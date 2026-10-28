@@ -1,4 +1,4 @@
-# Chat On Steroids â€” code research mirror
+# Chat On Steroids - code research mirror
 
 This is the real custom Chat On Steroids application and browser companion source, exported for code review and research. It is a clean-history code export, not an upstream release or a backup of anyone's chats.
 
@@ -77,6 +77,15 @@ Review the actual implementation and retained tests when investigating result at
 
 Changes still require affected tests, review, a separately qualified package and deliberate activation. This snapshot makes that review possible without publishing operational history.
 
+Start a focused investigation at the existing owner:
+
+- Native call scope and result attribution: `extension/fiber.js`, `extension/content.js`, `src/main/session/correlation.ts` and `src/main/bridge.ts`; compare their retained shell and Bridge tests.
+- Goal decisions, saved continuation identity and settings transitions: `src/main/goal.ts`, `src/main/session/input.ts`, `src/main/ipc.ts` and `src/main/settings-control.ts`.
+- Native Retry, interrupted streams and helper preservation: the existing recovery paths in `extension/content.js`, `extension/background.js`, `src/main/goal.ts` and `src/main/session/input.ts`.
+- Build and activation evidence: `scripts/install-custom.ps1` and `scripts/dev-fast.mjs`, subject to the packaging boundary above.
+
+Read production code and its tests before recommending a change. Cite the exact public commit and verified file/symbol, distinguish source findings from supplied runtime observations, and identify missing evidence rather than inventing native identities or results. Account logs and private release artifacts are not available from this mirror.
+
 ## Export validation
 
 On Windows, the exported source passed `npm run typecheck` and `npm run build` using the existing lockfile-compatible local dependencies. The build produced the main, preload and renderer bundles; it reported ordinary shared-import and dependency annotation warnings. Dependencies and generated output are ignored and are not part of this repository. No development app or account was launched, no installer was produced, and the full retained test suite was not run for this export.
@@ -84,3 +93,5 @@ On Windows, the exported source passed `npm run typecheck` and `npm run build` u
 Focused export checks cover 121 distinct tests in `instance-profile`, `profile-work-state` and `renderer-i18n`. The first run found one expected-message mismatch introduced by anonymizing account wording. After correcting that test's expected wording, its entire 73-test file passed; the other 48 tests had passed in the first run. This is limited export validation, not the complete private release qualification.
 
 The final source snapshot includes the reviewed exact-helper-expiry archive-only repair. It preserves late output without restoring a cancelled waiter or authorizing another executor Send. Historical unmarked cancellations remain ineligible.
+
+The current logical source `41be6425` also contains the narrow accepted-native-final identity correction, the persisted Settings Save pause-transition hook and bounded storage/source diagnostic explanations. Export follow-up validation passed typechecking, four focused Goal/IPC cases and the complete 41-case diagnostic file. This does not claim the complete public suite, a public installer release or verified autonomous browser execution. An earlier filtered diagnostic run reported asynchronous import teardown errors; the subsequent whole diagnostic-file run passed without suppressing them.
