@@ -1643,7 +1643,9 @@ export function moveGoalSwitch(fromConversationId: string, toConversationId: str
   const row = goalSwitches.get(fromConversationId);
   if (!row) return false;
   goalSwitches.delete(fromConversationId);
-  goalSwitches.set(toConversationId, row);
+  // The replacement may already own a deliberate Off/Loop choice. Match the
+  // collision-repair path: retire the old projection without overwriting it.
+  if (!goalSwitches.has(toConversationId)) goalSwitches.set(toConversationId, row);
   persistGoalSwitches();
   return true;
 }

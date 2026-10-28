@@ -7029,6 +7029,26 @@ describe('a chat driven towards a specific goal', () => {
     expect(goal.goalSwitchFor('c-switch-child').own).toBe(false);
   });
 
+  it('keeps a destination Off chosen while its source Loop was being continued', async () => {
+    await goal.setGoalSwitchNow('c-late-parent', 'loop', true);
+    await goal.setGoalSwitchNow('c-late-child', 'goal', false);
+    expect(goal.moveGoalSwitch('c-late-parent', 'c-late-child')).toBe(true);
+    expect(goal.goalSwitchFor('c-late-child')).toEqual({ enabled: false, mode: 'goal', own: true, afterTurn: false });
+    expect(goal.goalSwitchFor('c-late-parent').own).toBe(false);
+    expect(goal.moveGoalSwitch('c-late-parent', 'c-late-child')).toBe(false);
+    const snapshot = goal.snapshotGoalSwitches();
+    goal.restoreGoalSwitches(snapshot);
+    expect(goal.goalSwitchFor('c-late-child')).toEqual({ enabled: false, mode: 'goal', own: true, afterTurn: false });
+  });
+
+  it('keeps a destination Loop chosen independently of an explicit source Off', async () => {
+    await goal.setGoalSwitchNow('c-off-parent', 'goal', false);
+    await goal.setGoalSwitchNow('c-loop-child', 'loop', true, false);
+    expect(goal.moveGoalSwitch('c-off-parent', 'c-loop-child')).toBe(true);
+    expect(goal.goalSwitchFor('c-loop-child')).toEqual({ enabled: true, mode: 'loop', own: true, afterTurn: false });
+    expect(goal.goalSwitchFor('c-off-parent').own).toBe(false);
+  });
+
   it('migrates unmarked and contaminated Loop rows to continuous delivery but keeps marked finish-only', () => {
     const at = Date.now();
     goal.restoreGoalSwitches({

@@ -192,6 +192,8 @@ function ordinaryFinalDiagnostic(raw) {
   const answeredCodeCallMessageIds = codeIds('answeredCodeCallMessageIds', raw.codeCalls - raw.openCodeCalls);
   return { reason, questions: raw.questions, calls: raw.calls, openCalls: raw.openCalls,
     codeCalls: raw.codeCalls, openCodeCalls: raw.openCodeCalls, activeTurnMapped: raw.activeTurnMapped,
+    ...(reason === 'busy' && raw.activeTurnMapped === false && raw.maintenanceIdle === true
+      ? { maintenanceIdle: true } : {}),
     ...(inventoryIncomplete
       ? { callInventoryComplete: false } : {}),
     ...(sourceUserMessageId ? { sourceUserMessageId } : {}),
@@ -10315,7 +10317,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 92;
+const PAGE_RECORDER_VERSION = 93;
 
 let deferredRecoveryWork = null;
 

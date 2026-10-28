@@ -3862,6 +3862,7 @@ export async function failBrowserInput(id: string, owner: string, error: string,
     const released = confirmedUnsent ? releaseSameChatFollowerAfterConfirmedUnsent(next, entry) : { rows: next, releasedId: null };
     next = released.rows;
     await commit(next);
+    logWarn(`input ${entry.id}: browser_send_failure phase=${recoveryFailure.phase} detail=${detail === 'model-unconfirmed' ? detail : 'unspecified'} disposition=${entry.companionInputId ? 'cancelled-with-companion' : 'failed'}`);
     if (released.releasedId)
       logInfo(`input ${released.releasedId}: released same-chat explicit follower after ${entry.id} failed before native Send authorization`);
     rejectDecision('goal_browser_send_failed: ' + error.slice(0, 200));

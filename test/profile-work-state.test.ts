@@ -1,4 +1,4 @@
-import { CORE_BROWSER_EVIDENCE_MAX_AGE_MS, noteCoreBrowserEvidence, resetCoreBrowserEvidenceForTests } from '../src/main/core-browser-evidence.js';
+import { CORE_BROWSER_EVIDENCE_MAX_AGE_MS, coreBrowserEvidence, noteCoreBrowserEvidence, resetCoreBrowserEvidenceForTests } from '../src/main/core-browser-evidence.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import { readFileSync } from 'node:fs';
@@ -899,6 +899,33 @@ describe('profile lifecycle input census', () => {
       await lifecycle.poll();
       expect(shutdown).toHaveBeenCalledTimes(1);
       expect(await getSession(session.id)).toEqual(before);
+    } finally { resetCoreBrowserEvidenceForTests(); }
+  });
+
+  it('allows maintenance around positively idle presentation custody without clearing original native debt', async () => {
+    resetCoreBrowserEvidenceForTests();
+    const conversationId = randomUUID();
+    await createSession({ conversationId });
+    const observe = (reason: string, maintenanceIdle?: unknown) => noteCoreBrowserEvidence({
+      conversationId, documentId: 'idle-presentation-lifecycle-doc', navigationEpoch: 0,
+      observedAt: Date.now(), shell: 'classic', shellDiscovery: 'compatible', requestIds: [], turnId: null,
+      ordinaryFinal: { reason, questions: 1, calls: 1, openCalls: 1, codeCalls: 0, openCodeCalls: 0,
+        activeTurnMapped: false, sourceUserMessageId: conversationId,
+        coreCallMessageIds: ['retained-native-parent'], allCoreRequestIds: ['wfr-retained-native'],
+        openRequestIds: ['wfr-retained-native'], codeCallMessageIds: [], openCodeCallMessageIds: [],
+        ...(maintenanceIdle === undefined ? {} : { maintenanceIdle }) }
+    });
+    try {
+      expect(observe('open-call')).toBe(true);
+      const original = coreBrowserEvidence(conversationId)!.pendingCompletion;
+      expect(original?.openCalls).toBe(1);
+      expect(observe('busy', true)).toBe(true);
+      expect((await activeProfileWorkCensus()).blockers).toEqual([]);
+      expect(coreBrowserEvidence(conversationId)!.pendingCompletion).toEqual(original);
+      for (const ambiguous of [undefined, false, 'true', 1]) {
+        expect(observe('busy', ambiguous)).toBe(true);
+        expect((await activeProfileWorkCensus()).blockers).toContainEqual(expect.objectContaining({ category: 'active-turn', count: 1 }));
+      }
     } finally { resetCoreBrowserEvidenceForTests(); }
   });
 

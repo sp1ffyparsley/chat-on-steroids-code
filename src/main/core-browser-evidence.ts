@@ -70,6 +70,8 @@ export interface OrdinaryFinalDiagnostic {
   codeCalls: number;
   openCodeCalls: number;
   activeTurnMapped: boolean;
+  /** Positive page quiescence for app-only maintenance, never native result/Send proof. */
+  maintenanceIdle?: true;
   /** A negative exact-turn capability, never proof of tool-free completion. */
   callInventoryComplete?: false;
   /** Verified native user UUID; optional when the exact question cannot be read. Not an input Send receipt. */
@@ -464,6 +466,8 @@ function ordinaryFinalDiagnostic(raw: unknown): OrdinaryFinalDiagnostic | null {
   const answeredCodeIds = codeIds('answeredCodeCallMessageIds', codeCalls - openCodeCalls);
   return { reason, questions, calls, openCalls, codeCalls, openCodeCalls,
     activeTurnMapped: row['activeTurnMapped'],
+    ...(reason === 'busy' && row['activeTurnMapped'] === false && row['maintenanceIdle'] === true
+      ? { maintenanceIdle: true as const } : {}),
     ...(inventoryIncomplete
       ? { callInventoryComplete: false as const } : {}),
     ...(source ? { sourceUserMessageId: source } : {}),

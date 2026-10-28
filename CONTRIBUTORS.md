@@ -169,3 +169,9 @@ are adapted from [@Haz4rdovisk](https://github.com/Haz4rdovisk)'s
 [#1205](https://github.com/totec448-spec/chat-on-steroids/pull/1205), respectively.
 Only those narrow mechanisms were selected, preserving this fork's exact effort/availability,
 answer ownership, size and completion checks; the wider timeline redesign was not imported.
+
+The October 28 typed model-selection refusal and generic browser Send failure diagnostics
+adapt [@Maximapple](https://github.com/Maximapple)'s
+[#1900](https://github.com/totec448-spec/chat-on-steroids/pull/1900).
+This fork logs fixed phase/detail/disposition enums instead of provider error prose and
+keeps exact original delivery ownership, no-fallback selection and native access-limit holds.

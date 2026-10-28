@@ -83,15 +83,19 @@ export function createAgentPanel(options: {
   function list(): void {
     generation++; selected = null; renderedWorker = null; renderedEvents = null; back.hidden = true;
     ui(title, 'textContent', () => t("Sub-agents")); body.replaceChildren();
-    const isActive = (worker: SessionSummary): boolean => {
+    const roster = workers.map(worker => {
       const state = options.agent?.(worker)?.state;
-      return state ? ['invited', 'active', 'detached', 'waking'].includes(state) : options.working(worker);
-    };
-    for (const active of [true, false]) {
-      const group = workers.filter(worker => isActive(worker) === active);
-      body.append(el('h3', '', () => `${active ? t("Active") : t("History")} · ${group.length}`));
-      if (!group.length) { body.append(el('p', 'meta', () => active ? t("No active sub-agents") : t("No recorded sub-agents"))); continue; }
-      for (const worker of group) {
+      // An exact broker lookup returning no row cannot delegate to a stale timestamp.
+      const group = state ? (['invited', 'active', 'detached', 'waking'].includes(state) ? 'active' : 'history')
+        : options.agent ? 'unknown' : options.working(worker) ? 'active' : 'history';
+      return { worker, group };
+    });
+    for (const kind of ['active', 'unknown', 'history'] as const) {
+      const group = roster.filter(row => row.group === kind);
+      if (kind === 'unknown' && !group.length) continue;
+      body.append(el('h3', '', () => `${kind === 'active' ? t("Active") : kind === 'unknown' ? t("Unknown") : t("History")} · ${group.length}`));
+      if (!group.length) { body.append(el('p', 'meta', () => kind === 'active' ? t("No active sub-agents") : t("No recorded sub-agents"))); continue; }
+      for (const { worker } of group) {
         const row = el('button', 'agent-panel-row'); row.setAttribute('type', 'button');
         row.append(el('span', 'agent-avatar', worker.origin?.agentId?.replace(/^worker-/, '') ?? '•'), el('span', '', worker.title));
         row.title = worker.origin?.task || worker.title;

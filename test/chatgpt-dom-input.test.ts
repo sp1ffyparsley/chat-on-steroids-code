@@ -33,6 +33,7 @@ interface DomApi {
   confirmTemporaryChatIntroduction(): void;
   workModeInterstitial(): HTMLElement | null;
   errors(): Array<{ text: string; recoverable: boolean; blocking?: boolean; reason?: string; node: HTMLElement; retry?: HTMLButtonElement }>;
+  accessNoticeSince(since: number): string;
   captureComposerDraft(text: string, current?: () => boolean, withdrawalCurrent?: () => boolean): { current(): boolean; clear(): Promise<boolean>; rebind(): boolean; withdraw(): boolean; dispose(): void; attachments(nodes: Element[]): void };
   visibleModelSelection(): { model: string; reasoningEffort?: string } | null;
   hasComposerAttachments(): boolean;
@@ -3165,9 +3166,16 @@ describe('provider limit notice', () => {
     const notice = document.createElement('div'); notice.setAttribute('role', 'dialog');
     notice.innerHTML = '<h2>요청이 너무 많습니다</h2><p>요청을 너무 빠르게 보내고 있습니다. 데이터를 보호하기 위해 대화에 대한 액세스가 일시적으로 제한되었습니다. 몇 분 후 다시 시도해 주세요.</p><button>알겠습니다</button>';
     document.body.append(notice);
+    const selectingAt = Date.now();
     const click = vi.fn(); notice.querySelector('button')!.addEventListener('click', click);
     expect(api.errors()).toEqual([expect.objectContaining({ blocking: true, recoverable: false })]);
     expect(click).toHaveBeenCalledTimes(1);
+    expect(api.accessNoticeSince(selectingAt)).toContain('요청이 너무 많습니다');
+    expect(api.accessNoticeSince(Date.now() + 1000)).toBe('');
+    expect(api.accessNoticeSince(Number.NaN)).toBe('');
+    dom.reconfigure({ url: 'https://chatgpt.com/c/other-native-conversation' });
+    expect(api.accessNoticeSince(selectingAt)).toBe('');
+    dom.reconfigure({ url: 'https://chatgpt.com/' });
     api.errors(); expect(click).toHaveBeenCalledTimes(1);
     const unrelated = notice.cloneNode(true) as HTMLElement;
     unrelated.querySelector('h2')!.textContent = 'Permission required';

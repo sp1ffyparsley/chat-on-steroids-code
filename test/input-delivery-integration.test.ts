@@ -286,18 +286,27 @@ it('re-arms one authorized recovery UUID only after exact confirmed-unsent proof
   });
 });
 
-it('refreshes account models after an owned picker failure without authorizing another tab', async () => {
+it.each(['legacy-English', 'typed-localized'])('refreshes account models after an owned picker failure without authorizing another tab (%s)', async variant => {
   const catalog = await import('../src/main/chat-models.js');
+  const logger = await import('../src/main/logger.js');
+  const warning = vi.spyOn(logger, 'logWarn');
   catalog.resetChatModelsForTests();
   const row = await input.enqueueInput({ ...message(null, 'off'), mode: 'auto' });
   await post('/input/claim', { id: row.id, owner: 'picker-page', conversationId: null });
-  const failure = { id: row.id, owner: 'foreign-page', error: 'Requested model or reasoning could not be confirmed' };
+  const failure = { id: row.id, owner: 'foreign-page', error: variant === 'legacy-English'
+    ? 'Requested model or reasoning could not be confirmed' : 'Das Modell konnte nicht bestaetigt werden: PRIVATE_PROVIDER_COPY',
+    ...(variant === 'typed-localized' ? { detail: 'model-unconfirmed' } : {}) };
   expect((await post('/input/fail', failure)).body.ok).toBe(false);
   expect(catalog.pendingChatModelRequest()).toBeNull();
   expect((await post('/input/fail', { ...failure, owner: 'picker-page' })).body.ok).toBe(true);
   expect(catalog.pendingChatModelRequest()).toMatchObject({ allowOpen: false });
   expect(pushed).toHaveBeenCalledWith('chatModels:changed', expect.objectContaining({ state: 'pending' }));
   expect((await input.listInputs()).find(input => input.id === row.id)?.state).toBe('failed');
+  const logs = warning.mock.calls.map(call => String(call[0])).filter(line => line.includes('browser_send_failure'));
+  expect(logs).toHaveLength(1);
+  expect(logs[0]).toContain('disposition=failed');
+  expect(logs[0]).not.toContain('PRIVATE_PROVIDER_COPY');
+  warning.mockRestore();
   catalog.resetChatModelsForTests();
 });
 

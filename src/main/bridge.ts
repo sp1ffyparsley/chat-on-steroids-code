@@ -5822,7 +5822,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       }
       // A rejected picker choice invalidates cached availability. Reobserve existing
       // browser documents through the catalog owner; failure grants no new-tab authority.
-      if (ok && body.error === 'Requested model or reasoning could not be confirmed') requestChatModels(false);
+      if (ok && (body.detail === 'model-unconfirmed' || body.error === 'Requested model or reasoning could not be confirmed')) requestChatModels(false);
       return json(res, 200, { ok }, origin);
     }
     if (route === '/input/progress') {

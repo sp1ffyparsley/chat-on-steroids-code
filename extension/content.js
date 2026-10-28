@@ -93,7 +93,7 @@
   // Revision 90 distinguishes presentation-only retained errors from actionable evidence waits.
   // Revision 91 retires abandoned SPA claims without releasing a newer chat's lock.
   // Revision 92 retains current identity-refusal diagnostics across nonfinal reader states.
-  const RECORDER_VERSION = 92;
+  const RECORDER_VERSION = 93;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -4974,7 +4974,7 @@
   }
 
   /** Positive page custody only; absent legacy DOM methods do not assert a blocker. */
-  function settledFinalProjectionBlocked() {
+  function settledFinalProjectionBlocked(ignorePresentationCustody = false) {
     // Goal watches/retries and menu/catalog observation can await this very readiness proof.
     // Their administrative locks still veto reader reinjection, not passive native evidence.
     // Actual composer/command/Send custody remains a veto, including an empty composer after
@@ -4985,12 +4985,13 @@
     // Activity retains terminal compaction history for the UI. Only an explicitly idle
     // terminal job releases passive evidence; live or unknown custody still vetoes it.
     const pendingJob = job && (job.busy !== false || !['done', 'failed'].includes(job.stage));
-    return CLF_DOM.generating() || CLF_DOM.approvalWaiting() || nativeBusy ||
+    return CLF_DOM.generating() || (!ignorePresentationCustody && CLF_DOM.approvalWaiting()) || nativeBusy ||
       Boolean(pendingJob || desktopDecision || commandAttempt || pendingObjectiveSend) || pendingTools > 0 ||
       (desktopInputBusy && !ownPrepared) || commandJournalGate || continuationJournalPending || attemptedGoalSend ||
       Boolean(unsentCompactionRecovery) || continuationReconciliations.size > 0 ||
       projectCreateBusy || pluginRefreshBusy ||
-      (CLF_DOM.composerHasProtectedDraft?.() === true && !ownPrepared) || CLF_DOM.hasComposerAttachments?.() === true;
+      (!ignorePresentationCustody && ((CLF_DOM.composerHasProtectedDraft?.() === true && !ownPrepared) ||
+        CLF_DOM.hasComposerAttachments?.() === true));
   }
 
   function settledFinalProjectionReady() {
@@ -6039,6 +6040,11 @@
         calls: scan.calls, openCalls: scan.openCalls,
         codeCalls: scan.codeCalls, openCodeCalls: scan.openCodeCalls,
         activeTurnMapped: scan.activeTurnMapped,
+        // Drafts/attachments and a waiting approval veto continuation, but remain in
+        // Chrome across an app-only maintenance restart. This positive idle bit never
+        // supplies final/result evidence and never ignores real page/Send/tool custody.
+        ...(blocked && !scan.activeTurnMapped && !generating && !pendingToolCensusUnknown &&
+          !settledFinalProjectionBlocked(true) ? { maintenanceIdle: true } : {}),
         ...(scan.callInventoryComplete === false ? { callInventoryComplete: false } : {}),
         ...(scan.sourceUserMessageId ? { sourceUserMessageId: scan.sourceUserMessageId } : {}),
         ...(scan.checkpointSourceUserMessageId && !blocked && settledFinalProjectionReady()
@@ -15957,9 +15963,10 @@
       const requiresUnfinishedPage = Boolean(input.recovery || input.silenceBoundary);
       if (withdrawableRecoveryDraft) claimedRecovery = input;
       if (!onTarget()) { noteWithdraw(offTarget()); return false; }
-      const fail = async (error) => {
+      const fail = async (error, detail) => {
         const why = target && deletedConversations.has(target.toLowerCase()) ? CONVERSATION_DELETED : error;
-        await ask({ type: 'desktop_input', id: input.id, owner: input.owner, fail: true, error: why }); return false;
+        await ask({ type: 'desktop_input', id: input.id, owner: input.owner, fail: true, error: why,
+          ...(detail && why === error ? { detail } : {}) }); return false;
       };
       // Helpers can stall before Send too. Use the same bounded, owner-checked stage diagnostic
       // as ordinary inputs; stages contain no prompt/answer text and never authorize delivery.
@@ -16011,6 +16018,7 @@
       const providerLimitation = () => CLF_DOM.errors().find(error => error.blocking === true)?.text;
       const limitation = providerLimitation();
       if (limitation) return fail(limitation);
+      const choosingStartedAt = Date.now();
       // The picker selects the next turn's model, not the existing generation.
       // Its proven model was frozen by Main before directTurn could be offered.
       if (!intoRunningTurn()) {
@@ -16065,7 +16073,11 @@
             } });
           if (!confirmed && refusal) await stage(`model:ordinary:${refusal}`);
         }
-        if (!confirmed) return fail(providerLimitation() || 'Requested model or reasoning could not be confirmed');
+        if (!confirmed) {
+          const limit = providerLimitation() || CLF_DOM.accessNoticeSince?.(choosingStartedAt);
+          return fail(limit || 'Requested model or reasoning could not be confirmed',
+            !limit && onTarget() ? 'model-unconfirmed' : undefined);
+        }
         await stage('model:confirmed');
       }
       const temporaryModeCurrent = () => onTarget() &&

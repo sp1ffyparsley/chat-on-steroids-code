@@ -3235,11 +3235,37 @@ describe('desktop input delivery and helper ownership', () => {
       expect(api.selectModelSettings).toHaveBeenCalledOnce();
       expect(live.sent.filter(message => message.type === 'desktop_input' && (message.authorize || message.ack)))
         .toHaveLength(0);
+      expect(live.sent.find(message => message.type === 'desktop_input' && message.fail)?.detail).toBe('model-unconfirmed');
       const stages = live.sent.filter(message => message.stage).map(message => message.stage);
       expect(stages).toContain(`model:ordinary:${reason === 'unknown' ? 'selection_unconfirmed' : reason}`);
       expect(stages.filter(stage => stage.startsWith('model:ordinary:'))).toHaveLength(1);
       expect(JSON.stringify(stages)).not.toContain('Private provider copy');
     });
+
+  it('retains a native access limit acknowledged during model selection instead of misclassifying a model refusal', async () => {
+    live = await harness(`https://chatgpt.com/c/${chatA}`, {
+      desktop_input: message => ({ ok: true, data: message.authorize || message.ack || message.fail || message.stage
+        ? { ok: true } : { input: claimed({ model: 'gpt-6-thinking', reasoningEffort: 'high' }) } })
+    });
+    const api = (live.window as any).CLF_DOM;
+    api.selectModelSettings = vi.fn(async () => {
+      const notice = live!.document.createElement('div'); notice.setAttribute('role', 'dialog');
+      notice.innerHTML = '<h2>Too many requests</h2><p>We have temporarily limited access to conversations to protect your data. Please wait a few minutes.</p><button>Got it</button>';
+      for (const node of [notice, ...notice.querySelectorAll('*')]) node.getClientRects = () => [{ width: 100, height: 20 }] as unknown as DOMRectList;
+      notice.querySelector('button')!.addEventListener('click', () => notice.remove());
+      live!.document.body.append(notice);
+      expect(api.errors().some((error: any) => error.reason === 'access_throttle_notice')).toBe(true);
+      expect(notice.isConnected).toBe(false);
+      return false;
+    });
+    const send = vi.fn(); live.document.querySelector('[data-testid="send-button"]')!.addEventListener('click', send);
+    expect(await live.runtimeMessage({ type: 'clf-desktop-input', id: inputId, conversationId: chatA })).toEqual({ ok: false });
+    const failed = live.sent.find(message => message.type === 'desktop_input' && message.fail);
+    expect(failed?.error).toContain('Too many requests');
+    expect(failed?.detail).toBeUndefined();
+    expect(send).not.toHaveBeenCalled();
+    expect(live.sent.filter(message => message.type === 'desktop_input' && (message.authorize || message.ack))).toHaveLength(0);
+  });
 
   it.each(['trigger_missing', 'snapshot_missing', 'unknown', 'choice_unavailable', 'owner-lost', 'navigation',
     'draft', 'attachment', 'auth', 'approval', 'stopped', 'expired', 'twice-missing'] as const)(
@@ -25612,6 +25638,7 @@ describe('ordinary input native terminal association', () => {
       const proof = live!.sent.filter(message => message.type === 'activity').at(-1)?.coreDiagnostic?.ordinaryFinal;
       expect(proof).toMatchObject({ reason: 'busy', calls: 1, openCalls: 1 });
       expect(proof?.settledFinalMessageId).toBeUndefined();
+      expect(proof?.maintenanceIdle).toBe(state === 'native-generating' ? undefined : true);
     }
   );
 
@@ -25629,6 +25656,7 @@ describe('ordinary input native terminal association', () => {
       const blocked = live!.sent.filter(message => message.type === 'activity').at(-1)?.coreDiagnostic?.ordinaryFinal;
       expect(blocked).toMatchObject({ reason: 'busy', calls: 0, openCalls: 0, codeCalls: 0, openCodeCalls: 0 });
       expect(blocked?.settledFinalMessageId).toBeUndefined();
+      expect(blocked?.maintenanceIdle).toBe(true);
       expect(live!.sent.some(message => ['goal_draft', 'goal_ack', 'goal_prepare', 'desktop_input'].includes(message.type))).toBe(false);
       if (state === 'protected-draft') composer.textContent = '';
       else api.hasComposerAttachments = attachments;

@@ -2801,6 +2801,11 @@ var CLF_DOM = (() => {
    * recording "Chat On Steroids Desktop is now connected" as a ChatGPT failure.
    */
   const acknowledgedAccessNotices = new WeakSet();
+  let lastAccessNotice = null;
+  function accessNoticeSince(since) {
+    return Number.isFinite(since) && since > 0 && lastAccessNotice?.path === location.pathname &&
+      lastAccessNotice.at >= since ? lastAccessNotice.text : '';
+  }
   function errors() {
     return safe(() => {
       const out = [];
@@ -2849,10 +2854,12 @@ var CLF_DOM = (() => {
         const notice = value.startsWith(headingText) ? `${headingText} ${value.slice(headingText.length).trim()}` : value;
         if (conversationLimit) {
           addOccurrence({ text: notice, node, turnId: null, recoverable: false, blocking: true, reason: 'conversation_limit' });
+          lastAccessNotice = { text: notice.slice(0, 200), at: Date.now(), path: location.pathname };
           continue;
         }
         addOccurrence({ text: notice, node, turnId: null, recoverable: false, blocking: true,
           reason: 'access_throttle_notice' });
+        lastAccessNotice = { text: notice.slice(0, 200), at: Date.now(), path: location.pathname };
         // Acknowledge this identified informational notice once. The returned
         // blocking diagnostic survives the click; it grants no retry authority.
         const buttons = [...node.querySelectorAll('button')].filter(button =>
@@ -5067,6 +5074,7 @@ var CLF_DOM = (() => {
     fiberRef,
     toolLabel,
     errors,
+    accessNoticeSince,
     composer,
     composerSubmitReady,
     composerWritable,

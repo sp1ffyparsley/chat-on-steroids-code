@@ -9459,6 +9459,28 @@ describe('extension observation journal', () => {
     }
   );
 
+  it.each([true, false, 'true', 1])('forwards only a positive typed maintenance-idle observation (%s)', async maintenanceIdle => {
+    const conversationId = '22222222-3333-4444-5555-666666666666';
+    const documentId = 'maintenance-idle-document';
+    let diagnostic: any = null;
+    const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }), session: new FakeStorageArea(),
+      fetch: async (input: string) => {
+        const url = new URL(input);
+        if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (url.pathname === '/activity') { diagnostic = JSON.parse(url.searchParams.get('coreDiagnostic')!); return response(200, { entries: [], stream: [] }); }
+        return response(404, {});
+      }, tabsGet: async id => ({ id, url: `https://chatgpt.com/c/${conversationId}`, status: 'complete' }) });
+    await worker.registerTab(73, documentId);
+    await worker.send({ type: 'bind', conversationId }, 73, documentId);
+    await worker.send({ type: 'activity', conversationId, coreDiagnostic: {
+      shell: 'classic', shellDiscovery: 'compatible', ordinaryFinal: { reason: 'busy', maintenanceIdle,
+        questions: 1, calls: 1, openCalls: 1, codeCalls: 0, openCodeCalls: 0, activeTurnMapped: false }
+    } }, 73, documentId);
+    expect(diagnostic.ordinaryFinal.reason).toBe('busy');
+    expect(diagnostic.ordinaryFinal.maintenanceIdle).toBe(maintenanceIdle === true ? true : undefined);
+    expect(diagnostic.ordinaryFinal.settledFinalMessageId).toBeUndefined();
+  });
+
   it.each(['valid', 'busy', 'mapped', 'malformed-user', 'partial-core', 'partial-code', 'duplicate-core', 'foreign-document'] as const)(
     'forwards only an authenticated stopped checkpoint identity (%s)', async shape => {
       const conversationId = '22222222-3333-4444-5555-666666666666';

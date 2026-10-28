@@ -91,6 +91,29 @@ it('uses exact broker state instead of flickering recent-activity guesses', () =
   expect(host.textContent).toContain('History · 1');
 });
 
+it('keeps a missing exact broker match unknown despite recent historical work', () => {
+  dom = new JSDOM('<main></main><button></button>');
+  Object.assign(globalThis, { document: dom.window.document });
+  const host = document.querySelector('main')!, toggle = document.querySelector('button')!;
+  let state: 'active' | 'sleeping' | 'finished' | null = null;
+  const panel = createAgentPanel({ host, toggle, load: async () => ({ events: [] }), render: () => [],
+    openMain: vi.fn(), working: () => true,
+    agent: () => state ? { state, task: 'Current bounded assignment' } : null });
+  const worker = { id: 'worker-unknown', title: 'Worker', updatedAt: 10 } as SessionSummary;
+  panel.update('prime', [worker]); toggle.click();
+  expect(host.textContent).toContain('Unknown · 1');
+  expect(host.textContent).not.toContain('Active · 1');
+  expect(host.querySelector('.agent-panel-row')?.getAttribute('type')).toBe('button');
+  state = 'active'; panel.update('prime', [worker]);
+  expect(host.textContent).toContain('Active · 1');
+  expect(host.textContent).not.toContain('Unknown · 1');
+  for (const settled of ['sleeping', 'finished'] as const) {
+    state = settled; panel.update('prime', [worker]);
+    expect(host.textContent).toContain('History · 1');
+    expect(host.textContent).not.toContain('Active · 1');
+  }
+});
+
 it('shows a recoverable unknown state after an initial worker history read rejects', async () => {
   dom = new JSDOM('<main></main><button></button>', { pretendToBeVisual: true });
   Object.assign(globalThis, { document: dom.window.document });
