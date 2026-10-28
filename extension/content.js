@@ -92,7 +92,8 @@
   // worker; Main preserves the original completion fence across restarts.
   // Revision 90 distinguishes presentation-only retained errors from actionable evidence waits.
   // Revision 91 retires abandoned SPA claims without releasing a newer chat's lock.
-  const RECORDER_VERSION = 91;
+  // Revision 92 retains current identity-refusal diagnostics across nonfinal reader states.
+  const RECORDER_VERSION = 92;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -5116,6 +5117,17 @@
     return { answer, finalId: answer.endMessageId, userId: latest.message.rawMessageId };
   }
 
+  /** Negative reader diagnostics do not require a verified question or final answer. */
+  function nativeIdentityRefusalProjection(calls) {
+    if (!Array.isArray(calls) || calls.length === 0 || calls.length > FIBER_MAX_CALLS) return null;
+    const parents = calls.map(call => call?.messageId);
+    const refusals = calls.map(readIdentityRefusalReasons);
+    if (parents.some(id => typeof id !== 'string' || !id || id.length > 200) ||
+        new Set(parents).size !== parents.length || refusals.some(reasons => reasons === null)) return null;
+    return { coreCallMessageIds: parents, identityRefusals: parents.map((messageId, index) =>
+      ({ messageId, reasons: refusals[index] })) };
+  }
+
   /** Projection only: no cache adoption, transcript publication or request/Send authority. */
   function ordinaryFinalProjection(turns, target, forEpoch, activeLocalTurnId = null) {
     const latest = turns.at(-1), calls = latest?.calls || [], code = latest?.codeModeCalls || [];
@@ -5128,7 +5140,8 @@
       activeTurnMapped: false,
       // One selected provider turn, never the aggregate shell's other turns.
       // A negative capability only withholds native final/Goal authorization.
-      ...(latest?.callEvidenceComplete === false ? { callInventoryComplete: false } : {}) };
+      ...(latest?.callEvidenceComplete === false ? { callInventoryComplete: false }
+        : nativeIdentityRefusalProjection(calls) || {}) };
     return { scan, source: activeLocalTurnId ? null : ordinaryInputFinalSource(turns, target, scan) };
   }
 

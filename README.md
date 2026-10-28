@@ -2,8 +2,8 @@
 
 This is the real custom Chat On Steroids application and browser companion source, exported for code review and research. It is a clean-history code export, not an upstream release or a backup of anyone's chats.
 
-- Source commit: `41be642523fccfd607ae33d51bd21758dc12bb5d`.
-- Source tree: `81ffc4df6e6155cfe7e8e78b62dd17e40f4add6b`.
+- Source commit: `2aaea54f4ed09989d54832dd233aa29b317d4b1f`.
+- Source tree: `a3d4bc68a574e28a0e6b7e20af58e3edff0d72e3`.
 - Export date: October 28, 2026.
 - Upstream: https://github.com/totec448-spec/chat-on-steroids
 - Intended code mirror: https://github.com/sp1ffyparsley/chat-on-steroids-code
@@ -94,4 +94,6 @@ Focused export checks cover 121 distinct tests in `instance-profile`, `profile-w
 
 The final source snapshot includes the reviewed exact-helper-expiry archive-only repair. It preserves late output without restoring a cancelled waiter or authorizing another executor Send. Historical unmarked cancellations remain ineligible.
 
-The current logical source `41be6425` also contains the narrow accepted-native-final identity correction, the persisted Settings Save pause-transition hook and bounded storage/source diagnostic explanations. Export follow-up validation passed typechecking, four focused Goal/IPC cases and the complete 41-case diagnostic file. This does not claim the complete public suite, a public installer release or verified autonomous browser execution. An earlier filtered diagnostic run reported asynchronous import teardown errors; the subsequent whole diagnostic-file run passed without suppressing them.
+The preceding logical source `41be6425` contains the narrow accepted-native-final identity correction, persisted Settings Save pause-transition hook and bounded storage/source explanations. Its export passed typechecking, four focused Goal/IPC cases and the complete 41-case diagnostic file. An earlier filtered diagnostic run reported asynchronous import teardown errors; the subsequent whole diagnostic-file run passed without suppressing them.
+
+The current logical source `2aaea54f` adds truthful delivered-helper cancellation classification and separate, bounded current-observation identity-refusal diagnostics. Original source/parent/result and native Send gates remain unchanged. Recorder/background source markers are synchronized at 92; this is not proof that a running browser loaded them. The source-owner checks passed 889 Input/Goal/error cases (two platform skips), 2614 browser/operator cases and a final 284 Bridge/operator selection, plus typechecking and JavaScript syntax checks. Those sets overlap and must not be added together as distinct tests. This is a source follow-up, not a newly qualified or installed package, a public installer release, or verified all-account autonomy.

@@ -4158,7 +4158,7 @@ describe('browser decision lifetime', () => {
     expect(await settleTimedOutBrowserHelper(sessionId)).toBe('awaiting-answer');
     await expect(requestBrowserDecision('Automatic duplicate', new AbortController().signal, {
       sourceSessionId: sessionId, lifetime: 'temporary-planner'
-    })).rejects.toThrow('goal_browser_send_unconfirmed');
+    })).rejects.toThrow('goal_browser_delivered_helper_unresolved');
     expect((await listInputs()).map(row => row.id)).toEqual([original.id]);
   });
   it.each(['delivered', 'authorized'] as const)(
@@ -4190,7 +4190,7 @@ describe('browser decision lifetime', () => {
         ...(phase === 'delivered' ? { messageId: 'native-bound-helper' } : {}) });
       await expect(requestBrowserDecision('Forbidden automatic replacement', new AbortController().signal, {
         sourceSessionId: sessionId, lifetime: 'temporary-planner'
-      })).rejects.toThrow('goal_browser_send_unconfirmed');
+      })).rejects.toThrow(phase === 'delivered' ? 'goal_browser_delivered_helper_unresolved' : 'goal_browser_send_unconfirmed');
       expect((await listInputs()).map(row => row.id)).toEqual([original.id]);
       expect(await pausedBrowserHelpers()).toContainEqual({ id: original.id, sourceSessionId: sessionId });
 
@@ -4281,7 +4281,8 @@ describe('browser decision lifetime', () => {
     if (!superseded) {
       expect(await pausedBrowserHelpers()).toContainEqual({ id: original.id, sourceSessionId: sessionId });
       await expect(requestBrowserDecision('A different source still cannot borrow ambiguous custody.', new AbortController().signal,
-        { ...turn, sourceTurnId: nextTurn })).rejects.toThrow('goal_browser_send_unconfirmed');
+        { ...turn, sourceTurnId: nextTurn })).rejects.toThrow(proof === 'send-unconfirmed'
+          ? 'goal_browser_send_unconfirmed' : 'goal_browser_delivered_helper_unresolved');
       return;
     }
     expect(await pausedBrowserHelpers()).toEqual([]);
@@ -4552,7 +4553,7 @@ describe('browser decision lifetime', () => {
       expect(await acknowledgeBrowserInput(row.id, 'foreign-document', route, 'late-native-message')).toBe(false);
       await expect(requestBrowserDecision('No duplicate after late receipt', new AbortController().signal, {
         sourceSessionId: sessionId, lifetime: 'temporary-planner'
-      })).rejects.toThrow('goal_browser_send_unconfirmed');
+      })).rejects.toThrow('goal_browser_delivered_helper_unresolved');
       expect((await listInputs()).map(row => row.id)).toEqual([row.id]);
       expect(await completeBrowserDecision(row.id, 'old-exact-document', 'too-late')).toBe(false);
     }
@@ -5004,7 +5005,7 @@ describe('browser decision lifetime', () => {
     expect((await listInputs()).filter(entry => entry.sourceHelperId === row.id)).toHaveLength(0);
     expect(await authorizeBrowserInput(row.id, 'invalid-abort-owner', null)).toBe(false);
   });
-  it('leaves native delivery ambiguous when cancellation wins before protocol rejection', async () => {
+  it('retains confirmed native delivery without replacement when cancellation wins before protocol rejection', async () => {
     const controller = new AbortController();
     const onAccepted = vi.fn(() => { throw new BrowserDecisionProtocolRejection('invalid_goal_decision_json'); });
     const decision = requestBrowserDecision('Do not reinterpret a cancelled delivery', controller.signal, {
@@ -5021,7 +5022,7 @@ describe('browser decision lifetime', () => {
     expect(onAccepted).not.toHaveBeenCalled();
     expect((await listInputs())[0]).toMatchObject({ state: 'cancelled', messageId: 'native-cancelled-before-answer' });
     await expect(requestBrowserDecision('No implicit replacement', new AbortController().signal,
-      { lifetime: 'temporary-planner', sourceSessionId: sessionId })).rejects.toThrow('goal_browser_send_unconfirmed');
+      { lifetime: 'temporary-planner', sourceSessionId: sessionId })).rejects.toThrow('goal_browser_delivered_helper_unresolved');
     expect(await listInputs()).toHaveLength(1);
   });
   it('does not reinterpret a null protocol-owner callback as a rejected decision', async () => {
@@ -5694,6 +5695,60 @@ it.each(['saved', 'deleted', 'tampered', 'wrong-owner', 'restart', 'late-native-
 });
 
 
+it.each(['sent', 'sent-cold', 'expired', 'authorized-unknown'] as const)(
+  'preserves exact helper custody while classifying retained delivery (%s)', async mode => {
+    const controller = new AbortController();
+    const options = { sourceSessionId: sessionId, sourceTurnId: 'retained-delivery-turn',
+      lifetime: 'temporary-planner' as const };
+    const pending = requestBrowserDecision('Original exact decision', controller.signal, options);
+    const rejected = expect(pending).rejects.toThrow('goal_browser_cancelled');
+    const original = (await listInputs())[0]!;
+    expect(await claimBrowserInput(original.id, 'retained-helper-page', null, true)).not.toBeNull();
+    expect(await authorizeBrowserInput(original.id, 'retained-helper-page', null)).toBe(true);
+    if (mode !== 'authorized-unknown')
+      expect(await acknowledgeBrowserInput(original.id, 'retained-helper-page', null, 'retained-native-question')).toBe(true);
+    controller.abort(mode === 'expired' ? new DOMException('goal_browser_answer_expired', 'TimeoutError') : undefined);
+    await rejected;
+    const retained = (await listInputs())[0]!;
+    const durable = await readDurable('session-input');
+    if (mode === 'sent-cold') resetInputForTests();
+    await expect(requestBrowserDecision('No duplicate replacement', new AbortController().signal, options))
+      .rejects.toThrow(mode === 'authorized-unknown' ? 'goal_browser_send_unconfirmed' :
+        mode === 'expired' ? 'goal_browser_answer_expired' : 'goal_browser_delivered_helper_unresolved');
+    const after = await listInputs();
+    expect(after).toHaveLength(1);
+    for (const key of ['id', 'state', 'owner', 'sendAuthorizedAt', 'deliveredAt', 'messageId',
+      'decisionSourceSessionId', 'decisionSourceTurnId'] as const) expect(after[0]?.[key]).toEqual(retained[key]);
+    expect(await readDurable('session-input')).toEqual(durable);
+    expect(await claimBrowserInput(original.id, 'foreign-page', null, true)).toBeNull();
+    expect(await authorizeBrowserInput(original.id, 'retained-helper-page', null)).toBe(false);
+  }
+);
+
+it.each(['mixed-unknown', 'mixed-generic', 'future-delivery', 'created-after-authorization', 'authorized-after-delivery'] as const)(
+  'classifies every retained helper receipt without replacement (%s)', async mode => {
+    const known: InputEntry = { ...input({ sessionId: null, text: 'Retained helper' }),
+      purpose: 'decision', lifetime: 'temporary-planner', state: 'cancelled', owner: 'retained-owner', conversationId: null,
+      requiresAuthorization: true, decisionSourceSessionId: sessionId, decisionSourceTurnId: 'retained-original-turn',
+      createdAt: now - 300, sendAuthorizedAt: now - 200, deliveredAt: now - 100,
+      messageId: 'retained-native-question', error: 'goal_browser_answer_expired' };
+    const other: InputEntry = { ...known, id: randomUUID(), messageId: 'second-native-question' };
+    if (mode === 'mixed-unknown') delete other.messageId;
+    if (mode === 'mixed-generic') delete other.error;
+    if (mode === 'future-delivery') other.deliveredAt = now + 1;
+    if (mode === 'created-after-authorization') other.createdAt = now - 150;
+    if (mode === 'authorized-after-delivery') other.sendAuthorizedAt = now - 50;
+    await writeDurableNow('session-input', [known, other]);
+    const before = await listInputs();
+    const durable = await readDurable('session-input');
+    await expect(requestBrowserDecision('No replacement for these originals', new AbortController().signal, {
+      sourceSessionId: sessionId, sourceTurnId: 'retained-original-turn', lifetime: 'temporary-planner'
+    })).rejects.toThrow(mode === 'mixed-generic' ? 'goal_browser_delivered_helper_unresolved' : 'goal_browser_send_unconfirmed');
+    expect(await listInputs()).toEqual(before);
+    expect(await readDurable('session-input')).toEqual(durable);
+  }
+);
+
 it.each(['bound', 'temporary-null', 'cold'] as const)(
   'archives a future exact answer-expired helper without restoring its waiter (%s)', async mode => {
     const controller = new AbortController();
@@ -5730,7 +5785,7 @@ it.each(['bound', 'temporary-null', 'cold'] as const)(
     expect(await authorizeBrowserInput(original.id, 'expired-helper-page', route)).toBe(false);
     await expect(requestBrowserDecision('No automatic replacement', new AbortController().signal, {
       sourceSessionId: sessionId, sourceTurnId: 'expired-original-turn', lifetime: 'temporary-planner'
-    })).rejects.toThrow('goal_browser_send_unconfirmed');
+    })).rejects.toThrow('goal_browser_answer_expired');
     expect(await listInputs()).toHaveLength(1);
     expect((await listInputs())[0]).toMatchObject({ state: 'cancelled', error: 'goal_browser_answer_expired' });
   }

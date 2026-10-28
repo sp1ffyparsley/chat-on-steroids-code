@@ -257,7 +257,10 @@ function inspectedProviderUI(raw: unknown) {
       const value = own(source, key);
       if (count(value)) rejects[key] = value; // Preserve a real zero; malformed/missing is never invented as zero.
     }
-    return { observedAt, shell, discovery, currentTurnMatched, selectorMatches, mapped, rejects };
+    const summary = own(raw, 'identityRefusalSummary'), calls = own(summary, 'calls');
+    const reasons = count(calls) && calls <= 200 ? completionRefusalCounts(own(summary, 'reasons'), calls) : null;
+    const identityRefusalSummary = reasons ? { calls, reasons } : null;
+    return { observedAt, shell, discovery, currentTurnMatched, selectorMatches, mapped, rejects, identityRefusalSummary };
   } catch { return null; }
 }
 /** Project only fixed owner fields. Text, helper answers, tokens and arbitrary errors never enter this lane. */

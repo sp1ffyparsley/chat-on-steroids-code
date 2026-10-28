@@ -694,6 +694,26 @@ export interface NativeRequestIdentityDiagnostic {
   failureReasons?: { code: CoreNativeIdentityRefusalKey; calls: number }[] | null;
 }
 
+export interface NativeIdentityRefusalSummary {
+  /** Complete selected CURRENT call census, distinct from a retained original fence. */
+  calls: number;
+  reasons: NonNullable<NativeRequestIdentityDiagnostic['failureReasons']>;
+}
+
+function nativeIdentityRefusalCounts(witness: readonly NativeIdentityRefusal[]): NativeIdentityRefusalSummary['reasons'] {
+  return CORE_NATIVE_IDENTITY_REFUSAL_KEYS.map(code =>
+    ({ code, calls: witness.filter(call => call.reasons.includes(code)).length })).filter(item => item.calls > 0);
+}
+
+/** Latest provider observation only. This never enriches an original identity or result. */
+export function nativeIdentityRefusalSummary(row: Readonly<CoreBrowserEvidenceSnapshot> | null | undefined): NativeIdentityRefusalSummary | null {
+  const final = row?.ordinaryFinal;
+  if (!row || row.shellDiscovery !== 'compatible' || !final || final.callInventoryComplete === false ||
+      !final.coreCallMessageIds || final.coreCallMessageIds.length !== final.calls) return null;
+  const witness = identityRefusalsDiagnostic(final.identityRefusals, final.coreCallMessageIds);
+  return witness ? { calls: final.calls, reasons: nativeIdentityRefusalCounts(witness) } : null;
+}
+
 /** A missing admitted array does not prove provider metadata was absent. Only expose
  * reader counts for the very same original native parent set; never borrow stream IDs,
  * another question's counts or a later document to repair the retained fence. */
@@ -705,8 +725,7 @@ function nativeRequestIdentityDiagnostic(row: CoreBrowserEvidenceSnapshot,
   const singleShell = row.shellScan?.selectorMatches === 1 && row.shellScan.mapped === 1;
   const counters = sameParents && singleShell ? row.shellScan?.rejects : null;
   const witness = sameParents ? row.ordinaryFinal?.identityRefusals : null;
-  const failureReasons = witness ? CORE_NATIVE_IDENTITY_REFUSAL_KEYS.map(code =>
-    ({ code, calls: witness.filter(call => call.reasons.includes(code)).length })).filter(item => item.calls > 0) : null;
+  const failureReasons = witness ? nativeIdentityRefusalCounts(witness) : null;
   const shape = { selectedFieldsPresent: counters?.callRequestIdPresent ?? null,
     selectedFieldsMissing: counters?.callRequestIdMissing ?? null,
     selectedIdentitiesWithheld: counters?.callIdentitySelectedWithheld ?? null,

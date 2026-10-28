@@ -15,7 +15,7 @@ import { pendingChatModelRequest, observeChatModels, requestChatModels } from '.
 import { isProModel } from '../shared/chat-models.js';
 import type { SessionSummary } from '../shared/session.js';
 import { evaluateAgentHealth } from '../shared/agent-health.js';
-import { CORE_BROWSER_EVIDENCE_MAX_AGE_MS, CORE_SHELL_CALL_REJECTION_KEYS, acknowledgeNativeCompletion, coreBrowserEvidence, nativeCompletionCandidate, nativeCompletionDiagnostic, nativeFinalEvidenceWait, noteCoreBrowserEvidence, retainUnverifiedNativeCompletionFromIncident, retainNativeCompletionFromCheckpoint, retainNativeCompletionObservationsFromCheckpoint, retainNativeCompletionAfterClearFailure, retainAdditionalNativeCompletionUncertainty, settledNativeTurnCandidate } from './core-browser-evidence.js';
+import { CORE_BROWSER_EVIDENCE_MAX_AGE_MS, CORE_SHELL_CALL_REJECTION_KEYS, acknowledgeNativeCompletion, coreBrowserEvidence, nativeCompletionCandidate, nativeCompletionDiagnostic, nativeFinalEvidenceWait, nativeIdentityRefusalSummary, noteCoreBrowserEvidence, retainUnverifiedNativeCompletionFromIncident, retainNativeCompletionFromCheckpoint, retainNativeCompletionObservationsFromCheckpoint, retainNativeCompletionAfterClearFailure, retainAdditionalNativeCompletionUncertainty, settledNativeTurnCandidate } from './core-browser-evidence.js';
 import { unifiedExecManager } from './codex/manager.js';
 import type {
   CoreToolSurfaceDiagnostic,
@@ -2343,6 +2343,8 @@ export type SessionControlsView = {
       selectorMatches: number | null;
       mapped: number | null;
       rejects: import('./core-browser-evidence.js').CoreShellScanRejects | null;
+      /** Current observation's reasons only; never claims the retained source matched. */
+      identityRefusalSummary?: ReturnType<typeof nativeIdentityRefusalSummary>;
     };
   } | null;
   finishGoalDraft?: Pick<import('./goal.js').GoalDraftView, 'stage' | 'stageStartedAt' | 'model' | 'text' | 'error' | 'message'> | null;
@@ -2570,7 +2572,8 @@ export async function sessionControlsFor(sessionId: string): Promise<SessionCont
         // Keep the same bounded optional capability counters visible here;
         // a selector/UI change must not become unexplainable at Work status.
         // These numbers grant no native result, Send or Loop authority.
-        rejects: native.shellScan ? { ...native.shellScan.rejects } : null
+        rejects: native.shellScan ? { ...native.shellScan.rejects } : null,
+        identityRefusalSummary: nativeIdentityRefusalSummary(native)
       }
     } : null,
     stopPending: commands.some(c => c.spec.type === 'stop' && c.spec.sessionId === sessionId && c.spec.turnId === activeTurnId),

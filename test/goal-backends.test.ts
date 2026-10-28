@@ -708,20 +708,24 @@ describe('Goal decision backends', () => {
       else expect(reply).not.toHaveProperty('helperFailureCount');
     }
   );
-  it('does not query automatic helper retirement when native Send is unconfirmed', async () => {
+  it.each(['goal_browser_send_unconfirmed', 'goal_browser_delivered_helper_unresolved', 'goal_browser_answer_expired'])(
+    'does not replace retained helper custody for %s', async error => {
     await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true, backend: 'chatgpt' } });
     const id = 'early-helper-ambiguous-send';
     const sessionId = await recording(id, 'Continue the saved task');
     await goal.setGoalSwitchNow(id, 'goal', true);
-    browser.request.mockRejectedValueOnce(new Error('goal_browser_send_unconfirmed'));
+    await goal.acceptGoalReplyNow({ conversationId: id, sessionId, replyId: 'reply-one',
+      turnId: 'source-final', eventSeq: 10, blocked: false });
+    browser.request.mockRejectedValueOnce(new Error(error));
     browser.settleTimedOut.mockResolvedValue('queued-unclaimed');
     goal.startGoalDraft({ conversationId: id, sessionId, turnId: 'source-final' });
     const failed = await settled(id);
-    expect(failed).toMatchObject({ stage: 'failed', error: 'goal_browser_send_unconfirmed', retryable: false });
+    expect(failed).toMatchObject({ stage: 'failed', error, retryable: false });
     expect(browser.settleTimedOut).not.toHaveBeenCalled();
     expect(await goal.ackGoalDraftNow(id, failed.token)).toBe(true);
     expect(goal.startGoalDraft({ conversationId: id, sessionId, turnId: 'source-final' }).token).toBe(failed.token);
     expect(browser.request).toHaveBeenCalledTimes(1);
+    expect(goal.snapshotGoalReplies().replies.find(row => row.conversationId === id)).not.toHaveProperty('helperFailureCount');
   });
   it.each(['browser-preparing', 'awaiting-answer', 'send-outcome-unconfirmed'] as const)('classifies a %s timeout by its exact Send custody', async disposition => {
     vi.useFakeTimers();

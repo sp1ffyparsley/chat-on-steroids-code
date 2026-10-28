@@ -13,6 +13,15 @@ vi.mock('electron', () => ({
 }));
 
 describe('Goal failure explanations', () => {
+  it('distinguishes delivered unresolved helpers from unknown Send without exposing private output', () => {
+    const delivered = goalErrorMessage('goal_browser_delivered_helper_unresolved');
+    expect(delivered).toContain('confirmed');
+    expect(delivered).toContain('cancelled');
+    expect(delivered).toContain('Automatic replacement is paused');
+    expect(delivered).not.toContain('could not confirm whether');
+    expect(goalErrorMessage('goal_browser_answer_expired')).toContain('not collected');
+    expect(goalErrorMessage('goal_browser_send_unconfirmed')).toContain('could not confirm whether');
+  });
   it.each(['goal_human_history_incomplete', 'request_failed: goal_human_history_incomplete'])(
     'explains the retained human-history hold for %s without promising a retry', error => {
       const message = goalErrorMessage(error);

@@ -4125,7 +4125,12 @@ export async function requestBrowserDecision(text: string, signal: AbortSignal, 
       // by ChatGPT. Preserve every post-Send owner until explicit source reactivation.
       const ambiguous = cancelled.filter(row => !safelyUnsent.includes(row) && !superseded.includes(row));
       if (ambiguous.length > 0 && !options.allowAmbiguousRetry) {
-        throw new Error('goal_browser_send_unconfirmed');
+        // Cancellation leaves answer custody unresolved even when native Send is proven.
+        // Report that existing receipt truth without granting a replacement or retry.
+        const delivered = ambiguous.every(helperNativeSendConfirmed);
+        throw new Error(delivered && ambiguous.every(row => row.error === 'goal_browser_answer_expired')
+          ? 'goal_browser_answer_expired' : delivered
+            ? 'goal_browser_delivered_helper_unresolved' : 'goal_browser_send_unconfirmed');
       }
       const retired = new Set([...safelyUnsent, ...(options.allowAmbiguousRetry ? ambiguous : [])]);
       const available = retired.size > 0 || newlySuperseded.size > 0

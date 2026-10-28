@@ -25475,6 +25475,61 @@ describe('ordinary input native terminal association', () => {
     expect(JSON.stringify(proof)).not.toContain('bounded pass');
   });
 
+  it.each(['busy', 'local-owner', 'question-invalid', 'missing-final'] as const)(
+    'preserves selected-parent refusal diagnostics before final-authority guards (%s)', async state => {
+      await setup();
+      const turns = pair();
+      Object.assign(turns[1]!, { calls: [{ messageId: 'native-current-refusal-parent', tool: 'read',
+        answered: false, identityRefusalReasons: ['workingTurnMismatch'] }] });
+      let owner: Record<string, unknown> | null = null;
+      if (state === 'busy') (live!.window as any).CLF_DOM.generating = () => true;
+      if (state === 'question-invalid') turns[0]!.messages[0]!.stable = false;
+      if (state === 'missing-final') turns[1]!.endMessageId = '';
+      if (state === 'local-owner') {
+        startGenerating(live!.document);
+        const section = assistantTurn(live!.document, 'current-refusal-owner', []);
+        section.setAttribute('data-clf-fiber-turn', '1');
+        live!.hook.observe(); await settle();
+        const localTurn = emitted(live!.sent, 'turn_start').at(-1)!.event.turnId as string;
+        Object.assign(turns[1]!, { turnId: 'current-refusal-owner' });
+        owner = { localTurnId: localTurn, pageTurnId: 'current-refusal-owner',
+          pageTurn: { id: 'current-refusal-owner', node: section, nodes: [section] } };
+      }
+      await replyFiber([], turns, owner);
+      live!.sent.length = 0; await live!.hook.pullActivity();
+      const proof = live!.sent.filter(message => message.type === 'activity').at(-1)?.coreDiagnostic?.ordinaryFinal;
+      expect(proof).toMatchObject({ calls: 1, openCalls: 1,
+        coreCallMessageIds: ['native-current-refusal-parent'], identityRefusals: [
+          { messageId: 'native-current-refusal-parent', reasons: ['workingTurnMismatch'] }] });
+      expect(proof?.settledFinalMessageId).toBeUndefined();
+      expect(proof?.sourceUserMessageId).toBeUndefined();
+      if (state === 'local-owner') expect(proof?.activeTurnMapped).toBe(true);
+      expect(live!.sent.some(message => ['goal_draft', 'goal_ack', 'goal_prepare', 'desktop_input'].includes(message.type))).toBe(false);
+    });
+
+  it.each(['incomplete', 'duplicate-parent', 'unknown-reason', 'accessor'] as const)(
+    'withholds malformed current refusal diagnostics before a busy return (%s)', async variant => {
+      await setup(); let getterReads = 0;
+      const turns = pair();
+      const call: any = { messageId: 'native-malformed-refusal-parent', tool: 'read', answered: false,
+        identityRefusalReasons: ['workingTurnMismatch'] };
+      if (variant === 'unknown-reason') call.identityRefusalReasons = ['PRIVATE_UNKNOWN_REASON'];
+      if (variant === 'accessor') Object.defineProperty(call, 'identityRefusalReasons', {
+        get() { getterReads++; throw new Error('PRIVATE_ACCESSOR'); } });
+      Object.assign(turns[1]!, { calls: variant === 'duplicate-parent' ? [call, { ...call }] : [call],
+        ...(variant === 'incomplete' ? { callEvidenceComplete: false } : {}) });
+      (live!.window as any).CLF_DOM.generating = () => true;
+      await replyFiber([], turns); live!.sent.length = 0; await live!.hook.pullActivity();
+      const proof = live!.sent.filter(message => message.type === 'activity').at(-1)?.coreDiagnostic?.ordinaryFinal;
+      expect(proof?.identityRefusals).toBeUndefined();
+      expect(proof?.allCoreRequestIds).toBeUndefined();
+      expect(proof?.sourceUserMessageId).toBeUndefined();
+      expect(proof?.settledFinalMessageId).toBeUndefined();
+      expect(getterReads).toBe(0);
+      expect(JSON.stringify(proof)).not.toContain('PRIVATE_');
+      expect(live!.sent.some(message => ['goal_draft', 'goal_ack', 'goal_prepare', 'desktop_input'].includes(message.type))).toBe(false);
+    });
+
   it.each(['valid', 'unknown', 'duplicate', 'accessor', 'array-accessor'] as const)(
     'publishes only sanitized refusal reasons with their exact native parent (%s)', async variant => {
       await setup();

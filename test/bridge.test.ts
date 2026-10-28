@@ -31,6 +31,7 @@ import type { Config } from '../src/shared/types.js';
 import {
   coreBrowserEvidence,
   nativeFinalEvidenceWait,
+  nativeIdentityRefusalSummary,
   settledNativeTurnCandidate,
   resetCoreBrowserEvidenceForTests
 } from '../src/main/core-browser-evidence.js';
@@ -562,6 +563,47 @@ describe('opt-in settled-turn Loop forward-readiness', () => {
     expect((await sessionControlsFor(f.sessionId)).nativeEvidence?.providerUI?.currentTurnMatched).toBe(false);
     expect(await readEvents(f.sessionId, { kinds: ['tool_call'] })).toEqual([]);
   });
+
+  it.each(['source-missing', 'request-missing'] as const)(
+    'projects current refusal reasons separately from a retained original fence (%s)', async condition => {
+      const f = await stoppedResumeFixture(false);
+      resetCoreBrowserEvidenceForTests();
+      let observedAt = Date.now();
+      const publish = (ordinaryFinal: Record<string, unknown>, documentId = f.diagnostic.documentId) =>
+        request('POST', `/activity?conversationId=${f.conversationId}`, { body: { observationOnly: true,
+          coreDiagnostic: { ...f.diagnostic, documentId, observedAt: ++observedAt, ordinaryFinal } } });
+      const original = { reason: 'open-call', questions: 1, calls: 2, openCalls: 2,
+        codeCalls: 0, openCodeCalls: 0, activeTurnMapped: false,
+        ...(condition === 'request-missing' ? { sourceUserMessageId: f.userId } : {}),
+        coreCallMessageIds: ['original-private-parent-one', 'original-private-parent-two'] };
+      expect((await publish(original)).status).toBe(200);
+      const fence = JSON.stringify(coreBrowserEvidence(f.conversationId)?.pendingCompletion);
+      const parents = ['current-private-parent-one', 'current-private-parent-two', 'current-private-parent-three'];
+      const current = { reason: 'busy', questions: 2, calls: 3, openCalls: 3,
+        codeCalls: 0, openCodeCalls: 0, activeTurnMapped: false, coreCallMessageIds: parents,
+        identityRefusals: parents.map(messageId => ({ messageId, reasons: ['workingTurnMismatch'] })) };
+      expect((await publish(current, 'new-current-private-document')).status).toBe(200);
+      const control = await sessionControlsFor(f.sessionId);
+      const capturedObservation = coreBrowserEvidence(f.conversationId);
+      expect(control.nativeEvidence?.completion?.requestIdentity.failureReasons).toBeNull();
+      expect(control.nativeEvidence?.completion).toMatchObject({ retainedCalls: 2, missingOriginalRequestIds: 2 });
+      expect((control.nativeEvidence?.providerUI as any)?.identityRefusalSummary).toEqual({ calls: 3,
+        reasons: [{ code: 'workingTurnMismatch', calls: 3 }] });
+      expect(JSON.stringify((control.nativeEvidence?.providerUI as any)?.identityRefusalSummary)).not.toContain('private');
+      expect(JSON.stringify(coreBrowserEvidence(f.conversationId)?.pendingCompletion)).toBe(fence);
+      expect(control.nativeEvidence?.settledCandidate).toBe(false);
+      expect(nativeFinalEvidenceWait(coreBrowserEvidence(f.conversationId))).not.toBeNull();
+      expect((await publish({ reason: 'question-invalid', questions: 0, calls: 0, openCalls: 0,
+        codeCalls: 0, openCodeCalls: 0, activeTurnMapped: false }, 'new-current-private-document')).status).toBe(200);
+      expect((await sessionControlsFor(f.sessionId)).nativeEvidence?.providerUI).toMatchObject({ identityRefusalSummary: null });
+      // A newer generic frame must not mix its reasons into a previously captured
+      // providerUI timestamp while the controls owner yields to another read.
+      expect(nativeIdentityRefusalSummary(capturedObservation)).toEqual({ calls: 3,
+        reasons: [{ code: 'workingTurnMismatch', calls: 3 }] });
+      expect(nativeIdentityRefusalSummary(coreBrowserEvidence(f.conversationId))).toBeNull();
+      expect(JSON.stringify(coreBrowserEvidence(f.conversationId)?.pendingCompletion)).toBe(fence);
+      expect(await readEvents(f.sessionId, { kinds: ['tool_call'] })).toEqual([]);
+    });
 
   it('projects native identity and durable-result stalls through connected controls without exposing their identities', async () => {
     const recorder = await import('../src/main/session/recorder.js');

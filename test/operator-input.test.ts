@@ -125,7 +125,8 @@ describe('account-scoped operator input', () => {
       ['--cos-sessions-action=list', '--cos-sessions-receipt=bad']])
       expect(() => operatorSessionInspectionRequest([...base, ...suffix])).toThrow();
   });
-  it.each(['valid', 'unknown-code', 'null-entry', 'accessor'] as const)(
+  it.each(['valid', 'unknown-code', 'null-entry', 'accessor', 'summary-code', 'summary-overflow',
+    'summary-accessor', 'summary-count-accessor', 'summary-incomplete', 'summary-duplicate'] as const)(
     'delegates live session controls and bounded catalog reads without private text (%s)', async variant => {
     let getterReads = 0;
     const refusalCounter: any = { code: variant === 'unknown-code' ? 'private unknown code' : 'workingTurnMismatch',
@@ -140,6 +141,18 @@ describe('account-scoped operator input', () => {
         callReceiptMissing: 401, callReceiptConflict: -1, callNativePending: 0.5 },
       privatePayload: 'private provider source'
     };
+    if (providerUI) {
+      const summary: any = { calls: 4, reasons: [{ code: 'turnExchangeMismatch', calls: 4 }], privatePayload: 'private current source' };
+      if (variant === 'summary-code') summary.reasons[0].code = 'private unknown current code';
+      if (variant === 'summary-overflow') summary.reasons[0].calls = 5;
+      if (variant === 'summary-incomplete') delete summary.calls;
+      if (variant === 'summary-duplicate') summary.reasons.push({ ...summary.reasons[0] });
+      if (variant === 'summary-accessor') Object.defineProperty(summary, 'reasons', {
+        get() { getterReads++; throw new Error('private current-reason accessor must not run'); } });
+      if (variant === 'summary-count-accessor') Object.defineProperty(summary, 'calls', {
+        get() { getterReads++; throw new Error('private current-count accessor must not run'); } });
+      providerUI.identityRefusalSummary = summary;
+    }
     if (variant === 'accessor') Object.defineProperty(providerUI, 'selectorMatches', {
       get() { getterReads++; throw new Error('private provider accessor must not run'); } });
     const config = await import('../src/main/config.js'), bridge = await import('../src/main/bridge.js');
@@ -195,14 +208,17 @@ describe('account-scoped operator input', () => {
               observedAt: 1000, shell: 'alternate', discovery: 'compatible', currentTurnMatched: false,
               selectorMatches: variant === 'unknown-code' ? null : 400, mapped: variant === 'unknown-code' ? null : 0,
               rejects: { fiberMissing: 0, callRequestIdPresent: 3,
-                callRequestIdMissing: 0, callIdentityScopeUnproved: 2 }
+                callRequestIdMissing: 0, callIdentityScopeUnproved: 2 },
+              identityRefusalSummary: ['valid', 'unknown-code'].includes(variant)
+                ? { calls: 4, reasons: [{ code: 'turnExchangeMismatch', calls: 4 }] } : null
             },
             accountActivity: { runningTools: 0, settlingTools: 1, managedProcesses: 2, mcpRequests: 0, recordingWrites: 1 },
             completion: { reason: 'original-native-identity-missing', retainedCalls: 3, retainedCodeCalls: 1,
               missingOriginalNativeIds: 4, missingOriginalRequestIds: 3,
               requestIdentity: { status: 'unverified', selectedFieldsPresent: null, selectedFieldsMissing: null,
                 selectedIdentitiesWithheld: null, scopeRefusals: null,
-                failureReasons: variant === 'valid' ? [{ code: 'workingTurnMismatch', calls: 2 }] : null },
+                failureReasons: !['unknown-code', 'null-entry', 'accessor'].includes(variant)
+                  ? [{ code: 'workingTurnMismatch', calls: 2 }] : null },
               observation: { observedAt: 1000, ageMs: 200, freshness: 'fresh' },
               durable: { reason: 'original-identity-missing', checkedCalls: 0, missingCorrelations: 0,
                 conflictingCorrelations: 0, missingTerminalResults: null, ambiguousTerminalResults: null,
