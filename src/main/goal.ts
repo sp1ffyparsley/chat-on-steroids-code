@@ -2106,15 +2106,27 @@ async function setGoalReplyActiveOwned(conversationId: string, active: boolean, 
       ] });
       const user = source.findLast(row => row.kind === 'user_message');
       const final = source.findLast(row => row.kind === 'assistant_message' && row.messageId === held.replyId);
+      // The obligation itself was minted from a stable native final that can arrive without an
+      // inline question annotation: Core evidence, not the message row, is then what names the
+      // source. Inside one turn window the incumbent watchdog boundary already places this exact
+      // final between that question's turn_start and its stalled end, so a withheld annotation
+      // must not rewrite the same accepted reply into a different pickup identity on Resume —
+      // that rewrite orphans the retained unsent continuation and refuses the delivery it owns.
+      // A final that arrived after its own turn started never borrows a question it is not in.
+      const watchdogBoundary = user?.kind === 'user_message' && final?.kind === 'assistant_message'
+        ? ordinaryInputWatchdogBoundary(source, user, final) : null;
+      const questionAssociates = final?.kind === 'assistant_message' && user?.kind === 'user_message' &&
+        (final.inputReplyTo === user.messageId ||
+          (!final.inputReplyTo && !!watchdogBoundary && watchdogBoundary.afterFinal !== true));
       retainedNativeFinal = Boolean(user?.kind === 'user_message' && user.messageId &&
         final?.kind === 'assistant_message' && final.source === 'extension' &&
-        final.providerMessageId === held.replyId && final.inputReplyTo === user.messageId &&
+        final.providerMessageId === held.replyId && questionAssociates &&
         final.goalEligible === true && final.final === true && final.state === 'final' && !final.turnId &&
         !user.message.truncated && !final.message.truncated &&
         (final.finalContentSeq ?? final.origin ?? final.seq) === held.eventSeq &&
         !source.some(row => row.kind === 'assistant_message' && row.messageId !== held.replyId &&
           (row.origin ?? row.seq) > (user.origin ?? user.seq) && (row.final === true || row.state === 'final')) &&
-        ordinaryInputWatchdogBoundary(source, user, final)?.end.seq === end?.seq);
+        watchdogBoundary?.end.seq === end?.seq);
       if (retainedNativeFinal) logInfo('goal: exact pending native-final source validated across its local watchdog end; preserving reply identity for Resume, no Send authorized');
       if (!stillCurrent() || goalReplies.get(conversationId) !== held ||
           control !== goalSwitches.get(conversationId) || !goalArmedFor(conversationId)) return false;

@@ -80,6 +80,32 @@ describe('Goal failure explanations', () => {
     expect(message).not.toContain('private');
   });
 
+  it('distinguishes durable storage failures from helper model and delivery failures without leaking prose', () => {
+    for (const raw of ['goal_reply_not_durable', 'goal_ack_not_durable', 'goal_stop_disposition_not_durable',
+      'request_failed: request_failed: goal_objective_not_durable']) {
+      expect(goalHelperFailureCause(raw)).toBe('ledger_unsaved');
+      expect(goalErrorMessage(raw)).toContain('disk space');
+      expect(goalErrorMessage('goal_browser_helper_exhausted', goalHelperFailureCause(raw))).toContain('could not save');
+    }
+    expect(isGoalHelperFailureCause('ledger_unsaved')).toBe(true);
+    expect(goalHelperFailureCause('provider_private_storage_error')).toBe('request_failed');
+    expect(goalErrorMessage('goal_browser_helper_exhausted', goalHelperFailureCause('provider_private_storage_error')))
+      .not.toContain('provider_private_storage_error');
+  });
+
+  it('names the distinct source and acceptance holds while preserving unknown error fallback', () => {
+    for (const [code, detail] of [
+      ['goal_source_changed', 'source evidence changed'],
+      ['goal_original_acceptance_unverified', 'task acceptance'],
+      ['goal_canonical_scope_changed', 'canonical source'],
+      ['goal_human_history_changed', 'human changes']
+    ] as const) {
+      expect(goalErrorMessage('request_failed: ' + code)).toContain(detail);
+      expect(goalHelperFailureCause(code)).toBe('request_failed');
+    }
+    expect(goalErrorMessage('goal_newly_invented_code')).toContain('goal_newly_invented_code');
+  });
+
   it('refuses arbitrary persisted helper causes and keeps the legacy explanation', () => {
     for (const value of ['private diagnostic', '__proto__', 'constructor', null, {}, 5]) {
       expect(isGoalHelperFailureCause(value)).toBe(false);

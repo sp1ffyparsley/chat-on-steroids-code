@@ -12,6 +12,7 @@ const helperFailureExplanations = {
   unusable_response: 'The helper response was empty or could not be parsed as a continuation.',
   loop_stop_refused: 'The helper returned a stopping decision while this chat requires a Loop continuation. Its prompt was delivered; no continuation was invented.',
   unresolved_content_reference: 'ChatGPT returned an internal content reference instead of readable helper instructions. This is an answer-reading failure, not a shortage of helper tabs.',
+  ledger_unsaved: 'CoS could not save its continuation record. Check free disk space and app diagnostics; the saved task and delivery records remain the source of truth.',
   request_failed: 'The helper request failed; consult the existing delivery and provider diagnostics for the cause.'
 } as const;
 
@@ -37,6 +38,7 @@ export function goalHelperFailureCause(error: string): GoalHelperFailureCause {
   if (raw === 'goal_content_reference_unresolved') return 'unresolved_content_reference';
   if (raw === 'loop_stop_refused') return 'loop_stop_refused';
   if (/^(?:invalid_goal_decision_(?:json|schema)|malformed_(?:completion_response|stream_record)|empty_reply|control_tokens_only|unsafe_control_tokens)(?:$|:)/.test(raw)) return 'unusable_response';
+  if (/^goal_[a-z0-9_]*not_durable$/.test(raw)) return 'ledger_unsaved';
   return 'request_failed';
 }
 
@@ -92,7 +94,12 @@ const explanations: Readonly<Record<string, string>> = {
   goal_reply_not_durable: 'The app could not save the pending continuation. Check free disk space and the app diagnostics.',
   goal_ack_not_durable: 'The app could not save the delivery confirmation. Check free disk space; check the chat before manually resending.',
   goal_switch_not_durable: 'The app could not save the Goal/Loop setting. Check free disk space and try saving it again.',
-  goal_objective_not_durable: 'The app could not save the task. Check free disk space and try saving it again.'
+  goal_objective_not_durable: 'The app could not save the task. Check free disk space and try saving it again.',
+  goal_stop_disposition_not_durable: 'CoS could not save the helper decision to the Goal ledger. Check free disk space and app diagnostics; retain the exact task, reply and delivery evidence while storage is repaired.',
+  goal_source_changed: 'The source evidence changed while the continuation was being prepared. Automatic continuation is held; the saved task remains retained for reconciliation.',
+  goal_original_acceptance_unverified: 'The helper proposed stopping, but the original task acceptance could not be verified. The saved task remains open until its original requirements have supporting evidence.',
+  goal_canonical_scope_changed: 'The canonical source of the retained task changed. Scope verification held automatic continuation; verify the original request and current canonical source before resuming.',
+  goal_human_history_changed: 'Recorded human changes arrived while this decision was being prepared. The saved task is retained; reconcile the latest instructions before authorizing a continuation.'
 };
 
 export function goalErrorMessage(error: string, helperFailureCause?: GoalHelperFailureCause): string {

@@ -674,6 +674,53 @@ it('projects an explicit zero worker lifecycle for an ordinary chat with no work
   });
 });
 
+it('releases the existing queue admission owner when local Settings Save changes only the global pause', async () => {
+  const { onLog } = await import('../src/main/logger.js');
+  const goal = await import('../src/main/goal.js');
+  const previousReplies = goal.snapshotGoalReplies();
+  const previousSwitches = goal.snapshotGoalSwitches();
+  const session = await createSession({ conversationId: 'settings-pause-saved-obligation' });
+  await goal.setGoalSwitchNow(session.conversationId!, 'loop', true);
+  await goal.acceptGoalReplyNow({ conversationId: session.conversationId!, sessionId: session.id,
+    turnId: 'exact-settings-source', replyId: 'exact-settings-final', eventSeq: 7, blocked: false });
+  const obligation = goal.snapshotGoalReplies();
+  const commands = pendingCommands();
+  const transitions: boolean[] = [];
+  const persistedAtTransition: boolean[] = [];
+  const { readFileSync } = await import('node:fs');
+  currentWindow = { setBackgroundColor: vi.fn(), setTitleBarOverlay: vi.fn(),
+    isDestroyed: () => false, webContents: { send: vi.fn() } };
+  const off = onLog(entry => {
+    if (entry.message.startsWith('bridge: global ChatGPT automation ')) {
+      transitions.push(getConfig().ui.automationPaused === true);
+      persistedAtTransition.push(JSON.parse(readFileSync(path.join(dir, 'config.json'), 'utf8')).ui.automationPaused);
+    }
+  });
+  try {
+    let before = getConfig();
+    expect(await save({ ...before, ui: { ...before.ui, automationPaused: true } }, before))
+      .toMatchObject({ ok: true });
+    expect(JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8')).ui.automationPaused).toBe(true);
+    before = getConfig();
+    expect(await save({ ...before, ui: { ...before.ui, automationPaused: false } }, before))
+      .toMatchObject({ ok: true });
+    expect(JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8')).ui.automationPaused).toBe(false);
+    expect(transitions).toEqual([true, false]);
+    expect(persistedAtTransition).toEqual([true, false]);
+    expect(currentWindow.webContents.send).toHaveBeenCalledWith('session:changed');
+    expect(goal.snapshotGoalReplies().replies).toEqual(obligation.replies);
+    expect(pendingCommands()).toEqual(commands);
+    before = getConfig();
+    expect(await save({ ...before, ui: { ...before.ui, followOutput: !before.ui.followOutput } }, before))
+      .toMatchObject({ ok: true });
+    expect(transitions).toEqual([true, false]); // Cosmetic saves cannot mint another resume episode.
+  } finally {
+    off();
+    goal.restoreGoalReplies(previousReplies);
+    goal.restoreGoalSwitches(previousSwitches);
+  }
+});
+
 it('lets explicit Resume all durably release a global pause while background recovery cannot', async () => {
   await saveConfig({ ...getConfig(), ui: { ...getConfig().ui, automationPaused: true } });
   applyAutomationPause(true);

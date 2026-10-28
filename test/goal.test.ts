@@ -6371,6 +6371,58 @@ describe('a chat driven towards a specific goal', () => {
     expect(goal.goalPendingReplyFor(conversationId)).toMatchObject({ turnId: 'accepted-final-source-turn' });
   });
 
+  it.each(['goal', 'loop'] as const)('keeps the exact pending native final when explicit %s Resume observes the same watchdog end with a withheld inline association', async mode => {
+    const conversationId = 'withheld-native-association-resume-' + mode;
+    const session = await createSession({ conversationId });
+    await goal.setGoalSwitchNow(conversationId, mode, true);
+    const userId = '44444444-4444-4444-8444-444444444444';
+    const finalId = '55555555-5555-4555-8555-555555555555';
+    await appendEvent(session.id, { source: 'extension', time: 1000, kind: 'user_message', messageId: userId,
+      message: { text: 'Continue the retained objective.', chars: 32, truncated: false } });
+    await appendEvent(session.id, { source: 'extension', time: 1001, kind: 'turn_start', turnId: 'withheld-native-observer' });
+    await appendEvent(session.id, { source: 'extension', time: 1002, kind: 'chat_error', turnId: 'withheld-native-observer', reason: 'watchdog_stalled', message: { text: 'Observer timed out.', chars: 19, truncated: false } });
+    // The settled-final association reaches the app through Core evidence, not the message row:
+    // this exact row is what the recorder already accepted as the owed reply above.
+    const final = await appendEvent(session.id, { source: 'extension', time: 1003, kind: 'assistant_message',
+      messageId: finalId, providerMessageId: finalId, goalEligible: true, state: 'final', final: true,
+      message: { text: 'A useful bounded pass completed.', chars: 31, truncated: false } });
+    await appendEvent(session.id, { source: 'extension', time: 1004, kind: 'turn_end', turnId: 'withheld-native-observer', outcome: 'stalled',
+      detail: 'No visible output and no progress for five minutes' });
+    await goal.acceptGoalReplyNow({ conversationId, sessionId: session.id, replyId: finalId,
+      turnId: 'reply:' + finalId, eventSeq: final.seq, blocked: false });
+    const before = goal.goalPendingReplyFor(conversationId)!;
+    expect(await goal.setGoalReplyActiveNow(conversationId, true, () => true, true)).toBe(true);
+    const after = goal.goalPendingReplyFor(conversationId)!;
+    // Same pickup episode, not a new `activation:` obligation for the stalled turn.
+    expect(after).toMatchObject({ sessionId: session.id, replyId: finalId, turnId: before.turnId, eventSeq: before.eventSeq });
+    expect(after.acceptedAt).toBeGreaterThan(before.acceptedAt);
+  });
+
+
+  it('does not let a withheld association borrow a question its final is not inside during Resume', async () => {
+    const conversationId = 'withheld-native-association-after-final-resume';
+    const session = await createSession({ conversationId });
+    await goal.setGoalSwitchNow(conversationId, 'loop', true);
+    const userId = '66666666-6666-4666-8666-666666666666';
+    const finalId = '77777777-7777-4777-8777-777777777777';
+    await appendEvent(session.id, { source: 'extension', time: 1000, kind: 'user_message', messageId: userId,
+      message: { text: 'Continue the retained objective.', chars: 32, truncated: false } });
+    // The answer predates the only local turn: nothing ties it to this observer window.
+    const final = await appendEvent(session.id, { source: 'extension', time: 1001, kind: 'assistant_message',
+      messageId: finalId, providerMessageId: finalId, goalEligible: true, state: 'final', final: true,
+      message: { text: 'An older native answer.', chars: 23, truncated: false } });
+    await appendEvent(session.id, { source: 'extension', time: 1002, kind: 'turn_start', turnId: 'late-native-observer' });
+    await appendEvent(session.id, { source: 'extension', time: 1003, kind: 'turn_end', turnId: 'late-native-observer', outcome: 'stalled',
+      detail: 'No visible output and no progress for five minutes' });
+    await goal.acceptGoalReplyNow({ conversationId, sessionId: session.id, replyId: finalId,
+      turnId: 'reply:' + finalId, eventSeq: final.seq, blocked: false });
+    expect(await goal.setGoalReplyActiveNow(conversationId, true, () => true, true)).toBe(true);
+    const after = goal.goalPendingReplyFor(conversationId)!;
+    expect(after.replyId).not.toBe(finalId);
+    expect(after.turnId).toBe('late-native-observer');
+  });
+
+
   it.each([['goal', false], ['loop', false], ['goal', true], ['loop', true]] as const)('keeps the exact pending native final when explicit %s Resume observes its later watchdog end (streamed=%s)', async (mode, streamed) => {
     const conversationId = 'pending-native-final-resume-' + mode + '-' + streamed;
     const session = await createSession({ conversationId });

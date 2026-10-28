@@ -821,6 +821,13 @@ export function registerIpc(
       else if (!config.goal.impulseMinutes && (proposed.goal.impulseMinutes ?? 0) > 0) await cancelFinishInputs(true);
       return proposed;
     }, async (published, previous) => {
+      // Settings Save is also the exact-account local operator's pause owner. Publish the
+      // durable flag first, then release/suspend the existing queue, without the explicit
+      // Resume-all path that can retire failed helper fences or rearm another episode.
+      if ((previous.ui.automationPaused === true) !== (published.ui.automationPaused === true)) {
+        applyAutomationPause(published.ui.automationPaused === true);
+        push('session:changed');
+      }
       if ((previous.ui.keepAwake !== false) !== (published.ui.keepAwake !== false)) refreshKeepAwake();
       if (previous.ui.signOutEmergencyAlerts !== published.ui.signOutEmergencyAlerts) {
         signOutEmergencySettingTransition = published.ui.signOutEmergencyAlerts === true;
