@@ -1727,7 +1727,17 @@
         const status = Object.getOwnPropertyDescriptor(message, 'status');
         if (status && (!own.call(status, 'value') || status.value !== 'finished_successfully'))
           unfinishedResults.add(parent);
-        else answered.add(parent);
+        else {
+          answered.add(parent);
+          // A missing invocation ID may be captured from ONE exact, finished native result.
+          // The parent/tool/link/surface checks above and duplicate-result veto remain binding;
+          // never borrow a whole turn's workflow or overwrite a known invocation identity.
+          const request = meta && Object.getOwnPropertyDescriptor(meta, 'request_id');
+          if (!asked.requestId && !conflictingResultParents.has(parent) &&
+              message.author.name === 'api_tool.call_tool' && status?.value === 'finished_successfully' &&
+              request && own.call(request, 'value') && typeof request.value === 'string' &&
+              /^[a-z0-9_-]{1,100}$/i.test(request.value)) asked.requestId = request.value;
+        }
       }
       const receipt = coreResultReceipt(message);
       if (receipt && !conflictingResultParents.has(parent))
@@ -1762,7 +1772,7 @@
         // created. The app's existing stamp is when the *extension* observed the row, which
         // is a poll tick and jitters per tab; these are the only values on either side that
         // say which request this is and when it was actually issued.
-        requestId: request.requestId || null,
+        requestId: request.requestId || (hasResult ? requests.get(id)?.requestId : null) || null,
         ...(hasResult && receipts.get(id) ? { resultReceiptId: receipts.get(id) } : {}),
         createTime: request.createTime
       });

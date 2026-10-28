@@ -1999,10 +1999,12 @@ export function authorizeBrowserInput(id: string, owner: string, conversationId:
       catch { logWarn('native Input task-version authorization held: human task custody is unverified'); return false; }
     };
     if (!await scopeCurrent() || !await idleProbeCurrent() ||
-        !current.filter(entry => sameDelivery(row, entry)).every(routedInputAllowed)) return false;
+        !current.filter(entry => sameDelivery(row, entry)).every(routedInputAllowed) ||
+        (row.purpose === 'decision' && browserDecisionHoldError())) return false;
     await commit(current.map(entry => sameDelivery(row, entry) ? { ...entry, sendAuthorizedAt: Date.now() } : entry));
     if ((forward && !await forward()) || !await scopeCurrent() || !await idleProbeCurrent() ||
-        !current.filter(entry => sameDelivery(row, entry)).every(routedInputAllowed)) {
+        !current.filter(entry => sameDelivery(row, entry)).every(routedInputAllowed) ||
+        (row.purpose === 'decision' && browserDecisionHoldError())) {
       // This response has not left Main: this exact newly-created authorization is known
       // unsent. Restore only its pre-authorization row, retaining its exclusive browser owner.
       await commit(current);
@@ -3978,7 +3980,7 @@ export class BrowserDecisionProtocolRejection extends Error {
     this.name = 'BrowserDecisionProtocolRejection';
   }
 }
-function rejectedBrowserDecision(entry: InputEntry): boolean {
+export function rejectedBrowserDecision(entry: InputEntry): boolean {
   return entry.purpose === 'decision' && entry.lifetime === 'temporary-planner' &&
     entry.state === 'failed' && entry.goalDecisionRejection !== undefined && entry.error === entry.goalDecisionRejection;
 }

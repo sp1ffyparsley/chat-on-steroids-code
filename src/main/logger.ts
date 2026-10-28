@@ -504,6 +504,23 @@ export async function noteLocalIncident(input: {
   if (owner.pending >= LOCAL_INCIDENT_PENDING_LIMIT) {
     droppedIncident(owner, 'pending_full'); return false;
   }
+  // A queued negative belongs before an exact clear if it was admitted before
+  // that clear, even when slow storage writes it afterward. Bind the timestamp
+  // only to this validated native origin; changed/legacy/foreign inputs retain
+  // write-time uncertainty rather than borrowing an older admission.
+  const nativeNegativeAdmission = (() => {
+    try {
+      if (input.source === 'browser-debug' && input.status !== 'resolved' &&
+          /^native_terminal_(?:open_call|open_code|inventory_incomplete)$/.test(input.reason)) {
+        const completion = acceptedNativeCompletion(input.nativeCompletion);
+        if (completion?.checkpointKey) return {
+          at: Date.now(), reason: input.reason, sessionId: incidentIdentity(input.sessionId),
+          conversationId: incidentUuid(input.conversationId), turnId: incidentIdentity(input.turnId), completion
+        };
+      }
+    } catch { /* Invalid inputs still fail inside the incumbent queued writer. */ }
+    return null;
+  })();
   owner.pending++;
   const admissionEpoch = incidentProfileEpoch;
   let accepted = false;
@@ -531,14 +548,21 @@ export async function noteLocalIncident(input: {
       const rows = await readIncidentSlots(owner);
       await expireSettledIncidentSlots(owner, rows);
       if (!owner.rows) { droppedIncident(owner, 'index_unverified'); return; }
-      const now = Date.now(), reason = incidentReason(input.reason);
+      const reason = incidentReason(input.reason);
+      const nativeCompletion = acceptedNativeCompletion(input.nativeCompletion);
+      const sessionId = incidentIdentity(input.sessionId), conversationId = incidentUuid(input.conversationId);
+      const turnId = incidentIdentity(input.turnId);
+      const now = nativeNegativeAdmission && input.source === 'browser-debug' && input.status !== 'resolved' &&
+        reason === nativeNegativeAdmission.reason && sessionId === nativeNegativeAdmission.sessionId &&
+        conversationId === nativeNegativeAdmission.conversationId && turnId === nativeNegativeAdmission.turnId &&
+        JSON.stringify(nativeCompletion) === JSON.stringify(nativeNegativeAdmission.completion)
+        ? nativeNegativeAdmission.at : Date.now();
       const errorEvidence = incidentErrorEvidence(input.detail);
       const browserFacts = input.browserFacts ? {
         errors: boundedBrowserCount(input.browserFacts.errors),
         runningTools: boundedBrowserCount(input.browserFacts.runningTools),
         automationPaused: input.browserFacts.automationPaused === true
       } : undefined;
-      const nativeCompletion = acceptedNativeCompletion(input.nativeCompletion);
       // A malformed supplied key must not degrade a resolution into legacy scope.
       // Disk reads still retain shape-only negative counts when a key is invalid.
       if (input.nativeCompletion?.checkpointKey !== undefined &&
@@ -546,8 +570,6 @@ export async function noteLocalIncident(input: {
             !/^[a-f0-9]{64}$/.test(input.nativeCompletion.checkpointKey) ||
             nativeCompletion?.checkpointKey !== input.nativeCompletion.checkpointKey)) return;
       const screenshot = acceptedIncidentScreenshot(input.screenshot);
-      const sessionId = incidentIdentity(input.sessionId), conversationId = incidentUuid(input.conversationId);
-      const turnId = incidentIdentity(input.turnId);
       const fingerprint = input.fingerprint && /^[a-f0-9]{64}$/.test(input.fingerprint)
         ? input.fingerprint : undefined;
       const nativeReason = (value: string): boolean => value === 'native_terminal_open_call' ||

@@ -573,6 +573,86 @@ describe('the calls a turn says it made', () => {
     expect(turns[0]!.calls.map((call) => call.messageId)).toEqual(['req-mine']);
   });
 
+  it('backfills a missing classic invocation request ID only from its exact finished native result', async () => {
+    const asked = request('backfill-original-parent', 'read');
+    delete asked.metadata!.request_id;
+    const returned = answer('backfill-exact-result', asked.id, 'read');
+    returned.author.name = 'api_tool.call_tool';
+    returned.status = 'finished_successfully';
+    returned.metadata!.request_id = 'wfr_exact_result_backfill';
+    const { turns } = await scan([], [{ id: 'backfill-native-turn', messages: [asked, returned] }]);
+    expect(turns[0]?.calls).toMatchObject([{
+      messageId: asked.id, requestId: 'wfr_exact_result_backfill', answered: true
+    }]);
+    expect(turns[0]!.calls[0]).not.toHaveProperty('resultReceiptId');
+    expect(asked.metadata).not.toHaveProperty('request_id');
+  });
+
+  it.each(['duplicate-result', 'conflicting-result', 'duplicate-result-id', 'unfinished', 'missing-status',
+    'wrong-parent', 'missing-parent', 'foreign-app', 'foreign-link', 'foreign-tool', 'foreign-surface',
+    'missing-metadata', 'missing-request', 'invalid-request', 'oversize-request', 'wrong-role',
+    'wrong-recipient', 'missing-author', 'code-wrapper'] as const)(
+    'does not backfill classic request identity from %s evidence', async mode => {
+      const asked = request('backfill-held-parent', 'read');
+      delete asked.metadata!.request_id;
+      const returned = answer('backfill-held-result', asked.id, 'read');
+      returned.author.name = 'api_tool.call_tool';
+      returned.status = 'finished_successfully';
+      returned.metadata!.request_id = 'wfr_untrusted_result_backfill';
+      if (mode === 'unfinished') returned.status = 'in_progress';
+      if (mode === 'missing-status') delete returned.status;
+      if (mode === 'wrong-parent') returned.metadata!.parent_id = 'a-different-native-call';
+      if (mode === 'missing-parent') delete returned.metadata!.parent_id;
+      if (mode === 'foreign-app') (returned.metadata!.invoked_resource as Record<string, unknown>).app_name = 'Foreign Core';
+      if (mode === 'foreign-link') (returned.metadata!.invoked_resource as Record<string, unknown>).resource_uri = `/${ASDK}/link_99999999888877776666555555555555/read`;
+      if (mode === 'foreign-tool') (returned.metadata!.invoked_resource as Record<string, unknown>).resource_uri = `/${ASDK}/${LINK}/exec_command`;
+      if (mode === 'foreign-surface') (returned.metadata!.invoked_resource as Record<string, unknown>).app_name = PLUGINS_APP;
+      if (mode === 'missing-request') delete returned.metadata!.request_id;
+      if (mode === 'invalid-request') returned.metadata!.request_id = 'wfr_invalid request';
+      if (mode === 'oversize-request') returned.metadata!.request_id = 'wfr_' + 'x'.repeat(97);
+      if (mode === 'missing-metadata') delete returned.metadata;
+      if (mode === 'wrong-role') returned.author.role = 'assistant';
+      if (mode === 'wrong-recipient') returned.recipient = 'functions.exec';
+      if (mode === 'missing-author') delete returned.author.name;
+      if (mode === 'code-wrapper') returned.author.name = 'functions.exec';
+      const messages = [asked, returned];
+      if (['duplicate-result', 'conflicting-result', 'duplicate-result-id'].includes(mode)) {
+        const duplicate = answer(mode === 'duplicate-result-id' ? returned.id : 'second-native-result', asked.id, 'read');
+        duplicate.author.name = 'api_tool.call_tool';
+        duplicate.status = 'finished_successfully';
+        duplicate.metadata!.request_id = mode === 'conflicting-result' ? 'wfr_conflicting_result' : returned.metadata!.request_id;
+        messages.push(duplicate);
+      }
+      const { turns } = await scan([], [{ id: 'backfill-held-turn', messages }]);
+      expect(turns[0]?.calls).toMatchObject([{ messageId: asked.id, requestId: null }]);
+    }
+  );
+
+  it('keeps shared-workflow sibling results bound to their own exact native parent', async () => {
+    const first = request('backfill-first-sibling', 'read'), second = request('backfill-second-sibling', 'read');
+    delete first.metadata!.request_id;
+    delete second.metadata!.request_id;
+    const returned = answer('backfill-only-first-result', first.id, 'read');
+    returned.author.name = 'api_tool.call_tool';
+    returned.status = 'finished_successfully';
+    returned.metadata!.request_id = 'wfr_shared_sibling_workflow';
+    const { turns } = await scan([], [{ id: 'backfill-sibling-turn', messages: [first, returned, second] }]);
+    expect(turns[0]?.calls).toMatchObject([
+      { messageId: first.id, requestId: 'wfr_shared_sibling_workflow', answered: true },
+      { messageId: second.id, requestId: null, answered: false }
+    ]);
+  });
+
+  it('never replaces a known classic invocation request ID with result metadata', async () => {
+    const asked = request('backfill-known-parent', 'read');
+    const returned = answer('backfill-known-result', asked.id, 'read');
+    returned.author.name = 'api_tool.call_tool';
+    returned.status = 'finished_successfully';
+    returned.metadata!.request_id = 'wfr_different_result';
+    const { turns } = await scan([], [{ id: 'backfill-known-turn', messages: [asked, returned] }]);
+    expect(turns[0]?.calls).toMatchObject([{ messageId: asked.id, requestId: 'wfr_01a009', answered: false }]);
+  });
+
   it('names every request in the turn, in order, with its result state', async () => {
     const messages = [
       request('req-a', 'search_files'),

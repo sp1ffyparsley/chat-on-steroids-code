@@ -444,7 +444,7 @@ export { setBrowserWorkArea } from './browser-window-layout.js';
 import { pendingBrowserPreferenceRequest, acknowledgeBrowserPreferences } from './browser-preferences.js';
 import { sessionFinishHeld, releaseSessionFinish, getSessionFinishDraft, sessionFinishWaiting } from './session/finish.js';
 import { observeUsage } from './session/usage.js';
-import { pendingBrowserInputs, browserDecisionPreclaimRecovery, claimBrowserInput, acknowledgeBrowserInput, acknowledgeToolInput, bindBrowserInputProject, failBrowserInput, completeBrowserDecision, browserDecisionOutputSaved, supersededBrowserDecisionArchiveEligible, listInputs, fileSilenceInput, hasQueuedAfterTurnInput, inputBeforeGoal, pendingQueuedPickups, deferSilenceInput, revokeSilenceInputs, userRequestedInput, continuationTransportDiagnostics, retainedSourceHelperContinuationFor, rebindRetainedSourceHelperContinuation, retainedInputExecutionResumeFor, ordinaryInputTerminalReply, ordinaryInputWatchdogBoundary, rememberOrdinaryInputFinalNow } from './session/input.js';
+import { pendingBrowserInputs, browserDecisionPreclaimRecovery, claimBrowserInput, acknowledgeBrowserInput, acknowledgeToolInput, bindBrowserInputProject, failBrowserInput, completeBrowserDecision, browserDecisionOutputSaved, supersededBrowserDecisionArchiveEligible, rejectedBrowserDecision, listInputs, fileSilenceInput, hasQueuedAfterTurnInput, inputBeforeGoal, pendingQueuedPickups, deferSilenceInput, revokeSilenceInputs, userRequestedInput, continuationTransportDiagnostics, retainedSourceHelperContinuationFor, rebindRetainedSourceHelperContinuation, retainedInputExecutionResumeFor, ordinaryInputTerminalReply, ordinaryInputWatchdogBoundary, rememberOrdinaryInputFinalNow } from './session/input.js';
 /**
  * The local bridge between the Chrome extension and this app.
  *
@@ -2306,7 +2306,7 @@ export type SessionControlsView = {
   finishWaiting?: boolean;
   stopPending?: boolean;
   /** Existing Goal owner identifies the actual source turn; a retained draft is not a new turn's helper. */
-  goalDraft?: Pick<import('./goal.js').GoalDraftView, 'stage' | 'stageStartedAt' | 'model' | 'text' | 'error' | 'message'> & {
+  goalDraft?: Pick<import('./goal.js').GoalDraftView, 'stage' | 'stageStartedAt' | 'model' | 'text' | 'error' | 'message' | 'outboxContinuationOwned'> & {
     /** Present on current Main projections; optional for historical IPC/test consumers. */
     turnId?: string;
   } | null;
@@ -2538,7 +2538,8 @@ export async function sessionControlsFor(sessionId: string): Promise<SessionCont
     finishGoalDraft: getSessionFinishDraft(sessionId, activeTurnId),
     finishWaiting,
     goalDraft: draft ? { turnId: draft.turnId, stage: draft.stage, stageStartedAt: draft.stageStartedAt, model: draft.model,
-      text: draft.text.slice(-8000), error: draft.error } : null,
+      text: draft.text.slice(-8000), error: draft.error,
+      ...(draft.outboxContinuationOwned === true ? { outboxContinuationOwned: true } : {}) } : null,
     goalWait: !blocked && !draft && goalActiveFor(id) ? await goalWaitFor(id, sessionId) : null,
     nativeEvidence: native ? {
       reason: nativeFinal?.reason ?? null,
@@ -5860,8 +5861,12 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         (entry.sendAuthorizedAt !== undefined || entry.deliveredAt !== undefined || entry.messageId !== undefined);
       const supersededHelperArchive = route === '/input/answer' &&
         supersededBrowserDecisionArchiveEligible(entry, body.owner, deliveredConversation);
+      // A typed protocol rejection is terminal work, but its exact original page can
+      // still reconcile a lost answer publication response or late native ACK. Input's
+      // serialized owner retains the hash, authorization, route and receipt checks.
       if ((!deliveredConversation && entry.lifetime !== 'temporary-planner') || (entry.conversationId && entry.conversationId !== deliveredConversation) ||
-          !['browser', 'decision', 'sent', ...((entry.purpose !== 'decision' && route === '/input/ack') || expiredHelperAck || supersededHelperArchive ? ['cancelled'] : [])].includes(entry.state)) {
+          (!['browser', 'decision', 'sent', ...((entry.purpose !== 'decision' && route === '/input/ack') || expiredHelperAck || supersededHelperArchive ? ['cancelled'] : [])].includes(entry.state) &&
+            !rejectedBrowserDecision(entry))) {
         return json(res, 409, { error: 'input_not_pending' }, origin);
       }
       // Only a validated, still-owned route may report a stale pre-Send ACK.
@@ -12557,13 +12562,16 @@ async function settleObservedNativeCompletion(conversationId: string, sessionId:
     // The exact A proof committed even if B arrived during its disk await.
     // Resolve only A's opaque key before returning to B's retained negative;
     // otherwise a restart would mistake the old incident for additional debt.
+    // This privacy-only projection has the logger's 16-workflow cap; the full
+    // ordered parent inventories and every receipt above remain mandatory.
+    const resolvedTraceCount = Math.min(16, new Set(confirmedIds).size);
     await noteLocalIncident({ source: 'browser-debug', status: 'resolved',
       reason: privateOriginal.reason === 'inventory-incomplete' ? 'native_terminal_inventory_incomplete'
         : privateOriginal.reason === 'open-call' ? 'native_terminal_open_call' : 'native_terminal_open_code',
       sessionId, conversationId, capture: 'not_requested', nativeCompletion: {
         openCalls: privateOriginal.openCalls, openCodeCalls: privateOriginal.openCodeCalls,
-        traceRequestIds: privateOriginal.allCoreRequestIds?.length ?? 0,
-        exactRequestJoins: confirmedIds.length, checkpointKey: nativeCompletionCheckpointKey(privateOriginal)
+        traceRequestIds: resolvedTraceCount,
+        exactRequestJoins: resolvedTraceCount, checkpointKey: nativeCompletionCheckpointKey(privateOriginal)
       } });
     if (getActiveInstanceRuntime().profile.id !== privateOriginal.profileId ||
         (await getSession(sessionId))?.conversationId !== conversationId ||

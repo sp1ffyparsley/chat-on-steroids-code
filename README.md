@@ -2,8 +2,8 @@
 
 This is the real custom Chat On Steroids application and browser companion source, exported for code review and research. It is a clean-history code export, not an upstream release or a backup of anyone's chats.
 
-- Source commit: `2aaea54f4ed09989d54832dd233aa29b317d4b1f`.
-- Source tree: `a3d4bc68a574e28a0e6b7e20af58e3edff0d72e3`.
+- Source commit: `2b7c8b90dbc065d0cf44337272633e09645c720b`.
+- Source tree: `0241fa59d8e878a94965b18cb5fdab0de98c9cd4`.
 - Export date: October 28, 2026.
 - Upstream: https://github.com/totec448-spec/chat-on-steroids
 - Intended code mirror: https://github.com/sp1ffyparsley/chat-on-steroids-code
@@ -96,4 +96,6 @@ The final source snapshot includes the reviewed exact-helper-expiry archive-only
 
 The preceding logical source `41be6425` contains the narrow accepted-native-final identity correction, persisted Settings Save pause-transition hook and bounded storage/source explanations. Its export passed typechecking, four focused Goal/IPC cases and the complete 41-case diagnostic file. An earlier filtered diagnostic run reported asynchronous import teardown errors; the subsequent whole diagnostic-file run passed without suppressing them.
 
-The current logical source `2aaea54f` adds truthful delivered-helper cancellation classification and separate, bounded current-observation identity-refusal diagnostics. Original source/parent/result and native Send gates remain unchanged. Recorder/background source markers are synchronized at 92; this is not proof that a running browser loaded them. The source-owner checks passed 889 Input/Goal/error cases (two platform skips), 2614 browser/operator cases and a final 284 Bridge/operator selection, plus typechecking and JavaScript syntax checks. Those sets overlap and must not be added together as distinct tests. This is a source follow-up, not a newly qualified or installed package, a public installer release, or verified all-account autonomy.
+The preceding logical source `2aaea54f` adds truthful delivered-helper cancellation classification and separate, bounded current-observation identity-refusal diagnostics. Its source-owner checks passed 889 Input/Goal/error cases (two platform skips), 2614 browser/operator cases and a final 284 Bridge/operator selection, plus typechecking and JavaScript syntax checks. Those sets overlap and must not be added together as distinct tests.
+
+Current source `2b7c8b90` adds narrowly matched finished-result request-ID capture, idempotent HTTP reconciliation of typed rejected helpers, post-await helper Pause checks, the saved-continuation status flag and exact keyed-incident retirement across delayed writes/restart. Original source, per-parent results, authorization, output hash, spent disposition and rollback guards remain binding. Source checks passed 756 installer/Input cases (two platform skips), 132 Fiber cases, 90 HTTP provisioning cases, 168 incident/Bridge/session/logger cases and 18 selected renderer cases. These sets overlap. Recorder/background source markers are synchronized at 92; running-browser generation is unverified. A new private canonical qualification is running for this exact source; the source export itself is not a qualified/installed public package or a claim of autonomous useful successors. Historical private installer pins describe reviewed private program artifacts only.

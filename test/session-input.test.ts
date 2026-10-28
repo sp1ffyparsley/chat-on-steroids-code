@@ -5695,6 +5695,39 @@ it.each(['saved', 'deleted', 'tampered', 'wrong-owner', 'restart', 'late-native-
 });
 
 
+it.each([1, 2] as const)('rechecks helper Pause after async scope verification %s', async scopePass => {
+  const controller = new AbortController();
+  const pending = requestBrowserDecision('Preserve this exact helper while paused', controller.signal, {
+    sourceSessionId: sessionId, sourceTurnId: 'pause-scope-source', lifetime: 'temporary-planner'
+  });
+  const rejected = expect(pending).rejects.toThrow('goal_browser_cancelled');
+  const original = (await listInputs())[0]!;
+  expect(await claimBrowserInput(original.id, 'paused-scope-helper', null, true)).not.toBeNull();
+  let entered!: () => void, release!: () => void, passes = 0;
+  const verifying = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  configureInputDelivery({ applyAutomation: automate, changed, beforeAuthorizeNativeScope: async () => {
+    if (++passes === scopePass) { entered(); await gate; }
+    return true;
+  } });
+  const authorization = authorizeBrowserInput(original.id, 'paused-scope-helper', null);
+  try {
+    await verifying;
+    binding.automationPaused = true;
+    release();
+    expect(await authorization).toBe(false);
+    const retained = (await listInputs())[0]!;
+    expect(retained).toMatchObject({ id: original.id, state: 'browser', owner: 'paused-scope-helper' });
+    expect(retained.sendAuthorizedAt).toBeUndefined();
+    expect(retained.deliveredAt).toBeUndefined();
+    expect(retained.messageId).toBeUndefined();
+    expect(await listInputs()).toHaveLength(1);
+  } finally {
+    release(); await authorization;
+    controller.abort(); await rejected;
+  }
+});
+
 it.each(['sent', 'sent-cold', 'expired', 'authorized-unknown'] as const)(
   'preserves exact helper custody while classifying retained delivery (%s)', async mode => {
     const controller = new AbortController();

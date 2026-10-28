@@ -1038,6 +1038,43 @@ describe('bounded asynchronous diagnostic mirror', () => {
     const counts = { openCalls: 2, openCodeCalls: 0, traceRequestIds: 0, exactRequestJoins: 0 };
     const firstKey = 'a'.repeat(64), secondKey = 'b'.repeat(64);
 
+    it.each(['keyed-negative', 'legacy', 'other-source', 'other-reason', 'resolution', 'changed-scope', 'changed-key', 'changed-counts'] as const)(
+      'binds admission time only to an unchanged validated keyed native negative (%s)', async variant => {
+        await logFile();
+        if (variant === 'resolution') await noteLocalIncident({ ...base,
+          nativeCompletion: { ...counts, checkpointKey: firstKey } });
+        const clock = Date.now();
+        let now = clock, entered!: () => void, release!: () => void;
+        const started = new Promise<void>(resolve => { entered = resolve; });
+        const gate = new Promise<void>(resolve => { release = resolve; });
+        const realMkdir = fs.mkdir.bind(fs);
+        const time = vi.spyOn(Date, 'now').mockImplementation(() => now);
+        const block = vi.spyOn(fs, 'mkdir').mockImplementationOnce(async (...args) => {
+          entered(); await gate; return realMkdir(...args);
+        });
+        const blocker = noteLocalIncident({ source: 'app', reason: 'native_admission_fixture_barrier' });
+        await started;
+        now = clock + 10;
+        const input = { ...base,
+          ...(variant === 'other-source' ? { source: 'app' as const } : {}),
+          ...(variant === 'other-reason' ? { reason: 'native_terminal_other' } : {}),
+          ...(variant === 'resolution' ? { status: 'resolved' as const } : {}),
+          nativeCompletion: { ...counts, ...(variant === 'legacy' ? {} : { checkpointKey: firstKey }) } };
+        const pending = noteLocalIncident(input);
+        if (variant === 'changed-scope') input.conversationId = 'bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+        if (variant === 'changed-key') input.nativeCompletion.checkpointKey = secondKey;
+        if (variant === 'changed-counts') input.nativeCompletion.openCalls = 1;
+        now = clock + 30;
+        try {
+          release(); expect(await blocker).toBe(true); expect(await pending).toBe(true);
+          const row = (await listLocalIncidents()).incidents.find(value => value.conversationId === input.conversationId)!;
+          expect(row.updatedAt).toBe(clock + (variant === 'keyed-negative' ? 10 : 30));
+          expect(row.status).toBe(variant === 'resolution' ? 'resolved' : 'unresolved');
+        } finally {
+          release(); await blocker; await pending; block.mockRestore(); time.mockRestore();
+        }
+      });
+
     it('coalesces only the same immutable origin and resolves only its matching key across restart', async () => {
       const file = await logFile();
       await noteLocalIncident({ ...base, nativeCompletion: { ...counts, checkpointKey: firstKey } });

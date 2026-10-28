@@ -2274,6 +2274,11 @@ describe('opt-in settled-turn Loop forward-readiness', () => {
     }), null)).toBe(true);
     const outgoing = (await input.listInputs()).find(row => row.sourceHelperId === helper!.id);
     expect(outgoing).toMatchObject({ sessionId: f.sessionId, state: 'queued', sourceHelperAcceptedAt: expect.any(Number) });
+    await vi.waitFor(() => expect(goal.goalViewFor(f.conversationId)).toMatchObject({ stage: 'no-reply', outboxContinuationOwned: true }));
+    const savedControls = JSON.parse(JSON.stringify(await settledForwardBridge.sessionControlsFor(f.sessionId)));
+    expect(savedControls.goalDraft).toMatchObject({ stage: 'no-reply', outboxContinuationOwned: true });
+    expect((await input.listInputs()).filter(row => row.sourceHelperId === helper!.id))
+      .toEqual([expect.objectContaining({ id: outgoing!.id, state: 'queued', owner: null })]);
     expect(await input.claimBrowserInput(outgoing!.id, 'settled-global-source', f.conversationId, true)).toMatchObject({ id: outgoing!.id });
     await request('GET', `/activity?conversationId=${f.conversationId}&approval=1`);
     expect(await input.authorizeBrowserInput(outgoing!.id, 'settled-global-source', f.conversationId)).toBe(false);
@@ -3125,6 +3130,186 @@ describe('provisioning', () => {
       expect(proof.body.preclaimRecovery).toEqual(mode === 'pristine' ? { expiresAt } : null);
       expect((await inputOwner.listInputs()).find(entry => entry.id === row.id)).toEqual(before);
     } finally { controller.abort(); await pending.catch(() => undefined); }
+  });
+
+  it.each([true, false])('keeps durable helper Pause authoritative across real HTTP authorization commit (paused=%s)', async paused => {
+    await pair();
+    const inputOwner = await import('../src/main/session/input.js');
+    await writeDurableNow('session-input', []);
+    inputOwner.resetInputForTests();
+    const controller = new AbortController(), sourceSessionId = 'helper-commit-pause-http-' + randomUUID();
+    const decision = inputOwner.requestBrowserDecision('Keep this exact helper behind the current Pause boundary', controller.signal,
+      { sourceSessionId, sourceTurnId: 'pause-before-native-send', lifetime: 'temporary-planner' });
+    const cancelled = expect(decision).rejects.toThrow('goal_browser_cancelled');
+    let helper!: Awaited<ReturnType<typeof inputOwner.listInputs>>[number];
+    await vi.waitFor(async () => {
+      helper = (await inputOwner.listInputs()).find(entry => entry.decisionSourceSessionId === sourceSessionId)!;
+      expect(helper).toBeDefined();
+    });
+    const owner = 'paused-during-http-authorization';
+    expect((await request('POST', '/input/claim', { body: {
+      id: helper.id, owner, conversationId: null, requiresAuthorization: true
+    } })).body.input).toMatchObject({ id: helper.id });
+    const durable = await import('../src/main/durable.js'), write = durable.writeDurableNow, gate = faultGate();
+    let held = false;
+    const writer = vi.spyOn(durable, 'writeDurableNow').mockImplementation(async (name, value) => {
+      if (!held && name === 'session-input' && Array.isArray(value) &&
+          value.some(row => row.id === helper.id && row.sendAuthorizedAt !== undefined)) {
+        held = true; await gate.hold();
+      }
+      return write(name, value);
+    });
+    const authorizing = request('POST', '/input/claim', { body: {
+      id: helper.id, owner, conversationId: null, authorize: true
+    } });
+    try {
+      await gate.entered;
+      // The actual Settings persistence owner stays independent of the Input serializer.
+      await saveConfig({ ...getConfig(), ui: { ...getConfig().ui, automationPaused: paused } });
+      expect(getConfig().ui.automationPaused).toBe(paused);
+      gate.release();
+      const result = await authorizing;
+      expect(result.status).toBe(200);
+      expect(result.body.ok).toBe(!paused);
+      const rows = await inputOwner.listInputs();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ id: helper.id, state: 'browser', owner,
+        decisionSourceSessionId: sourceSessionId, decisionSourceTurnId: 'pause-before-native-send' });
+      expect(rows[0]?.sendAuthorizedAt !== undefined).toBe(!paused);
+      expect(rows[0]?.deliveredAt).toBeUndefined();
+      expect(rows[0]?.messageId).toBeUndefined();
+      if (paused) {
+        expect((await request('POST', '/input/ack', { body: {
+          id: helper.id, owner, conversationId: null, messageId: randomUUID()
+        } })).body.ok).toBe(false);
+        const saved = (await readDurable<Awaited<ReturnType<typeof inputOwner.listInputs>>>('session-input'))!;
+        expect(saved).toHaveLength(1);
+        expect(saved[0]).toMatchObject({ id: helper.id, state: 'browser', owner });
+        expect(saved[0]?.sendAuthorizedAt).toBeUndefined();
+        expect(saved[0]?.messageId).toBeUndefined();
+      }
+    } finally {
+      gate.release(); await authorizing; writer.mockRestore();
+      controller.abort(); await cancelled;
+      await writeDurableNow('session-input', []); inputOwner.resetInputForTests();
+    }
+  });
+
+  it.each(['answer', 'ack', 'cold-answer', 'cold-ack'] as const)(
+    'reconciles only exact terminal-rejected helper receipts through real HTTP (%s)', async operation => {
+      await pair();
+      const inputOwner = await import('../src/main/session/input.js');
+      await writeDurableNow('session-input', []);
+      inputOwner.resetInputForTests();
+      onTestFinished(async () => { await writeDurableNow('session-input', []); inputOwner.resetInputForTests(); });
+      const os = (await import('node:os')).default;
+      const temporary = path.join(dir, 'rejected-helper-http-' + randomUUID());
+      await fs.mkdir(temporary, { recursive: true });
+      const temp = vi.spyOn(os, 'tmpdir').mockReturnValue(temporary);
+      onTestFinished(() => temp.mockRestore());
+      const owner = 'exact-rejected-helper-page', nativeId = randomUUID(), lateRoute = randomUUID();
+      const sourceSessionId = 'terminal-rejection-http-' + randomUUID(), sourceTurnId = 'retained-original-final';
+      const response = '{"action":"continue","reply":"incomplete"';
+      const accepted = vi.fn(() => { throw new inputOwner.BrowserDecisionProtocolRejection('invalid_goal_decision_json'); });
+      const decision = inputOwner.requestBrowserDecision('Retain this exact original source', new AbortController().signal,
+        { sourceSessionId, sourceTurnId, lifetime: 'temporary-planner', onAccepted: accepted });
+      let helper!: Awaited<ReturnType<typeof inputOwner.listInputs>>[number];
+      await vi.waitFor(async () => {
+        helper = (await inputOwner.listInputs()).find(entry => entry.decisionSourceSessionId === sourceSessionId)!;
+        expect(helper).toBeDefined();
+      });
+      expect((await request('POST', '/input/claim', { body: {
+        id: helper.id, owner, conversationId: null, requiresAuthorization: true
+      } })).body.input).toMatchObject({ id: helper.id });
+      expect((await request('POST', '/input/claim', { body: {
+        id: helper.id, owner, conversationId: null, authorize: true
+      } })).body.ok).toBe(true);
+      const answer = { id: helper.id, owner, conversationId: null, response };
+      // The first publication succeeded even if the caller never received its HTTP response.
+      expect((await request('POST', '/input/answer', { body: answer })).body.ok).toBe(true);
+      await expect(decision).resolves.toBe(response);
+      const failed = (await inputOwner.listInputs()).find(entry => entry.id === helper.id)!;
+      expect(failed).toMatchObject({ state: 'failed', error: 'invalid_goal_decision_json',
+        goalDecisionRejection: 'invalid_goal_decision_json', owner,
+        decisionSourceSessionId: sourceSessionId, decisionSourceTurnId: sourceTurnId,
+        sendAuthorizedAt: expect.any(Number) });
+      expect(failed.messageId).toBeUndefined();
+      if (operation.startsWith('cold-')) inputOwner.resetInputForTests();
+      const ack = { id: helper.id, owner, conversationId: null, messageId: nativeId };
+      const replay = await request('POST', operation.endsWith('answer') ? '/input/answer' : '/input/ack', {
+        body: operation.endsWith('answer') ? answer : ack
+      });
+      expect(replay.status, JSON.stringify(replay.body)).toBe(200);
+      expect(replay.body.ok).toBe(true);
+      expect((await request('POST', '/input/answer', { body: answer })).body.ok).toBe(true);
+      expect((await request('POST', '/input/answer', { body: { ...answer, response: 'different output' } })).body.ok).toBe(false);
+      expect((await request('POST', '/input/answer', { body: { ...answer, owner: 'foreign-page' } })).status).toBe(409);
+      expect((await request('POST', '/input/ack', { body: { ...ack, owner: 'foreign-page' } })).status).toBe(409);
+      // Only an exact native ACK may learn a previously absent Temporary Chat route.
+      expect((await request('POST', '/input/answer', { body: { ...answer, conversationId: lateRoute } })).body.ok).toBe(false);
+      expect((await request('POST', '/input/ack', { body: ack })).body.ok).toBe(true);
+      expect((await request('POST', '/input/ack', { body: { ...ack, messageId: randomUUID() } })).body.ok).toBe(false);
+      expect((await request('POST', '/input/ack', { body: { ...ack, conversationId: lateRoute } })).body.ok).toBe(true);
+      expect((await request('POST', '/input/answer', { body: { ...answer, conversationId: lateRoute } })).body.ok).toBe(true);
+      expect((await request('POST', '/input/answer', { body: { ...answer, conversationId: randomUUID() } })).status).toBe(409);
+      expect((await request('POST', '/input/ack', { body: { ...ack, conversationId: randomUUID() } })).status).toBe(409);
+      expect((await request('POST', '/input/claim', { body: {
+        id: helper.id, owner, conversationId: lateRoute, authorize: true
+      } })).body.ok).toBe(false);
+      const rows = await inputOwner.listInputs();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ id: failed.id, state: 'failed', owner,
+        error: failed.error, goalDecisionRejection: failed.goalDecisionRejection,
+        decisionSourceSessionId: sourceSessionId, decisionSourceTurnId: sourceTurnId,
+        sendAuthorizedAt: failed.sendAuthorizedAt, decisionOutput: failed.decisionOutput,
+        messageId: nativeId, deliveredAt: expect.any(Number), conversationId: lateRoute });
+      if (operation.startsWith('cold-')) {
+        expect(rows[0]?.text).toBe('[Temporary planner]');
+        expect(rows[0]?.response).toBeUndefined();
+      }
+      expect(rows[0]?.sourceHelperId).toBeUndefined();
+      expect(await inputOwner.pendingBrowserInputs()).toEqual([]);
+      expect(accepted).toHaveBeenCalledTimes(1);
+      const output = { id: helper.id, owner, conversationId: lateRoute };
+      expect((await request('POST', '/input/output', { body: output })).body.ok).toBe(true);
+      const archive = path.join(temporary, 'CoS-helper-outputs', helper.id + '.json');
+      const archived = JSON.parse(await fs.readFile(archive, 'utf8'));
+      expect(archived).toMatchObject({ inputId: helper.id, owner, sourceSessionId, sourceTurnId, response });
+      expect(JSON.stringify(await readDurable('session-input'))).not.toContain(response);
+      await fs.unlink(archive);
+      inputOwner.resetInputForTests();
+      expect((await request('POST', '/input/output', { body: output })).body.ok).toBe(false);
+      expect((await inputOwner.listInputs())[0]).toMatchObject({ state: 'failed',
+        goalDecisionRejection: 'invalid_goal_decision_json', messageId: nativeId, decisionSourceSessionId: sourceSessionId });
+    }
+  );
+
+  it('refuses generic failed helper transport through terminal-rejection HTTP reconciliation', async () => {
+    await pair();
+    const inputOwner = await import('../src/main/session/input.js');
+    await writeDurableNow('session-input', []);
+    inputOwner.resetInputForTests();
+    onTestFinished(async () => { await writeDurableNow('session-input', []); inputOwner.resetInputForTests(); });
+    const owner = 'generic-failed-helper', sourceSessionId = 'generic-failed-http-' + randomUUID();
+    const decision = inputOwner.requestBrowserDecision('Transport failure is not a typed Goal rejection',
+      new AbortController().signal, { sourceSessionId, lifetime: 'temporary-planner' });
+    const rejected = expect(decision).rejects.toThrow('goal_browser_send_failed: invalid_goal_decision_json');
+    let helper!: Awaited<ReturnType<typeof inputOwner.listInputs>>[number];
+    await vi.waitFor(async () => {
+      helper = (await inputOwner.listInputs()).find(entry => entry.decisionSourceSessionId === sourceSessionId)!;
+      expect(helper).toBeDefined();
+    });
+    expect(await inputOwner.claimBrowserInput(helper.id, owner, null, true)).not.toBeNull();
+    expect(await inputOwner.authorizeBrowserInput(helper.id, owner, null)).toBe(true);
+    expect(await inputOwner.failBrowserInput(helper.id, owner, 'invalid_goal_decision_json')).toBe(true);
+    await rejected;
+    inputOwner.resetInputForTests();
+    const before = await inputOwner.listInputs();
+    expect(before[0]?.goalDecisionRejection).toBeUndefined();
+    expect((await request('POST', '/input/answer', { body: { id: helper.id, owner, conversationId: null, response: 'unverified output' } })).status).toBe(409);
+    expect((await request('POST', '/input/ack', { body: { id: helper.id, owner, conversationId: null, messageId: randomUUID() } })).status).toBe(409);
+    expect(await inputOwner.listInputs()).toEqual(before);
+    expect((await request('POST', '/input/output', { body: { id: helper.id, owner, conversationId: null } })).body.ok).toBe(false);
   });
 
   it.each([true, false])('keeps an expired temporary helper fenced through the real /input/ack endpoint (authorized=%s)', async authorized => {
@@ -7902,7 +8087,7 @@ describe('activity feed', () => {
     }
   });
 
-  async function privateNativeCheckpointFixture(capture = true, withCode = false) {
+  async function privateNativeCheckpointFixture(capture = true, withCode = false, parentCount = 1, sharedWorkflow = false) {
     const logger = await import('../src/main/logger.js');
     const profileId = (await import('../src/main/config.js')).getActiveInstanceRuntime().profile.id;
     logger.setLogProfileContext(profileId);
@@ -7924,6 +8109,8 @@ describe('activity feed', () => {
     const turnId = 'private-native-turn-' + randomUUID();
     const nativeId = 'private-native-call-' + randomUUID(), codeId = 'private-code-parent-' + randomUUID();
     const requestId = 'wfr_private_checkpoint_' + randomUUID().replaceAll('-', '');
+    const nativeIds = Array.from({ length: parentCount }, (_, index) => index ? nativeId + '-' + index : nativeId);
+    const requestIds = nativeIds.map((_, index) => index && !sharedWorkflow ? requestId + '_' + index : requestId);
     const opened = await request('POST', '/events', { body: { conversationId, events: [
       { kind: 'user_message', time: Date.now(), messageId: userId, text: 'Preserve this exact original native work.' },
       { kind: 'turn_start', time: Date.now(), turnId }
@@ -7932,16 +8119,17 @@ describe('activity feed', () => {
     const sessionId = opened.body.sessionId as string;
     const diagnostic = { documentId: 'private-original-document-' + randomUUID(), navigationEpoch: 4,
       observedAt: Date.now(), shell: 'alternate', shellDiscovery: 'compatible',
-      ordinaryFinal: { reason: 'open-call', questions: 1, calls: 1, openCalls: 1,
+      ordinaryFinal: { reason: parentCount ? 'open-call' : 'open-code', questions: 1, calls: parentCount, openCalls: parentCount,
         codeCalls: withCode ? 1 : 0, openCodeCalls: withCode ? 1 : 0, activeTurnMapped: false,
-        sourceUserMessageId: userId, coreCallMessageIds: [nativeId],
-        allCoreRequestIds: [requestId], openRequestIds: [requestId],
+        sourceUserMessageId: userId, coreCallMessageIds: nativeIds,
+        allCoreRequestIds: requestIds, openRequestIds: requestIds,
         codeCallMessageIds: withCode ? [codeId] : [], openCodeCallMessageIds: withCode ? [codeId] : [] } };
     const expected = { version: 1 as const, profileId, sessionId, conversationId,
       documentId: diagnostic.documentId, navigationEpoch: diagnostic.navigationEpoch,
-      observedAt: diagnostic.observedAt, reason: 'open-call' as const, calls: 1, codeCalls: withCode ? 1 : 0,
-      openCalls: 1, openCodeCalls: withCode ? 1 : 0, sourceUserMessageId: userId,
-      openRequestIds: [requestId], coreCallMessageIds: [nativeId], allCoreRequestIds: [requestId],
+      observedAt: diagnostic.observedAt, reason: parentCount ? 'open-call' as const : 'open-code' as const,
+      calls: parentCount, codeCalls: withCode ? 1 : 0,
+      openCalls: parentCount, openCodeCalls: withCode ? 1 : 0, sourceUserMessageId: userId,
+      openRequestIds: requestIds, coreCallMessageIds: nativeIds, allCoreRequestIds: requestIds,
       codeCallMessageIds: withCode ? [codeId] : [], openCodeCallMessageIds: withCode ? [codeId] : [] };
     const report = (ordinaryFinal: Record<string, unknown>, observedAt = Date.now()) => request('POST',
       '/activity?conversationId=' + conversationId, { body: {
@@ -7959,13 +8147,17 @@ describe('activity feed', () => {
       stopped = false;
     };
     const returned = async () => {
-      expect((await request('POST', '/correlations', { body: { conversationId,
-        calls: [{ messageId: nativeId, requestId, tool: 'read', answered: true }] } })).body.confirmed)
-        .toEqual([requestId]);
-      const result = await recordToolCall({ tool: 'read', args: { paths: ['/project/checkpoint.txt'] },
-        content: [{ type: 'text', text: 'One exact original returned result.' }],
-        outcome: 'ok', durationMs: 1, startedAt: Date.now(), requestId });
-      expect(result).toMatchObject({ requestId, attributionMethod: 'request_id' });
+      if (parentCount) {
+        expect((await request('POST', '/correlations', { body: { conversationId,
+          calls: nativeIds.map((messageId, index) => ({ messageId, requestId: requestIds[index], tool: 'read', answered: true })) } })).body.confirmed)
+          .toEqual([...new Set(requestIds)]);
+        for (const originalRequest of new Set(requestIds)) {
+          const result = await recordToolCall({ tool: 'read', args: { paths: ['/project/checkpoint.txt'] },
+            content: [{ type: 'text', text: 'One exact original returned result.' }],
+            outcome: 'ok', durationMs: 1, startedAt: Date.now(), requestId: originalRequest });
+          expect(result).toMatchObject({ requestId: originalRequest, attributionMethod: 'request_id' });
+        }
+      }
       expect((await request('POST', '/events', { body: { conversationId, events: [
         { kind: 'assistant_message', messageId: finalId, providerMessageId: finalId, turnId,
           time: Date.now(), text: 'The exact native answer completed.', state: 'final', final: true },
@@ -7975,9 +8167,125 @@ describe('activity feed', () => {
     const associated = () => ({ ...diagnostic.ordinaryFinal, reason: 'associated', openCalls: 0,
       openCodeCalls: 0, openRequestIds: [], openCodeCallMessageIds: [],
       settledFinalMessageId: finalId, ...(withCode ? { answeredCodeCallMessageIds: [codeId] } : {}) });
-    return { logger, profileId, conversationId, sessionId, userId, nativeId, requestId,
+    return { logger, profileId, conversationId, sessionId, userId, nativeId, requestId, nativeIds, requestIds,
       diagnostic, expected, report, restart, returned, associated };
   }
+
+  it.each([[16, false], [17, false], [52, false], [200, false], [0, false]] as const)(
+    'resolves the exact native incident after all %i original parents return without exceeding its workflow diagnostic cap (shared: %s)',
+    async (parents, shared) => {
+      const f = await privateNativeCheckpointFixture(true, parents === 0, parents, shared);
+      expect(await sessionStoreModule.readSessionNativeCompletionFence(f.sessionId, f.conversationId, f.profileId))
+        .toEqual(f.expected);
+      await f.returned();
+      expect((await f.report(f.associated())).status).toBe(200);
+      const clear = await sessionStoreModule.readSessionNativeCompletionFenceCheckpoint(f.sessionId, f.conversationId, f.profileId);
+      expect(clear).toEqual({ version: 1, fence: null, clearedFence: f.expected, clearedAt: expect.any(Number) });
+      const diagnosticCount = Math.min(16, new Set(f.requestIds).size);
+      const incidents = (await f.logger.listLocalIncidents()).incidents.filter(row => row.conversationId === f.conversationId);
+      expect(incidents).toHaveLength(1);
+      expect(incidents[0]).toMatchObject({ status: 'resolved', nativeCompletion: {
+        traceRequestIds: diagnosticCount, exactRequestJoins: diagnosticCount, checkpointKey: expect.any(String) } });
+      const results = (await readEvents(f.sessionId, { kinds: ['tool_call'], requireIntegrity: true }))
+        .filter(row => row.kind === 'tool_call');
+      expect(results).toHaveLength(parents);
+      expect(clear?.clearedFence?.coreCallMessageIds).toEqual(f.nativeIds);
+      expect(clear?.clearedFence?.allCoreRequestIds).toEqual(f.requestIds);
+      await f.restart();
+      expect(nativeFinalEvidenceWait(coreBrowserEvidence(f.conversationId))).toBeNull();
+    });
+
+  it('does not let the bounded workflow diagnostic stand in for 17 original sibling-parent receipts', async () => {
+    const f = await privateNativeCheckpointFixture(true, false, 17, true);
+    await f.returned();
+    expect((await f.report(f.associated())).status).toBe(200);
+    expect(await sessionStoreModule.readSessionNativeCompletionFence(f.sessionId, f.conversationId, f.profileId))
+      .toEqual(f.expected);
+    expect(nativeFinalEvidenceWait(coreBrowserEvidence(f.conversationId))?.reason).toBe('evidence');
+    expect((await f.logger.listLocalIncidents()).incidents.filter(row => row.conversationId === f.conversationId))
+      .toEqual([expect.objectContaining({ status: 'unresolved' })]);
+    expect((await readEvents(f.sessionId, { kinds: ['tool_call'], requireIntegrity: true }))
+      .filter(row => row.kind === 'tool_call')).toHaveLength(1);
+  });
+
+  it.each(['exact', 'masked', 'foreign', 'legacy', 'later'] as const)(
+    'keeps native incident admission chronology across a real queued write, exact clear, failed resolution and restart (%s)', async variant => {
+      const f = await privateNativeCheckpointFixture();
+      const original = (await f.logger.listLocalIncidents()).incidents.find(row => row.conversationId === f.conversationId)!;
+      const file = (await f.logger.listLocalIncidents()).logFile!;
+      let maskedPath: string | null = null, maskedBytes: string | null = null;
+      if (variant === 'masked') {
+        maskedPath = path.join(path.dirname(file), 'local-incidents', 'incident-15.json');
+        maskedBytes = JSON.stringify({ ...original, id: randomUUID(), profileId: '***' });
+        await fs.writeFile(maskedPath, maskedBytes, { flag: 'wx' });
+      }
+      const realMkdir = fs.mkdir.bind(fs), realWrite = fs.writeFile.bind(fs);
+      let entered!: () => void, release!: () => void, cleared!: () => void;
+      const enteredPromise = new Promise<void>(resolve => { entered = resolve; });
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const clearPromise = new Promise<void>(resolve => { cleared = resolve; });
+      const clock = Date.now();
+      let now = clock, failResolution = false;
+      const time = vi.spyOn(Date, 'now').mockImplementation(() => now);
+      const block = vi.spyOn(fs, 'mkdir').mockImplementationOnce(async (...args) => {
+        entered(); await gate; return realMkdir(...args);
+      });
+      const fail = vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
+        if (String(args[0]).includes('local-incidents') && String(args[1]).includes('"status":"resolved"')) {
+          failResolution = true; throw Object.assign(new Error('fixture resolution write refused'), { code: 'EIO' });
+        }
+        return realWrite(...args);
+      });
+      const cas = sessionStoreModule.compareAndSetSessionNativeCompletionFence;
+      const clear = vi.spyOn(sessionStoreModule, 'compareAndSetSessionNativeCompletionFence').mockImplementation(async (...args) => {
+        const result = await cas(...args);
+        if (result && args[3] !== null && args[4] === null) cleared();
+        return result;
+      });
+      const blocker = f.logger.noteLocalIncident({ source: 'app', reason: 'native_queue_fixture_barrier' });
+      await enteredPromise;
+      now = clock + 10;
+      const pending = variant === 'later' ? null : f.logger.noteLocalIncident({ source: 'browser-debug',
+        reason: 'native_terminal_open_call', sessionId: f.sessionId, conversationId: f.conversationId,
+        nativeCompletion: { ...original.nativeCompletion!, ...(variant === 'foreign' ? { checkpointKey: 'f'.repeat(64) }
+          : variant === 'legacy' ? { checkpointKey: undefined } : {}) } });
+      let reporting: Promise<any> | null = null;
+      try {
+        now = clock + 20;
+        await f.returned();
+        reporting = f.report(f.associated());
+        await Promise.race([clearPromise, reporting.then(() => {
+          throw new Error('Native completion returned without committing its exact clear');
+        })]);
+        const tombstone = await sessionStoreModule.readSessionNativeCompletionFenceCheckpoint(f.sessionId, f.conversationId, f.profileId);
+        expect(tombstone?.fence).toBeNull();
+        expect(tombstone?.clearedAt).toBe(now);
+        now = clock + 30;
+        release();
+        await blocker; if (pending) expect(await pending).toBe(true);
+        expect((await reporting).status).toBe(200);
+        expect(failResolution).toBe(true);
+        fail.mockRestore();
+        if (variant === 'later') {
+          now = clock + 40;
+          expect(await f.logger.noteLocalIncident({ source: 'browser-debug', reason: 'native_terminal_open_call',
+            sessionId: f.sessionId, conversationId: f.conversationId, nativeCompletion: original.nativeCompletion })).toBe(true);
+        }
+        // A real Main process restart reconstructs the logger owner as well as
+        // session/Core caches; an old in-memory EIO is not the cold disk index.
+        await f.logger.flushLocalIncidents();
+        f.logger.initLogFile(file);
+        await f.restart();
+        const shouldRemain = !['exact', 'masked'].includes(variant);
+        expect(Boolean(nativeFinalEvidenceWait(coreBrowserEvidence(f.conversationId)))).toBe(shouldRemain);
+        if (shouldRemain) expect(coreBrowserEvidence(f.conversationId)?.pendingCompletion?.sourceUserMessageId).toBeNull();
+        if (maskedPath) expect(await fs.readFile(maskedPath, 'utf8')).toBe(maskedBytes);
+      } finally {
+        release(); await blocker; if (pending) await pending;
+        if (reporting) await reporting.catch(() => undefined);
+        block.mockRestore(); fail.mockRestore(); clear.mockRestore(); time.mockRestore();
+      }
+    });
 
   it.each([false, true])('retains newer scoped native observations through missing frames and restart without resolving the original (observationOnly: %s)', async observationOnly => {
     const f = await privateNativeCheckpointFixture();
