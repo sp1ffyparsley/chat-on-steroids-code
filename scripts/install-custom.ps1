@@ -2095,6 +2095,71 @@ function Wait-ForLifecycleOwnedAppExit {
   }
 }
 
+function Get-InstalledProgramFileLocks {
+  param([Parameter(Mandatory)][string]$InstallRoot)
+
+  # Closing CoS does not release another editor's Electron ASAR cache. Ask Windows for
+  # existing owners before the runner captures state or NSIS tries to remove the app.
+  # Restart Manager is inspection only: never call RmShutdown or terminate an owner.
+  if (-not ('CosInstallRestartManagerNative' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class CosInstallRestartManagerNative {
+  [StructLayout(LayoutKind.Sequential)] public struct UniqueProcess {
+    public int ProcessId;
+    public System.Runtime.InteropServices.ComTypes.FILETIME StartTime;
+  }
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct Owner {
+    public UniqueProcess Process;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=256)] public string ApplicationName;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=64)] public string ServiceName;
+    public uint ApplicationType, AppStatus, SessionId;
+    [MarshalAs(UnmanagedType.Bool)] public bool Restartable;
+  }
+  [DllImport("rstrtmgr.dll", CharSet=CharSet.Unicode)] static extern int RmStartSession(out uint handle, int flags, string key);
+  [DllImport("rstrtmgr.dll", CharSet=CharSet.Unicode)] static extern int RmRegisterResources(uint handle, uint count, string[] files, uint apps, IntPtr processes, uint services, IntPtr serviceNames);
+  [DllImport("rstrtmgr.dll")] static extern int RmGetList(uint handle, out uint needed, ref uint count, [In,Out] Owner[] owners, ref uint reasons);
+  [DllImport("rstrtmgr.dll")] static extern int RmEndSession(uint handle);
+  public static Owner[] Query(string[] files) {
+    uint handle;
+    int code = RmStartSession(out handle, 0, Guid.NewGuid().ToString("N"));
+    if (code != 0) throw new Win32Exception(code, "Installed-file lock census could not start.");
+    try {
+      code = RmRegisterResources(handle, (uint)files.Length, files, 0, IntPtr.Zero, 0, IntPtr.Zero);
+      if (code != 0) throw new Win32Exception(code, "Installed-file lock census could not register program files.");
+      uint needed = 0, count = 0, reasons = 0;
+      Owner[] owners = null;
+      for (int attempt = 0; attempt < 3; attempt++) {
+        code = RmGetList(handle, out needed, ref count, owners, ref reasons);
+        if (code == 0) {
+          if (count == 0) return new Owner[0];
+          Array.Resize(ref owners, (int)count);
+          return owners;
+        }
+        if (code != 234) throw new Win32Exception(code, "Installed-file lock census failed.");
+        if (needed > 4096) throw new InvalidOperationException("Installed-file lock census exceeded its bounded owner inventory.");
+        owners = new Owner[needed];
+        count = needed;
+      }
+      throw new InvalidOperationException("Installed-file lock census changed repeatedly; no install was attempted.");
+    } finally { RmEndSession(handle); }
+  }
+}
+'@
+  }
+  $files = @(Get-ChildItem -LiteralPath $InstallRoot -File -Recurse -Force -ErrorAction Stop | ForEach-Object { $_.FullName })
+  if ($files.Count -eq 0) { throw 'Installed-file lock census found no program files; installation was not attempted.' }
+  foreach ($owner in [CosInstallRestartManagerNative]::Query([string[]]$files)) {
+    [pscustomobject]@{
+      ProcessId = $owner.Process.ProcessId
+      ApplicationName = $owner.ApplicationName
+      ServiceName = $owner.ServiceName
+    }
+  }
+}
+
 function Invoke-QualifiedInstallerTransaction {
   param(
     [Parameter(Mandatory)][psobject]$Qualified,
@@ -2104,7 +2169,12 @@ function Invoke-QualifiedInstallerTransaction {
     [psobject]$Candidate = $script:QualifiedCandidate
   )
 
-  Write-Host '[custom-install] installing the exact preflight-qualified candidate'
+  $fileOwners = @(Get-InstalledProgramFileLocks -InstallRoot $InstallRoot)
+  if ($fileOwners.Count -gt 0) {
+    $description = @($fileOwners | ForEach-Object { "$($_.ApplicationName) (PID $($_.ProcessId))" }) -join ', '
+    throw "Installed program files are still held open by: $description. Save that application's work and close it normally before retrying. No capture/installer runner or successor was started; no owner was stopped."
+  }
+  Write-Host '[custom-install] installed-file lock census clear; installing the exact preflight-qualified candidate'
   $exitCode = [int](& $InstallerRunner $Qualified.InstallerPath)
   if ($exitCode -ne 0) {
     throw "The silent installer exited with code $exitCode. The installed state was not accepted; no resume was launched. Rollback is a separate deliberate action and was not run automatically."

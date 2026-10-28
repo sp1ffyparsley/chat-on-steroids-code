@@ -29,6 +29,53 @@ function ps(value: string): string {
 }
 
 
+describe.runIf(process.platform === 'win32')('installed program file-lock preflight', () => {
+  const shells = ['powershell.exe', ...(spawnSync('pwsh.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { windowsHide: true }).status === 0 ? ['pwsh.exe'] : [])];
+  it.each(shells)('refuses held files and unknown census before the installer runner in %s', shell => {
+    const root = mkdtempSync(path.join(tmpdir(), 'cos-install-lock-'));
+    try {
+      const code = String.raw`$ErrorActionPreference='Stop'
+. __INSTALL_SCRIPT__
+$root=__FIXTURE_ROOT__
+$file=Join-Path $root 'fixture.asar'
+[IO.File]::WriteAllText($file,'retained-program-bytes')
+$held=[IO.File]::Open($file,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+try {
+  $owners=@(Get-InstalledProgramFileLocks -InstallRoot $root)
+  if (@($owners | Where-Object { $_.ProcessId -eq $PID }).Count -ne 1) { throw 'HELD_FILE_OWNER_NOT_FOUND' }
+} finally { $held.Dispose() }
+if (@(Get-InstalledProgramFileLocks -InstallRoot $root).Count -ne 0) { throw 'RELEASED_FILE_STILL_HELD' }
+$script:runnerCalls=0
+$script:successorCalls=0
+function Get-InstalledProgramFileLocks { param($InstallRoot) return [pscustomobject]@{ProcessId=4242;ApplicationName='fixture owner';ServiceName=''} }
+try {
+  Invoke-QualifiedInstallerTransaction -Qualified ([pscustomobject]@{InstallerPath='fixture.exe'}) -InstallRoot $root -InstallerRunner { $script:runnerCalls++;return 0 } -SuccessorLauncher {$script:successorCalls++} | Out-Null
+  throw 'LOCKED_TRANSACTION_WAS_NOT_REFUSED'
+} catch { if ($_.Exception.Message -notlike '*fixture owner*4242*') { throw } }
+if ($script:runnerCalls -ne 0 -or $script:successorCalls -ne 0) { throw 'LOCKED_TRANSACTION_REACHED_SIDE_EFFECT' }
+function Get-InstalledProgramFileLocks { param($InstallRoot) throw 'fixture native census unavailable' }
+try {
+  Invoke-QualifiedInstallerTransaction -Qualified ([pscustomobject]@{InstallerPath='fixture.exe'}) -InstallRoot $root -InstallerRunner { $script:runnerCalls++;return 0 } -SuccessorLauncher {$script:successorCalls++} | Out-Null
+  throw 'UNKNOWN_CENSUS_WAS_NOT_REFUSED'
+} catch { if ($_.Exception.Message -notlike '*census unavailable*') { throw } }
+if ($script:runnerCalls -ne 0 -or $script:successorCalls -ne 0) { throw 'UNKNOWN_CENSUS_REACHED_SIDE_EFFECT' }
+function Get-InstalledProgramFileLocks { param($InstallRoot) return @() }
+try {
+  Invoke-QualifiedInstallerTransaction -Qualified ([pscustomobject]@{InstallerPath='fixture.exe'}) -InstallRoot $root -InstallerRunner { $script:runnerCalls++;return 37 } -SuccessorLauncher {$script:successorCalls++} | Out-Null
+  throw 'INSTALLER_FAILURE_WAS_NOT_RETAINED'
+} catch { if ($_.Exception.Message -notlike '*exited with code 37*') { throw } }
+if ($script:runnerCalls -ne 1 -or $script:successorCalls -ne 0) { throw 'EMPTY_CENSUS_CHANGED_INSTALLER_CUSTODY' }
+if ([IO.File]::ReadAllText($file) -cne 'retained-program-bytes') { throw 'PREFLIGHT_MUTATED_PROGRAM' }
+Write-Output 'FILE_LOCK_CASES=5'
+`.replace('__INSTALL_SCRIPT__', ps(installScript)).replace('__FIXTURE_ROOT__', ps(root));
+      const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(code, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 25_000 });
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(result.stdout).toContain('FILE_LOCK_CASES=5');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+
 describe.runIf(process.platform === 'win32')('native state backup checkpoint', () => {
   const shells = ['powershell.exe', ...(spawnSync('pwsh.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { windowsHide: true }).status === 0 ? ['pwsh.exe'] : [])];
   it.each(shells)('requires manifest and final receipt custody in %s', shell => {
@@ -1957,7 +2004,7 @@ Exit-CustomInstallOperationLock -Mutex $mutex
         [
           ...common,
           "Invoke-QualifiedInstallerTransaction -Qualified ([pscustomobject]@{InstallerPath='fixture.exe'})" +
-            " -InstallRoot (Join-Path " + ps(root) + " 'never-installed')" +
+            " -InstallRoot " + ps(root) +
             " -InstallerRunner { param($p) return 37 } -SuccessorLauncher { throw 'successor must not run' }"
         ],
         ['silent installer exited with code 37', 'installed state was not accepted', 'no resume was launched', 'Rollback is a separate deliberate action']
@@ -1968,7 +2015,7 @@ Exit-CustomInstallOperationLock -Mutex $mutex
         [
           ...common,
           "Invoke-QualifiedInstallerTransaction -Qualified ([pscustomobject]@{InstallerPath='fixture.exe'})" +
-            " -InstallRoot (Join-Path " + ps(root) + " 'missing-installed-tree')" +
+            " -InstallRoot " + ps(root) +
             " -InstallerRunner { param($p) return 0 } -SuccessorLauncher { throw 'successor must not run' }"
         ],
         ['installer returned success', 'installed state was not accepted', 'No resume or companion reload was requested', 'Rollback is a separate deliberate action']

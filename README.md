@@ -35,6 +35,8 @@ macOS requires macOS 13 Ventura or newer and independent native permission and p
 
 ## Packaging boundary
 
+Installer-source follow-up: the existing Windows activation transaction now uses a bounded, read-only Restart Manager census before the capture/installer runner. It reports external applications holding installed program files and refuses unknown or held ownership without stopping those applications. Native held/released-file checks and transaction refusal checks cover Windows PowerShell and PowerShell 7. The application/companion runtime remains the source commit named above; this installer-only follow-up is not a new qualified package or a deployment claim.
+
 Existing packaging and installer source remains available for review. The private custom installer pins describe historical exact artifacts; this sanitized export has a different source identity. Those pins do **not** qualify an installer built here. Do not use them to replace an existing account installation. This mirror supplies no prebuilt installer, signing credentials, account data, deployment qualification or rollback package. Upstream release/publishing workflows are omitted; publishing this source does not initiate an installer release.
 
 ## Privacy exclusions
