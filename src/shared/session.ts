@@ -1,0 +1,1244 @@
+import { recordedOperatorPromptBody } from './operator-prompt.mjs';
+/**
+ * Types for the session recorder, compaction and the multi-agent broker.
+ *
+ * Shared by the main process, the renderer and — in JSON form — the Chrome extension.
+ * No runtime logic here beyond a couple of pure helpers the UI and the recorder must
+ * agree on exactly.
+ */
+
+/** Where an event came from. The extension is untrusted UI observation; mcp is ours. */
+export type EventSource = 'extension' | 'mcp' | 'app';
+
+/**
+ * How long the native Active badge keeps showing a chat as working after its last activity.
+ *
+ * Deliberately longer than the recovery window below, and this is the whole point of them being
+ * two constants rather than one. They answer different questions. Recovery asks "has this chat
+ * been quiet long enough that its page needs putting back together?", and one minute is the
+ * current measured boundary. The badge answers "is this chat still the one doing something?",
+ * which stays true across the reload that the first question triggers — a page being reloaded on
+ * the app's own instruction is a chat mid-repair, not an idle one.
+ *
+ * Sharing the recovery duration made the badge go dark first and the reload arrive afterwards:
+ * the label expired exactly on the boundary while the browser action still had the sweep and the
+ * extension's alarm ahead of it. A user watching that sees a chat go idle and then, half a minute
+ * later, reload itself for no visible reason. One minute of headroom covers both hops.
+ */
+export const CHAT_ACTIVE_MS = 3 * 60_000;
+
+/** The inactivity window after which exact-chat browser recovery reloads an open turn once. */
+export const CHAT_SILENCE_MS = 60_000;
+
+/**
+ * How a ChatGPT turn ended.
+ *
+ * Deliberately more than "done" and "failed". Guessing "output limit reached" for
+ * every unexplained stop is exactly the fake precision this project avoids, so an
+ * unexplained stop stays `interrupted` or `unknown` unless ChatGPT actually said why.
+ */
+export type TurnOutcome =
+  | 'completed'
+  | 'failed'
+  | 'stopped'
+  | 'interrupted'
+  | 'stalled'
+  | 'unknown';
+
+export const TURN_OUTCOME_LABELS: Record<TurnOutcome, string> = {
+  completed: 'completed',
+  failed: 'failed with a visible error',
+  stopped: 'stopped by the user',
+  interrupted: 'interrupted before it finished',
+  stalled: 'stalled — no visible progress',
+  unknown: 'ended for an unknown reason'
+};
+
+/**
+ * Text stored in an event, with an explicit note when it was cut.
+ *
+ * The inline copy is bounded so the JSONL stays readable and one huge command output
+ * cannot push a line past the reader's limit. Nothing is actually lost by that: when
+ * the text is cut, the full redacted original is written beside the log as an asset
+ * and named here, so recovery reads the whole thing. `truncated` therefore means
+ * "not all of it is in this line", never "the rest is gone".
+ */
+export interface StoredText {
+  text: string;
+  /** True when the original was longer than the per-event cap. */
+  truncated: boolean;
+  /** Length of the original, so a summary can say what it lost. */
+  chars: number;
+  /** Asset holding the complete redacted text, present only when truncated. */
+  assetId?: string;
+  /**
+   * Digest of the complete text, for events whose identity has to survive being cut.
+   *
+   * Written for messages, which are the events a reloaded page reports again and which
+   * must therefore be recognisable as ones already stored. `text` alone cannot do that
+   * once it has been capped, and a length plus a head cannot tell two answers apart that
+   * begin the same way — the exact case ChatGPT's reused turn ids produce.
+   */
+  digest?: string;
+}
+
+/** A screenshot or other binary kept beside the log rather than inside it. */
+export interface AssetRef {
+  id: string;
+  mimeType: string;
+  bytes: number;
+  /** Present only for images. */
+  width?: number;
+  height?: number;
+}
+
+/** Compact human-readable presentation of one tool call. */
+export interface ActivitySummary {
+  /** Short verb phrase: "Edited src/main/mcp/server.ts". */
+  title: string;
+  /** Optional qualifier: "lines 200–420", "30 matches". */
+  detail?: string;
+  /** Optional right-aligned metric: "+18 −4", "✓ 4.8s", "✕ exit 1". */
+  metric?: string;
+  tone: 'neutral' | 'good' | 'bad' | 'warn';
+  /** Family the entry belongs to, for icons and filtering. */
+  kind:
+    | 'edit'
+    | 'create'
+    | 'delete'
+    | 'move'
+    | 'read'
+    | 'search'
+    | 'browse'
+    | 'run'
+    | 'process'
+    | 'screen'
+    | 'input'
+    | 'clipboard'
+    | 'session'
+    | 'agent'
+    | 'other';
+}
+
+export interface FileChange {
+  path: string;
+  added: number;
+  removed: number;
+  /** True when the counts come from a bounded heuristic rather than a full diff. */
+  approximate: boolean;
+}
+
+/** Only `tool_internal_error` is a connector defect. */
+export type ToolOutcome = 'ok' | 'process_exit_nonzero' | 'tool_rejected' | 'tool_execution_error' | 'tool_internal_error';
+
+/** Returned is different from successful. Native completion may acknowledge a
+ * durably recorded refusal/error without certifying task acceptance or replay.
+ * Do not normalize unknown/legacy strings into this receipt authority. */
+export function isReturnedToolOutcome(outcome: unknown): outcome is ToolOutcome {
+  return outcome === 'ok' || outcome === 'process_exit_nonzero' ||
+    outcome === 'tool_rejected' || outcome === 'tool_execution_error' || outcome === 'tool_internal_error';
+}
+
+/**
+ * How confident the recorder is that this call belongs to the session it landed in.
+ *
+ * Four grades, strongest first. `agent` is caller identity. `turn` is per-call evidence
+ * out of the page's own message model, or a connector block it drew. `generation` is the
+ * one ChatGPT chat that was demonstrably mid-turn when the call arrived. `inferred` means
+ * nothing identified the caller — those calls are stored in the unattributed stream rather
+ * than guessed into somebody's history. The extension refuses to rewrite ChatGPT's UI for
+ * an inferred call.
+ */
+export type CallAttribution =
+  | 'request_id'
+  | 'result_receipt'
+  | 'unattributed'
+  | 'superseded'
+  | 'turn'
+  | 'agent'
+  | 'generation'
+  | 'inferred';
+
+/**
+ * What each grade of attribution actually rests on, in the words shown to the user.
+ *
+ * Deliberately not interchangeable. `agent` is caller identity: a key only that agent
+ * holds, bound to a chat the app itself opened. `turn` is the page having shown a
+ * connector block — good evidence about which conversation made *a* connector call, but
+ * the collapsed row does not name the connector, so it is a match rather than an identity.
+ *
+ * `generation` is weaker again and is stated as what it is. The connector belongs to a
+ * ChatGPT account rather than to a browser, so a chat being mid-turn here does not prove
+ * this call came from here rather than from the same account on a phone. It is used
+ * because the alternative measured worse in practice by a wide margin: requiring per-call
+ * page evidence sent roughly half of one session's own work into `Unattributed activity`,
+ * and a record that is missing half the work is not more truthful than one that says how
+ * it placed each call.
+ *
+ * `inferred` is on the records in the unattributed stream, which is where everything else
+ * goes rather than being guessed into somebody's history.
+ */
+export const ATTRIBUTION_LABELS: Record<CallAttribution, string> = {
+  request_id: 'exact request id',
+  result_receipt: 'exact native tool-result receipt',
+  unattributed: 'request id not resolved',
+  superseded: 'retired conversation',
+  agent: 'agent key',
+  turn: 'tool block on the page',
+  generation: 'the only chat generating',
+  inferred: 'not placed in a chat'
+};
+
+export interface ToolCallRecord {
+  /** Child lifetime, independent of the initial tool response and output delivery. */
+  process?: { sessionId: string; completedAt?: number; exitCode?: number | null; durationMs?: number };
+  /** Recorded model evidence, when known; absence is not the current picker selection. */
+  model?: string;
+  reasoningEffort?: ReasoningEffort;
+  callId: string;
+  /** Random per-execution Core result witness. Recorded before publication; never a
+   * workflow/JSON-RPC identity or a grant to replay the operation. */
+  resultReceiptId?: string;
+  /** Set only after the paired native Fiber tool-result message proves this call. */
+  nativeCallMessageId?: string;
+  tool: string;
+  attribution: CallAttribution;
+  /** Normalized inbound HTTP x-request-id, retained for forensic correlation. */
+  requestId: string | null;
+  /** Conversation proven by that request id, or null when ownership was unresolved. */
+  conversationId: string | null;
+  /** Deterministic placement outcome for current, unresolved, or deliberately retired callers. */
+  attributionMethod: 'request_id' | 'result_receipt' | 'unattributed' | 'superseded';
+  /** Exact arguments as JSON. Cut inline past the cap, with the whole text in an asset. */
+  args: StoredText;
+  result: StoredText;
+  outcome: ToolOutcome;
+  durationMs: number;
+  summary: ActivitySummary;
+  /** Files this call demonstrably changed, with line counts where computable. */
+  changes?: FileChange[];
+  assets?: AssetRef[];
+  /**
+   * This call was the caller's last word: a worker's successful finish report. Recorded so
+   * the session itself, not only the in-memory swarm, knows the worker stopped working here.
+   */
+  endsActivity?: true;
+}
+
+export type MessageState = 'streaming' | 'final';
+/** Transcript text quality only; neither value establishes delivery or automation authority. */
+export type UserMessageTextOrigin = 'provider' | 'rendered';
+
+/** A persisted launch acknowledgement never proves that its child is still alive. */
+export function toolCallSummary(call: Pick<ToolCallRecord, 'tool' | 'summary'>): ActivitySummary {
+  return call.tool === 'exec_command' && call.summary.metric === 'running'
+    ? { ...call.summary, metric: 'started' } : call.summary;
+}
+
+/** Process-status revisions are delivery cursors, not new model work. */
+export function workSequence(event: SessionEvent): number {
+  return event.kind === 'tool_call' ? event.origin ?? event.seq : event.seq;
+}
+
+/** Reads current outcomes and only self-proving legacy `error` rows; ambiguous legacy errors abstain. */
+export function normalizedToolOutcome(
+  call: Pick<ToolCallRecord, 'tool' | 'summary'> & { outcome: unknown }
+): ToolOutcome | null {
+  if (
+    call.outcome === 'ok' ||
+    call.outcome === 'process_exit_nonzero' ||
+    call.outcome === 'tool_rejected' ||
+    call.outcome === 'tool_execution_error' ||
+    call.outcome === 'tool_internal_error'
+  ) {
+    return call.outcome;
+  }
+  if (call.outcome === 'rejected') return 'tool_rejected';
+  if (
+    call.outcome === 'error' &&
+    (call.tool === 'exec_command' || call.tool === 'write_stdin') &&
+    /^✕ exit -?\d+$/.test(call.summary.metric ?? '')
+  ) {
+    return 'process_exit_nonzero';
+  }
+  return null;
+}
+
+interface BaseEvent {
+  /** Selection verified for this exact delivered native message, never enqueue intent. */
+  model?: string;
+  reasoningEffort?: ReasoningEffort;
+  /** 1-based, strictly increasing within a session. Ordering never relies on time. */
+  seq: number;
+  time: number;
+  source: EventSource;
+  /** Multi-agent attribution. Absent when no swarm is running. */
+  agent?: string;
+  /** ChatGPT's own turn id when the extension could read it. */
+  turnId?: string;
+}
+
+export type SessionEvent =
+  | (BaseEvent & { kind: 'session_start'; conversationId: string | null; title: string })
+  | (BaseEvent & {
+      kind: 'user_message';
+      message: StoredText;
+      messageId?: string;
+      /** Exact provider text or rendered fallback. Missing keeps legacy revision behavior. */
+      textOrigin?: UserMessageTextOrigin;
+      /** Exact app outbox identity, attached after a tool handout or proven native delivery. */
+      inputId?: string;
+      /** Tool handout remains unconfirmed until a later exact invocation proves receipt. */
+      inputDelivery?: 'offered' | 'confirmed';
+      /** Exact app-owned automatic origin when delivery bypasses the ordinary input outbox. */
+      automationOrigin?: 'goal' | 'rotation';
+      /** Original app-authored text, excluding transport-only control instructions. */
+      authoredText?: string;
+      /** SHA-256 of the complete, locally prepared native input / Skill envelope.
+       * A Send or tool offer stamps intent, not proof that the executor received
+       * or applied these bytes. Provider text revisions must never change it. */
+      preparedDeliverySha256?: string;
+      /** Canonical Main-owned authorship/ACK snapshot before the bounded outbox
+       * releases this payload. Intent provenance, never tool/result acceptance. */
+      inputProvenance?: {
+        version: 1;
+        authorship: 'human' | 'automation';
+        sessionId: string;
+        conversationId: string;
+        inputId: string;
+        nativeMessageId: string;
+        deliveredAt: number;
+        authoredSha256: string;
+        preparedSha256: string;
+      };
+      /** A provider echo supplied app-origin labels before a matching local
+       * receipt. It is reference text, not a verified new human correction;
+       * the real app-owned ACK may clear this uncertainty on the same UUID. */
+      unverifiedAuthorshipClaim?: true;
+      /** Store-owned time of the newest authored-text change; metadata-only revisions preserve it. */
+      semanticUpdatedAt?: number;
+      /** Native badge on this exact user message. Missing means unobserved; null means absent. */
+      reaction?: string | null;
+      attachments?: import('./input.js').InputAttachment[];
+      assets?: AssetRef[];
+      /** First sequence assigned to this stable website message; revisions keep this anchor. */
+      origin?: number;
+    })
+  | (BaseEvent & {
+      kind: 'assistant_message';
+      message: StoredText;
+      /**
+       * Stable ChatGPT website identity used by the local canonical store.
+       *
+       * For streaming commentary this is an exact tuple of ChatGPT's parent/working-turn/
+       * turn-exchange ids when those are available, so it remains stable even if React rotates
+       * the child text-message UUID before the thought row mounts. Older page shapes with a
+       * proven thought parent may use that thought `message.id`; a text object with no stronger
+       * relation uses its own ChatGPT message id. Local turn ids, text prefixes and DOM
+       * positions do not participate in this identity.
+       */
+      messageId?: string;
+      /** ChatGPT's canonical rendered representation captured from the page. */
+      renderedHtml?: StoredText;
+      /** Public provider object UUID. Evidence for identity drift; not a canonical key or turn owner. */
+      providerMessageId?: string;
+      state?: MessageState;
+      /** Compatibility mirror for older consumers; equivalent to state === 'final'. */
+      final: boolean;
+      /** This exact stable reply was proven terminal and may enter Goal policy. */
+      goalEligible?: boolean;
+      /** Main-validated native question for an ordinary Sent input's terminal answer.
+       * Browser annotations cannot assign this durable association directly. */
+      inputReplyTo?: string;
+      /** Main deferred an annotated native source join. Only its exact receipt proof
+       * clears this publication hold; sparse replays cannot turn it into handled debt. */
+      inputAssociationPending?: boolean;
+      /** Store-owned sequence of the latest final text/state change; rendering/metadata cannot advance it. */
+      finalContentSeq?: number;
+      /** Store-owned time of the newest model-text change or streaming-to-final transition. */
+      semanticUpdatedAt?: number;
+      /** First sequence assigned to this logical message; later revisions keep this anchor. */
+      origin?: number;
+    })
+  /**
+   * One visible ChatGPT commentary item, as it stood when this snapshot was taken.
+   *
+   * `progressId` is the identity of the *logical* item — one caption block the page keeps
+   * growing — not of the snapshot. ChatGPT re-lays-out, reparents, shrinks and redraws that
+   * block many times inside a turn, and treating each redraw as a new event is what put the
+   * same sentence on screen a dozen times, split across duplicate rows. So a later snapshot
+   * of the same item supersedes the earlier one instead of following it: readers keep the
+   * newest text at the *earliest* record's position, which is both where the commentary
+   * belongs chronologically and the only way one caption stays one row.
+   *
+   * `origin` names the seq of that earliest record, so a reader working from a cursor can
+   * still place a supersession whose anchor it has already consumed. Both are optional: an
+   * event written before this model existed, or by a page whose commentary had no readable
+   * identity, is still a plain standalone caption.
+   */
+  | (BaseEvent & { kind: 'progress'; message: StoredText; progressId?: string; origin?: number; finishControl?: { state: 'released' | 'notified' | 'decision'; conversationId: string; revision?: string; inputRevision?: string; workSeq?: number } })
+  /**
+   * Visible ChatGPT-native tool activity that never passed through this MCP server.
+   *
+   * `messageId` is ChatGPT's own thought/message identity for the activity. The rendered row
+   * may be replaced entirely and its label may change from "Inspecting" to "Inspected";
+   * neither affects identity. `origin` names the seq of the first record of that site object,
+   * for readers working from a cursor that has already consumed it.
+   */
+  | (BaseEvent & { kind: 'page_tool'; messageId: string; label: string; origin?: number })
+  /**
+   * `detail` names an app-authored reopening: the page reported this turn ended, and a tool
+   * call under the same server turn then proved it had not. Absent on the page's own starts.
+   */
+  | (BaseEvent & { kind: 'turn_start'; detail?: string })
+  | (BaseEvent & {
+      kind: 'turn_end';
+      outcome: TurnOutcome;
+      detail?: string;
+      reason?: 'thinking_failed' | 'model_cooldown' | 'conversation_limit';
+      /**
+       * Recorder-authored proof used only to repair a page-false completion after restart.
+       * The page cannot supply this object. `observedAt` is when the recorder accepted the
+       * completion, which may differ from `time` when the final kept an older authored time.
+       */
+      completionEvidence?: { observedAt: number; startedAt: number | null; requestIds: string[] };
+    })
+  | (BaseEvent & { kind: 'chat_error'; message: StoredText; recoverable?: boolean; blocking?: boolean; reason?: 'thinking_failed' | 'model_cooldown' | 'conversation_limit' | 'stream_gone' | 'watchdog_stalled' })
+  | (BaseEvent & { kind: 'tool_call'; call: ToolCallRecord; origin?: number })
+  /**
+   * An app-authored line. `continuation` names the Compact & Resume it is about, so the
+   * timeline can fold the note into that compaction's one row instead of showing it loose.
+   */
+  | (BaseEvent & { kind: 'note'; message: StoredText; continuation?: string })
+  /**
+   * A message routed between agents.
+   *
+   * Recorded twice and deliberately so: once in the sender's session when the broker
+   * accepts it, once in the recipient's when the recipient acknowledges it. Without the
+   * second one a worker's report would exist only in the worker's own history and the
+   * volatile queue, so compacting the prime — the whole point of Compact & Resume while
+   * workers keep running — would silently omit everything the workers had told it.
+   * `messageId` is stable across both, so the pair can be matched and re-offers of the
+   * same message never produce a second record.
+   */
+  | (BaseEvent & {
+      kind: 'agent_message';
+      messageId: string;
+      from: string;
+      to: string;
+      message: StoredText;
+      delivery: 'sent' | 'delivered';
+    })
+  | (BaseEvent & {
+      kind: 'handoff';
+      handoffId: string;
+      chars: number;
+      /** What triggered it: manual compaction, resume, or an automatic suggestion. */
+      reason: string;
+    });
+
+export type SessionEventKind = SessionEvent['kind'];
+
+/**
+ * The marker Compact & Resume puts at the head of the two prompts it types itself: the brief
+ * request in the source chat and the bootstrap in its replacement. Group 1 says which, group
+ * 2 is the continuation token that ties the pair together. Mirrors `CONTINUATION_MARKER` in
+ * `extension/content.js`, which cannot import; the renderer uses this one to fold a
+ * compaction's three rows into one.
+ */
+export const CONTINUATION_MARKER = /^\s*\[\[CLF-(HANDOFF|RESUME):([A-Za-z0-9_-]{16,64})\]\](?:\\?\s|$)/;
+
+/** Semantic marker only; a wrapper never proves delivery, ownership or completion. */
+export function continuationMarker(text: string): RegExpExecArray | null {
+  const direct = CONTINUATION_MARKER.exec(recordedOperatorPromptBody(text));
+  if (direct) return direct;
+  const chip = /^\[\$[a-z][a-z0-9-]{0,80}-windows-core\]\(app:\/\/asdk_app_[a-f0-9]{32}\)/.exec(text);
+  return chip ? CONTINUATION_MARKER.exec(recordedOperatorPromptBody(text.slice(chip[0].length))) : null;
+}
+
+/**
+ * An event before the store assigns its sequence number.
+ *
+ * Written as a distributive conditional because a plain Omit over a union keeps only
+ * the keys every member shares, which would silently reduce every event to its base
+ * fields and let a caller append a tool_call with no call in it.
+ */
+export type NewSessionEvent = SessionEvent extends infer Event
+  ? Event extends SessionEvent
+    ? Omit<Event, 'seq'>
+    : never
+  : never;
+
+/**
+ * How a chat came to exist, when this app is the one that opened it.
+ *
+ * Recorded when the extension acknowledges that it typed the bootstrap into a fresh
+ * tab, which is the first and only moment at which the app can connect the command it
+ * queued to the conversation that command became.
+ */
+export interface SessionOrigin {
+  kind: 'resume' | 'worker' | 'helper' | 'desktop';
+  /** The session this chat continues. Null when the source session no longer exists. */
+  fromSessionId: string | null;
+  /** Agent id for a worker chat ("worker-1"). Null for a resume. */
+  agentId: string | null;
+  /** The worker's task, verbatim from `agents action=spawn`. Empty for a resume. */
+  task: string;
+  /** Explicit local label supplied when the desktop queue creates a new main chat. */
+  nickname?: string;
+}
+
+function clip(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max - 1).trimEnd()}…` : flat;
+}
+
+/** Provider/transport placeholders that must never become an automatic durable task name. */
+export function isGenericAutomaticSessionTitle(title: string): boolean {
+  return /^(?:new chat|chatgpt session|resume(?:d)?(?: chatgpt)? session|continue(?:d)?(?: the)?(?: previous)?(?: chatgpt)? session|continue from where (?:we|you) left off|continued task|coding agent(?: guidance)?|code task calibration)$/i
+    .test(title.replace(/\s+/g, ' ').trim());
+}
+
+/**
+ * The name to give a chat this app opened, in place of its bootstrap prompt.
+ *
+ * A resumed or worker chat opens with a long instruction this app typed itself, and
+ * the ordinary "name a session after the first thing the user said" rule turned that
+ * instruction into the session's name. The result was a list of near-identical rows
+ * reading `Continue the previous ChatGPT ...` and `You are worker agent "worker-1"...`
+ * with nothing in them to say which run a row belonged to. The command that opened the
+ * chat already knows what the chat is for, so the name comes from there instead.
+ */
+export function originTitle(origin: SessionOrigin, source: string | null): string {
+  if (origin.kind === 'desktop') return clip(origin.nickname ?? '', 120) || source || 'New chat';
+  if (origin.kind === 'helper') return 'Task helper';
+  if (origin.kind === 'worker') {
+    const who = origin.agentId ?? 'worker';
+    const parent = clip(source ?? '', 48);
+    const task = clip(origin.task, parent ? 48 : 60);
+    return clip([parent, who, task].filter(Boolean).join(' · '), 120);
+  }
+  // Resume is transport, not identity. The task name is the useful thing in the sidebar,
+  // so a replacement chat keeps the source session's exact visible name. The durable session
+  // itself already records that a continuation happened; adding "Resumed" here only makes a
+  // list of long-running chats harder to distinguish.
+  const from = clip(source ?? '', 120);
+  return from || 'Continued task';
+}
+
+export interface SessionSummary {
+  /** Durable naming authority; absent only on legacy recordings. */
+  titleSource?: 'fallback' | 'provider' | 'manual';
+  /** ChatGPT's own generated title when the local nickname is shown as the primary label. */
+  originalTitle?: string;
+  /** Latest proven native picker selection; scoped to its frontend, never worker creation intent. */
+  selectedModel?: { conversationId: string; model: string; observedAt: number; reasoningEffort?: ReasoningEffort };
+  /** Explicit local project; durable across frontend conversation replacement. */
+  projectId?: string;
+  /** Optional per-chat sub-agent concurrency cap; null/absent follows the global setting. */
+  workerLimit?: number | null;
+  id: string;
+  title: string;
+  /**
+   * The ChatGPT conversation this session is attached to *right now*.
+   *
+   * The local session is the durable identity; a ChatGPT chat is only the frontend
+   * currently attached to it. Compact & Resume moves this from chat A to chat B in one
+   * commit, and nothing else ever changes it.
+   */
+  conversationId: string | null;
+  /**
+   * Every ChatGPT conversation this session has lived in, oldest first, current last.
+   *
+   * Kept so a recorded history that spans a compaction can still be traced back to the
+   * chats it was written in, and so a stale tab reporting for a superseded conversation
+   * can be recognised rather than silently filed as if nothing had moved.
+   */
+  chatIds: string[];
+  startedAt: number;
+  updatedAt: number;
+  /** Newest authored/model message; unlike updatedAt, tool/error noise does not reorder the sidebar. */
+  lastMessageAt?: number | null;
+  /** Null while the session is still the active one. */
+  endedAt: number | null;
+  events: number;
+  userMessages: number;
+  toolCalls: number;
+  /** Recorded file-change rows produced by successful local tools in this session. */
+  fileEdits: number;
+  /** Added/removed line totals from recorded file-change evidence. */
+  linesAdded: number;
+  linesRemoved: number;
+  /** True when any contributing tool could provide only an approximate diffstat. */
+  approximateFileChanges: boolean;
+  /** Completion time of the newest recorded local file change; absent on legacy metadata. */
+  lastFileChangeAt?: number | null;
+  /** Start time of the newest exact attributed tool call, independent of later page noise. */
+  lastToolCallAt: number | null;
+  /**
+   * Lower bound of accumulated active work proven by durable exact execution intervals.
+   *
+   * This is deliberately not wall-clock session age, recent-activity time, or an open-turn
+   * duration. The current projection can prove exact attributed local tool/process execution
+   * intervals and unions overlaps between them; model/browser work that has no durable interval
+   * evidence is omitted rather than estimated.
+   */
+  activeWorkMs?: number;
+  /**
+   * `unknown` means history contains no exact interval evidence. `partial` means some active
+   * duration is proven, but the durable event vocabulary does not cover every kind of work.
+   */
+  activeWorkMeasurement?: 'unknown' | 'partial';
+  /**
+   * Durable two-active-hour Loop reporting custody, owned by the stable prime session.
+   *
+   * `pending` is a reservation for one exact safe continuation turn. It prevents restart,
+   * compaction and duplicate page pickup from minting another report request while delivery is
+   * unresolved. `delivered` advances only from ChatGPT's exact native user-message receipt;
+   * a spent-draft ACK without `messageId` is deliberately insufficient.
+   */
+  loopProgressReport?: {
+    delivered?: {
+      thresholdMs: number;
+      messageId: string;
+      confirmedAt: number;
+      sourceTurnId: string;
+      draftToken: string;
+    };
+    pending?: {
+      thresholdMs: number;
+      sourceTurnId: string;
+      draftToken: string;
+      reservedAt: number;
+    };
+  };
+  /** Observation time of the newest stable final assistant message. */
+  lastAssistantFinalAt?: number | null;
+  /**
+   * Time of the newest turn end, whatever ended it: the model finishing, the user pressing
+   * stop, or an error. The other end of "recent activity" beside `lastAssistantFinalAt`, which
+   * a stopped turn never sets — so a prime the user blocked and stopped stayed `active` for
+   * three minutes on the strength of the refused call before the stop (2026-09-02). Undefined
+   * on metadata written before this field existed.
+   */
+  lastTurnEndAt?: number | null;
+  /** Runtime-only activity deadline from the bridge; null means no current activity grant. */
+  activityExpiresAt?: number | null;
+  /**
+   * Start time of the newest successful worker finish report in this session.
+   *
+   * A worker's finish is its final answer as far as this app is concerned, and it is durable
+   * here because the swarm that also knows it parks the moment its last worker stops: a list
+   * that read only the swarm showed a finished worker as `active` for three minutes and then
+   * as nothing at all. Undefined on metadata written before this field existed.
+   */
+  lastFinishReportAt?: number | null;
+  processExitNonzero: number;
+  toolRejected: number;
+  /** Connector/tool implementation failures; the tool reliability numerator. */
+  toolInternalErrors: number;
+  /** Chat errors plus `toolInternalErrors`. */
+  errors: number;
+  /** Rough local estimate for the whole session — never ChatGPT's private counter. */
+  estimatedTokens: number;
+  /**
+   * The same estimate, but only for what the *currently attached* ChatGPT chat is carrying.
+   *
+   * This is what the composer meter fills against and what automatic compaction fires on,
+   * and it is why one durable session surviving a compaction does not mean an ever-rising
+   * meter: the rebind into chat B resets this to zero while `estimatedTokens` keeps
+   * counting the session's whole life. Chat B genuinely starts with only the handoff in
+   * its context, so measuring it against the session's lifetime total would re-fire
+   * compaction immediately after every compaction.
+   */
+  contextTokens: number;
+  /** Id of the newest stored handoff, or null when the session was never compacted. */
+  lastHandoffId: string | null;
+  lastHandoffAt: number | null;
+  /**
+   * Handoff that positively became the opening user message of the currently attached resumed
+   * chat, or null when no successful Compact & Resume has been durably proven.
+   *
+   * Distinct from `lastHandoffId`: a handoff is published as soon as capture is durable, before
+   * the replacement-chat rebind commits. A later aborted compaction may therefore advance
+   * `lastHandoffId` without ever becoming ChatGPT context. This field moves only with the same
+   * atomic metadata write that moves `conversationId` to the replacement chat.
+   */
+  lastCommittedResumeHandoffId?: string | null;
+  /** Outcome of the most recent finished turn. */
+  lastTurnOutcome: TurnOutcome | null;
+  /** Durable open-turn projection. Undefined only on pre-1.8.8 metadata. */
+  activeTurnId?: string | null;
+  /** A pre-Send automatic handoff refusal lasts until a different turn or frontend. */
+  autoCompactionRefusal?: { conversationId: string; turnId: string | null };
+  /** Constant-size projection of app finish receipts for the most recently started turn. */
+  finishTurn?: {
+    turnId: string;
+    conversationId: string | null;
+    startedAt: number;
+    notified: boolean;
+    released: boolean;
+    decisionRevision: string | null;
+    workSeq: number;
+    decisionSeq: number;
+    decisionInputRevision: string | null;
+    decisionAt?: number;
+  } | null;
+  /** Agents seen in this session, prime first. Empty when no swarm ran. */
+  agents: string[];
+  /** Set only for a chat this app opened itself. Null for one the user started. */
+  origin: SessionOrigin | null;
+}
+
+/** One chat found by the desktop chat search. */
+export interface SessionSearchResult {
+  id: string;
+  title: string;
+  projectId: string | null;
+  /** Match ranges in the title; absent when the match came only from message text. */
+  titleMatches?: Array<[number, number]>;
+  /** Short passage around a message-text match. */
+  snippet?: { text: string; matches: Array<[number, number]> };
+}
+
+/** Exact recorded message to reveal after opening a text search result. */
+export interface SessionSearchLocation {
+  seq: number;
+  kind: 'user_message' | 'assistant_message';
+  messageId: string | null;
+  position: number;
+}
+
+export interface SessionSearchReply {
+  results: SessionSearchResult[];
+  indexed: number;
+  total: number;
+  limited?: true;
+}
+
+/** Receipt returned by a recoverable sidebar deletion. */
+export interface SessionDeletionReceipt {
+  id: string;
+  title: string;
+  conversationId: string | null;
+  deletedAt: number;
+  undoUntil: number;
+}
+
+export interface SessionDeletionBatchResult {
+  requested: number;
+  permanent: boolean;
+  deleted: SessionDeletionReceipt[];
+  failed: Array<{ id: string; error: string }>;
+}
+
+/** One recoverable local-history row in Chat On Steroids Trash. */
+export interface DeletedSessionRecovery {
+  id: string;
+  title: string;
+  conversationId: string | null;
+  /** Complete retained ChatGPT lineage, including pre-compaction source conversations. */
+  chatIds: string[];
+  /** Whether the retained folder still has valid session metadata/history. */
+  readable: boolean;
+  /** Filesystem-backed deletion timestamp for this exact recovery copy. */
+  deletedAt: number | null;
+  /** When the existing 30-day retention owner will permanently expire this copy. */
+  expiresAt: number | null;
+}
+
+export interface DeletedSessionTrashResult {
+  removed: number;
+  activeDuplicatesDeleted: number;
+}
+
+/** Result of the explicit Settings danger-zone wipe of every local conversation record. */
+export interface SessionPurgeResult {
+  activeRemoved: number;
+  trashRemoved: number;
+  foldersRemoved: number;
+}
+
+/** A purely local sidebar collection; it never creates or changes a ChatGPT Project. */
+export interface SidebarFolder {
+  id: string;
+  name: string;
+  sessionIds: string[];
+  createdAt: number;
+}
+
+export interface Handoff {
+  /** Absent only on legacy files that predate transaction-bound briefs. */
+  version?: 1;
+  id: string;
+  sessionId: string;
+  createdAt: number;
+  /** The continuation brief itself. */
+  text: string;
+  /** How the raw session looked when this was made, for honest staleness reporting. */
+  sourceEvents: number;
+  sourceTokens: number;
+  /** Set when the model stopped early or the pack dropped material. */
+  notes: string[];
+  /** Descriptive provenance, never a capability to claim or send a continuation. */
+  provenance?: {
+    sourceConversationId: string | null;
+    sourceGeneration: number | null;
+    sourceTurnId: string | null;
+    /** SHA-256 of the continuation token; never the raw one-time authority. */
+    continuationId: string | null;
+  };
+}
+
+// ---------------------------------------------------------------- agents
+
+export type AgentRole = 'prime' | 'worker';
+/**
+ * Where an agent is in its life, and — for `detached` — where its *browser view* is.
+ *
+ * `detached` is the state that separates the two. A ChatGPT turn runs on OpenAI's servers,
+ * so closing the tab of a worker that is mid-task stops nothing: its tool calls keep
+ * arriving here, correlated to the same conversation by the same request id. Treating the
+ * closed tab as the end of the worker was reading the browser's lifecycle as if it were the
+ * turn's. A detached worker is still working, still holds its slot, still has an inbox, and
+ * can still report; it only sleeps once it has also gone quiet.
+ *
+ * `sleeping` is the state that makes a worker reusable rather than disposable.
+ *
+ * A worker used to be a one-shot job: it reported, its slot was a tombstone, and the only
+ * way to get more work done was another `spawn` — another ChatGPT conversation, thrown away
+ * again a few minutes later. That is both what ChatGPT itself pushes back on and a waste of
+ * everything the worker had already learned about the task. So the end of a worker's *turn*
+ * is no longer the end of the worker: it goes to sleep in the chat it already has, keeping
+ * its conversation, its transcript, its workspace and its inbox. The prime wakes it by
+ * messaging it, and the app reopens that exact chat and types the message into it.
+ *
+ * A sleeping worker holds no slot — that is the whole point of the state — so a run can
+ * accumulate more sleeping workers than `maxWorkers` while never having more than
+ * `maxWorkers` of them awake at once.
+ *
+ * `waking` is the short window between the prime's message being accepted and the woken chat
+ * proving it is running — its first tool call, or a turn that begins after the sleep. It holds
+ * the slot the revival reserved, so two revivals cannot claim the same one; a revival that
+ * fails puts the worker back to sleep and gives the slot back. Nothing observed from outside
+ * can stop a waking worker: a settled answer or finish that arrives then is the old turn's,
+ * and the wake ends only through its own proof or failure.
+ *
+ * `finished` and `failed` remain the two terminal states, and a worker only reaches
+ * `finished` once its own chat has grown past the context ceiling: past that point there is
+ * nothing left to reuse, so the next time it stops working it stops for good.
+ */
+export type AgentState =
+  | 'invited'
+  | 'active'
+  | 'detached'
+  | 'waking'
+  | 'sleeping'
+  | 'finished'
+  | 'failed';
+
+/**
+ * Read-only parent-chat projection of the existing broker lifecycle. This is presentation data,
+ * never a second worker ledger: every count is derived from the caller family's AgentState rows.
+ */
+export interface WorkerLifecycleProgress {
+  total: number;
+  active: number;
+  queued: number;
+  finished: number;
+  failed: number;
+  /** Bounded labels for currently active workers only; tasks/conversation ids never leave main. */
+  names: string[];
+  /** Bounded, de-duplicated terminal failure summaries for attention UI. */
+  failures: string[];
+}
+
+/**
+ * Canonical reasoning levels for a worker's chat, shared with the Hermes runtime
+ * vocabulary (hermes_constants.VALID_REASONING_EFFORTS plus "none").
+ *
+ * "none" is a real level — reasoning disabled — and is distinct from null, which means
+ * inherit the account default. This is the single vocabulary authority; the broker, the
+ * bridge restore and the extension all check membership against this list.
+ */
+export const REASONING_EFFORTS = [
+  'pro', // ChatGPT browser Power tier; never forwarded as an API reasoning effort.
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+  'ultra'
+] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+export function isReasoningEffort(value: unknown): value is ReasoningEffort {
+  return typeof value === 'string' && (REASONING_EFFORTS as readonly string[]).includes(value);
+}
+
+export interface AgentInfo {
+  /** Broker owner projection. IDs such as worker-1 are local to this incarnation. */
+  runId?: string;
+  primeConversationId?: string;
+  id: string;
+  role: AgentRole;
+  /** Spawn label; reused assignments fall back to the stable worker id. */
+  label: string;
+  /** Spawn brief, or a bounded inbox preview for the current reused assignment. */
+  task: string;
+  /**
+   * Requested reasoning level for this worker's chat, or null to inherit the default.
+   *
+   * Canonical vocabulary shared with the Hermes runtime (VALID_REASONING_EFFORTS plus
+   * "none"). "none" is a real level — reasoning disabled — distinct from null. Stored
+   * where the worker's model is stored and matched, snapshotted and restored the same way.
+   */
+  reasoningEffort: ReasoningEffort | null;
+  /**
+   * ChatGPT model slug this worker's chat was opened with, or null for the account default.
+   *
+   * Chosen by the prime at spawn, never by the worker. This remains the requested baseline
+   * across sleep/wake reuse; a bounded Core recovery may select Extra High for one wake
+   * without changing it. Null for the prime, which runs in the user's own chat.
+   */
+  model: string | null;
+  state: AgentState;
+  createdAt: number;
+  /**
+   * When the app bound this agent to its conversation and started it.
+   *
+   * Set by the app, never by the model: a worker is activated by the extension reporting the
+   * chat it opened for the slot, which happens before that chat has said anything.
+   */
+  activatedAt: number | null;
+  finishedAt: number | null;
+  /** Current completion report; cleared when work resumes. Prior reports remain in history/inbox. */
+  result: string | null;
+  /**
+   * Consecutive automatic same-chat retries consumed after a tool-free Core preflight failure.
+   * Optional so older durable snapshots remain valid. A normal completion resets it.
+   */
+  coreUnavailableRetries?: number;
+  /** One verified tool-free recovery may use this account-observed Extra High model.
+   * The worker's requested model above is never changed and is restored on its next wake. */
+  coreRecoveryModel?: string | null;
+  /** Messages waiting for this agent, including offered-but-unacknowledged ones. */
+  pending: number;
+  /** Of those, how many have gone out at least once and are awaiting proof of receipt. */
+  awaitingAck: number;
+  /** Messages this agent has demonstrably received. */
+  delivered: number;
+  /**
+   * Exact prime-inbox row that reported this worker's current stopped state.
+   *
+   * A browser tab may be retired only after that exact row is acknowledged. Optional for
+   * backward compatibility: a snapshot from before this field existed restores without
+   * cleanup authority rather than guessing that an absent prime-inbox row was delivered.
+   */
+  stopReportId?: string | null;
+  /**
+   * When the prime demonstrably acknowledged {@link stopReportId}, or null.
+   *
+   * This proof is retained after the acknowledged inbox row is pruned from snapshots. It is
+   * cleared whenever the worker becomes live again or is stopped without publishing a report.
+   */
+  stopReportAcknowledgedAt?: number | null;
+  /**
+   * The ChatGPT conversation this agent is running in.
+   *
+   * For the prime this is the run's identity and is set exactly once, by a successful
+   * spawn; it moves only through the app's authenticated Compact & Resume transfer. For a
+   * worker it is reported first-hand by the extension that opened the tab, and is what
+   * lets `join` answer from the conversation the call came from.
+   */
+  conversationId: string | null;
+  /**
+   * When this agent's last ChatGPT view went away, while the agent itself did not.
+   *
+   * Set with `detached`, cleared on revival. Only the browser is gone at this point: the
+   * ChatGPT turn is server-side and may still be issuing tool calls.
+   */
+  detachedAt: number | null;
+  /**
+   * The last moment this app had first-hand evidence that this agent's conversation exists.
+   *
+   * Exactly two things stamp it: an MCP call proved by the request-id correlation, and the
+   * agent's own page reporting to the bridge. One clock, so a worker whose tab is open is
+   * never on the silence clock at all. It is what revives a detached agent, and — when it
+   * stops advancing — what eventually ends one nobody can see any more.
+   */
+  lastSeenAt: number | null;
+  /**
+   * Whether this agent can be brought back — by the prime, or by its own next call.
+   *
+   * True for every sleeping worker under the context ceiling, and for one that ended for a
+   * reason that says nothing about the turn itself (its chat was closed, or it went quiet
+   * after that). False for a worker whose tab never opened, one a person cleared, and one
+   * whose chat crossed the ceiling, which is what makes that crossing terminal.
+   */
+  revivable: boolean;
+  /**
+   * Bridge command id of the most recent revival whose user message ChatGPT accepted.
+   *
+   * This is crash-recovery evidence for the narrow window where the worker snapshot was
+   * fsynced but the bridge command receipt was not. It is never used to decide whether a worker
+   * may be revived; it only makes a retry of that exact browser ACK idempotent.
+   */
+  lastRevivalCommandId?: string | null;
+  /**
+   * When this agent last stopped working without ending, or null.
+   *
+   * Distinct from `finishedAt`, which is only ever set by a terminal state. A worker that
+   * has slept three times and been woken twice has a `sleptAt` and no `finishedAt` at all.
+   */
+  sleptAt: number | null;
+  /**
+   * This chat's own estimated context, as the local session store measures it.
+   *
+   * Never a number a model reported: it is the same estimate the composer meter fills
+   * against, read off the durable session that records this exact conversation. It is what
+   * decides whether a worker is still worth reviving — see {@link revivable}.
+   */
+  contextTokens: number;
+  /** Read-only host projection; never persisted as broker authority. */
+  health?: AgentHealthProjection;
+}
+
+export type AgentActivity = 'starting' | 'working' | 'tool_call' | 'waiting' | 'sleeping' | 'done';
+export type AgentHealth = 'healthy' | 'degraded' | 'stalled' | 'blocked' | 'unknown';
+export type AgentHealthAction = 'none' | 'observe' | 'retry_delivery' | 'user_attention';
+export type AgentBrowserEvidence = 'present' | 'missing' | 'unknown';
+export type AgentIdentityEvidence = 'exact' | 'missing';
+
+export interface AgentHealthProjection {
+  observedAt: number;
+  activity: AgentActivity;
+  health: AgentHealth;
+  action: AgentHealthAction;
+  reason: string;
+  evidence: {
+    identity: AgentIdentityEvidence;
+    browser: AgentBrowserEvidence;
+    runningToolCalls: number;
+    generating: boolean;
+    activeTurn: boolean;
+    waitMs: number;
+    blocker: boolean;
+  };
+}
+
+/**
+ * One brokered message, with delivery tracked at-least-once — within a stated limit.
+ *
+ * Marking a message delivered at the moment it is written into a tool result would be
+ * a lie the moment the connector drops between the result being built and ChatGPT
+ * receiving it — a failure this project has already reproduced — and the message would
+ * be gone for good. So a message is only *offered* when it goes out, and retired when
+ * the recipient proves it got it by making another authenticated call. The cost is
+ * that a message can be shown twice; `id` is stable so the model and the recorder can
+ * both tell a repeat from a new message, and a repeat is much cheaper than a loss.
+ *
+ * The limit, stated rather than glossed: another authenticated call is *evidence* that
+ * the previous result arrived, not proof of it. The connector supplies no session id and
+ * no request identity (see transportIdentityStatus), so a retry of a call whose result
+ * was lost is indistinguishable from the next call of one that arrived — and retirement
+ * on that call would drop a message the model never saw. `offeredOnFinish` narrows the
+ * one place where that is unrecoverable rather than merely annoying.
+ */
+export interface AgentMessage {
+  id: string;
+  from: string;
+  to: string;
+  time: number;
+  text: string;
+  /** When it was last written into a tool result. Re-offered until acknowledged. */
+  offeredAt: number | null;
+  /** Exact recipient conversation that received the last offer; a Prime rebind cannot ACK A's result from B. */
+  offeredConversationId?: string | null;
+  /** How many times it has been offered, so a repeat can be labelled as one. */
+  offers: number;
+  /**
+   * Last written into a result for a `finish_agent` call.
+   *
+   * That is the one call an agent repeats verbatim when its result goes missing, and the
+   * one whose next call therefore proves nothing — a finish that never came back is
+   * answered by another finish. Retiring on it would hand the agent's own retry as
+   * evidence that it read something it never saw, and then terminalise it. So a message
+   * carrying this flag is not retired by a finish; it is re-offered, and only an ordinary
+   * tool call — the kind an agent makes because it went back to work — retires it.
+   */
+  offeredOnFinish: boolean;
+  /**
+   * This row was delivered by the browser as a real user message while reviving a sleeping
+   * worker, rather than merely being copied into an MCP result.
+   *
+   * That distinction is durable and stronger than an ordinary offer. Once ChatGPT accepted
+   * the injected user message, replaying the same row through the worker's next tool result
+   * would duplicate the prime's instruction inside one turn. A later authenticated worker call
+   * may acknowledge the row, but the broker must never *offer* it again, including after an app
+   * restart where ordinary result offers deliberately become uncertain and are reset.
+   */
+  offeredViaRevival: boolean;
+  /** Set once the recipient has demonstrably received it. */
+  ackedAt: number | null;
+}
+
+export interface SwarmState {
+  enabled: boolean;
+  /** True while at least one worker is invited or active. */
+  running: boolean;
+  /**
+   * Local-app presentation hint: worker histories exist but are parked outside the active run.
+   * Caller/model status remains scoped separately and never uses this to reveal another owner.
+   */
+  retainedHistory?: boolean;
+  agents: AgentInfo[];
+}
+
+/**
+ * The result of the user clearing one agent row in the app.
+ *
+ * `cleared` is what actually happened, not what was asked for: clearing the prime ends the
+ * whole run, clearing a worker frees that one slot, and clearing a row that had already
+ * ended does nothing at all. The UI reports this rather than assuming the click worked.
+ */
+export interface ClearAgentResult {
+  cleared: 'run' | 'worker' | 'none';
+  reason: string;
+  swarm: SwarmState;
+}
+
+// ---------------------------------------------------------------- helpers
+
+/**
+ * Rough token estimate for locally held text.
+ *
+ * Four characters per token is the usual English approximation. It is deliberately
+ * not presented as ChatGPT's context counter: hidden reasoning, system prompts and
+ * the tool schema are all invisible from here, so the number is only ever used to
+ * suggest compaction, never to claim a limit was reached.
+ */
+export function estimateTokens(text: string): number {
+  if (!text) return 0;
+  return Math.ceil(text.length / 4);
+}
+
+/** Recorder clipping changes storage, not the text already sent to the model. */
+export function storedTextTokens(value: StoredText): number {
+  const chars = value.truncated && Number.isSafeInteger(value.chars) && value.chars >= 0
+    ? value.chars : value.text.length;
+  return Math.ceil(chars / 4);
+}
+
+/** Local estimation policy for one MCP return, independent of recorder/transport limits. */
+export const MAX_TOOL_RESULT_TOKENS = 10_000;
+
+/** Token weight of recorded context; previews, assets and HTML are not extra context. */
+export function eventTokens(event: SessionEvent): number {
+  switch (event.kind) {
+    case 'user_message':
+    case 'assistant_message':
+    case 'chat_error':
+    case 'note':
+      return storedTextTokens(event.message);
+    case 'progress':
+      // Live progress/reasoning captions are useful audit evidence but are not stable
+      // conversation context, and often restate work that later appears in the final
+      // assistant message. Counting every transient caption made the advisory meter
+      // roughly double what users saw in the actual conversation on tool-heavy turns.
+      return 0;
+    case 'agent_message':
+      // Real context, unlike a progress caption: a brokered message is appended to a tool
+      // result the model actually reads, so it occupies the conversation the same way a
+      // tool result does. Leaving it at zero made the meter under-report exactly the runs
+      // most likely to need compacting — the multi-agent ones.
+      return storedTextTokens(event.message);
+    case 'tool_call':
+      return (
+        storedTextTokens(event.call.args) +
+        Math.min(MAX_TOOL_RESULT_TOKENS, storedTextTokens(event.call.result)) +
+        estimateTokens(event.call.summary.title)
+      );
+    case 'handoff':
+      return 0;
+    default:
+      return 0;
+  }
+}
+
+/**
+ * Collapses every stored snapshot of one page-observed item back into one event.
+ *
+ * The recorder writes a `progress` or `page_tool` event again whenever the thing it is
+ * watching has changed on screen. That is the honest thing to store — an append-only log
+ * cannot rewrite a line it has already written — but it is not what anything should
+ * *display*: one caption that grew four times is one caption, not four, and one activity
+ * row whose label was rewritten as it finished is one step, not two. Rendering the
+ * snapshots as siblings is exactly the duplicated-and-reordered transcript this fold
+ * exists to undo.
+ *
+ * The surviving event keeps the *first* snapshot's position (seq, time, turn, agent) and
+ * the *last* snapshot's text. Position first, because the thing happened when it first
+ * appeared — placing it at the newest snapshot would drag it below tool calls it actually
+ * preceded, which is the other half of the same bug. Snapshots with no identity are left
+ * exactly as they are: nothing about them says they belong together.
+ *
+ * Identity is namespaced by kind. A `progressId` and a `messageId` are minted by different
+ * code paths and are not required to be disjoint; folding them into one keyspace would let
+ * a caption swallow an activity row that happened to be named the same thing.
+ */
+export function foldProgress(events: readonly SessionEvent[]): SessionEvent[] {
+  const anchor = new Map<string, number>();
+  const out: Array<SessionEvent | null> = [...events];
+  for (let index = 0; index < out.length; index++) {
+    const event = out[index];
+    if (!event) continue;
+    let key: string | null = null;
+    if (event.kind === 'progress' && event.progressId) key = `progress\u0000${event.progressId}`;
+    else if (event.kind === 'tool_call') key = `tool_call\u0000${event.call.callId}`;
+    else if (event.kind === 'page_tool' && event.messageId) key = `page_tool\u0000${event.messageId}`;
+    if (!key) continue;
+    const at = anchor.get(key);
+    if (at === undefined) {
+      anchor.set(key, index);
+      continue;
+    }
+    const held = out[at];
+    if (held && held.kind === 'progress' && event.kind === 'progress') {
+      out[at] = { ...held, message: event.message };
+    } else if (held && held.kind === 'page_tool' && event.kind === 'page_tool') {
+      out[at] = { ...held, label: event.label };
+    } else if (held && held.kind === 'tool_call' && event.kind === 'tool_call') {
+      out[at] = event.seq >= held.seq ? { ...event, origin: held.origin ?? held.seq, time: held.time } : held;
+    }
+    out[index] = null;
+  }
+  // A Stop click receipt is not provider completion. Reconcile the existing status
+  // only from this exact turn's observed stopped event, including old stored rows.
+  const stopped = new Set(events.filter(event => event.source === 'extension' && event.kind === 'turn_end' &&
+    event.outcome === 'stopped' && event.turnId).map(event => event.turnId));
+  return out.filter((event): event is SessionEvent => event !== null).map(event => {
+    if (event.source !== 'app' || event.kind !== 'progress' || !event.turnId ||
+        event.progressId !== `finish-release:${event.turnId}` || !stopped.has(event.turnId) ||
+        !event.message.text.startsWith('Stop requested.')) return event;
+    const text = 'Stopped. ChatGPT confirmed that generation stopped.';
+    return { ...event, message: { text, chars: text.length, truncated: false } };
+  });
+}
+
+export interface TokenPressure {
+  estimated: number;
+  advisory: number;
+  limit: number;
+  level: 'ok' | 'large' | 'huge';
+}
+
+export function tokenPressure(estimated: number, advisory: number, limit: number): TokenPressure {
+  return {
+    estimated,
+    advisory,
+    limit,
+    level: estimated >= limit ? 'huge' : estimated >= advisory ? 'large' : 'ok'
+  };
+}

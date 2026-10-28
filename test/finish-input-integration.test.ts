@@ -1,0 +1,88 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { makeTempDir, removeTempDir } from './helpers.js';
+const hooks = vi.hoisted(() => ({ caller: { sessionId: '', conversationId: '' }, startedAt: 2000, followup: vi.fn() }));
+vi.mock('../src/main/goal.js', async original => ({ ...await original<object>(), draftFastFollowup: hooks.followup }));
+vi.mock('../src/main/mcp/call-context.js', async original => ({ ...await original<object>(), currentCall: () => ({ caller: hooks.caller, startedAt: hooks.startedAt }) }));
+import { initConfigPath, defaultConfig, saveConfig } from '../src/main/config.js';
+import { initDurableStore, resetDurableForTests, flushDurable } from '../src/main/durable.js';
+import { initSessionStore, createSession, appendEvent, observeSessionModel, resetSessionStoreForTests, flushSessions } from '../src/main/session/store.js';
+import { setGoalSwitchNow, resetGoalStateForTests } from '../src/main/goal.js';
+import { announceSessionFinish, settleSessionFinishForTests, setFinishNotifier } from '../src/main/session/finish.js';
+import { listInputs, offerToolInput, resetInputForTests, pendingBrowserInputs, enqueueInput } from '../src/main/session/input.js';
+import { recordChatObservations, resetRecorderForTests } from '../src/main/session/recorder.js';
+let directory = '';
+afterEach(async () => {
+  await flushSessions(); await flushDurable();
+  resetInputForTests(); resetGoalStateForTests(); resetRecorderForTests(); resetSessionStoreForTests(); resetDurableForTests();
+  setFinishNotifier(null); vi.restoreAllMocks();
+  if (directory) await removeTempDir(directory);
+});
+describe('finish producer to durable injection integration', () => {
+  it.each(['inferred', 'cached', 'revised'])('releases an after-turn message only for exact recovered native completion (%s)', async evidence => {
+    directory = await makeTempDir('clf-recovered-final-input-');
+    initConfigPath(directory); initDurableStore(directory); initSessionStore(directory);
+    await saveConfig(defaultConfig());
+    const conversationId = randomUUID();
+    const opened = await recordChatObservations(conversationId, [
+      { kind: 'turn_start', time: 1000, turnId: 'recovered-turn' },
+      { kind: 'assistant_message', time: 1100, turnId: 'recovered-turn', messageId: 'answer',
+        text: 'Earlier answer', ...(evidence !== 'inferred' ? { providerMessageId: 'native-answer' } : {}), state: 'final' },
+      { kind: 'turn_end', time: 1200, turnId: 'recovered-turn', outcome: 'failed' }
+    ]);
+    const head = await enqueueInput({ id: randomUUID(), sessionId: opened.sessionId!, text: 'Read the saved worker report',
+      mode: 'after-turn', dueAt: 0, model: 'gpt-5-6-thinking', reasoningEffort: 'high' });
+    expect(await pendingBrowserInputs()).toEqual([]);
+    await recordChatObservations(conversationId, [{ kind: 'assistant_message', time: 1100, authoredTime: true,
+      messageId: 'answer', text: evidence === 'revised' ? 'New final after recovery' : 'Earlier answer',
+      ...(evidence !== 'inferred' ? { providerMessageId: 'native-answer' } : {}), state: 'final', renderedHtml: '<p>Refreshed rendering</p>' }]);
+    expect(await pendingBrowserInputs()).toEqual(evidence !== 'inferred' ? [expect.objectContaining({ id: head.id })] : []);
+    expect((await listInputs()).find(row => row.id === head.id)?.state).toBe('queued');
+  });
+
+  it('releases the held answer for an after-turn head without letting a later finish checkpoint overtake', async () => {
+    directory = await makeTempDir('clf-finish-queue-');
+    initConfigPath(directory); initDurableStore(directory); initSessionStore(directory);
+    await saveConfig({ ...defaultConfig(), ui: { ...defaultConfig().ui, finishTool: true } });
+    const conversationId = randomUUID();
+    const session = await createSession({ conversationId, title: 'Ordered queue' });
+    hooks.caller = { sessionId: session.id, conversationId };
+    await appendEvent(session.id, { source: 'extension', kind: 'turn_start', turnId: 'held-turn', time: 1000 });
+    const head = await enqueueInput({ id: randomUUID(), sessionId: session.id, text: 'Next native turn', mode: 'after-turn', dueAt: 0, model: 'gpt-6-pro', reasoningEffort: 'pro' });
+    await observeSessionModel(session.id, conversationId, 'gpt-6-pro', 1500);
+    await enqueueInput({ id: randomUUID(), sessionId: session.id, text: 'Later checkpoint', mode: 'finish', dueAt: 0, model: 'gpt-6-pro', reasoningEffort: 'pro' });
+    hooks.followup.mockClear();
+    expect(await announceSessionFinish(session.id, 'Wrapping up')).toMatch(/^RELEASED:/);
+    expect(hooks.followup).not.toHaveBeenCalled();
+    expect(await pendingBrowserInputs()).toEqual([]);
+    expect((await offerToolInput(session.id, conversationId, randomUUID(), Date.now(), true)).messages).toEqual([]);
+    await appendEvent(session.id, { source: 'extension', kind: 'turn_end', turnId: 'held-turn', outcome: 'completed', time: Date.now() + 1 });
+    expect(await pendingBrowserInputs()).toEqual([expect.objectContaining({ id: head.id })]);
+  });
+
+  it.each(['goal', 'loop'] as const)('Notify with armed %s produces and retains one real tool injection', async mode => {
+    directory = await makeTempDir('clf-finish-input-');
+    initConfigPath(directory); initDurableStore(directory); initSessionStore(directory);
+    await saveConfig({ ...defaultConfig(), ui: { ...defaultConfig().ui, finishTool: true, finishAction: 'notify' } });
+    const conversationId = randomUUID();
+    const session = await createSession({ conversationId, title: 'Finish integration' });
+    hooks.caller = { sessionId: session.id, conversationId };
+    await appendEvent(session.id, { source: 'extension', kind: 'turn_start', turnId: 'turn-one', time: 1000 });
+    await observeSessionModel(session.id, conversationId, 'gpt-6-pro', 1500);
+    await setGoalSwitchNow(conversationId, mode, true);
+    hooks.followup.mockResolvedValue('Inspect the remaining work');
+    const notify = vi.fn(); setFinishNotifier(notify);
+    await announceSessionFinish(session.id, 'Wrapping up');
+    await settleSessionFinishForTests();
+    const rows = await listInputs();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ state: 'queued', finishOwner: { turnId: 'turn-one' } });
+    expect(await pendingBrowserInputs()).toEqual([]);
+    const payload = await offerToolInput(session.id, conversationId, randomUUID(), Date.now() + 10);
+    expect(payload.messages).toHaveLength(1);
+    expect(payload.messages[0]!.text).toContain('Inspect the remaining work');
+    expect(notify).not.toHaveBeenCalled();
+    await setGoalSwitchNow(conversationId, mode, false);
+    expect((await listInputs())[0]!.state).toBe('cancelled');
+  });
+});

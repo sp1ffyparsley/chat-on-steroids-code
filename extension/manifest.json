@@ -1,0 +1,86 @@
+{
+  "manifest_version": 3,
+  "name": "Luna Forge X7 Companion",
+  "version": "2.1.39",
+  "description": "Connects ChatGPT to Luna Forge X7 and controls browser tabs in the background with DOM, screenshots and developer tools.",
+  "minimum_chrome_version": "125",
+  "permissions": [
+    "storage",
+    "scripting",
+    "alarms",
+    "tabGroups",
+    "debugger",
+    "tabs",
+    "clipboardWrite"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*",
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*",
+    "http://127.0.0.1:8765/*",
+    "http://127.0.0.1:8766/*",
+    "http://127.0.0.1:8767/*",
+    "http://127.0.0.1:8768/*",
+    "http://127.0.0.1:8769/*"
+  ],
+  "optional_host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": [
+        "chatgpt-dom.js",
+        "content.js"
+      ],
+      "css": [
+        "overlay.css"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": [
+        "fiber.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": [
+        "usage.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_start"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Luna Forge X7 Companion",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  }
+}

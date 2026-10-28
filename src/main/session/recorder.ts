@@ -1,0 +1,3386 @@
+/**
+ * The bridge between what happens and what is stored.
+ *
+ * Two sources feed it. The MCP server reports every tool call with the exact arguments
+ * and result. The Chrome extension reports canonical ChatGPT message observations, turn
+ * lifecycle, visible page-native activity, errors, and request-id evidence.
+ *
+ * Tool ownership has one path only: normalized HTTP x-request-id -> ChatGPT
+ * message.metadata.request_id -> conversationId. The correlation registry records that
+ * exact proof. ConversationId then maps to a session and, independently, to swarm role.
+ * If the exact request cannot be proven, the call goes to Unattributed activity. No
+ * tool-name, timing, visible-row, active-tab, generation, or agent-payload heuristic may
+ * choose an owner.
+ */
+
+import { createHash, randomUUID } from 'node:crypto';
+import { promises as fs } from 'node:fs';
+import { join } from 'node:path';
+import { userTitle } from './title.js';
+import type {
+  ActivitySummary,
+  AgentMessage,
+  AssetRef,
+  CallAttribution,
+  SessionEvent,
+  SessionOrigin,
+  SessionSummary,
+  StoredText,
+  ToolCallRecord,
+  ToolOutcome,
+  TurnOutcome
+} from '../../shared/session.js';
+import { estimateTokens, isGenericAutomaticSessionTitle, isReturnedToolOutcome, originTitle, workSequence } from '../../shared/session.js';
+import { getConfig } from '../config.js';
+import { logInfo, logWarn, noteLocalIncident } from '../logger.js';
+import { redactCredentialText } from '../redaction.js';
+import { currentCall, emptyEvidence, runningToolCalls, type CallEvidence } from '../mcp/call-context.js';
+import {
+  MAX_MESSAGE_CHARS,
+  MAX_TOOL_ARGS_CHARS,
+  MAX_TOOL_RESULT_CHARS,
+  MAX_USER_MESSAGE_CHARS,
+  MAX_ASSET_BYTES,
+  appendEvent,
+  appendEventIfCurrent,
+  recordProcessCall,
+  completeProcessCall,
+  bindOwnedToolCallReceipt,
+  syncCanonicalToolCall,
+  observeSessionModel,
+  conversationAttachment,
+  createSession,
+  conversationWasSuperseded,
+  endSession,
+  findSessionByConversation,
+  getSession,
+  readAsset,
+  readEvents,
+  readRecentEvents,
+  readReceiptWitnessOccurrences,
+  readLatestUserMessage,
+  indexedSessions,
+  syncSessionJournal,
+  sessionsRoot,
+  renameSession,
+  reopenSession,
+  rewriteUnattributedToolCalls,
+  setSessionOrigin,
+  upsertMessageEvent,
+  writeAsset,
+  verifyAndSyncSessionAsset,
+  writeOverflowText,
+  type SessionAppendPredicate
+} from './store.js';
+import {
+  awaitRequestCorrelation,
+  commitRequestCorrelations,
+  correlationCommitPending,
+  observeRequestCorrelations,
+  requestCorrelation,
+  resetCorrelationRegistryForTests,
+} from './correlation.js';
+import { resumeOpeningChat, resumeOpeningWait } from './resume-gate.js';
+import { reconcileRecordedContinuationDestinationNow } from './continuation.js';
+import { summarizeToolCall } from './summarize.js';
+import { isChatDeleted } from './blocked-chats.js';
+
+interface EndedTurnEvidence {
+  turnId: string;
+  startedAt: number | null;
+  endedAt: number;
+  requestIds: Set<string>;
+}
+
+interface LiveConversation {
+  conversationId: string;
+  sessionId: string;
+  /** Durable local turn lifecycle only. Never used as MCP ownership evidence. */
+  turnStartedAt: number | null;
+  turnId: string | null;
+  /**
+   * Turns this session's log started and has not ended.
+   *
+   * Only these may be closed by the reload-recovery path. A cold page reports a final
+   * assistant message tagged with whatever turn id it can read, and those ids are reused
+   * turn after turn, so trusting the id alone let a reload append a second completion for
+   * a turn that ended long before. Seeded from the log at pickup, so it is right after an
+   * app restart and not only for a page that stayed open.
+   */
+  openTurns: Set<string>;
+  /** Durable starts and ends not superseded by an app-authored reopen; browser replay stays idempotent. */
+  knownTurnStarts: Set<string>;
+  knownTurnEnds: Set<string>;
+  /** Newest durable turn verdict, used only to interpret post-reload final/call evidence. */
+  lastTurnOutcome: TurnOutcome | null;
+  /** Start of that turn, so its final may predate a later detach/end while old finals cannot. */
+  lastTurnStartedAt: number | null;
+  /** ChatGPT request ids — one per server turn — that called tools while the open turn ran. */
+  turnRequestIds: Set<string>;
+  /**
+   * The newest turn the page reported completed, with the server turns it was calling under.
+   *
+   * A request id is minted per server turn and outlives anything the page does: a reload,
+   * a lost stream, a Stop click. So a call under one of these ids that *starts* after the
+   * reported end is proof the end was the page's mistake — ChatGPT is still working that
+   * turn — and the recorder reopens it rather than let Goal answer a turn that has not
+   * finished. See reopenFalselyEndedTurn. When that completion is accepted, the same bounded
+   * request-id set plus its local observation time is stored on the canonical turn_end so a
+   * restart retains exactly this repair proof without a second lifecycle ledger.
+   */
+  endedTurn: EndedTurnEvidence | null;
+  /** Visible ChatGPT-native activity rows, updated by the page's stable row identity. */
+  pageTools: Map<string, ProgressRecord>;
+}
+
+interface ProgressRecord {
+  /** Seq of the first record written for this item — where every reader positions it. */
+  seq: number;
+  /** And the time it was first seen, for the same reason. */
+  time: number;
+  /** Most recent observation of this logical item, used only to validate a re-parent alias. */
+  updatedAt: number;
+  text: string;
+  /** The turn it belongs to, so a re-stamp is only ever matched within its own turn. */
+  turnId?: string;
+}
+
+const conversations = new Map<string, LiveConversation>();
+/** One full first-sight initialization per ChatGPT conversation at a time. */
+const sessionInitializations = new Map<string, Promise<string | null>>();
+/**
+ * conversationId → what this app opened that chat for, until the session exists.
+ *
+ * The extension reports the conversation it just typed a bootstrap into before the page
+ * has told the app anything about that conversation, so the origin routinely arrives
+ * first. Holding it here is what lets the session be named correctly at creation rather
+ * than being created under the bootstrap prompt and renamed a moment later.
+ */
+const pendingOrigins = new Map<string, SessionOrigin>();
+const MAX_PENDING_ORIGINS = 50;
+/** Calls whose exact request id never resolves to a conversation are stored here. */
+let unattributedSessionId: string | null = null;
+let unattributedInitialization: Promise<string | null> | null = null;
+let lastActiveSessionId: string | null = null;
+
+/**
+ * How long a session must have been closed before its return is worth a log line.
+ *
+ * Reloads, back/forward-cache round-trips and short disconnects all close and reopen a
+ * session; only an absence long enough that the user might have gone and done something
+ * else is news. The reopen itself always happens — this is purely about what is said.
+ */
+const REOPEN_NOTICE_MS = 60_000;
+
+const listeners = new Set<() => void>();
+let notifyTimer: NodeJS.Timeout | null = null;
+
+export function onSessionChange(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+function notifyChanged(): void {
+  if (notifyTimer) return;
+  notifyTimer = setTimeout(() => {
+    notifyTimer = null;
+    for (const listener of listeners) {
+      try { listener(); }
+      catch {
+        // Observers run after the durable write. A failed view must neither turn that
+        // write into a failure nor prevent other observers from seeing the change.
+        logWarn('session change observer failed (callback_failure)');
+        void noteLocalIncident({ source: 'app', reason: 'session_change_observer_failed',
+          status: 'unresolved' }).catch(() => {});
+      }
+    }
+  }, 400);
+  notifyTimer.unref?.();
+}
+
+export function recordingEnabled(): boolean {
+  return getConfig().sessions.record;
+}
+
+// ------------------------------------------------------------- sessions
+
+/**
+ * The session a conversation writes to, created on first sight.
+ *
+ * First sight can race: two extension batches, or an extension batch and another recorder
+ * path, may reach a conversation before either has installed its live map entry. Sharing the
+ * whole initialization promise prevents both callers from independently passing the disk
+ * lookup and creating two durable sessions for the same chat.
+ */
+export async function sessionForConversation(
+  conversationId: string | null,
+  title?: string
+): Promise<string | null> {
+  if (isChatDeleted(conversationId)) return null;
+  if (!conversationId) return initializeSessionForConversation(conversationId, title);
+
+  const pending = sessionInitializations.get(conversationId);
+  if (pending) {
+    const sessionId = await pending;
+    if (sessionId) {
+      // A caller that arrived while initialization was in flight may carry evidence the first
+      // caller did not yet have: command origin or the first authored user title. Apply both
+      // after the shared initialization rather than dropping the later evidence.
+      if (pendingOrigins.has(conversationId)) await applyOrigin(sessionId, conversationId);
+      await promoteGenericTitle(sessionId, title);
+    }
+    return sessionId;
+  }
+
+  const initializing = initializeSessionForConversation(conversationId, title);
+  sessionInitializations.set(conversationId, initializing);
+  try {
+    const sessionId = await initializing;
+    // noteChatOrigin() can race the find/create window too. Its pending entry is authoritative
+    // and must be stamped before this first caller returns even if it arrived after the
+    // initializer sampled pendingOrigins.
+    if (sessionId) {
+      if (pendingOrigins.has(conversationId)) await applyOrigin(sessionId, conversationId);
+      await promoteGenericTitle(sessionId, title);
+    }
+    return sessionId;
+  } finally {
+    if (sessionInitializations.get(conversationId) === initializing) {
+      sessionInitializations.delete(conversationId);
+    }
+  }
+}
+
+/**
+ * Reattaches an already-recorded ChatGPT conversation after process-memory loss.
+ *
+ * A browser `/activity` poll is first-hand evidence that the page is open, but it must not
+ * create a brand-new session for a conversation this app has never recorded. Check durable
+ * history first, then use the ordinary reopen path so live turn/session state is rebuilt from
+ * the existing log exactly as if the page had just reported an observation.
+ */
+export async function restoreRecordedConversation(conversationId: string): Promise<string | null> {
+  if (!recordingEnabled() || !conversationId) return null;
+  const existing = conversations.get(conversationId);
+  if (existing) return existing.sessionId;
+  const known = await findSessionByConversation(conversationId);
+  if (!known) return null;
+  return sessionForConversation(conversationId);
+}
+
+/**
+ * Honor the continuation's existing claim window before creating an unknown conversation.
+ * An independent shorter deadline can mint a shadow session while the destination still
+ * legitimately awaits its commit. Capture the current attempts only: an exact durably
+ * redeemed command keeps its existing delivery deadline, not a new recorder timeout, and
+ * overlapping unrelated claims cannot indefinitely prevent a new chat from being recorded.
+ */
+async function settleResumeCommit(): Promise<void> {
+  const opening = resumeOpeningWait();
+  while (opening()) {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 50);
+      timer.unref?.();
+    });
+  }
+}
+
+async function initializeSessionForConversation(
+  conversationId: string | null,
+  title?: string
+): Promise<string | null> {
+  if (!recordingEnabled()) return null;
+  if (!conversationId) return ensureUnattributedSession();
+  // A deletion can race a first-sight initialization already waiting on a resume commit.
+  // Recheck at the actual creation boundary so an open page cannot recreate the row the user
+  // just removed.
+  if (isChatDeleted(conversationId)) return null;
+  const existing = conversations.get(conversationId);
+  if (existing) {
+    lastActiveSessionId = existing.sessionId;
+    if (pendingOrigins.has(conversationId)) await applyOrigin(existing.sessionId, conversationId);
+    await promoteGenericTitle(existing.sessionId, title);
+    return existing.sessionId;
+  }
+  // Reuse a session already recorded for this conversation, so closing and reopening
+  // the tab continues the same history instead of fragmenting it.
+  let known = await findSessionByConversation(conversationId);
+  if (!known && resumeOpeningChat()) {
+    // A compaction is opening its replacement chat right now, and this unknown conversation
+    // may be it. Creating a session here is what breaks the move: the commit that follows
+    // finds its own destination owned by a session it has never heard of and refuses to
+    // rebind. Wait within the claim's existing bound, then resolve this conversation to the
+    // session that was moved onto it so the batch is recorded in the right place. See
+    // resume-gate.ts for what this cost the session it was written for.
+    await settleResumeCommit();
+    const moved = conversations.get(conversationId);
+    if (moved) {
+      lastActiveSessionId = moved.sessionId;
+      return moved.sessionId;
+    }
+    known = await findSessionByConversation(conversationId);
+  }
+  if (!known && (await conversationWasSuperseded(conversationId))) {
+    // Compact & Resume moved this chat's session onto its replacement. Whatever the old page
+    // still reports — the brief re-rendered with its HTML, a lingering turn, the user typing
+    // into it — is history of that one session, never a chat of its own: on 2026-09-02 the
+    // brief's late re-render minted a second session holding nothing but the summary.
+    // recordChatObservationsNow() files such messages into the lineage; nothing else may
+    // mint a session for a conversation this app has already replaced.
+    logInfo(`conversation ${conversationId} was replaced by Compact & Resume; its late observation gets no session of its own`);
+    return null;
+  }
+  if (isChatDeleted(conversationId)) return null;
+  // A chat this app opened is named for the command that opened it. The alternative —
+  // the first thing said in the chat — is this app's own bootstrap prompt.
+  const origin = pendingOrigins.get(conversationId) ?? null;
+  const summary =
+    known ??
+    (await createSession({
+      conversationId,
+      title: origin ? await titleForOrigin(origin) : title,
+      origin,
+      titleSource: origin?.kind === 'desktop' && origin.nickname ? 'manual' : 'fallback'
+    }));
+  if (origin && !known) pendingOrigins.delete(conversationId);
+  // Reopening a chat that was closed earlier makes its session live again. Appending
+  // to a session still stamped with an end time left the UI showing a finished session
+  // that was visibly still growing.
+  if (known && known.endedAt !== null) {
+    const closedFor = Date.now() - known.endedAt;
+    await reopenSession(known.id).catch(() => undefined);
+    // Only worth saying when the session was actually away. A reload, a bfcache
+    // round-trip or a brief disconnect closes and reopens within seconds and changes
+    // nothing the user could act on; announcing each one filled the Activity log with
+    // ten identical lines in seventy seconds across five tabs.
+    if (closedFor >= REOPEN_NOTICE_MS) {
+      logInfo(`session ${known.id} reopened — its ChatGPT conversation is active again`);
+    }
+  }
+  const history = known
+    ? await storedHistory(summary.id)
+    : {
+        openTurns: new Set<string>(),
+        knownTurnStarts: new Set<string>(),
+        knownTurnEnds: new Set<string>(),
+        lastTurnStartedAt: null,
+        activeTurnId: null,
+        activeTurnStartedAt: null,
+        endedTurn: null,
+        pageTools: new Map<string, ProgressRecord>()
+      };
+
+  // `storedHistory()` can take long enough for Compact & Resume to durably move this exact
+  // session from chat A to chat B while first-sight initialisation of A is still in flight.
+  // The lookup at the top of this function is therefore no longer authority after that await.
+  // Re-check the session itself immediately before publishing the live map and returning its
+  // id. If durable metadata no longer names A, this stale initializer must publish nothing and
+  // return nothing; a later observation from A can then take the normal "new session" path
+  // rather than resurrecting the moved session behind B's back.
+  if (known) {
+    const current = await getSession(summary.id);
+    if (!current || current.conversationId !== conversationId) {
+      logInfo(
+        `session ${summary.id} moved away from conversation ${conversationId} while that conversation was being restored; discarded stale live initialization`
+      );
+      return null;
+    }
+  }
+  conversations.set(conversationId, {
+    conversationId,
+    sessionId: summary.id,
+    // A running turn survives an app/content-script restart. The durable log is the only
+    // component that can still know the old document's generation id, so restore it here
+    // and let /activity hand it back to the replacement content script.
+    turnStartedAt: history.activeTurnStartedAt,
+    turnId: history.activeTurnId,
+    openTurns: history.openTurns,
+    knownTurnStarts: history.knownTurnStarts,
+    knownTurnEnds: history.knownTurnEnds,
+    lastTurnOutcome: summary.lastTurnOutcome,
+    lastTurnStartedAt: history.lastTurnStartedAt,
+    turnRequestIds: new Set<string>(),
+    endedTurn: history.endedTurn,
+    pageTools: history.pageTools
+  });
+  if (!known) {
+    await appendEvent(summary.id, {
+      time: Date.now(),
+      source: 'extension',
+      kind: 'session_start',
+      conversationId,
+      title: summary.title
+    });
+    logInfo(`session started for a ChatGPT conversation (${summary.id})`);
+  }
+  if (origin && known) await applyOrigin(summary.id, conversationId);
+  if (known) await promoteGenericTitle(summary.id, title);
+  if (known) {
+    // There are two awaited metadata niceties above. A rebind that starts after the pre-publish
+    // check can therefore still commit before this initializer returns. Re-check once more and
+    // retract only our own stale A→S publication if durable ownership moved in that window.
+    // No await follows this check before return, so a caller can never receive S from an
+    // initializer that has already observed S belonging to B.
+    const current = await getSession(summary.id);
+    if (!current || current.conversationId !== conversationId) {
+      const published = conversations.get(conversationId);
+      if (published?.sessionId === summary.id) conversations.delete(conversationId);
+      logInfo(
+        `session ${summary.id} moved away from conversation ${conversationId} before restore completed; retracted stale live initialization`
+      );
+      return null;
+    }
+  }
+  lastActiveSessionId = summary.id;
+  notifyChanged();
+  return summary.id;
+}
+
+/** Generic placeholders yield to authored previews; store owns naming precedence. */
+async function promoteGenericTitle(sessionId: string, title?: string): Promise<void> {
+  const next = title?.trim();
+  if (!next || isGenericAutomaticSessionTitle(next)) return;
+  const summary = await getSession(sessionId);
+  if (!summary || summary.titleSource === 'manual' || !isGenericAutomaticSessionTitle(summary.title)) return;
+  await renameSession(sessionId, next, 'fallback');
+  notifyChanged();
+}
+
+/** Provider titles may arrive before message history, after a receipt, or after restart. */
+async function promoteConversationTitle(sessionId: string, title?: string, conversationId?: string): Promise<void> {
+  const next = title?.trim();
+  if (!next) return;
+  await renameSession(sessionId, next, 'provider', conversationId);
+  notifyChanged();
+}
+
+/**
+ * Records that this app opened a chat, so the session can be named for the work rather
+ * than for the bootstrap prompt.
+ *
+ * Called from the bridge the moment the extension acknowledges having typed a command
+ * into a fresh tab — the only point at which the queued command and the conversation it
+ * became are both known.
+ */
+export async function noteChatOrigin(conversationId: string, origin: SessionOrigin): Promise<void> {
+  if (!conversationId) return;
+  pendingOrigins.set(conversationId, origin);
+  while (pendingOrigins.size > MAX_PENDING_ORIGINS) {
+    const oldest = pendingOrigins.keys().next();
+    if (oldest.done) break;
+    pendingOrigins.delete(oldest.value);
+  }
+  if (!recordingEnabled()) return;
+  const live = conversations.get(conversationId);
+  const sessionId =
+    live?.sessionId ??
+    (await findSessionByConversation(conversationId))?.id ??
+    null;
+  // No session yet is the common case: the ack beats the page's first observation.
+  // sessionForConversation picks the origin up out of pendingOrigins when it creates one.
+  if (sessionId) await applyOrigin(sessionId, conversationId);
+}
+
+/** The name for a chat this app opened, taking a resume's name from its source. */
+async function titleForOrigin(origin: SessionOrigin): Promise<string> {
+  const source = origin.fromSessionId ? await getSession(origin.fromSessionId) : null;
+  return originTitle(origin, source?.title ?? null);
+}
+
+/** Stamps a pending origin onto an existing session, once. */
+async function applyOrigin(sessionId: string, conversationId: string): Promise<void> {
+  const origin = pendingOrigins.get(conversationId);
+  if (!origin) return;
+  pendingOrigins.delete(conversationId);
+  const summary = await getSession(sessionId);
+  // Already stamped: a worker's bootstrap can be acknowledged more than once, and a
+  // second stamp would rename a session that has since become the user's to name.
+  if (!summary) return;
+  if (summary.origin) {
+    // Older workers either omitted their Prime link or were named before parent-aware worker
+    // labels existed. Exact broker ownership may repair that relation and its automatic title;
+    // a manual/user-edited title remains authoritative in setSessionOrigin().
+    if (summary.origin.kind === 'worker' && origin.kind === 'worker' &&
+        summary.origin.agentId === origin.agentId) {
+      const repaired = summary.origin.fromSessionId || !origin.fromSessionId
+        ? summary.origin
+        : { ...summary.origin, fromSessionId: origin.fromSessionId };
+      const repairedTitle = summary.titleSource === 'manual' ? summary.title : await titleForOrigin(repaired);
+      if (repaired.fromSessionId !== summary.origin.fromSessionId || repairedTitle !== summary.title) {
+        await setSessionOrigin(sessionId, repaired, repairedTitle);
+        notifyChanged();
+      }
+    }
+    return;
+  }
+  const title = origin.kind === 'desktop' && (summary.titleSource === 'manual' || !origin.nickname)
+    ? summary.title
+    : await titleForOrigin(origin);
+  await setSessionOrigin(sessionId, origin, title).catch((err: Error) =>
+    logWarn(`could not name the ${origin.kind} session: ${err.message}`)
+  );
+  logInfo(`session ${sessionId} named for the ${origin.kind} chat this app opened`);
+  notifyChanged();
+}
+
+/** What a session's own log already says, for a conversation being picked up again. */
+interface StoredHistory {
+  /** Turns this log started and never ended — the only ones a recovery may close. */
+  openTurns: Set<string>;
+  /** Every durable turn start, including starts whose turn has already ended. */
+  knownTurnStarts: Set<string>;
+  /** Durable turn ends not superseded by an app-authored reopen. */
+  knownTurnEnds: Set<string>;
+  /** Durable start time of the newest turn that ended in the recovered tail. */
+  lastTurnStartedAt: number | null;
+  /** Current generation from lifecycle replay; older unended turns are history, not active work. */
+  activeTurnId: string | null;
+  /** Durable start time of activeTurnId. */
+  activeTurnStartedAt: number | null;
+  /** Latest completed turn that still carries exact same-request false-completion proof. */
+  endedTurn: EndedTurnEvidence | null;
+  /** Latest stable ChatGPT-native activity row by website thought/message identity. */
+  pageTools: Map<string, ProgressRecord>;
+}
+
+const MAX_COMPLETION_REQUEST_IDS = 128;
+
+function restoredCompletionEvidence(
+  event: Extract<SessionEvent, { kind: 'turn_end' }>
+): EndedTurnEvidence | null {
+  const evidence = event.completionEvidence;
+  if (!event.turnId || event.outcome !== 'completed' || !evidence ||
+      !Number.isFinite(evidence.observedAt) || evidence.observedAt < 0 ||
+      !(evidence.startedAt === null || (Number.isFinite(evidence.startedAt) && evidence.startedAt >= 0)) ||
+      !Array.isArray(evidence.requestIds) || evidence.requestIds.length === 0 ||
+      evidence.requestIds.length > MAX_COMPLETION_REQUEST_IDS ||
+      evidence.requestIds.some(requestId => typeof requestId !== 'string' || requestId.length === 0 || requestId.length > 200)) {
+    return null;
+  }
+  return {
+    turnId: event.turnId,
+    startedAt: evidence.startedAt,
+    endedAt: evidence.observedAt,
+    requestIds: new Set(evidence.requestIds)
+  };
+}
+
+function completionEvidenceFor(
+  live: LiveConversation | undefined,
+  turnId: string,
+  observedAt: number
+): Extract<SessionEvent, { kind: 'turn_end' }>['completionEvidence'] | undefined {
+  if (!live || live.turnId !== turnId || live.turnRequestIds.size === 0 ||
+      live.turnRequestIds.size > MAX_COMPLETION_REQUEST_IDS) return undefined;
+  const requestIds = [...live.turnRequestIds];
+  if (requestIds.some(requestId => requestId.length === 0 || requestId.length > 200)) return undefined;
+  return { observedAt, startedAt: live.turnStartedAt, requestIds };
+}
+
+/**
+ * Reads what a session already contains.
+ *
+ * Read once when a conversation is picked up again, so both de-duplication and turn
+ * recovery survive an app restart rather than only a page that was never reloaded.
+ *
+ * The open-turn ledger is what stops a reload from resurrecting a finished turn. A cold
+ * page reports a final assistant message carrying whatever turn id the page has, and
+ * those ids are reused; without knowing which turns this log actually left open, the
+ * recovery path appended a second completion for a turn that had ended many turns ago.
+ */
+async function storedHistory(sessionId: string): Promise<StoredHistory> {
+  const openTurns = new Set<string>();
+  const knownTurnStarts = new Set<string>();
+  const knownTurnEnds = new Set<string>();
+  let lastTurnEndedAt: number | null = null;
+  let lastTurnStartedAt: number | null = null;
+  let activeTurnId: string | null = null;
+  let activeTurnStartedAt: number | null = null;
+  let endedTurn: EndedTurnEvidence | null = null;
+  const turnStarts = new Map<string, number>();
+  const pageTools = new Map<string, ProgressRecord>();
+  try {
+    const events = await readRecentEvents(sessionId, 4096, {
+      kinds: ['turn_start', 'turn_end', 'page_tool'],
+      maxBytes: 2 * 1024 * 1024
+    });
+    // Presentation groups a turn's starts before its end. Lifecycle replay must
+    // instead retain an app-authored reopen that was committed after that end.
+    for (const event of events.sort((a, b) => a.seq - b.seq)) {
+      if (event.kind === 'turn_start') {
+        if (event.turnId) {
+          endedTurn = null;
+          knownTurnStarts.add(event.turnId);
+          knownTurnEnds.delete(event.turnId);
+          openTurns.add(event.turnId);
+          turnStarts.set(event.turnId, event.time);
+          // Match live recording: each committed start replaces the current generation.
+          // An older turn missing its end remains forensic history; it must not become
+          // active again after a later turn completes and the user closes/revisits the chat.
+          activeTurnId = event.turnId;
+          activeTurnStartedAt = event.time;
+        }
+      } else if (event.kind === 'turn_end') {
+        const endedActiveTurn = Boolean(event.turnId && activeTurnId === event.turnId);
+        if (event.turnId) {
+          knownTurnEnds.add(event.turnId);
+          openTurns.delete(event.turnId);
+          if (activeTurnId === event.turnId) {
+            activeTurnId = null;
+            activeTurnStartedAt = null;
+          }
+        }
+        if (lastTurnEndedAt === null || event.time >= lastTurnEndedAt) {
+          lastTurnEndedAt = event.time;
+          lastTurnStartedAt = event.turnId ? turnStarts.get(event.turnId) ?? null : null;
+        }
+        endedTurn = endedActiveTurn ? restoredCompletionEvidence(event) : null;
+      } else if (event.kind === 'page_tool' && event.messageId) {
+        const held = pageTools.get(event.messageId);
+        if (!held) {
+          pageTools.set(event.messageId, {
+            seq: event.origin ?? event.seq,
+            time: event.time,
+            updatedAt: event.time,
+            text: event.label,
+            ...(event.turnId ? { turnId: event.turnId } : {})
+          });
+        } else {
+          held.updatedAt = Math.max(held.updatedAt, event.time);
+          held.text = event.label;
+          if (!held.turnId && event.turnId) held.turnId = event.turnId;
+        }
+      }
+    }
+  } catch (err) {
+    logWarn(`could not read stored session history: ${(err as Error).message}`);
+  }
+  return { openTurns, knownTurnStarts, knownTurnEnds, lastTurnStartedAt, activeTurnId, activeTurnStartedAt, endedTurn, pageTools };
+}
+
+async function ensureUnattributedSession(): Promise<string | null> {
+  if (!recordingEnabled()) return null;
+  if (unattributedSessionId) return unattributedSessionId;
+  if (unattributedInitialization) return unattributedInitialization;
+  const initializing = (async () => {
+    const summary = await createSession({ title: 'Unattributed activity' });
+    await appendEvent(summary.id, {
+      time: Date.now(), source: 'app', kind: 'session_start', conversationId: null, title: summary.title
+    });
+    unattributedSessionId = summary.id;
+    lastActiveSessionId = summary.id;
+    notifyChanged();
+    return summary.id;
+  })();
+  unattributedInitialization = initializing;
+  try {
+    return await initializing;
+  } finally {
+    if (unattributedInitialization === initializing) unattributedInitialization = null;
+  }
+}
+
+/** The session the UI opens by default: whatever was written to most recently. */
+export function activeSessionId(): string | null {
+  return lastActiveSessionId;
+}
+
+/** The live recorded session owned by one concrete ChatGPT conversation. */
+export function sessionIdForConversation(conversationId: string | null): string | null {
+  if (!conversationId) return null;
+  return conversations.get(conversationId)?.sessionId ?? null;
+}
+
+/** The unattributed stream, when one has been created. Shown as its own row in the UI. */
+export function unattributedSession(): string | null {
+  return unattributedSessionId;
+}
+
+/**
+ * `activeTurnId` is the generation id of the turn this conversation currently has open, or
+ * null. It exists so a reloaded content script can adopt the turn it is standing in the
+ * middle of instead of minting a second one.
+ *
+ * The extension's turn ids are `g-<run>-<epoch>-<n>`, where `<run>` is a namespace random
+ * per *document*. That is what makes them unique, and it is also why a reload cannot
+ * reconstruct one: the old document's namespace died with it. So the new document sees a
+ * stop button, believes it is watching a turn nobody has reported, and opens another —
+ * splitting one assistant run across two local lifecycle generations. This app holds the
+ * durable half of that lifecycle identity, so this is where it has to come from.
+ */
+export function liveConversations(): Array<{
+  conversationId: string;
+  sessionId: string;
+  generating: boolean;
+  activeTurnId: string | null;
+  /** Existing recorder-owned start, used to age bare open-turn recovery evidence. */
+  activeTurnStartedAt: number | null;
+  /**
+   * How many turns of this chat have finished. Only ever goes up, for the life of the entry.
+   *
+   * `knownTurnEnds` is the recorder's idempotency set for turn ends, so its size is already an
+   * exact count of them - including the ends recovered from a final assistant message after a
+   * page reload. It answers the one question a turn id cannot: whether the turn that was live a
+   * moment ago is the turn that is live now. A reload mints a fresh local id for a generation
+   * that never ended, so id inequality means "or the page came back", while this counter moves
+   * only when a turn is actually over.
+   */
+  endedTurns: number;
+  /** Newest durable turn verdict; null when this chat has never reported an end. */
+  lastTurnOutcome: TurnOutcome | null;
+}> {
+  return [...conversations.values()].map((entry) => ({
+    conversationId: entry.conversationId,
+    sessionId: entry.sessionId,
+    generating: entry.turnStartedAt !== null,
+    activeTurnId: entry.turnStartedAt !== null ? entry.turnId : null,
+    activeTurnStartedAt: entry.turnStartedAt,
+    endedTurns: entry.knownTurnEnds.size,
+    lastTurnOutcome: entry.lastTurnOutcome
+  }));
+}
+
+/** Exact committed start, not a newly sighted request whose transcript is still being filed. */
+export function hasRecordedTurn(sessionId: string, conversationId: string, turnId: string): boolean {
+  const live = conversations.get(conversationId);
+  return live?.sessionId === sessionId && live.knownTurnStarts.has(turnId);
+}
+
+/**
+ * Shortens the evidence waits for the test suite, and only for it.
+ *
+ * These windows exist because a real browser reports a request id up to several seconds
+ * after the connector already answered. The suite has no browser: it hands the recorder its
+ * evidence in the same process, microseconds later, or deliberately never. So every test
+ * that asserts "this ends up unattributed" paid the full twenty seconds to prove a
+ * negative, and a handful of them dominated the whole run.
+ *
+ * Never set outside the test runner, so production keeps the measured windows. The value is
+ * also clamped to the production one, so this can only ever make a wait shorter.
+ */
+export function evidenceWindow(production: number): number {
+  const raw = process.env.CLF_EVIDENCE_MS;
+  if (raw === undefined) return production;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? Math.min(parsed, production) : production;
+}
+
+/**
+ * How long a completed MCP call may wait for its exact page-side request id observation.
+ *
+ * This wait is request-specific: only the identical normalized x-request-id can satisfy it.
+ * Chrome-off or missing evidence ends in Unattributed activity rather than a tool, time or
+ * generation guess.
+ *
+ * Exported because it is also the depth to which *enforcement* has to resolve identity. Any
+ * rule that refuses a call by conversation — the user's chat block — must not settle for less
+ * evidence than the timeline the user is looking at will settle for, or the app ends up showing
+ * a call attributed to a chat whose calls it claims to be refusing. See kernel.ts.
+ */
+export const REQUEST_ID_GRACE_MS = evidenceWindow(20_000);
+
+/**
+ * Late exact request-id evidence can arrive after a call already fell into Unattributed.
+ *
+ * Correlation is deliberately durable and request-specific, so once that evidence exists
+ * there is no reason to leave the old call stranded until the next app restart. Coalesce a
+ * burst of page evidence into one deterministic repair pass. This never uses timestamps,
+ * active tabs, tool names or turn position: `repairDeterministicAttribution()` moves only
+ * calls carrying the exact request id whose owner the page has proved.
+ */
+let attributionRepairTimer: NodeJS.Timeout | null = null;
+let attributionRepairRequested = false;
+let fullAttributionRepair = false;
+const repairRequestIds = new Set<string>();
+// Derived negative-read cache only: exact ownership still comes from correlation.ts.
+const repairBuckets = new Map<string, { toolCalls: number; updatedAt: number; requestIds: Set<string> }>();
+const MAX_REPAIR_BUCKETS = 128;
+const MAX_REPAIR_REQUEST_IDS = 50_000;
+let attributionRepairChain: Promise<void> = Promise.resolve();
+
+function startAttributionRepair(): void {
+  if (!attributionRepairRequested) return;
+  attributionRepairRequested = false;
+  const affected = fullAttributionRepair ? undefined : new Set(repairRequestIds);
+  fullAttributionRepair = false;
+  repairRequestIds.clear();
+  const run = attributionRepairChain.then(async () => {
+    try {
+      await repairDeterministicAttributionNow(affected);
+    } catch (err) {
+      logWarn(`late request attribution repair failed: ${(err as Error).message}`);
+    }
+    if (attributionRepairRequested) startAttributionRepair();
+  });
+  attributionRepairChain = run.then(
+    () => undefined,
+    () => undefined
+  );
+}
+
+/**
+ * Queues the startup repair on the same serialized chain as late request-evidence repairs.
+ * `flushRecorder()` waits this chain during shutdown, so maintenance can never escape the final
+ * recorder/session flush just because startup deliberately did not block the first window on it.
+ */
+export function queueDeterministicAttributionRepair(): void {
+  attributionRepairRequested = true;
+  fullAttributionRepair = true;
+  if (attributionRepairTimer) {
+    clearTimeout(attributionRepairTimer);
+    attributionRepairTimer = null;
+  }
+  startAttributionRepair();
+}
+
+function scheduleAttributionRepair(requestId: string): void {
+  attributionRepairRequested = true;
+  repairRequestIds.add(requestId);
+  if (repairRequestIds.size > 50_000) { repairRequestIds.clear(); fullAttributionRepair = true; }
+  if (attributionRepairTimer) return;
+  attributionRepairTimer = setTimeout(() => {
+    attributionRepairTimer = null;
+    startAttributionRepair();
+  }, 250);
+  attributionRepairTimer.unref?.();
+}
+
+/**
+ * Feeds the one request-correlation registry.
+ *
+ * The outer conversation id comes from the tab URL. `fiberConversationId` comes from the
+ * React tree that also supplied these request messages. When both exist and disagree, none
+ * of the batch is ownership evidence: choosing either side would silently cross-attribute.
+ *
+ * Disagreement discards the batch and nothing else. A page whose URL and React tree disagree
+ * is a page caught in the middle of something, which is the common case rather than the
+ * corrupt one: a chat being switched, a model still mounted from the conversation before it,
+ * a fresh chat whose client-side thread id is not yet the server's. Every one of those
+ * resolves a moment later, so the batch is worth nothing as evidence and worth nothing as a
+ * verdict either.
+ */
+function noteCallEvidence(
+  conversationId: string,
+  sessionId: string,
+  fiberConversationId: string | null | undefined,
+  calls: readonly PageCallEvidence[],
+  at: number,
+  turnId?: string
+): boolean {
+  if (fiberConversationId && fiberConversationId !== conversationId) {
+    // Name the discarded ids. Without them this line says a batch was dropped but not
+    // *which* calls it cost, so a chat whose every call lands in Unattributed activity
+    // reads identically in the log to one that lost a single stale sighting — and the
+    // 2026-08-21 outage, where this branch swallowed an entire conversation's evidence
+    // because the page turn id was absent, was invisible here for exactly that reason.
+    const dropped = calls.map((call) => call.requestId).filter((id): id is string => !!id);
+    logWarn(
+      `request attribution: ignoring ${calls.length} sighting(s) — URL conversation ${conversationId} disagrees ` +
+        `with Fiber conversation ${fiberConversationId}. Later agreeing evidence can still prove these calls.` +
+        (dropped.length > 0 ? ` Discarded request ids: ${dropped.join(', ')}.` : '')
+    );
+    return false;
+  }
+  const observedAt = Math.min(at, Date.now());
+  const evidencedCalls = calls.filter((call): call is PageCallEvidence & { requestId: string } => !!call.requestId);
+  // One ChatGPT workflow request id can legitimately cover dozens of connector calls, so read
+  // the owners once up front and report a refusal once per id rather than once per call.
+  const priorOwners = new Map(
+    evidencedCalls.map((call) => [call.requestId, requestCorrelation(call.requestId)?.conversationId ?? null] as const)
+  );
+  const priorTurns = new Map(
+    evidencedCalls.map((call) => [call.requestId, requestCorrelation(call.requestId)?.turnId] as const)
+  );
+  const priorNative = new Map(evidencedCalls.map((call) => {
+    const held = requestCorrelation(call.requestId);
+    return [call.requestId, {
+      messageId: held?.nativeCallMessageId,
+      ambiguous: held?.nativeCallAmbiguous
+    }] as const;
+  }));
+  const results = observeRequestCorrelations(
+    evidencedCalls.map((call) => ({
+      requestId: call.requestId,
+      conversationId,
+      sessionId,
+      messageId: call.messageId,
+      ...(turnId ? { turnId } : {}),
+      tool: call.tool,
+      observedAt
+    }))
+  );
+  const refusals = new Set<string>();
+  let stored = false;
+  for (const [index, call] of evidencedCalls.entries()) {
+    const result = results[index]!;
+    if (result === 'refused') {
+      // A note, not a problem. Nothing is lost when a claim is refused - the calls under this id
+      // go on reaching the conversation that proved it - so this must not join the count of
+      // things wrong with the run. It was a warning while a contradiction destroyed the owner,
+      // which was a real fault and was worth shouting about.
+      if (!refusals.has(call.requestId)) {
+        refusals.add(call.requestId);
+        logInfo(
+          `request attribution: ${call.requestId} stays with conversation ${priorOwners.get(call.requestId)}` +
+            `; conversation ${conversationId} claimed it too and was refused`
+        );
+      }
+    } else if (result === 'stored') {
+      stored = true;
+      logInfo(`request attribution: ${call.requestId} -> conversation ${conversationId}`);
+      scheduleAttributionRepair(call.requestId);
+    } else if (priorTurns.get(call.requestId) !== requestCorrelation(call.requestId)?.turnId ||
+        priorNative.get(call.requestId)?.messageId !== requestCorrelation(call.requestId)?.nativeCallMessageId ||
+        priorNative.get(call.requestId)?.ambiguous !== requestCorrelation(call.requestId)?.nativeCallAmbiguous) {
+      // Exact turn enrichment and positively distinct native-call evidence both
+      // cross the same durable browser-ACK barrier. A late sibling result cannot
+      // be allowed to settle the original call before this veto is committed.
+      stored = true;
+    }
+  }
+  return stored;
+}
+
+/**
+ * The chat a recorded session belongs to, when exactly one live chat is writing to it.
+ *
+ * Used by compaction to find the workspace of the chat being compacted, which it otherwise
+ * has no way to name: a compaction request identifies a session, and the mapping only runs
+ * the other way. Ambiguity is answered with null rather than a pick, for the same reason it
+ * is everywhere else in the workspace code.
+ */
+export function soleConversationForSession(sessionId: string): string | null {
+  const owners = [...conversations.values()].filter((entry) => entry.sessionId === sessionId);
+  return owners.length === 1 ? owners[0]!.conversationId : null;
+}
+
+export function freshCallOrigin(tool: string, after: number, requestId: string | null = null): string | null {
+  void tool;
+  void after;
+  return requestCorrelation(requestId)?.conversationId ?? null;
+}
+
+export async function awaitFreshCallOrigin(
+  tool: string,
+  after: number,
+  within: number,
+  options: { exact?: boolean; requestId?: string | null } = {}
+): Promise<string | null> {
+  void tool;
+  void after;
+  void options.exact;
+  const correlation = await awaitRequestCorrelation(options.requestId ?? null, within);
+  return correlation?.conversationId ?? null;
+}
+
+/**
+ * Repairs every call in an old Unattributed bucket whose deterministic owner is now known.
+ *
+ * 1.8.1 could forget a previously-proved request id after ten minutes. A historical bucket can
+ * also contain several workflows because all unknown work shared one global sink. Repair is
+ * therefore per exact request id, not all-or-nothing: calls with a proven owner move to that
+ * conversation, while calls that still have no proof remain in Unattributed activity. Several
+ * proven owners in one bucket are split correctly; no tool name, clock or active-tab guess is
+ * ever involved.
+ *
+ * Calls keep their original callId, so a crash after copying some rows but before rewriting the
+ * old bucket is idempotent on the next launch. Assets are copied before any history is removed.
+ */
+export function repairDeterministicAttribution(affected?: ReadonlySet<string>): Promise<{ sessions: number; calls: number }> {
+  // Explicit callers must join the same owner as startup, delayed correlation
+  // repair and native result-receipt transfer. Otherwise two passes can both
+  // snapshot an empty destination and append one execution twice. Freeze the
+  // caller's selection while waiting; a failed pass cannot poison later work.
+  const selected = affected ? new Set(affected) : undefined;
+  const pending = attributionRepairChain.then(() => repairDeterministicAttributionNow(selected));
+  attributionRepairChain = pending.then(() => undefined, () => undefined);
+  return pending;
+}
+
+/** Already executing inside attributionRepairChain; never queue recursively. */
+async function repairDeterministicAttributionNow(affected?: ReadonlySet<string>): Promise<{ sessions: number; calls: number }> {
+  if (!recordingEnabled()) return { sessions: 0, calls: 0 };
+ let repairedSessions = 0;
+ let repairedCalls = 0;
+  let deferredDestinationSyncError: Error | null = null;
+  const exactCurrentOwner = async (conversationId: string, sessionId: string): Promise<boolean> => {
+    // A correlation names one exact historical session, but that is not proof
+    // that the conversation still has one unique current attachment. The store
+    // owns that verdict; duplicate/current-catalog uncertainty keeps the source.
+    const unique = await findSessionByConversation(conversationId, { requireUnique: true });
+    return unique?.id === sessionId &&
+      await conversationAttachment(conversationId, sessionId) === 'current';
+  };
+
+  for (const summary of await indexedSessions()) {
+    if (summary.conversationId !== null || summary.title !== 'Unattributed activity') continue;
+    const cached = repairBuckets.get(summary.id);
+    if (affected && cached?.toolCalls === summary.toolCalls && cached.updatedAt === summary.updatedAt &&
+        ![...affected].some((id) => cached.requestIds.has(id))) continue;
+    // Attribution repair is a destructive cross-session move. A tolerant history
+    // projection may omit a damaged source row, so the source snapshot must be
+    // complete before it can be used as the keep/remove set.
+    let events: SessionEvent[];
+    try {
+      events = await readEvents(summary.id, { requireIntegrity: true });
+    } catch {
+      // One damaged holding bucket must remain untouched, but it must not starve
+      // independent exact request-id repairs in other sessions.
+      repairBuckets.delete(summary.id);
+      logWarn('late request attribution repair held: source journal integrity unverified');
+      continue;
+    }
+    const scannedThroughSeq = events.reduce((highest, event) => Math.max(highest, event.seq), 0);
+    const tools = events.filter(
+      (event): event is Extract<SessionEvent, { kind: 'tool_call' }> => event.kind === 'tool_call'
+    );
+    const requestIds = new Set<string>();
+    for (const event of tools) {
+      if (event.call.requestId) requestIds.add(event.call.requestId);
+      if (requestIds.size > MAX_REPAIR_REQUEST_IDS) break;
+    }
+    repairBuckets.delete(summary.id);
+    if (requestIds.size <= MAX_REPAIR_REQUEST_IDS) {
+      let total = requestIds.size;
+      for (const bucket of repairBuckets.values()) total += bucket.requestIds.size;
+      while (repairBuckets.size >= MAX_REPAIR_BUCKETS || total > MAX_REPAIR_REQUEST_IDS) {
+        const oldest = repairBuckets.keys().next().value!;
+        total -= repairBuckets.get(oldest)!.requestIds.size;
+        repairBuckets.delete(oldest);
+      }
+      repairBuckets.set(summary.id, { toolCalls: summary.toolCalls, updatedAt: summary.updatedAt, requestIds });
+    }
+    if (tools.length === 0) continue;
+    if (events.some((event) => event.kind !== 'session_start' && event.kind !== 'tool_call')) continue;
+
+    const owned = new Map<
+      string,
+      Array<{ event: Extract<SessionEvent, { kind: 'tool_call' }>; conversationId: string }>
+    >();
+    const unknown: Extract<SessionEvent, { kind: 'tool_call' }>[] = [];
+    const sourceCallCounts = new Map<string, number>();
+    for (const event of tools) {
+      sourceCallCounts.set(event.call.callId, (sourceCallCounts.get(event.call.callId) ?? 0) + 1);
+    }
+    const duplicateSourceCallIds = new Set(
+      [...sourceCallCounts].filter(([, count]) => count > 1).map(([callId]) => callId)
+    );
+    for (const event of tools) {
+      // Two source rows claiming one call identity are a custody conflict,
+      // even if their text looks equal. Preserve both until an owner can resolve
+      // the duplicate evidence.
+      if (duplicateSourceCallIds.has(event.call.callId)) {
+        unknown.push(event);
+        continue;
+      }
+      // A superseded request is already fully attributed and deliberately isolated here.
+      // Replaying the same correlation must never turn retired execution into live history.
+      if (event.call.attributionMethod === 'superseded' || event.call.attribution === 'superseded') {
+        unknown.push(event);
+        continue;
+      }
+      const requestId = event.call.requestId;
+      const correlation = requestId ? requestCorrelation(requestId) : null;
+      if (!correlation || correlation.nativeCallAmbiguous === true) {
+        // One workflow request id can appear on multiple native tool messages.
+        // The correlation owner keeps that contradiction sticky across restart;
+        // it is not enough to know the conversation when the exact invocation
+        // cannot be distinguished. Preserve the result in its original bucket.
+        unknown.push(event);
+        continue;
+      }
+      // A durable request owner survives Compact & Resume, but its old session
+      // may now be attached to a successor conversation. Historical chatIds are
+      // lineage only; late repair must not move an old result into that successor.
+      if (!await exactCurrentOwner(correlation.conversationId, correlation.sessionId)) {
+        unknown.push(event);
+        continue;
+      }
+      const group = owned.get(correlation.sessionId);
+      const placed = { event, conversationId: correlation.conversationId };
+      if (group) group.push(placed);
+      else owned.set(correlation.sessionId, [placed]);
+    }
+    if (owned.size === 0) continue;
+
+    // Resolve all destinations and pre-copy every referenced file before appending anything.
+    // If one source asset is gone, leave the bucket untouched rather than making history less
+    // complete merely to clean up its presentation.
+    const destinations = new Map<string, string>();
+    let assetsComplete = true;
+    try {
+      for (const [targetSessionId, group] of owned) {
+        const target = await getSession(targetSessionId);
+        if (!target || targetSessionId === summary.id) {
+          assetsComplete = false;
+          break;
+        }
+        destinations.set(targetSessionId, targetSessionId);
+
+        const assets = new Map<string, string>();
+        for (const { event } of group) {
+          if (event.call.args.assetId) assets.set(event.call.args.assetId, 'text/plain');
+          if (event.call.result.assetId) assets.set(event.call.result.assetId, 'text/plain');
+          for (const asset of event.call.assets ?? []) assets.set(asset.id, asset.mimeType);
+        }
+        for (const [assetId, mimeType] of assets) {
+          const data = await readAsset(summary.id, assetId);
+          if (!data) {
+            assetsComplete = false;
+            break;
+          }
+          await verifyAndSyncSessionAsset(summary.id, assetId, data);
+          const copied = await writeAsset(targetSessionId, data, mimeType);
+          if (copied.id !== assetId) {
+            assetsComplete = false;
+            break;
+          }
+          await verifyAndSyncSessionAsset(targetSessionId, assetId, data);
+        }
+        if (!assetsComplete) break;
+      }
+    } catch (err) {
+      assetsComplete = false;
+      logWarn(`could not repair unattributed session ${summary.id}: ${(err as Error).message}`);
+    }
+    if (!assetsComplete) continue;
+
+    const ownersStillCurrent = async (): Promise<boolean> => {
+      for (const [targetSessionId, group] of owned) {
+        for (const { conversationId } of group) {
+          if (!await exactCurrentOwner(conversationId, targetSessionId)) return false;
+        }
+      }
+      return true;
+    };
+    if (!await ownersStillCurrent()) continue;
+    // The source remains the only committed owner until every target copy is
+    // durable. Sync the source first so a crash before target commit cannot
+    // lose a buffered original result.
+    try {
+      await syncSessionJournal(summary.id);
+    } catch (err) {
+      logWarn('late request attribution repair held: source journal sync failed for ' + summary.id + ': ' + String((err as Error).message));
+      continue;
+    }
+
+    let firstTargetSessionId: string | null = null;
+    for (const [sessionKey, group] of owned) {
+      const targetSessionId = destinations.get(sessionKey)!;
+      firstTargetSessionId ??= targetSessionId;
+      let targetEvents: SessionEvent[];
+      try {
+        targetEvents = await readEvents(targetSessionId, { kinds: ['tool_call'], requireIntegrity: true });
+     } catch (error) {
+       // A freshly created destination may not have an event journal until its
+       // first append. Treat only a provably empty projection plus an absent or
+       // zero-byte journal as empty; any nonempty damaged target remains a veto.
+        try {
+          const targetSummary = await getSession(targetSessionId);
+          if (!targetSummary || targetSummary.events !== 0 || targetSummary.toolCalls !== 0) {
+            assetsComplete = false;
+            logWarn('late request attribution repair held: destination journal integrity unverified for ' + targetSessionId);
+            break;
+          }
+          const journalPath = join(sessionsRoot(), targetSessionId, 'events.jsonl');
+          let raw: string | null;
+          try { raw = await fs.readFile(journalPath, 'utf8'); }
+          catch (readError) {
+            if ((readError as NodeJS.ErrnoException).code === 'ENOENT') raw = null;
+            else {
+              assetsComplete = false;
+              logWarn('late request attribution repair held: destination journal unreadable for ' + targetSessionId);
+              break;
+            }
+          }
+          if (raw !== null && raw.length !== 0) {
+            assetsComplete = false;
+            logWarn('late request attribution repair held: nonempty destination journal could not be verified for ' + targetSessionId);
+            break;
+          }
+          targetEvents = [];
+        } catch (inspectionError) {
+          assetsComplete = false;
+          logWarn('late request attribution repair held: destination inspection failed for ' + targetSessionId + ': ' + String((inspectionError as Error).message));
+          break;
+        }
+      }
+      const existingByCallId = new Map<string, Extract<SessionEvent, { kind: 'tool_call' }>>();
+      const duplicateCallIds = new Set<string>();
+      for (const row of targetEvents) {
+        if (row.kind !== 'tool_call') continue;
+        if (existingByCallId.has(row.call.callId)) duplicateCallIds.add(row.call.callId);
+        else existingByCallId.set(row.call.callId, row);
+      }
+      for (const { event, conversationId } of group) {
+        if (!await exactCurrentOwner(conversationId, targetSessionId)) {
+          assetsComplete = false;
+          break;
+        }
+        const headeredCall = { ...event.call };
+        // Exact placement must not erase the execution's already-published
+        // witness. Its native binding is independently proved later.
+        delete headeredCall.nativeCallMessageId;
+        const attributedCall = {
+          ...headeredCall,
+          attribution: 'request_id' as const,
+          conversationId,
+          attributionMethod: 'request_id' as const
+        };
+        if (duplicateCallIds.has(event.call.callId)) {
+          assetsComplete = false;
+          logWarn('late request attribution repair held: destination has duplicate call identity for ' + event.call.callId);
+          break;
+        }
+        const existing = existingByCallId.get(event.call.callId);
+        if (existing) {
+          // A prior crash may have committed the destination before retiring the
+          // source. Retry only the exact same execution; a callId collision or
+          // changed result must preserve the original instead of blessing a copy.
+          if (existing.source !== 'mcp' || existing.time !== event.time ||
+              existing.turnId !== event.turnId || existing.agent !== event.agent ||
+              JSON.stringify(existing.call) !== JSON.stringify(attributedCall)) {
+            assetsComplete = false;
+            logWarn('late request attribution repair held: destination conflicts with original execution for ' + event.call.callId);
+            break;
+          }
+          continue;
+        }
+        let attached: SessionEvent;
+        try {
+          attached = await appendEvent(targetSessionId, {
+            time: event.time,
+            source: 'mcp',
+            kind: 'tool_call',
+            call: attributedCall,
+            ...(event.agent ? { agent: event.agent } : {}),
+            ...(event.turnId ? { turnId: event.turnId } : {})
+          });
+        } catch (err) {
+          assetsComplete = false;
+          logWarn('late request attribution repair held: destination append failed for ' + event.call.callId + ': ' + String((err as Error).message));
+          break;
+        }
+        if (attached.kind !== 'tool_call' ||
+            JSON.stringify(attached.call) !== JSON.stringify(attributedCall)) {
+          assetsComplete = false;
+          logWarn('late request attribution repair held: destination append mismatch for ' + event.call.callId);
+          break;
+        }
+        existingByCallId.set(event.call.callId, attached);
+      }
+      if (!assetsComplete) break;
+      // A successful append is only buffered until this journal's durability
+      // barrier passes. If it fails, the original source remains available and
+      // an exact retry can validate/reuse this same target row.
+      try {
+        await syncSessionJournal(targetSessionId);
+      } catch (err) {
+        // A durable target append may now exist, but the source is still the
+        // recovery owner. Keep this bucket for a later pass and keep repairing
+        // independent source buckets during this pass.
+        assetsComplete = false;
+        deferredDestinationSyncError ??= err instanceof Error ? err : new Error(String(err));
+        logWarn('late request attribution repair held: destination journal sync failed for ' + targetSessionId + ': ' + String((err as Error).message));
+        break;
+      }
+    }
+    if (!assetsComplete || !await ownersStillCurrent()) continue;
+
+    let repaired: { retained: number; deleted: boolean };
+    try {
+      // Recheck source durability immediately before the destructive rewrite;
+      // concurrent arrivals since the earlier barrier are preserved by the
+      // store's high-water and exact-snapshot checks.
+      await syncSessionJournal(summary.id);
+      repaired = await rewriteUnattributedToolCalls(summary.id, unknown, scannedThroughSeq, summary.id !== unattributedSessionId, events);
+    } catch (err) {
+      // Failure is local to this holding bucket. Its original journal remains
+      // the custody source, and the next pass reconstructs its cache from disk.
+      logWarn('late request attribution repair held: source rewrite failed for ' + summary.id + ': ' + String((err as Error).message));
+      continue;
+    } finally {
+      // Concurrent arrivals can replace removed rows with the same count and max timestamp.
+      // The old negative-read cache cannot describe the rewritten bucket, even after an
+      // uncertain filesystem failure; its next lookup must rebuild from the authoritative log.
+      repairBuckets.delete(summary.id);
+    }
+    // Count only completed transfers. A target append that fails its sync or
+    // source rewrite is a recovery copy, not a completed repair.
+    repairedCalls += tools.length - unknown.length;
+    if (repaired.retained === 0 && lastActiveSessionId === summary.id) lastActiveSessionId = firstTargetSessionId;
+    if (!repaired.deleted && unattributedSessionId === null) unattributedSessionId = summary.id;
+    repairedSessions += 1;
+    logInfo(
+      `repaired ${tools.length - unknown.length} deterministically attributed call(s) from session ${summary.id}; ` +
+        `${repaired.retained} remain unknown`
+    );
+  }
+
+  if (repairedSessions > 0) notifyChanged();
+  // Surface the durability failure to the original caller after independent
+  // buckets have had a chance to complete. The source remains authoritative,
+  // and callers still see the failed destination commit as a failed pass.
+  if (deferredDestinationSyncError) throw deferredDestinationSyncError;
+  return { sessions: repairedSessions, calls: repairedCalls };
+}
+
+/**
+ * The second, per-TOOL-message proof path for the provider's real unowned
+ * Core HTTP ingress. The caller first receives a 192-bit receipt ONLY after
+ * its original Unattributed MCP record is durably appended. The installed
+ * extension must then see that value inside the RESULT native message, whose
+ * parent is the particular Core invocation. This operation never uses the
+ * workflow id to locate the execution (or makes a fresh tool call).
+ *
+ * It reuses the existing Unattributed repair's copy-then-rewrite custody and
+ * serializes with that repair. No new state store, replay queue or timer.
+ * A damaged original, stale session, duplicate witness or unknown source
+ * means the native-final hold remains unresolved.
+ */
+/**
+ * A target journal alone cannot prove a receipt transfer committed. A crash
+ * between the destination append and the Unattributed source rewrite leaves
+ * TWO durable custody copies; checking only the target would fabricate native
+ * completion. Recheck all original holding buckets before ACKing any receipt.
+ * Unreadable sources refuse proof rather than being treated as empty.
+ */
+export async function receiptUnattributedSourceClear(resultReceiptId: string): Promise<boolean> {
+  if (!/^[a-f0-9]{48}$/.test(resultReceiptId)) return false;
+  try {
+    for (const summary of await indexedSessions({ requireComplete: true })) {
+      if (summary.conversationId !== null || summary.title !== 'Unattributed activity') continue;
+      if ((await readReceiptWitnessOccurrences(summary.id, resultReceiptId)).length > 0) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Retain a transport header as data, never promote it over an established native owner. */
+function receiptTransportHeaderCompatible(requestId: string | null, scope: {
+  conversationId: string | null; sessionId: string; nativeCallMessageId: string;
+}): boolean {
+  if (requestId === null) return true;
+  if (!requestId || !scope.conversationId) return false;
+  const owner = requestCorrelation(requestId);
+  return !owner || (owner.conversationId === scope.conversationId &&
+    owner.sessionId === scope.sessionId && owner.nativeCallAmbiguous !== true &&
+    (owner.nativeCallMessageId ?? owner.messageId) === scope.nativeCallMessageId);
+}
+
+/** An owned per-execution witness does not erase a workflow's sibling ambiguity.
+ * Its header still must retain its original conversation/session principal. */
+export function ownedReceiptHeaderCompatible(call: ToolCallRecord, sessionId: string): boolean {
+  const owner = call.requestId ? requestCorrelation(call.requestId) : null;
+  return call.attribution === 'request_id' && call.attributionMethod === 'request_id' &&
+    !!call.conversationId && owner?.conversationId === call.conversationId && owner.sessionId === sessionId;
+}
+
+/** One per-execution nonce must have exactly one durable home, with its own
+ * native message identity, in the complete current-account session index.
+ * Neither a syntactically valid marker nor a correct target row licenses native
+ * final/Loop when another session also claims the same execution. This is an
+ * infrequent receipt/final boundary, NOT a UI/history polling reader.
+ * Unreadable or incomplete catalogs/journals retain the original hold.
+ */
+export async function receiptDurableOwnerUnique(
+  resultReceiptId: string, targetSessionId: string, nativeCallMessageId: string,
+  expectedCallId?: string, options: { historicalReadOnly?: true } = {}
+): Promise<boolean> {
+  if (!/^[a-f0-9]{48}$/.test(resultReceiptId) || !targetSessionId ||
+      !nativeCallMessageId) return false;
+  try {
+    let count = 0;
+    let owned: Extract<SessionEvent, { kind: 'tool_call' }> | null = null;
+    for (const summary of await indexedSessions({ requireComplete: true })) {
+      const events = await readReceiptWitnessOccurrences(summary.id, resultReceiptId);
+      for (const event of events) {
+        if (event.kind !== 'tool_call' || event.call.resultReceiptId !== resultReceiptId) continue;
+        count++;
+        // A successful Compact & Resume retains the exact older execution in
+        // the same session's chatIds, but that old chat may not authorize a new
+        // native Send/receipt. ONLY the read-only acceptance projection opts in
+        // to inspecting this historical row; all incumbent live custody checks
+        // continue to require the current conversation by default.
+        const retainedHistorical = options.historicalReadOnly === true &&
+          typeof event.call.conversationId === 'string' &&
+          summary.chatIds.includes(event.call.conversationId);
+        if (count !== 1 || summary.id !== targetSessionId ||
+            event.call.nativeCallMessageId !== nativeCallMessageId ||
+            (event.call.conversationId !== summary.conversationId && !retainedHistorical) ||
+            !(event.call.attributionMethod === 'request_id'
+              ? ownedReceiptHeaderCompatible(event.call, targetSessionId)
+              : event.call.attributionMethod === 'result_receipt' && receiptTransportHeaderCompatible(event.call.requestId, {
+              conversationId: retainedHistorical ? event.call.conversationId : summary.conversationId,
+              sessionId: targetSessionId, nativeCallMessageId })) ||
+            (expectedCallId && event.call.callId !== expectedCallId)) return false;
+        owned = event;
+      }
+    }
+    if (count !== 1 || !owned) return false;
+    if (owned.call.attributionMethod === 'request_id') await syncCanonicalToolCall(targetSessionId, owned);
+    // Native final/Loop can re-evaluate a receipt after a cold restart, when
+    // the recorder's original copy barrier is no longer in memory. The row is
+    // not sufficient proof if its overflow result or referenced binary was
+    // removed/corrupted since the transfer. Verify all content-addressed bytes
+    // and flush the exact owned journal before returning an ACK candidate.
+    const call = owned.call;
+    const assets = new Set<string>();
+    if (call.args.assetId) assets.add(call.args.assetId);
+    if (call.result.assetId) assets.add(call.result.assetId);
+    for (const asset of call.assets ?? []) assets.add(asset.id);
+    for (const id of assets) {
+      const bytes = await readAsset(targetSessionId, id);
+      if (!bytes) return false;
+      await verifyAndSyncSessionAsset(targetSessionId, id, bytes);
+    }
+    await syncSessionJournal(targetSessionId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The recorder's own pre-commit custody gate. The Bridge performs a separate
+ * admission check, but the source may acquire a foreign duplicate while this
+ * serialized recorder operation copies assets or waits for disk. Both before
+ * target append and before source retirement, require exactly the original
+ * execution and (after append/restart) its single identical target copy.
+ * An incomplete/changed physical catalog or missing journal is never absence
+ * evidence. The operation can leave two copies after a crash, but can never
+ * *retire* the original while a foreign owner is already visible. */
+async function receiptTransferCustodyExact(input: {
+  resultReceiptId: string; originalSessionId: string; targetSessionId: string;
+  callId: string; nativeCallMessageId: string; tool: string; conversationId: string;
+  targetCopied: boolean; transportRequestId: string | null;
+}): Promise<boolean> {
+  try {
+    const folderIds = async () => (await fs.readdir(sessionsRoot()))
+      .filter(name => /^[0-9a-z-]{8,64}$/i.test(name)).sort();
+    const physicalBefore = await folderIds();
+    const before = await indexedSessions({ requireComplete: true });
+    const fingerprint = (sessions: readonly SessionSummary[]) => JSON.stringify(sessions
+      .map(summary => [summary.id, summary.conversationId, [...summary.chatIds].sort(),
+        summary.conversationId === null && summary.title === 'Unattributed activity'])
+      .sort((left, right) => String(left[0]).localeCompare(String(right[0]))));
+    const ids = before.map(summary => summary.id).sort();
+    if (ids.length !== physicalBefore.length || ids.some((id, i) => id !== physicalBefore[i])) return false;
+    let original = 0;
+    let target = 0;
+    for (const summary of before) {
+      for (const event of await readReceiptWitnessOccurrences(summary.id, input.resultReceiptId)) {
+        const call = event.call;
+        if (event.source !== 'mcp' || call.callId !== input.callId ||
+            call.tool !== input.tool || !isReturnedToolOutcome(call.outcome) ||
+            call.requestId !== input.transportRequestId ||
+            !receiptTransportHeaderCompatible(call.requestId, {
+              conversationId: input.conversationId, sessionId: input.targetSessionId,
+              nativeCallMessageId: input.nativeCallMessageId }) ||
+            (call.process && !call.process.completedAt)) return false;
+        if (summary.id === input.originalSessionId &&
+            summary.conversationId === null && summary.title === 'Unattributed activity' &&
+            call.conversationId === null &&
+            call.attributionMethod === 'unattributed') {
+          original++;
+        } else if (summary.id === input.targetSessionId &&
+                   summary.conversationId === input.conversationId &&
+                   call.conversationId === input.conversationId &&
+                   call.attributionMethod === 'result_receipt' &&
+                   call.nativeCallMessageId === input.nativeCallMessageId) {
+          target++;
+        } else return false;
+        if (original > 1 || target > 1) return false;
+      }
+    }
+    if (original !== 1 || target !== (input.targetCopied ? 1 : 0)) return false;
+    const physicalAfter = await folderIds();
+    const after = await indexedSessions({ requireComplete: true });
+    return physicalAfter.length === physicalBefore.length &&
+      physicalAfter.every((id, i) => id === physicalBefore[i]) &&
+      fingerprint(before) === fingerprint(after);
+  } catch {
+    return false;
+  }
+}
+
+export async function attachNativeCoreResultReceipt(input: {
+  conversationId: string; sessionId: string; requestId: string;
+  nativeCallMessageId: string; tool: string; resultReceiptId: string;
+}): Promise<boolean> {
+  if (!recordingEnabled() || !/^[a-f0-9]{48}$/.test(input.resultReceiptId) ||
+      !input.nativeCallMessageId || !input.tool) return false;
+  const attach = async (): Promise<boolean> => {
+    const target = await findSessionByConversation(input.conversationId, { requireUnique: true });
+    if (!target || target.id !== input.sessionId ||
+        await conversationWasSuperseded(input.conversationId)) return false;
+    const correlation = requestCorrelation(input.requestId);
+    if (!correlation || correlation.conversationId !== input.conversationId ||
+        correlation.sessionId !== input.sessionId) return false;
+    const fullHistory = await readEvents(input.sessionId, { requireIntegrity: true });
+    // A repeat browser observation or crash after the destination append is
+    // idempotent. Also reject any unrelated use of the same witness/message
+    // rather than picking the first row or trusting a stale cached map.
+    const destination = fullHistory.filter(row => row.kind === 'tool_call');
+    const sameReceipt = destination.filter(event => event.kind === 'tool_call' &&
+      event.call.resultReceiptId === input.resultReceiptId);
+    const sameNative = destination.filter(event => event.kind === 'tool_call' &&
+      event.call.nativeCallMessageId === input.nativeCallMessageId);
+    const owned = sameReceipt.length === 1 && sameReceipt[0]?.kind === 'tool_call' &&
+      sameReceipt[0].call.attributionMethod === 'request_id' ? sameReceipt[0] : null;
+    if (owned) {
+      if (owned.source !== 'mcp' || owned.call.tool !== input.tool || !isReturnedToolOutcome(owned.call.outcome) ||
+          owned.call.requestId !== input.requestId ||
+          owned.call.conversationId !== input.conversationId ||
+          !ownedReceiptHeaderCompatible(owned.call, input.sessionId) ||
+          owned.call.process && !owned.call.process.completedAt ||
+          owned.call.nativeCallMessageId && owned.call.nativeCallMessageId !== input.nativeCallMessageId ||
+          sameNative.some(row => row.kind === 'tool_call' && row.call.callId !== owned.call.callId)) return false;
+      let count = 0;
+      for (const summary of await indexedSessions({ requireComplete: true })) {
+        for (const row of await readReceiptWitnessOccurrences(summary.id, input.resultReceiptId)) {
+          if (++count !== 1 || summary.id !== input.sessionId || row.call.callId !== owned.call.callId ||
+              row.call.tool !== input.tool || row.call.attributionMethod !== 'request_id') return false;
+        }
+      }
+      if (count !== 1 || !await bindOwnedToolCallReceipt(input.sessionId, owned,
+        input.nativeCallMessageId, fullHistory.reduce((seq, row) => Math.max(seq, row.seq), 0))) return false;
+      if (!await receiptDurableOwnerUnique(input.resultReceiptId, input.sessionId,
+        input.nativeCallMessageId, owned.call.callId)) return false;
+      logInfo('native Core result bound to its original owned execution; workflow ambiguity and header preserved');
+      notifyChanged();
+      return true;
+    }
+    // The existing Unattributed copy/rewrite path retains its stricter single
+    // native-call workflow gate. An owned witness never relaxes this fallback.
+    if (correlation.nativeCallAmbiguous === true ||
+        (correlation.nativeCallMessageId ?? correlation.messageId) !== input.nativeCallMessageId) return false;
+    const existing = sameReceipt.length === 1 && sameNative.length === 1 &&
+      sameReceipt[0] === sameNative[0] && sameReceipt[0]?.kind === 'tool_call' &&
+      sameReceipt[0].call.attributionMethod === 'result_receipt' &&
+      sameReceipt[0].call.conversationId === input.conversationId &&
+      receiptTransportHeaderCompatible(sameReceipt[0].call.requestId, input) &&
+      sameReceipt[0].call.tool === input.tool ? sameReceipt[0] : null;
+    if ((sameReceipt.length || sameNative.length) && !existing) return false;
+
+    const matches: Array<{
+      summary: SessionSummary;
+      event: Extract<SessionEvent, { kind: 'tool_call' }>;
+      events: SessionEvent[];
+      unknown: Extract<SessionEvent, { kind: 'tool_call' }>[];
+      throughSeq: number;
+    }> = [];
+    for (const summary of await indexedSessions({ requireComplete: true })) {
+      if (summary.conversationId !== null || summary.title !== 'Unattributed activity') continue;
+      if ((await readReceiptWitnessOccurrences(summary.id, input.resultReceiptId)).length === 0)
+        continue;
+      // Reads MUST validate all original lines, not just the latest UI tail.
+      // A malformed row could hide a second result/capability; never rewrite it.
+      const events = await readEvents(summary.id, { requireIntegrity: true });
+      // The incumbent rewrite operation is intentionally for pure tool-call
+      // Unattributed buckets. A foreign/user/handoff event is protected disk
+      // history, not disposable material: refuse the entire receipt rather
+      // than silently dropping those records while migrating one tool result.
+      const tools = events.filter((row): row is Extract<SessionEvent, { kind: 'tool_call' }> =>
+        row.kind === 'tool_call');
+      for (const event of tools) if (event.call.resultReceiptId === input.resultReceiptId) {
+        if (events.some(row => row.kind !== 'session_start' && row.kind !== 'tool_call'))
+          return false;
+        matches.push({ summary, event, events, unknown: tools.filter(row => row !== event),
+          throughSeq: events.reduce((seq, row) => Math.max(seq, row.seq), 0) });
+      }
+    }
+    // Already fully migrated before the callback/cold restart: no new append,
+    // tool execution, activity credit, or moving a different source.
+    if (matches.length === 0) return existing !== null &&
+      await receiptDurableOwnerUnique(input.resultReceiptId, input.sessionId,
+        input.nativeCallMessageId, existing.call.callId);
+    if (matches.length !== 1) return false;
+    const { summary, event, events, unknown, throughSeq } = matches[0]!;
+    const call = event.call;
+    if (event.source !== 'mcp' || !receiptTransportHeaderCompatible(call.requestId, input) ||
+        call.attributionMethod !== 'unattributed' || call.conversationId !== null ||
+        call.tool !== input.tool || !isReturnedToolOutcome(call.outcome) ||
+        (call.process && !call.process.completedAt)) return false;
+    // A destination append already committed before a crash is not a second
+    // execution and must never be appended again. It may finish ONLY its own
+    // matching original source custody cleanup; a different callId is conflict.
+    if (existing && (existing.call.callId !== call.callId || existing.call.requestId !== call.requestId)) return false;
+
+    // A call's stored text/asset references are content-addressed. Copy before
+    // inserting the new record, exactly like the incumbent request-id repair.
+    const assets = new Map<string, string>();
+    if (call.args.assetId) assets.set(call.args.assetId, 'text/plain');
+    if (call.result.assetId) assets.set(call.result.assetId, 'text/plain');
+    for (const asset of call.assets ?? []) assets.set(asset.id, asset.mimeType);
+    for (const [assetId, mime] of assets) {
+      const bytes = await readAsset(summary.id, assetId);
+      if (!bytes) return false;
+      await verifyAndSyncSessionAsset(summary.id, assetId, bytes);
+      if ((await writeAsset(input.sessionId, bytes, mime)).id !== assetId) return false;
+      await verifyAndSyncSessionAsset(input.sessionId, assetId, bytes);
+    }
+    if ((await getSession(input.sessionId))?.conversationId !== input.conversationId ||
+        await conversationWasSuperseded(input.conversationId)) return false;
+    const transfer = { resultReceiptId: input.resultReceiptId,
+      originalSessionId: summary.id, targetSessionId: input.sessionId,
+      callId: call.callId, nativeCallMessageId: input.nativeCallMessageId,
+      tool: input.tool, conversationId: input.conversationId, transportRequestId: call.requestId };
+    // An original Core receipt was recorded before a browser owner was known.
+    // Sync it before any destructive rewrite and do not silently promote an
+    // unsynced copy into the only remaining durable execution record.
+    await syncSessionJournal(summary.id);
+    if (!await receiptTransferCustodyExact({ ...transfer, targetCopied: existing !== null })) return false;
+    if (!existing) {
+      const attached = await appendEvent(input.sessionId, {
+        time: event.time, source: 'mcp', kind: 'tool_call',
+        call: { ...call, attribution: 'result_receipt',
+          attributionMethod: 'result_receipt', conversationId: input.conversationId,
+          nativeCallMessageId: input.nativeCallMessageId },
+        ...(event.agent ? { agent: event.agent } : {}),
+        ...(correlation.turnId ? { turnId: correlation.turnId } : {})
+      });
+      if (attached.kind !== 'tool_call' || attached.call.callId !== call.callId) return false;
+    }
+    // The new target append is only a buffered write until synced. A failed
+    // barrier may leave a complete target row, which the next exact browser
+    // receipt can safely reuse; its original stays untouched until then.
+    await syncSessionJournal(input.sessionId);
+    // A different recorder/session could have committed the same witness while
+    // our target was being appended. Keep both original and target recoverable;
+    // do not rewrite/delete the original until custody is still exactly two.
+    if (!await receiptTransferCustodyExact({ ...transfer, targetCopied: true })) return false;
+    try {
+      await rewriteUnattributedToolCalls(summary.id, unknown, throughSeq,
+        summary.id !== unattributedSessionId, events);
+    } finally {
+      repairBuckets.delete(summary.id);
+    }
+    // A concurrent original source append or incomplete filesystem rewrite
+    // cannot be declared complete even when the target has exactly one row.
+    if (!await receiptDurableOwnerUnique(input.resultReceiptId, input.sessionId,
+      input.nativeCallMessageId, call.callId)) return false;
+    notifyChanged();
+    // The incumbent Bridge health/Loop owner needs to hear of a newly
+    // authenticated result just as it hears of an ordinarily attributed MCP
+    // append. Only rearm live-work projection for a POSITIVELY matching current
+    // native turn; an old returned result must not mark a newer turn busy.
+    // Independently, a settled native final is released only by its strict
+    // durable per-message comparison, never this notification alone.
+    try {
+      const filed = await getSession(input.sessionId);
+      if (filed?.conversationId === input.conversationId && correlation.turnId &&
+          filed.activeTurnId === correlation.turnId &&
+          !await conversationWasSuperseded(input.conversationId)) {
+        attributionListener?.(input.conversationId, input.sessionId, true,
+          event.time, false, filed.lastAssistantFinalAt ?? null,
+          input.requestId, null, filed);
+      }
+    } catch {
+      // Post-commit observation failure never retracts a successfully
+      // recorded result or authorizes a second execution.
+    }
+    return true;
+  };
+  const pending = attributionRepairChain.then(attach);
+  attributionRepairChain = pending.then(() => undefined, () => undefined);
+  // A disk/foreign-owner failure preserves the unresolved native final and
+  // original evidence; only fixed error classes enter the existing logger.
+  return pending.catch(() => false);
+}
+
+// ---------------------------------------------------------------- helpers
+
+/**
+ * Stores text for one event: bounded inline, complete in an asset when it overflows.
+ *
+ * `truncated` means "not all of it is on this line", never "the rest is gone" — the
+ * whole redacted original goes next to the log and its id travels in the event, so the
+ * exact arguments of an edit or the exact output of a build stay recoverable. The one
+ * case where material really is lost is text beyond even the overflow limit, and then
+ * the inline note says exactly that instead of implying a complete record.
+ */
+async function storeText(
+  sessionId: string,
+  text: string,
+  cap: number
+): Promise<StoredText> {
+  const value = typeof text === 'string' ? text : String(text ?? '');
+  if (value.length <= cap) return { text: value, truncated: false, chars: value.length };
+  const assetId = await writeOverflowText(sessionId, value);
+  const note = assetId
+    ? `\n…[${value.length - cap} more characters stored in full as ${assetId}]`
+    : `\n…[${value.length - cap} more characters were too large to store and are lost]`;
+  return {
+    text: `${value.slice(0, cap)}${note}`,
+    truncated: true,
+    chars: value.length,
+    ...(assetId ? { assetId } : {})
+  };
+}
+
+/**
+ * Fields that must never reach disk, whatever tool they arrive on.
+ *
+ * Nothing in the multi-agent surface carries a credential any more — an agent *is* the
+ * conversation it runs in, and that id is recorded on purpose — so this is now a guard
+ * against a field named like a secret arriving on some other tool, rather than a rule about
+ * agent identity. Writing one into events.jsonl would publish it to session_history, to the
+ * Activity feed the extension is sent, and to anything built from the raw log.
+ */
+const CREDENTIAL_FIELDS = new Set(['secret']);
+
+/**
+ * Removes the argument values that must never be written to disk.
+ *
+ * Environment overrides can carry credentials, a base64 blob is megabytes of noise,
+ * and clipboard text is the one input the user may not have meant to hand over.
+ * Everything else is stored verbatim: the point of the record is exact recovery.
+ */
+function redactArgs(tool: string, args: unknown): unknown {
+  if (!args || typeof args !== 'object') return args;
+  const copy: Record<string, unknown> = { ...(args as Record<string, unknown>) };
+  // Native file values carry download credentials, not reproducible tool input.
+  // Keep the destination and result for recovery without persisting the URL or file token.
+  if (tool === 'download_artifact' && Object.hasOwn(copy, 'file')) copy['file'] = '<native file credentials not stored>';
+  if (copy['env'] && typeof copy['env'] === 'object') {
+    copy['env'] = Object.fromEntries(Object.keys(copy['env'] as object).map((key) => [key, '***']));
+  }
+  if (typeof copy['dataBase64'] === 'string') {
+    copy['dataBase64'] = `<${(copy['dataBase64'] as string).length} base64 characters not stored>`;
+  }
+  if (tool === 'write_clipboard' && typeof copy['text'] === 'string') {
+    copy['text'] = `<${copy['text'].length} characters not stored>`;
+  }
+  // Clipboard text arrives inside computer's action list, so the redaction follows the
+  // action rather than the tool name: the text the user copied is theirs, and one of these
+  // steps buried in a batch of clicks must not be the thing that writes it to disk.
+  if (tool === 'computer' && Array.isArray(copy['actions'])) {
+    copy['actions'] = (copy['actions'] as unknown[]).map((action) => {
+      if (!action || typeof action !== 'object') return action;
+      const step = action as Record<string, unknown>;
+      if (step['type'] !== 'write_clipboard' || typeof step['text'] !== 'string') return action;
+      return { ...step, text: `<${(step['text'] as string).length} characters not stored>` };
+    });
+  }
+  for (const field of Object.keys(copy)) {
+    if (CREDENTIAL_FIELDS.has(field)) copy[field] = '<removed>';
+  }
+  return copy;
+}
+
+function redactResult(tool: string, text: string): string {
+  text = redactCredentialText(text);
+  if (tool === 'read_clipboard') return '<clipboard text not stored>';
+  // The other half of the clipboard rule: what was read comes back as its own line in
+  // computer's reply, and only that line is dropped, so the rest of the result — which
+  // actions ran, where the pointer ended up — still says what happened.
+  if (tool === 'computer' && text.includes('Clipboard read ')) {
+    return text
+      .split('\n')
+      .map((line) =>
+        line.startsWith('Clipboard read ')
+          ? `${line.slice(0, line.indexOf(':') + 1)} <clipboard text not stored>`
+          : line
+      )
+      .join('\n');
+  }
+  return text;
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value ?? null, null, 0) ?? 'null';
+  } catch {
+    return '"<arguments could not be serialised>"';
+  }
+}
+
+// -------------------------------------------------------------- tool calls
+
+export interface ToolContentPart {
+  type: string;
+  text?: string;
+  data?: string;
+  mimeType?: string;
+}
+
+export interface ToolCallInput {
+  tool: string;
+  /** Per-execution server witness for unowned Core calls, never from a caller's arguments. */
+  resultReceiptId?: string;
+  args: unknown;
+  content: readonly ToolContentPart[];
+  /** External MCP responses can carry structured results and resource blocks alongside text. */
+  protocolResult?: unknown;
+  outcome: ToolOutcome;
+  durationMs: number;
+  startedAt: number;
+  evidence?: CallEvidence;
+  agent?: string | null;
+  /** Agent to bind to this call's conversation once it is identified. See CallContext. */
+  bind?: string | null;
+  /**
+   * ChatGPT's id for the HTTP request that carried this call, when it sent one.
+   *
+   * The page's evidence for the same call carries the same id, so this places the call in
+   * the conversation that issued it outright — including when two workers call one tool at
+   * the same instant, which no window or ordering rule can separate. See inbound.ts.
+   */
+  requestId?: string | null;
+  /** Exact conversation already proven for this request by the dispatcher, when available. */
+  conversationId?: string | null;
+  /** Durable local session principal carried by the exact request correlation, when available. */
+  sessionId?: string | null;
+  /** A successful worker finish report is a hard activity boundary, not fresh work. */
+  endsActivity?: boolean;
+}
+
+/** A workflow orders its calls before identity resolves; a session orders their storage.
+ * Neither queue can make an unrelated proven chat wait for browser evidence. */
+const requestRecordings = new Map<string, Promise<void>>();
+const sessionRecordings = new Map<string, Promise<void>>();
+const pendingRecordings = new Set<Promise<unknown>>();
+
+/** A failed recorder write never creates a terminal result or a Send receipt.
+ * Preserve only a shape-only, bounded first cause under the incumbent logger.
+ * A raw request id or error message can contain provider/private data and is not
+ * an authenticated call-to-chat join. Correlate a session only with the original
+ * exact page request proof, never with the active/last visible conversation. */
+function noteToolRecordingFailure(input: ToolCallInput,
+  stage: 'admission' | 'append' | 'post_append' | 'process_completion' | 'process_completion_observation',
+  error: unknown, target?: Target): void {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  const safeCode = typeof code === 'string' && /^(?:ENOSPC|EACCES|EPERM|EIO|EPIPE|ECONNRESET|ETIMEDOUT)$/.test(code)
+    ? code : 'recording_io_failure';
+  const correlation = input.requestId ? requestCorrelation(input.requestId) : null;
+  const exactOwner = !!input.requestId && !!correlation && target?.attribution === 'request_id' &&
+    target.conversationId === correlation.conversationId && target.sessionId === correlation.sessionId;
+  void noteLocalIncident({
+    source: 'app',
+    reason: stage === 'post_append' ? 'mcp_post_append_observation_failed' :
+      stage === 'process_completion' ? 'mcp_process_completion_recording_failed' :
+      stage === 'process_completion_observation' ? 'mcp_process_completion_unknown' :
+      'mcp_terminal_recording_failed',
+    status: 'unresolved',
+    ...(exactOwner ? { sessionId: correlation!.sessionId, conversationId: correlation!.conversationId } : {}),
+    fingerprint: createHash('sha256').update(JSON.stringify([
+      stage, input.tool, input.requestId ?? null, input.startedAt
+    ])).digest('hex'),
+    detail: safeCode
+  });
+  logWarn(`session recorder ${stage.replace(/_/g, '-')} failed (${safeCode})`);
+}
+
+function serializeRecording<T>(queues: Map<string, Promise<void>>, key: string, run: () => Promise<T>): Promise<T> {
+  const work = (queues.get(key) ?? Promise.resolve()).then(run);
+  const settled = work.then(() => undefined, () => undefined);
+  queues.set(key, settled);
+  void settled.then(() => { if (queues.get(key) === settled) queues.delete(key); });
+  return work;
+}
+
+/**
+ * Records one MCP tool call.
+ *
+ * Never throws into the caller: a broken recorder must not break the connector, so a
+ * storage failure is logged and the tool result is returned to ChatGPT regardless.
+ *
+ * The returned promise includes preparation and durable append. The dispatcher awaits it
+ * for a proven caller. Unresolved identity can still need browser evidence, so that degraded
+ * path releases the response and keeps this promise charged to its settling/shutdown barrier.
+ *
+ * Evidence windows open at admission. Calls from the same request keep their admission order,
+ * and known sessions serialize preparation plus append. A late owner may append behind another
+ * workflow already committed to that session: seq remains commit/cursor order, while the existing
+ * turn-local chronology uses the original startedAt. Unknown identity must never reserve every
+ * other session's writer merely to impose a global order that no individual chat needs.
+ *
+ * The unidentified path has a crash window: a call whose evidence has not
+ * resolved yet exists only in memory, so a power loss inside those couple of seconds
+ * loses it, where the old inline write would not have. Quitting flushes. That is the
+ * whole of the tradeoff, and it is bounded by REQUEST_ID_GRACE_MS.
+ */
+export function recordToolCall(input: ToolCallInput): Promise<ToolCallRecord | null> {
+  if (!recordingEnabled()) return Promise.resolve(null);
+  let attributing: Promise<Target>;
+  if (input.conversationId) {
+    const live = conversations.get(input.conversationId);
+    const correlation = input.requestId ? requestCorrelation(input.requestId) : null;
+    const target: Target = {
+      conversationId: input.conversationId,
+      sessionId:
+        input.sessionId ??
+        (correlation?.conversationId === input.conversationId ? correlation.sessionId : null),
+      attribution: 'request_id',
+      // A request proved for the conversation is not thereby proved for the
+      // generation that happens to be visible when its delayed result arrives.
+      // Only an exact request/turn join may assign an MCP call to a turn.
+      turnId: input.requestId
+        ? (correlation?.conversationId === input.conversationId ? correlation.turnId ?? null : null)
+        : live?.turnId ?? null
+    };
+    if (input.bind) bindAgentConversation(input.bind, input.conversationId);
+    attributing = Promise.resolve(target);
+  } else {
+    // Open the evidence wait before entering this workflow's queue, so sequential calls never
+    // restart its deadline. No other request or page state can satisfy this exact join.
+    attributing = input.requestId
+      ? (input.resultReceiptId
+        // The ingress already attempted native attribution. A result witness must
+        // commit within its bounded response budget, rather than wait a second
+        // identity grace period. Keep the real header and honor any owner NOW.
+        ? Promise.resolve(requestCorrelation(input.requestId))
+        : awaitRequestCorrelation(input.requestId, REQUEST_ID_GRACE_MS)).then((correlation) => {
+          const conversationId = correlation?.conversationId ?? null;
+          // Say which request id gave up, not just that something did. `unattributed` is the
+          // one outcome whose cause always lives in the browser half of the join, so the log
+          // has to carry the id that the page never confirmed — it is the only handle anyone
+          // has for matching this against what the extension believed it sent.
+          if (!conversationId) {
+            logWarn(input.resultReceiptId
+              ? 'request attribution: no confirmed native owner at result-witness commit; retaining the original header in Unattributed history'
+              : `request attribution: no page evidence for ${input.requestId} within ` +
+                `${REQUEST_ID_GRACE_MS}ms; filing ${input.tool} under Unattributed activity`);
+          }
+          if (input.bind && conversationId) bindAgentConversation(input.bind, conversationId);
+          return {
+            conversationId,
+            sessionId: correlation?.sessionId ?? null,
+            attribution: conversationId ? ('request_id' as const) : ('unattributed' as const),
+            turnId: correlation?.turnId ?? null
+          };
+        })
+      : Promise.resolve<Target>({ conversationId: null, sessionId: null, attribution: 'unattributed', turnId: null });
+  }
+  const file = async (): Promise<ToolCallRecord | null> => {
+    const target = await attributing;
+    const owner = target.sessionId ?? (target.conversationId ? conversations.get(target.conversationId)?.sessionId : null);
+    // Cold/historical owners use the existing targetSession authority, never a guessed chat.
+    const sessionId = owner ?? await targetSession(target);
+    if (!sessionId) return null;
+    return serializeRecording(sessionRecordings, sessionId, () => fileToolCall(input, target));
+  };
+  const filed = (input.requestId ? serializeRecording(requestRecordings, input.requestId, file) : file())
+    .catch(async (err: Error) => {
+      // Admission can fail before fileToolCall sees the exact target. If the
+      // original correlation already resolved, retain its authenticated owner
+      // in the incident without deriving anything from input args or live tabs.
+      const target = await attributing.catch(() => null);
+      noteToolRecordingFailure(input, 'admission', err, target ?? undefined);
+      return null;
+    });
+  pendingRecordings.add(filed);
+  void filed.then(() => pendingRecordings.delete(filed));
+  return filed;
+}
+
+/** Waits for every queued tool call to be written. Called before the app quits. */
+export async function flushRecorder(): Promise<void> {
+  // Admission is synchronous even while a request is still waiting for its owner. Include work
+  // admitted during a flush too; endpoint/bridge shutdown closes producers before this barrier.
+  while (pendingRecordings.size) await Promise.all([...pendingRecordings]);
+  if (attributionRepairTimer) {
+    clearTimeout(attributionRepairTimer);
+    attributionRepairTimer = null;
+    startAttributionRepair();
+  }
+  await attributionRepairChain.catch(() => undefined);
+}
+
+async function fileToolCall(input: ToolCallInput, target: Target): Promise<ToolCallRecord | null> {
+  if (!recordingEnabled()) return null;
+  let durableCall: ToolCallRecord | null = null;
+  try {
+    // Exact request evidence proves who called; it does not keep a replaced frontend
+    // executable. A remains part of the durable transcript after A -> B, but any *new* call
+    // from A is an incident, not new history in B's live context. Preserve the proof on the
+    // row while routing it to the one non-chat stream, and make that verdict terminal so the
+    // ordinary late-correlation repair cannot put it back later.
+    if (
+      target.conversationId &&
+      (await conversationAttachment(target.conversationId, target.sessionId)) === 'superseded'
+    ) {
+      target = { ...target, attribution: 'superseded', turnId: null };
+    }
+    const evidence = input.evidence ?? currentCall()?.evidence ?? emptyEvidence();
+    const sessionId = await targetSession(target);
+    if (!sessionId) return null;
+    // A proven request can outlive the swarm object and even the worker tab that issued it.
+    // Request-id correlation still recovers the exact old conversation/session in that case,
+    // but the live broker can no longer answer `agentForCaller()`. Worker origin is already
+    // durable first-hand evidence: the bridge stamped it when this app opened and bound the
+    // worker chat. Recover only that worker id, never a guessed prime/current agent.
+    let eventAgent = input.agent ?? null;
+    let callModel: Pick<ToolCallRecord, 'model' | 'reasoningEffort'> = {};
+    if (target.conversationId) {
+      const summary = await getSession(sessionId);
+      const selection = summary?.selectedModel;
+      const live = conversations.get(target.conversationId);
+      // Selection evidence must precede this exact turn, not merely arrive before the
+      // tool result is recorded. A user changing next-turn settings cannot reprice the
+      // model still executing the old turn. Unknown/historical calls stay unattributed.
+      if (selection?.conversationId === target.conversationId && live?.turnId === target.turnId &&
+          live.turnStartedAt !== null && live.turnStartedAt !== undefined &&
+          selection.observedAt <= live.turnStartedAt && selection.observedAt <= input.startedAt) {
+        callModel = { model: selection.model, ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}) };
+      }
+      const origin = summary?.origin;
+      if (origin?.kind === 'worker' && origin.agentId && /^worker-\d+$/.test(origin.agentId)) {
+        // Request/session ownership is older and stronger than whatever live broker role this
+        // conversation may hold now. A stale request from worker-1 must stay worker-1 even if
+        // the same ChatGPT conversation later participates in another run as prime.
+        eventAgent = origin.agentId;
+      }
+    }
+
+    const textParts = input.content.filter((part) => part.type === 'text').map((part) => part.text ?? '');
+    // Scrub before summarisation too. A failed tool may put the first line of its
+    // result into ActivitySummary.detail; scrubbing only in storeText would keep the
+    // raw capability out of args/result while still leaking it through that summary to
+    // events.jsonl, the renderer and the extension activity feed.
+    const authoredResultText = redactResult(input.tool, textParts.join('\n'));
+    const resultText = input.protocolResult === undefined ? authoredResultText : redactResult(input.tool, safeJson(input.protocolResult));
+    const assets: AssetRef[] = [...evidence.assets];
+    let missingImages = 0;
+    const imageRecordingReasons = new Set<string>();
+    for (const part of input.content) {
+      if (part.type !== 'image') continue;
+      try {
+        assets.push(await storeImage(sessionId, part.data ?? '', part.mimeType ?? 'image/png'));
+      } catch (err) {
+        missingImages++;
+        // Only fixed storage diagnostics may enter the transcript; arbitrary fs errors
+        // can contain private paths. Recording failure never changes the MCP payload.
+        const message = err instanceof Error ? err.message : '';
+        const reason = message === 'Global session asset quota exceeded' || message === 'Session asset quota exceeded'
+          ? 'recording storage limit reached'
+          : message === 'Session image exceeds the recording limit' ? 'recording image size limit' : 'recording write failed';
+        imageRecordingReasons.add(reason);
+        logWarn(`session image not stored: ${reason}`);
+      }
+    }
+
+    const summary: ActivitySummary = summarizeToolCall({
+      tool: input.tool,
+      args: input.args,
+      evidence,
+      outcome: input.outcome,
+      durationMs: input.durationMs,
+      resultHead: authoredResultText.split('\n', 1)[0] ?? ''
+    });
+    if (missingImages) {
+      const notice = `${missingImages} image preview(s) not saved: ${[...imageRecordingReasons].join('; ')}. Image content remains in the tool response.`;
+      summary.detail = summary.detail ? `${summary.detail} · ${notice}` : notice;
+      if (summary.tone !== 'bad') summary.tone = 'warn';
+    }
+
+    const call: ToolCallRecord = {
+      ...(target.attribution === 'request_id' && target.conversationId && evidence.processCompletion && evidence.processSessionId && input.tool === 'exec_command'
+        ? { process: { sessionId: evidence.processSessionId } } : {}),
+      ...callModel,
+      callId: randomUUID(),
+      ...(input.resultReceiptId && (target.attribution === 'unattributed' || target.attribution === 'request_id')
+        ? { resultReceiptId: input.resultReceiptId } : {}),
+      tool: input.tool,
+      attribution: target.attribution,
+      requestId: input.requestId ?? null,
+      conversationId: target.conversationId,
+      attributionMethod:
+        target.attribution === 'superseded'
+          ? 'superseded'
+          : target.conversationId && input.requestId
+            ? 'request_id'
+            : 'unattributed',
+      args: await storeText(sessionId, redactCredentialText(safeJson(redactArgs(input.tool, input.args))), MAX_TOOL_ARGS_CHARS),
+      result: await storeText(sessionId, resultText, MAX_TOOL_RESULT_CHARS),
+      outcome: input.outcome,
+      durationMs: input.durationMs,
+      summary,
+      ...(evidence.changes.length > 0 ? { changes: evidence.changes } : {}),
+      ...(assets.length > 0 ? { assets } : {}),
+      ...(input.endsActivity === true ? { endsActivity: true as const } : {})
+    };
+
+    const recordCall = call.process ? recordProcessCall : appendEvent;
+    await recordCall(sessionId, {
+      time: input.startedAt,
+      source: 'mcp',
+      kind: 'tool_call',
+      call,
+      ...(eventAgent ? { agent: eventAgent } : {}),
+      ...(target.turnId ? { turnId: target.turnId } : {})
+    });
+    durableCall = call.resultReceiptId ? { ...call, resultReceiptId: undefined } : call;
+    if (call.process && evidence.processCompletion) {
+      // Bind once to the recorded call, never look up a reusable numeric process id.
+      // A process that exited during recorder admission resolves this same promise.
+      void evidence.processCompletion.then(completion => {
+        const work = completeProcessCall(sessionId, call.callId, completion)
+          .then(() => {
+            // Notification is not the exit commit: an observer throwing after
+            // the write must never erase a real durable process termination.
+            try { notifyChanged(); }
+            catch (error) { noteToolRecordingFailure(input, 'post_append', error, target); }
+          }, error => noteToolRecordingFailure(input, 'process_completion', error, target));
+        pendingRecordings.add(work);
+        void work.then(() => pendingRecordings.delete(work));
+      }, error => {
+        // A lost managed-process completion promise is uncertainty, not exit
+        // code zero or positive permission to start another native request.
+        noteToolRecordingFailure(input, 'process_completion_observation', error, target);
+      });
+    }
+    if (call.resultReceiptId) await syncSessionJournal(sessionId);
+    durableCall = call;
+    const reopenedTurnId = await serializeConversationObservations(target.conversationId ?? sessionId, () => reopenFalselyEndedTurn(
+      sessionId,
+      target.conversationId,
+      input.requestId ?? null,
+      input.startedAt,
+      eventAgent
+    ));
+    notifyChanged();
+    try {
+      const filed = await getSession(sessionId);
+      const currentConversation =
+        target.conversationId !== null &&
+        filed?.conversationId === target.conversationId &&
+        !(await conversationWasSuperseded(target.conversationId));
+      attributionListener?.(
+        target.conversationId,
+        sessionId,
+        currentConversation,
+        input.startedAt,
+        input.endsActivity === true,
+        filed?.lastAssistantFinalAt ?? null,
+        // The one thing an unattributed call still carries: the server turn it belongs to.
+        input.requestId ?? null,
+        reopenedTurnId,
+        filed
+      );
+    } catch (err) {
+      noteToolRecordingFailure(input, 'post_append', err, target);
+    }
+    return call;
+  } catch (err) {
+    // Observation/reopen failure AFTER the awaited append cannot erase the
+    // already-durable terminal result. Its separate first cause remains visible,
+    // but later exact Main completion reconciliation may still inspect the row.
+    noteToolRecordingFailure(input, durableCall ? 'post_append' : 'append', err, target);
+    return durableCall;
+  }
+}
+
+/** A fresh exact observation can disprove a failed view, including after reload/restart. */
+async function reopenThinkingFailure(sessionId: string, live: LiveConversation | undefined, at: number,
+  owner?: string): Promise<string | null> {
+  if (!live || live.turnId) return null;
+  const [boundary] = await readRecentEvents(sessionId, 1, { kinds: ['turn_start', 'turn_end', 'user_message'] });
+  if (live.turnId || boundary?.kind !== 'turn_end' || boundary.reason !== 'thinking_failed' ||
+      !boundary.turnId || (owner && boundary.turnId !== owner) || at <= boundary.time) return null;
+  await appendEvent(sessionId, { source: 'app', time: at, kind: 'turn_start', turnId: boundary.turnId,
+    detail: 'fresh work resumed the same turn after its native view failed' });
+  live.knownTurnEnds.delete(boundary.turnId);
+  live.openTurns.add(boundary.turnId);
+  live.turnId = boundary.turnId;
+  live.turnStartedAt = live.lastTurnStartedAt ?? at;
+  live.lastTurnOutcome = null;
+  live.endedTurn = null;
+  return boundary.turnId;
+}
+
+/**
+ * Files one attributed call against its conversation's turn lifecycle.
+ *
+ * While a turn is open the call's request id is remembered as one of the server turns that
+ * turn runs under. With no turn open, the same request id calling again — starting after the
+ * end the page reported — is the earliest fact that contradicts that end: ChatGPT does not
+ * mint a new request id for a turn it is still working, so the turn never ended, and only the
+ * page's view of it did. Live 2026-09-02: a reload mid-turn adopted the open turn and closed it
+ * "completed" four seconds later from interim prose; the same request id then called tools for
+ * twenty-four more minutes, and Goal typed the next message against an answer that had never
+ * been given. The reopening is app-authored and durable — a second `turn_start` for the same
+ * id, named as such — so the page's real end is accepted afterwards, the projection hands the
+ * open id back to the next document, and Goal is told (through the attribution listener) that
+ * the decision it was drafting was owed to nothing.
+ *
+ * Deliberately narrow: a call that *started* before the reported end is the ordinary in-flight
+ * call finishing late and proves nothing; a different request id is a different server turn.
+ * Returns the reopened turn id, or null when this call changed no lifecycle.
+ */
+async function reopenFalselyEndedTurn(
+  sessionId: string,
+  conversationId: string | null,
+  requestId: string | null,
+  startedAt: number,
+  agent: string | null
+): Promise<string | null> {
+  if (!conversationId || !requestId) return null;
+  const live = conversations.get(conversationId);
+  if (!live || live.sessionId !== sessionId) return null;
+  const failed = await reopenThinkingFailure(sessionId, live, startedAt);
+  if (failed) {
+    live.turnRequestIds.add(requestId);
+    return failed;
+  }
+  if (live.turnStartedAt !== null) {
+    live.turnRequestIds.add(requestId);
+    return null;
+  }
+  const ended = live.endedTurn;
+  if (!ended || !ended.requestIds.has(requestId) || startedAt <= ended.endedAt) return null;
+  // A request id proves conversation ownership, not that the selected native
+  // answer is still generating. Pro can issue same-request work after its public
+  // terminal message. Only a completion inferred without that native final is
+  // contradicted by the late call.
+  const [answer] = await readRecentEvents(sessionId, 1, { kinds: ['assistant_message'] });
+  if (live.endedTurn !== ended || live.turnStartedAt !== null) return null;
+  if (answer?.kind === 'assistant_message' && answer.turnId === ended.turnId &&
+      answer.state === 'final' && answer.final === true && answer.providerMessageId) return null;
+  await appendEvent(sessionId, {
+    time: startedAt,
+    source: 'app',
+    kind: 'turn_start',
+    turnId: ended.turnId,
+    detail: 'the same ChatGPT request kept calling tools after the page reported this turn completed',
+    ...(agent ? { agent } : {})
+  });
+  live.endedTurn = null;
+  live.knownTurnEnds.delete(ended.turnId);
+  live.openTurns.add(ended.turnId);
+  live.turnId = ended.turnId;
+  live.turnStartedAt = ended.startedAt ?? startedAt;
+  live.lastTurnOutcome = null;
+  live.turnRequestIds = new Set(ended.requestIds);
+  logInfo(
+    `session ${sessionId} reopened turn ${ended.turnId} — request ${requestId} kept calling tools after the page reported it completed`
+  );
+  return ended.turnId;
+}
+
+interface Target {
+  conversationId: string | null;
+  /** Exact durable session epoch carried by request correlation, when proven. */
+  sessionId: string | null;
+  attribution: CallAttribution;
+  turnId: string | null;
+}
+
+/** Set by the agent broker so a worker's calls land in that worker's own session. */
+let agentConversationLookup: (agent: string) => string | null = () => null;
+let agentBinder: (agent: string, conversationId: string) => void = () => undefined;
+
+export function setAgentConversationLookup(lookup: (agent: string) => string | null): void {
+  agentConversationLookup = lookup;
+}
+
+/**
+ * Set by the bridge. Called once per filed call with the verdict this module just reached: the
+ * conversation the request-id join proved, or null for a call that finished the grace with no
+ * page evidence at all. Both are already durable when it runs.
+ *
+ * One hook rather than two, because the two facts are one fact — which chats' reporting works
+ * and which activity nobody claimed — and splitting them invites a second attribution clock
+ * somewhere else. Nothing here decides what a verdict is worth; the bridge owns that.
+ */
+let attributionListener:
+  | ((
+      conversationId: string | null,
+      sessionId: string,
+      currentConversation: boolean,
+      startedAt: number,
+      endsActivity: boolean,
+      lastAssistantFinalAt: number | null,
+      requestId: string | null,
+      reopenedTurnId: string | null,
+      filedSession: SessionSummary | null
+    ) => void)
+  | null = null;
+
+export function setCallAttributionListener(
+  listen:
+    | ((
+        conversationId: string | null,
+        sessionId: string,
+        currentConversation: boolean,
+        startedAt: number,
+        endsActivity: boolean,
+        lastAssistantFinalAt: number | null,
+        requestId: string | null,
+        /** The turn this call reopened, when it proved the page's completed end false. */
+        reopenedTurnId: string | null,
+        filedSession: SessionSummary | null
+      ) => void)
+    | null
+): void {
+  attributionListener = listen;
+}
+
+/** Set by the agent broker, for the deferred prime binding in recordToolCall. */
+export function setAgentBinder(bind: (agent: string, conversationId: string) => void): void {
+  agentBinder = bind;
+}
+
+function bindAgentConversation(agent: string, conversationId: string): void {
+  try {
+    agentBinder(agent, conversationId);
+  } catch (err) {
+    logWarn(`could not bind ${agent} to its conversation: ${(err as Error).message}`);
+  }
+}
+
+function agentConversation(agent: string): string | null {
+  try {
+    return agentConversationLookup(agent);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The session an event is physically written to.
+ *
+ * Anything that could not be tied to a conversation goes to the unattributed stream.
+ * The previous behaviour — fall back to whichever session was written to last — was
+ * the dangerous one: with two workers generating at once it appended one agent's calls
+ * into the other's raw history, and nothing downstream could tell that had happened.
+ */
+async function targetSession(target: Target): Promise<string | null> {
+  if (target.attribution === 'superseded') return ensureUnattributedSession();
+  if (target.conversationId) {
+    if (target.sessionId) {
+      const exact = await getSession(target.sessionId);
+      if (exact && exact.chatIds.includes(target.conversationId)) return exact.id;
+      logWarn(
+        `request attribution session ${target.sessionId} for conversation ${target.conversationId} is unavailable; refusing to downgrade to a newer conversation epoch`
+      );
+      return null;
+    }
+    const live = conversations.get(target.conversationId);
+    if (live) return live.sessionId;
+    // Request-id ownership is allowed to outlive the browser tab and a Compact & Resume
+    // rebind. Append to that durable session without calling sessionForConversation(), whose
+    // semantics correctly mean "the page reopened" and would clear endedAt. Historical chat
+    // lineage is safe here only because target.conversationId came from exact request proof.
+    const durable = await findSessionByConversation(target.conversationId, { includeHistorical: true });
+    if (durable) return durable.id;
+    // First ever evidence for this exact conversation can still be an MCP call. There is no
+    // existing session to resurrect, so creating one through the ordinary path is correct.
+    return sessionForConversation(target.conversationId);
+  }
+  return ensureUnattributedSession();
+}
+
+async function storeImage(sessionId: string, base64: string, mimeType: string): Promise<AssetRef> {
+  const data = Buffer.from(base64, 'base64');
+  if (data.length === 0 || data.length > MAX_ASSET_BYTES) throw new Error('Session image exceeds the recording limit');
+  return writeAsset(sessionId, data, mimeType);
+}
+
+// ------------------------------------------------------- extension events
+
+/** One observation from the ChatGPT page. Validated by the bridge before it lands. */
+export interface ChatObservation {
+  kind:
+    | 'model_selection'
+    | 'conversation_title'
+    | 'user_message'
+    | 'assistant_message'
+    | 'page_tool'
+    | 'turn_start'
+    | 'turn_end'
+    | 'chat_error'
+    | 'tool_evidence'
+    | 'app_sightings';
+  time: number;
+  /** app_sightings only: connector result rows as the page saw them (connector-identity.ts). */
+  apps?: import('../connector-identity.js').AppSighting[];
+  /** Current native selection evidence, not a historical message or requested worker model. */
+  model?: string;
+  reasoningEffort?: import('../../shared/session.js').ReasoningEffort;
+  /** True when `time` is ChatGPT's own authored create_time, not local observation time. */
+  authoredTime?: boolean;
+  /** True only for the newest DOM user row that this document proved was just sent. */
+  authoredNow?: boolean;
+  /** True only when the current page generation owns this assistant revision now. */
+  activeNow?: boolean;
+  text?: string;
+  /** User transcript quality only; not native Send or Goal eligibility evidence. */
+  textOrigin?: import('../../shared/session.js').UserMessageTextOrigin;
+  /** Exact native user-message attachment metadata; no remote URL or image bytes. */
+  attachments?: import('../../shared/input.js').InputAttachment[];
+  reaction?: string | null;
+  /** ChatGPT's already-rendered authored markup for this same logical message. */
+  renderedHtml?: string;
+  messageId?: string;
+  /** Raw public provider message UUID, retained as evidence, never used to guess ownership. */
+  providerMessageId?: string;
+  turnId?: string;
+  final?: boolean;
+  state?: 'streaming' | 'final';
+  /** Internal React conversation id used only to cross-check the URL conversation id. */
+  fiberConversationId?: string;
+  outcome?: TurnOutcome;
+  /** Terminal failures close input; stream_gone files a recoverable transport episode only. */
+  reason?: 'thinking_failed' | 'model_cooldown' | 'conversation_limit' | 'stream_gone' | 'watchdog_stalled';
+  detail?: string;
+  /** Browser terminal proof; app-owned Goal policy is applied only after this is durable. */
+  goalEligible?: boolean;
+  /** Main-only ordinary native question/final association, verified against the Sent outbox. */
+  inputReplyTo?: string;
+  /** Main-only publication hold for an annotated source join awaiting its receipt proof. */
+  inputAssociationPending?: boolean;
+  /** chat_error only: explicit recovery authority from a transport failure or app watchdog. */
+  recoverable?: boolean;
+  /** chat_error only: the current failed turn exposes one exact native Retry/Try again control. */
+  retryAvailable?: boolean;
+  /** chat_error only: the DOM classifier identified a provider access limit, in any language. */
+  blocking?: boolean;
+  /** tool_evidence only: the connector requests this turn's message model holds. */
+  calls?: PageCallEvidence[];
+}
+
+/**
+ * One connector request, as the page's own message model describes it.
+ *
+ * Deliberately tiny. Request id is the ownership key. Tool/name/order remain diagnostics;
+ * nothing here carries an argument value, result body, or other hidden request payload.
+ */
+export interface PageCallEvidence {
+  /** ChatGPT's message id for the request, which is what makes this idempotent. */
+  messageId: string;
+  tool: string;
+  /** Position within the turn, recorded only for diagnostics/presentation. */
+  order: number;
+  /** Whether the page has seen a result come back yet. Recorded for diagnosis only. */
+  answered: boolean;
+  /**
+   * ChatGPT's own request id, and its own creation time in seconds.
+   *
+   * The id is what ties this request to the MCP call it issued: the connector request
+   * arrives carrying the same `wfr_…`. `at` cannot do that job — it is when the extension
+   * *observed* the row, a poll tick that is phase-shifted per tab, so it cannot even order
+   * two workers' requests reliably, whatever it looks like it is doing.
+   */
+  requestId?: string | null;
+  /** Opaque Core server witness read from this invocation's native result
+   * after strict result/parent/tool/link checks. Never a guessed workflow id. */
+  resultReceiptId?: string;
+  createTime?: number | null;
+}
+
+/**
+ * Stores one visible ChatGPT-native activity row, superseding the record it already has.
+ *
+ * The same contract as `recordProgress`, for the same reason. ChatGPT rewrites an activity
+ * row's label as the step finishes, and the extension used to name each row by its position
+ * in the turn plus a hash of that label — so "Inspecting project files" and "Inspected
+ * project files" were two different rows, and a re-layout that shifted the row's index made
+ * a third. One recorded session held fifty-four `page_tool` events for what the page had
+ * shown as roughly a dozen steps.
+ */
+async function recordPageTool(
+  sessionId: string,
+  live: LiveConversation | undefined,
+  item: ChatObservation,
+  base: { time: number; source: 'extension'; turnId?: string; agent?: string }
+): Promise<boolean> {
+  const id = item.messageId;
+  const label = (item.text ?? '').slice(0, 300).trim();
+  if (!id || !label) return false;
+  if (!live) {
+    await appendEvent(sessionId, { ...base, kind: 'page_tool', messageId: id, label });
+    return true;
+  }
+
+  const held = live.pageTools.get(id);
+  if (held && held.text === label) return false;
+
+  const event = await appendEvent(sessionId, {
+    ...base,
+    time: held ? held.time : base.time,
+    kind: 'page_tool',
+    messageId: id,
+    label,
+    ...(held ? { origin: held.seq } : {})
+  });
+  live.pageTools.set(id, {
+    seq: held ? held.seq : event.seq,
+    time: held ? held.time : base.time,
+    updatedAt: base.time,
+    text: label
+  });
+  return true;
+}
+
+const observationChains = new Map<string, Promise<void>>();
+
+function observedUserTitle(first?: string): string | undefined {
+  return first ? userTitle(first) || undefined : undefined;
+}
+
+function observationTitle(observations: readonly ChatObservation[]): string | undefined {
+  const title = observations.find((item) => item.kind === 'conversation_title')?.text?.trim();
+  const first = observations.find((item) => item.kind === 'user_message')?.text;
+  return title || observedUserTitle(first);
+}
+
+/** The one ownership ingress used by both /correlations and transcript batches.
+ * Exact proof needs a committed session/lineage, but must never wait behind that chat's
+ * streamed text, HTML or image writes. Session initialization already has its own owner. */
+export async function recordRequestEvidence(
+  conversationId: string,
+  observations: readonly ChatObservation[],
+  claimedTurnId?: string | null
+): Promise<string | null> {
+  if (!recordingEnabled()) return null;
+  const lineage = !conversations.has(conversationId) ? await supersededLineage(conversationId) : null;
+  const sessionId = lineage ?? await sessionForConversation(conversationId, observationTitle(observations));
+  if (!sessionId) return null;
+  // The browser may know a local generation from its own document stamp before
+  // the MCP result appears. Cross-check that claim against this *same durable
+  // session* and its most recent authored generation. A page final/turn_end may
+  // follow it, but a newer human question or generation revokes its right to
+  // enrich an old request. This does not establish tool completion or Send.
+  let confirmedTurn: string | undefined;
+  if (claimedTurnId && /^g-[a-z0-9_-]{3,180}$/i.test(claimedTurnId)) {
+    try {
+      const [session, timeline] = await Promise.all([
+        getSession(sessionId),
+        readRecentEvents(sessionId, 256, { kinds: ['user_message', 'turn_start'] })
+      ]);
+      const latest = timeline.at(-1);
+      if (session?.conversationId === conversationId && latest?.kind === 'turn_start' &&
+          latest.turnId === claimedTurnId) confirmedTurn = claimedTurnId;
+    } catch {
+      // Recording the request's exact conversation still matters if an old or
+      // unavailable timeline cannot prove the optional turn. Fail closed here.
+    }
+  }
+  // Proof identifies even a retired caller; kernel/recorder attachment checks then refuse it
+  // as superseded. Never turn an exact historical owner into anonymous executable authority.
+  let storedOwner = false;
+  for (const item of observations) {
+    if (item.kind === 'tool_evidence' && item.calls?.length) {
+      storedOwner = noteCallEvidence(conversationId, sessionId, item.fiberConversationId,
+        item.calls, item.time, item.turnId ?? confirmedTurn) || storedOwner;
+    }
+  }
+  if (storedOwner || correlationCommitPending()) await commitRequestCorrelations();
+  return sessionId;
+}
+
+export type RecordedChatObservations = {
+  sessionId: string | null;
+  stored: number;
+  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; toolStartedAt?: number; endedTurnId?: string };
+  goalCandidates: Array<{ replyId: string; turnId: string; eventSeq: number }>;
+};
+
+export function recordChatObservations(
+  conversationId: string,
+  observations: readonly ChatObservation[],
+  agent?: string | null,
+  afterDurable?: (recorded: RecordedChatObservations) => Promise<void>
+): Promise<RecordedChatObservations> {
+  const hasEvidence = observations.some((item) => item.kind === 'tool_evidence');
+  const ownership = hasEvidence ? recordRequestEvidence(conversationId, observations) : null;
+  // Observe rejection now even if an earlier transcript batch is still blocked. The queued
+  // work below rethrows it to the journal owner, which retains the batch for its normal retry.
+  void ownership?.catch(() => undefined);
+  const transcript = hasEvidence ? observations.filter((item) => item.kind !== 'tool_evidence') : observations;
+  return serializeConversationObservations(conversationId, async () => {
+    await ownership;
+    const recorded = await recordChatObservationsNow(conversationId, transcript, agent);
+    if (recorded.sessionId) await reconcileRecordedContinuationDestinationNow(recorded.sessionId, conversationId);
+    // Narrow lifecycle hooks that must not race a later page claim run after the transcript is
+    // durable but before this conversation's observation owner is released. The hook cannot
+    // change what was recorded; failure keeps the caller's journal batch retryable.
+    await afterDurable?.(recorded);
+    return recorded;
+  });
+}
+
+/**
+ * Transcript, MCP lifecycle, and guarded automatic-continuation publication share this exact
+ * per-conversation order. Exported only so continuation.ts can make its optional guarded open
+ * atomic with the browser observations that would revoke that guard.
+ */
+export function serializeConversationObservations<T>(conversationId: string, action: () => Promise<T>): Promise<T> {
+  const prior = observationChains.get(conversationId) ?? Promise.resolve();
+  const work = prior.then(action);
+  const tracked = work.then(
+    () => undefined,
+    () => undefined
+  );
+  observationChains.set(conversationId, tracked);
+  void tracked.finally(() => {
+    if (observationChains.get(conversationId) === tracked) observationChains.delete(conversationId);
+  });
+  return work;
+}
+
+/**
+ * The session a replaced Compact & Resume source chat still writes its prose to.
+ *
+ * Null for every conversation that is current somewhere or unknown; those take the ordinary
+ * path. Only a chat that is a past frontend of exactly one session, and current on none, has
+ * a lineage to file into.
+ */
+async function supersededLineage(conversationId: string): Promise<string | null> {
+  if (!conversationId || !(await conversationWasSuperseded(conversationId))) return null;
+  if (await findSessionByConversation(conversationId)) return null;
+  const lineage = await findSessionByConversation(conversationId, { includeHistorical: true });
+  return lineage && lineage.conversationId !== conversationId ? lineage.id : null;
+}
+
+/**
+ * What a replaced chat may still add to its session: its messages, and nothing else.
+ *
+ * The session's live turn, activity clock, Goal obligations and title belong to the chat
+ * that replaced it, so a lingering page on the old chat records prose only — the brief's
+ * final rendering arriving after the commit, or the user carrying on in the old tab — and
+ * moves none of the projections the replacement now owns.
+ */
+async function recordSupersededMessages(
+  sessionId: string,
+  observations: readonly ChatObservation[]
+): Promise<number> {
+  let stored = 0;
+  for (const item of observations) {
+    if (!item.messageId) continue;
+    const base = {
+      time: item.time,
+      source: 'extension' as const,
+      ...(item.turnId ? { turnId: item.turnId } : {})
+    };
+    let written: { changed: boolean } | null = null;
+    if (item.kind === 'user_message') {
+      written = await upsertMessageEvent(
+        sessionId,
+        {
+          ...base,
+          kind: 'user_message',
+          message: await storeText(sessionId, item.text ?? '', MAX_USER_MESSAGE_CHARS),
+          ...(item.textOrigin === 'provider' || item.textOrigin === 'rendered' ? { textOrigin: item.textOrigin } : {}),
+          ...(item.attachments?.length ? { attachments: item.attachments } : {}),
+          ...(item.reaction !== undefined ? { reaction: item.reaction } : {}),
+          ...(item.model ? { model: item.model } : {}),
+          messageId: item.messageId
+        },
+        { preferTime: item.authoredTime === true }
+      );
+    } else if (item.kind === 'assistant_message') {
+      const state = item.state ?? (item.final === true ? 'final' : 'streaming');
+      written = await upsertMessageEvent(
+        sessionId,
+        {
+          ...base,
+          kind: 'assistant_message',
+          message: await storeText(sessionId, item.text ?? '', 256_000),
+          ...(item.renderedHtml
+            ? { renderedHtml: await storeText(sessionId, item.renderedHtml, 120_000) }
+            : {}),
+          messageId: item.messageId,
+          state,
+          ...(item.providerMessageId ? { providerMessageId: item.providerMessageId } : {}),
+          final: state === 'final'
+        },
+        { preferTime: item.authoredTime === true }
+      );
+    }
+    if (written?.changed) stored++;
+  }
+  if (stored > 0) notifyChanged();
+  return stored;
+}
+
+async function recordChatObservationsNow(
+  conversationId: string,
+  observations: readonly ChatObservation[],
+  agent?: string | null
+): Promise<{
+  sessionId: string | null;
+  stored: number;
+  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; toolStartedAt?: number; endedTurnId?: string };
+  goalCandidates: Array<{ replyId: string; turnId: string; eventSeq: number }>;
+}> {
+  const activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; toolStartedAt?: number; endedTurnId?: string } = { meaningful: false, working: false, terminal: false };
+  if (!recordingEnabled()) return { sessionId: null, stored: 0, activity, goalCandidates: [] };
+  if (!conversations.has(conversationId)) {
+    const lineage = await supersededLineage(conversationId);
+    if (lineage) {
+      const stored = await recordSupersededMessages(lineage, observations);
+      return { sessionId: lineage, stored, activity, goalCandidates: [] };
+    }
+  }
+  let firstUser: ChatObservation | undefined;
+  let pageTitle: ChatObservation | undefined;
+  const explicitEnds = new Set<string>();
+  const batchTurnStarts = new Map<string, number>();
+  let batchUncertainEndId: string | null = null;
+  // This batch is hot while ChatGPT is streaming. Collect the three facts needed before the
+  // write loop in one pass instead of find + find + filter + map (the latter two also allocated
+  // an intermediate array for every batch).
+  for (const item of observations) {
+    if (!firstUser && item.kind === 'user_message') firstUser = item;
+    if (item.kind === 'conversation_title') pageTitle = item;
+    if (item.kind === 'turn_start' && item.turnId) batchTurnStarts.set(item.turnId, item.time);
+    if (item.kind === 'turn_end' && item.turnId) {
+      explicitEnds.add(item.turnId);
+      if (item.outcome !== 'completed' && item.outcome !== 'stopped') batchUncertainEndId = item.turnId;
+    }
+  }
+  const sessionId = await sessionForConversation(
+    conversationId,
+    pageTitle?.text?.trim() || observedUserTitle(firstUser?.text)
+  );
+  if (!sessionId) return { sessionId: null, stored: 0, activity, goalCandidates: [] };
+  const live = conversations.get(conversationId);
+  let stored = 0;
+  let recoveredGoalSeen = false;
+  const goalCandidates: Array<{ replyId: string; turnId: string; eventSeq: number }> = [];
+  // Reload can lose or replace the page's turn id. The canonical message store keeps
+  // the first exact owner of that stable assistant message through every revision.
+  // Decide recovery from its committed result, never the replacement page's hint.
+  // Only a turn already open before this batch qualifies; apply the end after all
+  // observations so a newer turn or an explicit verdict cannot be overwritten.
+  const recoverableTurns = new Set(live?.openTurns);
+  let recoveredFinal: { turnId: string; time: number; seq: number; origin: number; native: boolean; uncertainEndSeq?: number } | undefined;
+
+  for (const item of observations) {
+    const base = {
+      time: item.time,
+      source: 'extension' as const,
+      ...(item.turnId ? { turnId: item.turnId } : {}),
+      ...(agent ? { agent } : {})
+    };
+    switch (item.kind) {
+      case 'model_selection':
+        if (item.model) await observeSessionModel(sessionId, conversationId, item.model, item.time, item.reasoningEffort);
+        break;
+      case 'conversation_title':
+        // Apply after canonical messages so legacy preview proof exists in either batch order.
+        break;
+      case 'user_message': {
+        // A message with no ChatGPT identity cannot participate in the canonical transcript.
+        // Dropping it is safer than minting a local id that can collide on reload.
+        if (!item.messageId) continue;
+        const written = await upsertMessageEvent(sessionId, {
+          ...base,
+          kind: 'user_message',
+          message: await storeText(sessionId, item.text ?? '', MAX_USER_MESSAGE_CHARS),
+          ...(item.textOrigin === 'provider' || item.textOrigin === 'rendered' ? { textOrigin: item.textOrigin } : {}),
+          ...(item.attachments?.length ? { attachments: item.attachments } : {}),
+          ...(item.reaction !== undefined ? { reaction: item.reaction } : {}),
+          ...(item.model ? { model: item.model } : {}),
+          messageId: item.messageId
+        }, { preferTime: item.authoredTime === true });
+        if (!written.changed) continue;
+        if (item.authoredNow === true) {
+          activity.meaningful = true; activity.at = Math.max(activity.at ?? 0, item.time);
+          activity.working = true;
+        }
+        break;
+      }
+      case 'assistant_message': {
+        if (!item.messageId) continue;
+        const state = item.state ?? (item.final === true ? 'final' : 'streaming');
+        // A reload can destroy the document-local generation id after this recorder already
+        // made the only honest lifecycle verdict it could: unknown/failed/interrupted/stalled.
+        // A new stable final reply is stronger evidence about Goal than that lost id, but an
+        // old final seen merely by opening an idle chat is not. The prior uncertain boundary is
+        // therefore the exact fence; the stable reply id is the durable exactly-once identity.
+        const batchUncertainStartedAt = batchUncertainEndId
+          ? batchTurnStarts.get(batchUncertainEndId) ??
+            (live?.turnId === batchUncertainEndId ? live.turnStartedAt : null)
+          : null;
+        const priorUncertainStartedAt =
+          live?.turnStartedAt === null &&
+          live.lastTurnOutcome !== null &&
+          live.lastTurnOutcome !== 'completed' &&
+          live.lastTurnOutcome !== 'stopped'
+            ? live.lastTurnStartedAt
+            : null;
+        const uncertainTurnStartedAt = batchUncertainStartedAt ?? priorUncertainStartedAt;
+        const terminalActivity =
+          state === 'final' &&
+          (item.activeNow === true ||
+            (uncertainTurnStartedAt !== null && item.time >= uncertainTurnStartedAt));
+        const recoveredGoalEligible =
+          state === 'final' &&
+          !item.turnId &&
+          live !== undefined &&
+          uncertainTurnStartedAt !== null &&
+          item.time >= uncertainTurnStartedAt;
+        const goalEligible = item.goalEligible === true || recoveredGoalEligible;
+        const written = await upsertMessageEvent(sessionId, {
+          ...base,
+          kind: 'assistant_message',
+          // Keep normal 15k–20k-token handoff-style answers inline rather than making the
+          // local transcript itself look truncated while the continuation carries more.
+          message: await storeText(sessionId, item.text ?? '', 256_000),
+          ...(item.renderedHtml
+            ? { renderedHtml: await storeText(sessionId, item.renderedHtml, 120_000) }
+            : {}),
+          messageId: item.messageId,
+          state,
+          final: state === 'final',
+          ...(item.providerMessageId ? { providerMessageId: item.providerMessageId } : {}),
+          ...(item.inputReplyTo && state === 'final' ? { inputReplyTo: item.inputReplyTo } : {}),
+          ...(item.inputAssociationPending !== undefined ? { inputAssociationPending: item.inputAssociationPending } : {}),
+          ...(goalEligible && state === 'final' ? { goalEligible: true } : {})
+        }, { preferTime: item.authoredTime === true });
+        const canonicalTurn = written.event.turnId;
+        // A stopped partial answer stays streaming in history. Re-observing its
+        // DOM after restart cannot renew work, nor can an old message borrow a
+        // newer page turn. Preserve the revision while using its canonical owner
+        // and the recorder's terminal boundary to decide activity.
+        const [uncertainEnd] = canonicalTurn && !live?.turnId
+          ? await readRecentEvents(sessionId, 1, { kinds: ['turn_start', 'turn_end', 'user_message'] }) : [];
+        // A fresh exact interim can resume an uncertain failure without inventing
+        // a new user turn. Old messages and explicit completed/stopped turns cannot.
+        const resumedUncertainTurn = uncertainEnd?.kind === 'turn_end' && uncertainEnd.turnId === canonicalTurn &&
+          uncertainEnd.outcome !== 'completed' && uncertainEnd.outcome !== 'stopped' && item.time > uncertainEnd.time;
+        // HTML, provider identity and authored-time promotion revise history, not work.
+        // In particular a post-failure Fiber backfill must not reopen the dead turn.
+        const workingActivity = written.contentChanged && state !== 'final' && item.activeNow === true &&
+          (!canonicalTurn || canonicalTurn === live?.turnId || resumedUncertainTurn) &&
+          !(live?.turnStartedAt === null && (live.lastTurnOutcome === 'stopped' || live.lastTurnOutcome === 'completed'));
+        // A transport/watchdog failure may precede the real native final. Preserve the exact
+        // canonical owner and defer reconciliation until the entire batch is durable, just
+        // like open-turn recovery. Neither final-looking prose nor a timestamp supplies identity.
+        const uncertainFinal = written.event.kind === 'assistant_message' && written.event.providerMessageId &&
+          uncertainEnd?.kind === 'turn_end' && uncertainEnd.turnId === canonicalTurn &&
+          uncertainEnd.outcome !== 'completed' && uncertainEnd.outcome !== 'stopped';
+        if (state === 'final' && written.event.kind === 'assistant_message' && canonicalTurn &&
+            !explicitEnds.has(canonicalTurn) &&
+            ((recoverableTurns.has(canonicalTurn) && live?.turnId === canonicalTurn) || uncertainFinal)) {
+          const finalSeq = written.event.finalContentSeq ?? written.event.origin ?? written.event.seq;
+          if (!recoveredFinal || finalSeq > recoveredFinal.seq) {
+            recoveredFinal = { turnId: canonicalTurn, time: item.time, seq: finalSeq,
+              origin: written.event.origin ?? written.event.seq, native: Boolean(written.event.providerMessageId),
+              ...(uncertainFinal && uncertainEnd ? { uncertainEndSeq: uncertainEnd.seq } : {}) };
+          }
+        }
+        if (
+          written.event.kind === 'assistant_message' &&
+          written.event.goalEligible === true &&
+          written.event.inputAssociationPending !== true &&
+          state === 'final' &&
+          written.event.messageId
+        ) {
+          goalCandidates.push({
+            replyId: written.event.messageId,
+            turnId: written.event.turnId ?? `reply:${written.event.messageId}`.slice(0, 200),
+            eventSeq: written.event.origin ?? written.event.seq
+          });
+        }
+        if (recoveredGoalEligible && live) {
+          // This is an in-memory verdict for later call/reload decisions, not a fabricated
+          // turn_end. The canonical message keeps goalEligible monotonically, so an HTTP 503
+          // can still replay the same obligation even after this stronger final evidence wins.
+          recoveredGoalSeen = true;
+        }
+        if (!written.changed) continue;
+        if (workingActivity && canonicalTurn &&
+            await reopenThinkingFailure(sessionId, live, item.time, canonicalTurn)) {
+          activity.terminal = false;
+        }
+        if (terminalActivity || workingActivity) { activity.meaningful = true; activity.at = Math.max(activity.at ?? 0, item.time); }
+        if (terminalActivity) activity.terminal = true;
+        if (workingActivity) activity.working = true;
+        break;
+      }
+      case 'page_tool': {
+        const newlyObserved = !!live && !!item.messageId && !live.pageTools.has(item.messageId);
+        const written = await recordPageTool(sessionId, live, item, base);
+        if (!written) continue;
+        if (item.turnId && await reopenThinkingFailure(sessionId, live, item.time, item.turnId)) {
+          activity.terminal = false;
+          activity.working = true;
+          activity.meaningful = true;
+          activity.at = Math.max(activity.at ?? 0, item.time);
+        }
+        if (newlyObserved && item.turnId === live?.turnId && live.turnStartedAt !== null && item.time >= live.turnStartedAt) {
+          activity.toolStartedAt = Math.max(activity.toolStartedAt ?? 0, item.time);
+        }
+        break;
+      }
+      case 'chat_error': {
+        if (item.reason === 'thinking_failed' && !item.turnId) continue;
+        if (item.reason === 'stream_gone' && (!item.turnId || live?.turnId !== item.turnId ||
+            live.knownTurnEnds.has(item.turnId))) continue;
+        // Documents identify rendered nodes, not a shared notice: remounts, duplicate
+        // tabs and journal retries can all report the same problem. Coalesce a short
+        // burst here, inside the conversation's serialized writer, using committed history
+        // so restart/retry needs no second ledger. Access-limit dialogs are page-wide and can
+        // be remounted for minutes, so identical blocking copies share a ten-minute episode;
+        // ordinary failures retain their turn identity so a new failed attempt stays visible.
+        // Reloads may remint document turn ids, so a recoverable notice is also coalesced
+        // against the canonical question; a genuinely new question receives a new incident.
+        const text = (item.text ?? '').replace(/\s+/g, ' ').trim();
+        const question = item.recoverable === true ? await readLatestUserMessage(sessionId) : undefined;
+        const recent = await readRecentEvents(sessionId, 32, { kinds: ['chat_error'], maxBytes: 256 * 1024 });
+        if (recent.some(event => event.kind === 'chat_error' &&
+            ((question && event.recoverable === true && event.seq > (question.origin ?? question.seq)) ||
+            ((Math.abs(item.time - event.time) <= (item.blocking === true ? 10 * 60_000 : 30_000) ||
+              (item.reason && event.reason === item.reason && event.turnId === item.turnId)) &&
+            (item.blocking === true || (event.turnId ?? '') === (item.turnId ?? '')) &&
+            (!question || event.seq > (question.origin ?? question.seq)))) &&
+            (event.message.text.replace(/\s+/g, ' ').trim() === text ||
+              (item.recoverable === true && event.recoverable === true &&
+                (item.reason === 'stream_gone' || event.reason === 'stream_gone'))))) continue;
+        await appendEvent(sessionId, {
+          ...base,
+          kind: 'chat_error',
+          ...(item.reason ? { reason: item.reason } : {}),
+          ...(typeof item.recoverable === 'boolean' ? { recoverable: item.recoverable } : {}),
+          ...(typeof item.blocking === 'boolean' ? { blocking: item.blocking } : {}),
+          message: await storeText(sessionId, item.text ?? '', 2000)
+        });
+        activity.meaningful = true; activity.at = Math.max(activity.at ?? 0, item.time);
+        break;
+      }
+      case 'turn_start':
+        // Lifecycle without a durable local id is not a lifecycle boundary a later reader
+        // can reconcile. In particular, a reloaded page once emitted an unnamed turn_end
+        // between two named generations; accepting it cleared the live turn and made the
+        // next observation open a third copy of the same ChatGPT response. Modern content.js
+        // always mints/adopts a local id before announcing a start, so an unnamed boundary is
+        // stale/legacy noise and must fail closed here as well.
+        if (!item.turnId) continue;
+        // /events is intentionally at-least-once. A response can be lost after commit, so the
+        // service worker may replay the exact same local lifecycle id. Never turn that transport
+        // retry into a second durable boundary or reopen a turn that already ended.
+        if (live?.knownTurnStarts.has(item.turnId) || live?.knownTurnEnds.has(item.turnId)) continue;
+        await appendEvent(sessionId, { ...base, kind: 'turn_start' });
+        // Commit before publishing the lifecycle projection. If append rejects, the same
+        // browser event remains eligible for its normal at-least-once retry.
+        if (live) {
+          live.knownTurnStarts.add(item.turnId);
+          // Turn lifecycle is presentation/recovery state only in 1.8. It is never consulted
+          // for MCP ownership, so a replayed journal timestamp cannot misattribute a call.
+          live.turnStartedAt = item.time;
+          live.turnId = item.turnId;
+          live.openTurns.add(item.turnId);
+          // A page-authored start is a new send; whatever end came before it is settled.
+          live.turnRequestIds = new Set<string>();
+          live.endedTurn = null;
+        }
+        activity.meaningful = true; activity.at = Math.max(activity.at ?? 0, item.time);
+        activity.working = true;
+        break;
+      case 'turn_end':
+        // An unnamed end closes nothing durable and, worse, used to clear whichever named
+        // turn happened to be live. Ignore it. A stale named end is still useful history for
+        // the turn it names, but it must not tear down a newer active generation.
+        if (!item.turnId) continue;
+        if (live?.knownTurnEnds.has(item.turnId)) continue;
+        if (live?.turnId === item.turnId) {
+          const [latest] = await readRecentEvents(sessionId, 1, { kinds: ['turn_start', 'turn_end'] });
+          // A replay of the pre-reopen end cannot undo newer app-owned work.
+          if (latest?.kind === 'turn_start' && latest.source === 'app' && latest.turnId === item.turnId &&
+              latest.time >= item.time) continue;
+        }
+        const completionEvidence = item.outcome === 'completed'
+          ? completionEvidenceFor(live, item.turnId, item.time)
+          : undefined;
+        await appendEvent(sessionId, {
+          ...base,
+          kind: 'turn_end',
+          outcome: item.outcome ?? 'unknown',
+          ...(item.outcome === 'failed' && item.reason &&
+            item.reason !== 'stream_gone' && item.reason !== 'watchdog_stalled' ? { reason: item.reason } : {}),
+          ...(item.detail ? { detail: item.detail } : {}),
+          ...(completionEvidence ? { completionEvidence } : {})
+        });
+        // As above, durable journal state owns idempotency; in-memory state follows it.
+        if (live) {
+          const endedStartedAt = live.turnId === item.turnId ? live.turnStartedAt : null;
+          if (live.turnId === item.turnId) activity.endedTurnId = item.turnId;
+          live.knownTurnEnds.add(item.turnId);
+          live.openTurns.delete(item.turnId);
+          live.lastTurnOutcome = item.outcome ?? 'unknown';
+          live.lastTurnStartedAt = endedStartedAt;
+          // Only a completed end can be proven false by a later call: it is the one verdict
+          // Goal acts on, and the one a reloaded page fabricates. A stop is the user's own
+          // decision and the failure outcomes already belong to recovery.
+          live.endedTurn =
+            live.turnId === item.turnId && item.outcome === 'completed'
+              ? { turnId: item.turnId, startedAt: endedStartedAt, endedAt: item.time, requestIds: new Set(live.turnRequestIds) }
+              : null;
+          live.turnRequestIds = new Set<string>();
+          if (live.turnId === item.turnId) {
+            live.turnStartedAt = null;
+            live.turnId = null;
+          }
+        }
+        if (item.outcome !== 'unknown') {
+          activity.meaningful = true;
+          activity.at = Math.max(activity.at ?? 0, item.time);
+          activity.terminal = true;
+        }
+        break;
+    }
+    stored++;
+  }
+  if (pageTitle) await promoteConversationTitle(sessionId, pageTitle.text, conversationId);
+  // An old final cannot finish a turn reopened for later tool work. Sequence proves
+  // revision order even when ChatGPT keeps its original message creation timestamp.
+  // Read only the bounded newest work boundary, not the whole conversation history.
+  const [workBoundaries, [latestUser]] = recoveredFinal
+    ? await Promise.all([
+        readRecentEvents(sessionId, 2, { kinds: ['turn_start', 'turn_end', 'tool_call', 'user_message'] }),
+        readRecentEvents(sessionId, 1, { kinds: ['user_message'] })
+      ]) : [[], []];
+  // Recent-event tails are returned in display chronology (oldest first), not
+  // descending lifecycle order. Compare the newest logical work boundary first;
+  // otherwise an earlier failure can hide a subsequently recorded MCP call.
+  const [latestWork, priorWork] = workBoundaries.sort((a, b) => workSequence(b) - workSequence(a));
+  // The existing native-activity projection retains first-observation sequence across
+  // label revisions and restart. A historical "Reading" -> "Read" update is not new
+  // work and must neither block the final nor hide a genuinely newer native activity.
+  let latestNativeWorkSeq = 0;
+  if (recoveredFinal && live) {
+    for (const row of live.pageTools.values()) latestNativeWorkSeq = Math.max(latestNativeWorkSeq, row.seq);
+  }
+  // Repair a previously recorded false reopen only from its durable A/end/A
+  // lineage and an exact native final. A page-authored new start is new work.
+  const boundaries = recoveredFinal?.native && latestWork &&
+    (recoveredFinal.uncertainEndSeq !== undefined || workSequence(latestWork) >= recoveredFinal.seq)
+    ? await readRecentEvents(sessionId, 2, { kinds: ['turn_start', 'turn_end'] }) : [];
+  const [lastBoundary, priorBoundary] = boundaries.sort((a, b) => b.seq - a.seq);
+  const nativeReopen = recoveredFinal?.native && lastBoundary?.kind === 'turn_start' && lastBoundary.source === 'app' &&
+    lastBoundary.turnId === recoveredFinal.turnId && priorBoundary?.kind === 'turn_end' &&
+    priorBoundary.turnId === recoveredFinal.turnId && priorBoundary.outcome === 'completed';
+  const uncertainRecovery = recoveredFinal?.uncertainEndSeq !== undefined &&
+    lastBoundary?.kind === 'turn_end' && lastBoundary.seq === recoveredFinal.uncertainEndSeq &&
+    lastBoundary.turnId === recoveredFinal.turnId && lastBoundary.outcome !== 'completed' && lastBoundary.outcome !== 'stopped' &&
+    (!latestUser || (latestUser.kind === 'user_message' && (latestUser.origin ?? latestUser.seq) < lastBoundary.seq)) && !live?.turnId;
+  // A later load failure is the verdict being corrected, not fresh executor work.
+  // Exclude only that exact latest uncertain end, then prove its preceding work
+  // predates the canonical final. New tools/questions/turns remain vetoes even
+  // when they preceded that failed end and would otherwise be hidden behind it.
+  const uncertainFinalSettled = uncertainRecovery && latestWork?.kind === 'turn_end' &&
+    latestWork.seq === recoveredFinal?.uncertainEndSeq && priorWork !== undefined &&
+    workSequence(priorWork) < recoveredFinal.seq;
+  if (recoveredFinal && latestWork && (workSequence(latestWork) < recoveredFinal.seq || nativeReopen || uncertainFinalSettled) &&
+      latestNativeWorkSeq < recoveredFinal.seq &&
+      (!latestUser || (latestUser.kind === 'user_message' && (latestUser.origin ?? latestUser.seq) < recoveredFinal.origin)) &&
+      runningToolCalls(conversationId) === 0 && live &&
+      (uncertainRecovery || (live.turnId === recoveredFinal.turnId && live.openTurns.has(recoveredFinal.turnId)))) {
+    const { turnId, time } = recoveredFinal;
+    const completionObservedAt = Date.now();
+    const completionEvidence = completionEvidenceFor(live, turnId, completionObservedAt);
+    await appendEvent(sessionId, {
+      // An uncertain end already exists: publish the correction at its actual observation
+      // boundary so saved after-turn inputs do not remain blocked by an old authored time.
+      time: uncertainRecovery ? completionObservedAt : time, source: 'extension', kind: 'turn_end', turnId, outcome: 'completed',
+      detail: uncertainRecovery ? 'the exact native final superseded the uncertain view' :
+        'recovered from a final assistant message after the ChatGPT page reloaded',
+      ...(completionEvidence ? { completionEvidence } : {}),
+      ...(agent ? { agent } : {})
+    });
+    // Commit before publishing, preserving the same late-tool evidence as an explicit end.
+    live.openTurns.delete(turnId);
+    live.knownTurnEnds.add(turnId);
+    live.lastTurnOutcome = 'completed';
+    live.lastTurnStartedAt = live.turnStartedAt ?? live.lastTurnStartedAt;
+    // Native message time may be its creation time, long before this final was observed.
+    live.endedTurn = { turnId, startedAt: live.turnStartedAt, endedAt: completionObservedAt, requestIds: new Set(live.turnRequestIds) };
+    live.turnRequestIds = new Set<string>();
+    live.turnStartedAt = null;
+    live.turnId = null;
+    activity.meaningful = true;
+    activity.at = Math.max(activity.at ?? 0, time);
+    activity.terminal = true;
+    activity.endedTurnId = turnId;
+    stored++;
+  }
+  if (recoveredGoalSeen && live) live.lastTurnOutcome = 'completed';
+  notifyChanged();
+  return { sessionId, stored, activity, goalCandidates };
+}
+
+/** Records something the app itself decided, e.g. a saved handoff. */
+export async function recordNote(sessionId: string, text: string, continuation?: string): Promise<void> {
+  if (!recordingEnabled()) return;
+  await appendEvent(sessionId, {
+    time: Date.now(),
+    source: 'app',
+    kind: 'note',
+    message: await storeText(sessionId, text, 4000),
+    ...(continuation ? { continuation } : {})
+  }).catch(() => undefined);
+  notifyChanged();
+}
+
+/**
+ * Records one app-owned status whose later snapshots replace its text in-place.
+ *
+ * The first durable snapshot owns chronology. Callers retain that anchor and reuse the
+ * progress id, so a retry can move from trying to failed to successful without leaving three
+ * contradictory rows in the transcript.
+ */
+export async function recordProgress(
+  sessionId: string,
+  progressId: string,
+  text: string,
+  anchor?: { seq: number; time: number },
+  turnId?: string | null,
+  finishControl?: { state: 'released' | 'notified' | 'decision'; conversationId: string; revision?: string; inputRevision?: string; workSeq?: number },
+  current?: SessionAppendPredicate
+): Promise<{ seq: number; time: number } | null> {
+  if (!recordingEnabled() || !progressId) return null;
+  const time = anchor?.time ?? Date.now();
+  // `turnId` is the turn this row happened inside, when the caller can name one. A row that
+  // names its turn is a member of that turn on every reader — the desktop transcript and the
+  // page's Overwrite alike — and sits in it chronologically like a tool call; a row that names
+  // none belongs to no turn and is placed between turns instead.
+  const progress = {
+    time,
+    source: 'app',
+    kind: 'progress',
+    progressId,
+    ...(finishControl ? { finishControl } : {}),
+    ...(anchor ? { origin: anchor.seq } : {}),
+    ...(turnId ? { turnId } : {}),
+    message: await storeText(sessionId, text, 4000)
+  } as const;
+  const event = await (current
+    ? appendEventIfCurrent(sessionId, progress, current)
+    : appendEvent(sessionId, progress)).catch(() => null);
+  if (!event) return null;
+  notifyChanged();
+  return anchor ?? { seq: event.seq, time };
+}
+
+/**
+ * Records a brokered message in the relevant agent's own session.
+ *
+ * Called twice per message and on purpose. `sent` goes into the sender's history when
+ * the broker accepts it; `delivered` goes into the recipient's when the recipient
+ * proves it received it. Without the second one a worker's report would live only in
+ * the worker's session and the broker's volatile queue, so compacting the prime — the
+ * exact thing Compact & Resume does while workers keep running — would produce a brief
+ * that omits everything the workers had told it.
+ *
+ * A message can be offered several times before it is acknowledged; only the single
+ * acknowledgement produces a `delivered` record, so retries never duplicate history.
+ */
+export async function recordAgentMessage(
+  message: AgentMessage,
+  delivery: 'sent' | 'delivered',
+  ownerConversationId: string | null = null
+): Promise<void> {
+  if (!recordingEnabled()) return;
+  const owner = delivery === 'sent' ? message.from : message.to;
+  try {
+    // A friendly agent id is unique only inside one active incarnation. Dormant histories are
+    // intentionally allowed to each own their own `prime`/`worker-1`, so an acknowledged message
+    // from an exact MCP caller must carry that conversation through instead of resolving the
+    // same friendly id against whichever other prime happens to be active now.
+    const conversationId = ownerConversationId ?? agentConversation(owner);
+    const sessionId = conversationId ? await sessionForConversation(conversationId) : await ensureUnattributedSession();
+    if (!sessionId) return;
+    await appendEvent(sessionId, {
+      time: delivery === 'sent' ? message.time : Date.now(),
+      source: 'app',
+      kind: 'agent_message',
+      agent: owner,
+      messageId: message.id,
+      from: message.from,
+      to: message.to,
+      message: await storeText(sessionId, message.text, MAX_MESSAGE_CHARS),
+      delivery
+    });
+    notifyChanged();
+  } catch (err) {
+    logWarn(`session recorder could not store an agent message: ${(err as Error).message}`);
+  }
+}
+
+export async function recordHandoff(
+  sessionId: string,
+  handoffId: string,
+  chars: number,
+  reason: string
+): Promise<void> {
+  await appendEvent(sessionId, {
+    time: Date.now(),
+    source: 'app',
+    kind: 'handoff',
+    handoffId,
+    chars,
+    reason
+  });
+  notifyChanged();
+}
+
+/**
+ * Repairs the narrow crash window after a continuation WAL committed its prepared handoff
+ * but before the session timeline published it.
+ *
+ * Normal publication is one append and does not pay for a journal scan. Recovery is rare and
+ * must be idempotent: blindly appending an old recovered handoff would make it the session's
+ * newest handoff again even when a later compaction already exists. Search by the durable
+ * handoff id first, then append only when that exact semantic event is absent.
+ */
+export async function ensureHandoffRecorded(
+  sessionId: string,
+  handoffId: string,
+  chars: number,
+  reason: string
+): Promise<boolean> {
+  const existing = await readEvents(sessionId, { kinds: ['handoff'] });
+  if (existing.some((event) => event.kind === 'handoff' && event.handoffId === handoffId)) return false;
+  await recordHandoff(sessionId, handoffId, chars, reason);
+  return true;
+}
+
+/**
+ * Called when a conversation page goes away.
+ *
+ * Browser lifetime owns the *binding* — which tab speaks for this conversation — and
+ * nothing else. `pagehide` cannot tell a reload from a navigation from a real close, and
+ * in every one of those cases ChatGPT keeps the server generation running while no page
+ * is watching it. So a detach is not evidence about the turn, not even weak evidence:
+ * synthesising a `turn_end` here closed the exact turn the recovery path was supposed to
+ * reopen, and a closed turn can never be resolved by later real evidence. The open turn
+ * stays open; the detach is recorded as a note, which the timeline shows without ending
+ * anything, and recordChatObservations writes the real terminal when the chat comes back.
+ */
+export async function closeConversation(conversationId: string): Promise<void> {
+  const live = conversations.get(conversationId);
+  if (!live) return;
+  if (live.turnStartedAt !== null) {
+    await appendEvent(live.sessionId, {
+      time: Date.now(),
+      source: 'extension',
+      kind: 'note',
+      ...(live.turnId ? { turnId: live.turnId } : {}),
+      message: await storeText(
+        live.sessionId,
+        'the ChatGPT page detached while this turn was still open; the turn stays open until real evidence ends it',
+        4000
+      )
+    }).catch(() => undefined);
+  }
+  conversations.delete(conversationId);
+  await endSession(live.sessionId).catch(() => undefined);
+  notifyChanged();
+}
+
+/**
+ * Points the live recorder at the ChatGPT conversation that has replaced this session's.
+ *
+ * The in-memory half of the Compact & Resume commit. Chat B is a different page, so
+ * everything that describes the *page* starts empty — its open turns and page-native row
+ * identities belong to chat A's DOM and would otherwise contaminate B's first observations.
+ * Everything that describes the *session* —
+ * which is to say the session id itself, and through it the whole recorded history — is
+ * exactly what does not move.
+ *
+ * Chat A's entry is dropped outright. A stale tab still sitting on A must not go on
+ * appending into a session that has moved; without the mapping its next observation starts
+ * a fresh session of its own, which is the honest outcome.
+ *
+ * Pure map work and total, because the commit calls it only once the durable session write
+ * has landed and nothing after that point is allowed to fail.
+ */
+export function rebindConversation(sessionId: string, fromConversationId: string, toConversationId: string): void {
+  const previous = conversations.get(fromConversationId);
+  if (previous?.sessionId === sessionId) conversations.delete(fromConversationId);
+  conversations.set(toConversationId, {
+    conversationId: toConversationId,
+    sessionId,
+    turnStartedAt: null,
+    turnId: null,
+    openTurns: new Set<string>(),
+    knownTurnStarts: new Set<string>(),
+    knownTurnEnds: new Set<string>(),
+    lastTurnOutcome: null,
+    lastTurnStartedAt: null,
+    turnRequestIds: new Set<string>(),
+    endedTurn: null,
+    pageTools: new Map()
+  });
+  lastActiveSessionId = sessionId;
+  notifyChanged();
+}
+
+/**
+ * Detaches a session from everything still pointing at it, before it is deleted.
+ *
+ * Deleting a session whose ChatGPT tab is still open used to leave the conversation
+ * mapped to a folder that no longer existed, so the next observation from that tab
+ * appended into nothing and recording for that chat silently stopped. The session deletion
+ * path installs a durable conversation fence before calling this, so
+ * the next event is ignored instead of manufacturing a replacement session. Other internal
+ * callers can still detach without that fence when they deliberately want recording to resume.
+ */
+export function forgetSession(sessionId: string): string[] {
+  const affected: string[] = [];
+  for (const [conversationId, entry] of conversations) {
+    if (entry.sessionId !== sessionId) continue;
+    conversations.delete(conversationId);
+    affected.push(conversationId);
+  }
+  if (unattributedSessionId === sessionId) unattributedSessionId = null;
+  if (lastActiveSessionId === sessionId) lastActiveSessionId = null;
+  if (affected.length > 0) {
+    logInfo(`session ${sessionId} detached while live; ${affected.length} conversation mapping(s) removed`);
+  }
+  return affected;
+}
+
+/** Rough token estimate for a session, from the text actually stored. */
+export async function sessionTokens(sessionId: string): Promise<number> {
+  const summary = await getSession(sessionId);
+  return summary?.estimatedTokens ?? 0;
+}
+
+export function estimate(text: string): number {
+  return estimateTokens(text);
+}
+
+/** Test seam. */
+export function resetRecorderForTests(): void {
+  resetCorrelationRegistryForTests();
+  conversations.clear();
+  observationChains.clear();
+  sessionInitializations.clear();
+  pendingOrigins.clear();
+  unattributedSessionId = null;
+  unattributedInitialization = null;
+  requestRecordings.clear();
+  sessionRecordings.clear();
+  pendingRecordings.clear();
+  lastActiveSessionId = null;
+  if (attributionRepairTimer) {
+    clearTimeout(attributionRepairTimer);
+    attributionRepairTimer = null;
+  }
+  attributionRepairRequested = false;
+  attributionRepairChain = Promise.resolve();
+  fullAttributionRepair = false;
+  repairRequestIds.clear();
+  repairBuckets.clear();
+  agentConversationLookup = () => null;
+  agentBinder = () => undefined;
+  // The attribution listener is deliberately not cleared here: it belongs to the bridge's
+  // start/stop lifecycle, and a recorder reset between tests must not silently unwire it.
+  if (notifyTimer) {
+    clearTimeout(notifyTimer);
+    notifyTimer = null;
+  }
+}
+
+export function markSessionActive(sessionId: string): void {
+  lastActiveSessionId = sessionId;
+}
+
+export type { SessionSummary, SessionEvent };
