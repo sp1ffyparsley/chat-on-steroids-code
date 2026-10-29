@@ -1320,7 +1320,11 @@ if (checkOnly) {
     // Reversible shutdown flushing moved into the existing lifecycle preparation.
     // Complete navigation owners still hash to window6c0662d9/globald2ba9316.
     // This remains BLOCKED; no renderer or installed-runtime proof is granted.
-    appShellSourceSha256 === 'C52191651B2CC36F7EC97168B41FEB95511D27C149C684B067EC76A6B3D75364';
+    appShellSourceSha256 === 'C52191651B2CC36F7EC97168B41FEB95511D27C149C684B067EC76A6B3D75364' ||
+      // Consumed startup controls no longer replay on native relaunch.
+      // Both complete navigation owners retain the independently checked hashes above.
+      // Still BLOCKED: this source classification grants no runtime or browser authority.
+      appShellSourceSha256 === 'D685C51CDF03056A64FF6C2EC679F79A27EDE061620978C0D30E270C76468C64';
   const nativeDocumentGate = knownBlockedNavigationSource
     ? 'blocked-by-known-app-shell-navigation-guards'
     : 'source-unknown-requires-native-qualification';
