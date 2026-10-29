@@ -27,6 +27,21 @@ public class FixtureWindowPeer : WindowAutomationPeer {
   public FixtureWindowPeer(FixtureWindow owner) : base(owner) { window = owner; }
   protected override string GetClassNameCore() { return window.BrowserRoot ? "BrowserRootView" : base.GetClassNameCore(); }
 }
+public class FixtureDocument : RichTextBox {
+  public bool DelayNextObservation;
+  protected override AutomationPeer OnCreateAutomationPeer() { return new FixtureDocumentPeer(this); }
+}
+public class FixtureDocumentPeer : RichTextBoxAutomationPeer {
+  private FixtureDocument document;
+  public FixtureDocumentPeer(FixtureDocument owner) : base(owner) { document = owner; }
+  protected override string GetNameCore() {
+    if (document.DelayNextObservation) {
+      document.DelayNextObservation = false;
+      Thread.Sleep(2200);
+    }
+    return base.GetNameCore();
+  }
+}
 public static class AccessibilityFixture {
   [STAThread] public static void Main() {
     var application = new Application();
@@ -48,7 +63,7 @@ public static class AccessibilityFixture {
     document.Document = new FlowDocument(new Paragraph(new Run("Page document body " + new string('d', 20000))));
     AutomationProperties.SetAutomationId(document, "document"); panel.Children.Add(document);
     FixtureWindow browserWindow = null;
-    RichTextBox browserPage = null;
+    FixtureDocument browserPage = null;
     window.Loaded += delegate {
       var targetHandle = new WindowInteropHelper(window).Handle;
       var popup = new HwndSource(new HwndSourceParameters("") { ParentWindow = targetHandle, WindowStyle = unchecked((int)0x90000000), ExtendedWindowStyle = 0x08000080, Width = 100, Height = 50, PositionX = -10000, PositionY = -10000 });
@@ -61,7 +76,12 @@ public static class AccessibilityFixture {
           if (command == "quit") { window.Dispatcher.Invoke(new Action(delegate { if (browserWindow != null) browserWindow.Close(); popup.Dispose(); unrelated.Close(); window.Close(); })); return; }
           window.Dispatcher.Invoke(new Action(delegate {
             if (command == "document") {
-              if (browserWindow != null) { browserPage.Visibility = Visibility.Visible; browserWindow.UpdateLayout(); }
+              if (browserWindow != null) {
+                browserPage.Visibility = Visibility.Visible; browserWindow.UpdateLayout();
+                // One real slow provider proves that a bounded partial observation
+                // is not a complete text/precedence verdict, even after visibility ACK.
+                browserPage.DelayNextObservation = true;
+              }
               else {
                 // Semantic controls have already passed their action assertions. Keep the
                 // same earlier editor and document for this independent text-precedence phase.
@@ -75,7 +95,7 @@ public static class AccessibilityFixture {
               browserWindow = new FixtureWindow { BrowserRoot = true, Title = "COS owned browser fixture", Width = 400, Height = 300, Left = -12000, Top = -12000, ShowActivated = false, ShowInTaskbar = false };
               var browserPanel = new StackPanel(); browserWindow.Content = browserPanel;
               var browserEditor = new TextBox { Height = 80, Text = "Toolbar only" }; AutomationProperties.SetAutomationId(browserEditor, "editor"); browserPanel.Children.Add(browserEditor);
-              browserPage = new RichTextBox { Height = 80, Visibility = Visibility.Collapsed };
+              browserPage = new FixtureDocument { Height = 80, Visibility = Visibility.Collapsed };
               browserPage.Document = new FlowDocument(new Paragraph(new Run("Page document body " + new string('d', 20000)))); browserPanel.Children.Add(browserPage);
               browserWindow.Show(); browserWindow.UpdateLayout();
               Console.WriteLine(new WindowInteropHelper(browserWindow).Handle.ToInt64()); Console.Out.Flush(); return;
@@ -210,19 +230,40 @@ try {
   # document text. The same real UIA editor remains available in the tree.
   $owned.StandardInput.WriteLine('browser'); $owned.StandardInput.Flush(); $browserId = [int64]$owned.StandardOutput.ReadLine()
   $browser = Find-UiElements @{ id = $browserId; maxResults = 100 }
-  if ((Get-UiRoot $browserId).Current.ClassName -ne 'BrowserRootView') { throw 'browser root fixture missing' }
+  $browserRootClass = (Get-UiRoot $browserId).Current.ClassName
+  if ($browserRootClass -ne 'BrowserRootView') { throw 'browser root fixture missing' }
+  function Browser-Shape($observed) {
+    return @{ windowMatched=($observed.window -eq $browserId); rootClass=$browserRootClass;
+      visited=$observed.visited; truncated=$observed.truncated; rows=@($observed.elements).Count;
+      documentRows=@($observed.elements | Where-Object { $_.role -eq 'Document' }).Count;
+      editorRows=@($observed.elements | Where-Object { $_.automationId -eq 'editor' }).Count;
+      documentNull=($null -eq $observed.document_text); selectedNull=($null -eq $observed.selected_text);
+      documentChars=([string]$observed.document_text).Length; selectedChars=([string]$observed.selected_text).Length;
+      bodyPrefix=($observed.document_text -match '^Page document body'); toolbarPrefix=($observed.document_text -match '^Toolbar only') }
+  }
+  Write-Output ('WINDOWS_ACCESSIBILITY_BROWSER_INITIAL ' + ((Browser-Shape $browser) | ConvertTo-Json -Compress))
   if (-not @($browser.elements | Where-Object { $_.automationId -eq 'editor' }).Count) { throw ('browser editor missing from indexed controls: ' + ($browser | ConvertTo-Json -Depth 8 -Compress)) }
   if ($null -ne $browser.document_text -or $null -ne $browser.selected_text) { throw 'browser toolbar text presented as page content' }
   $owned.StandardInput.WriteLine('document'); $owned.StandardInput.Flush(); $null = $owned.StandardOutput.ReadLine()
-  # UIA may expose the newly shown WPF document after the dispatcher reply.
-  # Wait for the actual text on this owned fixture, never a production timeout or input retry.
+  # A first truthful partial observation can itself spend the native 2s budget.
+  # Give only this owned fixture a bounded readiness phase after that observation;
+  # a complete Document with wrong text is a real failure, not something to retry.
+  $browser = Find-UiElements @{ id = $browserId; maxResults = 100 }
+  $browserAttempts = 1; $firstBrowserShape = Browser-Shape $browser
+  $browserDocumentRows = @($browser.elements | Where-Object { $_.role -eq 'Document' }).Count
   $documentReady = [System.Diagnostics.Stopwatch]::StartNew()
-  do {
-    $browser = Find-UiElements @{ id = $browserId; maxResults = 100 }
-    if ($browser.document_text -match '^Page document body') { break }
+  while (($browser.truncated -eq $true -or $browserDocumentRows -eq 0) -and
+      $browserAttempts -lt 3 -and $documentReady.ElapsedMilliseconds -lt 2000) {
     Start-Sleep -Milliseconds 25
-  } while ($documentReady.ElapsedMilliseconds -lt 2000)
-  if ($browser.document_text -notmatch '^Page document body') { throw 'browser page document text missing' }
+    $browser = Find-UiElements @{ id = $browserId; maxResults = 100 }
+    $browserAttempts += 1
+    $browserDocumentRows = @($browser.elements | Where-Object { $_.role -eq 'Document' }).Count
+  }
+  $browserShapes = @{ attempts=$browserAttempts; first=$firstBrowserShape; last=(Browser-Shape $browser) } | ConvertTo-Json -Depth 4 -Compress
+  Write-Output ('WINDOWS_ACCESSIBILITY_BROWSER_DOCUMENT ' + $browserShapes)
+  if ($browser.window -ne $browserId -or $browser.truncated -eq $true -or $browserDocumentRows -eq 0) { throw ('browser document fixture not ready: ' + $browserShapes) }
+  if ($browser.document_text -notmatch '^Page document body') { throw ('browser page document text missing: ' + $browserShapes) }
+  if (($browser.document_text.Length + $browser.selected_text.Length) -gt 8000) { throw ('browser document text exceeded shared budget: ' + $browserShapes) }
   Write-Output 'WINDOWS_ACCESSIBILITY_PROBE_OK'
 } finally {
   if (-not $owned.HasExited) {
@@ -251,6 +292,8 @@ try {
           child.once('error', reject);
           child.once('close', resolve);
         });
+        for (const line of stdout.split(/\r?\n/).filter(line => line.startsWith('WINDOWS_ACCESSIBILITY_BROWSER_')))
+          console.info(line);
         expect(timedOut, stderr + stdout).toBe(false);
         expect(status, stderr + stdout).toBe(0);
         expect(stdout).toContain('WINDOWS_ACCESSIBILITY_PROBE_OK');
