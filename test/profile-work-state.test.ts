@@ -218,7 +218,9 @@ describe('inactive profile worker summaries', () => {
     await prepareIsolatedInstanceRuntimeConfig(profile.id);
     const result = await renameManagedInstanceProfile(idleLifecycle(), profile.id, 'Delta');
     expect(result.profiles.find(row => row.id === profile.id)?.nickname).toBe('Delta');
-  });
+    // Three bounded10s process probes plus real file publication can exceed30s.
+    // Keep production deadlines and every refusal/preservation assertion unchanged.
+  }, 45_000);
 
   it.skipIf(process.platform !== 'win32')('runs the incumbent exact-process census with real PowerShell argument and boundary matching', async () => {
     const powershell = managedExec.findWindowsPowerShell();

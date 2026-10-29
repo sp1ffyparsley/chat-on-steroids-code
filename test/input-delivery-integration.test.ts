@@ -4,7 +4,7 @@ import { currentCoreInstructions } from '../src/main/mcp/instructions.js';
 import { prependUserPrompt, userPromptText } from '../src/shared/user-prompt.js';
 import { finishInstruction } from '../src/shared/finish.js';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { addProject, armProjectCreate, assignSessionProject, claimProjectCreate, completeProjectCreate } from '../src/main/projects.js';
@@ -331,6 +331,226 @@ it.each([false, true])('collects an exact recorded helper final across document 
     await expect(answer).resolves.toBe('{"next":"continue"}');
     expect(await input.pendingBrowserInputs()).toEqual([]);
   } finally { controller.abort(); await answer.catch(() => undefined); }
+});
+
+it.each(['stop', 'continue', 'invalid-json', 'paused', 'objective-revision', 'human-revision', 'plan-revision',
+  'no-native-ack', 'retired-waiter', 'route-before-debt', 'retire-during-archive', 'fence-during-archive',
+  'strict-fence-during-archive'] as const)
+('preserves exact helper answer custody when strict source completion becomes unresolved before collection (%s)', async variant => {
+  const bridge = await import('../src/main/bridge.js');
+  const evidence = await import('../src/main/core-browser-evidence.js');
+  const store = await import('../src/main/session/store.js');
+  const conversationId = randomUUID(), userId = randomUUID(), finalId = randomUUID();
+  const sourceTurnId = 'g-strict-late-native-fence-' + randomUUID();
+  const lateFenceDuringArchive = variant === 'fence-during-archive' || variant === 'strict-fence-during-archive';
+  const owner = 'strict-helper-native-document';
+  const response = variant === 'continue' ? '{"action":"continue","reply":"Continue the original authorized work."}'
+    : variant === 'invalid-json' ? '{"action":' : '{"action":"stop","reply":""}';
+  let helper: import('../src/main/session/input.js').InputEntry | undefined;
+  let archive: string | undefined;
+  let releaseArchive = () => {};
+  let archiveOpen: ReturnType<typeof vi.spyOn> | undefined;
+  try {
+    // The suite resets Goal between cases; restore the same two concrete owners
+    // registerIpc installed before that reset, without replacing their behavior.
+    goal.configureLoopForwardReadiness(bridge.settledTurnContinuationAllowed, bridge.goalNativeCompletionReady);
+    await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal,
+      enabled: true, mode: 'goal', backend: 'chatgpt',
+      continuationPolicy: variant === 'fence-during-archive' ? 'settled-turn' : 'strict' } });
+    expect((await post('/status', { openConversations: [], inventoryComplete: false, authState: 'signed-in' })).status).toBe(200);
+    const session = await createSession({ title: 'Strict helper collection custody', conversationId });
+    await goal.setGoalObjectiveNow(conversationId, 'Verify the original returned native result before completing this task.');
+    await goal.setGoalSwitchNow(conversationId, 'goal', true);
+    const time = Date.now();
+    expect((await post('/events', { conversationId, events: [
+      { kind: 'user_message', messageId: userId, text: 'Verify the original returned native result.', time },
+      { kind: 'turn_start', turnId: sourceTurnId, time },
+      { kind: 'assistant_message', messageId: finalId, providerMessageId: finalId, turnId: sourceTurnId,
+        text: 'Saved the original checkpoint.', state: 'final', final: true, time },
+      { kind: 'turn_end', turnId: sourceTurnId, outcome: 'completed', time }
+    ] })).status).toBe(200);
+    const [final] = await store.readRecentEvents(session.id, 1, { kinds: ['assistant_message'] });
+    if (lateFenceDuringArchive) expect((await post(`/activity?conversationId=${conversationId}`, {
+      observationOnly: true, coreDiagnostic: { documentId: 'strict-source-document', navigationEpoch: 0,
+        observedAt: Date.now(), shell: 'alternate', shellDiscovery: 'compatible', requestIds: [], turnId: sourceTurnId,
+        ordinaryFinal: { reason: 'associated', questions: 1, calls: 0, openCalls: 0, codeCalls: 0, openCodeCalls: 0,
+          activeTurnMapped: false, sourceUserMessageId: userId, settledFinalMessageId: finalId,
+          coreCallMessageIds: [], allCoreRequestIds: [], codeCallMessageIds: [], answeredCodeCallMessageIds: [] } }
+    })).status).toBe(200);
+    await goal.acceptGoalReplyNow({ conversationId, sessionId: session.id, replyId: finalId,
+      turnId: sourceTurnId, eventSeq: final!.seq, blocked: false });
+    expect((await post('/goal/draft', { conversationId, turnId: sourceTurnId,
+      clientId: 'strict-source-helper-page' })).status).toBe(200);
+    await vi.waitFor(async () => {
+      helper = (await input.listInputs()).find(row => row.purpose === 'decision' && row.decisionSourceSessionId === session.id);
+      expect(helper).toBeDefined();
+    });
+    const id = helper!.id, claim = { id, owner, conversationId: null, requiresAuthorization: true };
+    archive = path.join((await import('node:os')).tmpdir(), 'CoS-helper-outputs', `${id}.json`);
+    expect((await post('/input/claim', claim)).body.input?.id).toBe(id);
+    expect((await post('/input/claim', { ...claim, authorize: true })).body.ok).toBe(true);
+    if (variant !== 'no-native-ack')
+      expect((await post('/input/ack', { id, owner, conversationId: null, messageId: randomUUID() })).body.ok).toBe(true);
+    const nativeSent = (await input.listInputs()).find(row => row.id === id)!;
+    expect(nativeSent).toMatchObject({ state: variant === 'no-native-ack' ? 'browser' : 'decision', requiresAuthorization: true,
+      decisionSourceSessionId: session.id, decisionSourceTurnId: sourceTurnId });
+    if (variant === 'no-native-ack') expect(nativeSent.messageId).toBeUndefined();
+    else expect(nativeSent.messageId).toBeTruthy();
+    if (variant === 'route-before-debt') {
+      expect(bridge.goalNativeCompletionReady(conversationId)).toBe(true);
+      const before = await input.listInputs();
+      expect(typeof await bridge.settledTurnInputForwardProof(nativeSent, before, 'collect')).toBe('function');
+      const foreign = await post('/input/answer', { id, owner, conversationId: randomUUID(), response });
+      expect(foreign.body.ok).toBe(false);
+      expect(await input.listInputs()).toEqual(before);
+      expect(await input.browserDecisionOutputSaved(id, owner, null)).toBe(false);
+      return;
+    }
+
+    // The same exact original can expose a late missing result after its helper was
+    // admitted. This withholds STOP/Send authority without making that answer disposable.
+    const publishMissingResult = () => post(`/activity?conversationId=${conversationId}`, { observationOnly: true,
+      coreDiagnostic: { documentId: 'strict-source-document', navigationEpoch: 0, observedAt: Date.now(),
+        shell: 'alternate', shellDiscovery: 'compatible', requestIds: [], turnId: sourceTurnId,
+        ordinaryFinal: { reason: 'open-call', questions: 1, calls: 1, openCalls: 1, codeCalls: 0,
+          openCodeCalls: 0, activeTurnMapped: false, sourceUserMessageId: userId,
+          settledFinalMessageId: finalId, coreCallMessageIds: ['strict-original-native-parent'],
+          allCoreRequestIds: ['wfr_strict_original_unresolved'], openRequestIds: ['wfr_strict_original_unresolved'] }
+      } });
+    if (!lateFenceDuringArchive) expect((await publishMissingResult()).status).toBe(200);
+    let originalFence = evidence.coreBrowserEvidence(conversationId)?.pendingCompletion;
+    const obligation = goal.goalPendingReplyFor(conversationId);
+    const obligationLedger = goal.snapshotGoalReplies().replies.find(row => row.conversationId === conversationId);
+    const originalDraft = goal.goalViewFor(conversationId)!;
+    if (lateFenceDuringArchive) {
+      expect(originalFence).toBeNull();
+      expect(bridge.goalNativeCompletionReady(conversationId)).toBe(true);
+      const proof = await bridge.settledTurnInputForwardProof(nativeSent, await input.listInputs(), 'collect');
+      expect(typeof proof).toBe('function');
+    } else {
+      expect(originalFence).toMatchObject({ sourceUserMessageId: userId, calls: 1, openCalls: 1 });
+      expect(bridge.goalNativeCompletionReady(conversationId)).toBe(false);
+      expect(await bridge.settledTurnInputForwardProof(nativeSent, await input.listInputs(), 'collect')).toBe(false);
+    }
+
+    // Foreign publications cannot exploit the collection/forwarding split.
+    const beforeForeign = await input.listInputs();
+    expect((await post('/input/answer', { id, owner: 'foreign-native-document', conversationId: null, response })).status).toBe(409);
+    expect((await post('/input/answer', { id, owner, conversationId: randomUUID(), response })).body.ok).toBe(false);
+    expect(await input.listInputs()).toEqual(beforeForeign);
+    if (variant === 'paused') await saveConfig({ ...defaultConfig(),
+      goal: { ...defaultConfig().goal, enabled: true, mode: 'goal', backend: 'chatgpt', continuationPolicy: 'strict' },
+      ui: { ...defaultConfig().ui, automationPaused: true } });
+    if (variant === 'objective-revision') await goal.setGoalObjectiveNow(conversationId, 'A genuine revised original objective.');
+    if (variant === 'human-revision') {
+      const text = 'A genuine amended human requirement.';
+      await store.upsertMessageEvent(session.id, { kind: 'user_message', source: 'extension', messageId: userId,
+        time: Date.now(), message: { text, chars: text.length, truncated: false } });
+    }
+    if (variant === 'plan-revision') await store.updateSessionPlan(session.id, conversationId, { plan: [], checklist: [{
+      id: 'new-source-requirement', source: 'Original user request', requirement: 'Verify the amended source requirement.',
+      acceptance: 'Read back its genuine result.', status: 'pending'
+    }] }, Date.now());
+    if (variant === 'retired-waiter') {
+      goal.retireGoalDraftsFor(conversationId);
+      await vi.waitFor(async () => expect((await input.listInputs()).find(row => row.id === id)?.state).toBe('cancelled'));
+    }
+
+    let atArchive: Promise<void> | undefined;
+    if (variant === 'retire-during-archive' || lateFenceDuringArchive) {
+      let entered = () => {};
+      atArchive = new Promise<void>(resolve => { entered = resolve; });
+      const gate = new Promise<void>(resolve => { releaseArchive = resolve; });
+      const open = fs.open;
+      archiveOpen = vi.spyOn(fs, 'open').mockImplementation(async (file, flags, mode) => {
+        if (typeof file === 'string' && file.startsWith(archive + '.') && file.endsWith('.tmp')) {
+          entered(); await gate;
+        }
+        return open(file, flags, mode);
+      });
+    }
+    const publication = post('/input/answer', { id, owner, conversationId: null, response });
+    if (atArchive) {
+      await atArchive;
+      if (variant === 'retire-during-archive') goal.retireGoalDraftsFor(conversationId);
+      else {
+        expect((await publishMissingResult()).status).toBe(200);
+        originalFence = evidence.coreBrowserEvidence(conversationId)?.pendingCompletion;
+        expect(originalFence).toMatchObject({ sourceUserMessageId: userId, calls: 1, openCalls: 1 });
+      }
+      releaseArchive();
+    }
+    const collected = await publication;
+    archiveOpen?.mockRestore(); archiveOpen = undefined;
+    expect(collected.status).toBe(variant === 'retired-waiter' ? 409 : 200);
+    expect(evidence.coreBrowserEvidence(conversationId)?.pendingCompletion).toEqual(originalFence);
+    if (variant !== 'retired-waiter' && variant !== 'retire-during-archive')
+      expect(goal.goalPendingReplyFor(conversationId)).toEqual(obligation);
+    expect(bridge.goalNativeCompletionReady(conversationId)).toBe(false);
+    expect((await input.listInputs()).filter(row => row.sourceHelperId === id)).toEqual([]);
+    expect((await input.listInputs()).find(row => row.id === id)?.goalStopDisposition).toBeUndefined();
+    if (variant === 'no-native-ack' || variant === 'retired-waiter') {
+      expect(collected.body.ok).not.toBe(true);
+      expect((await input.listInputs()).find(row => row.id === id)?.decisionOutput).toBeUndefined();
+      await expect(fs.stat(archive)).rejects.toMatchObject({ code: 'ENOENT' });
+      if (variant === 'retired-waiter') {
+        // Recorder's allowMissingWaiter path cannot revive this explicitly retired helper.
+        expect(await input.completeBrowserDecision(id, owner, response, null, true)).toBe(false);
+      }
+      return;
+    }
+    expect(collected.body.ok).toBe(variant !== 'retire-during-archive');
+    const archived = (await input.listInputs()).find(row => row.id === id)!;
+    const error = variant === 'objective-revision' ? 'goal_canonical_scope_changed'
+      : variant === 'human-revision' ? 'goal_human_history_changed'
+        : variant === 'plan-revision' ? 'goal_plan_changed' : 'native_completion_unverified';
+    expect(archived).toMatchObject({ state: 'failed', goalDecisionRejection: error,
+      messageId: nativeSent.messageId, sendAuthorizedAt: nativeSent.sendAuthorizedAt, deliveredAt: nativeSent.deliveredAt });
+    expect(archived.decisionOutput).toMatchObject({
+      sha256: createHash('sha256').update(response).digest('hex'), bytes: Buffer.byteLength(response) });
+    expect(await input.browserDecisionOutputSaved(id, owner, null)).toBe(true);
+    expect(JSON.parse(await fs.readFile(archive, 'utf8'))).toMatchObject({ inputId: id, owner,
+      sourceSessionId: session.id, sourceTurnId, response });
+    if (variant === 'retire-during-archive') {
+      expect(goal.goalViewFor(conversationId)).toBeNull();
+      await flushDurable();
+      input.resetInputForTests(); resetDurableForTests(); initDurableStore(directory);
+      expect((await post('/input/answer', { id, owner, conversationId: null, response })).body.ok).toBe(true);
+      expect(await input.browserDecisionOutputSaved(id, owner, null)).toBe(true);
+      expect(goal.goalViewFor(conversationId)).toBeNull();
+      expect((await input.listInputs()).filter(row => row.sourceHelperId === id)).toEqual([]);
+      return;
+    }
+    await vi.waitFor(() => expect(goal.goalViewFor(conversationId)).toMatchObject({ stage: 'failed' }));
+    const failed = goal.goalViewFor(conversationId)!;
+    expect(failed.token).toBe(originalDraft.token);
+    expect(failed.error).toContain(error === 'goal_plan_changed' ? 'goal_browser_plan_changed' : error);
+    expect(failed.retryable).toBe(false);
+    expect(await goal.ackGoalDraftNow(conversationId, failed.token, 'strict-source-helper-page')).toBe(true);
+    expect(goal.snapshotGoalReplies().replies.find(row => row.conversationId === conversationId)).toEqual(obligationLedger);
+    expect(goal.goalPendingReplyFor(conversationId)).toEqual(obligation);
+    expect((await input.listInputs()).filter(row => row.decisionSourceSessionId === session.id)).toHaveLength(1);
+    // The recorded source remains blocked; another native draft request cannot open a helper.
+    const repeated = await post('/goal/draft', { conversationId, turnId: sourceTurnId,
+      clientId: 'strict-no-repeat-helper' });
+    if (variant === 'fence-during-archive') {
+      expect(repeated.status).toBe(200);
+      expect(repeated.body.goal).toMatchObject({ token: failed.token, stage: 'failed', retryable: false });
+    } else expect(repeated.status).toBe(variant === 'paused' ? 423 : 409);
+    expect((await input.listInputs()).filter(row => row.decisionSourceSessionId === session.id)).toHaveLength(1);
+    await flushDurable();
+    input.resetInputForTests(); resetDurableForTests(); initDurableStore(directory);
+    expect((await input.listInputs()).find(row => row.id === id)?.response).toBeUndefined();
+    expect((await post('/input/answer', { id, owner, conversationId: null, response })).body.ok).toBe(true);
+    expect(await input.browserDecisionOutputSaved(id, owner, null)).toBe(true);
+    expect((await post('/input/answer', { id, owner, conversationId: null, response: response + ' ' })).body.ok).toBe(false);
+    expect((await input.listInputs()).filter(row => row.sourceHelperId === id)).toEqual([]);
+  } finally {
+    releaseArchive(); archiveOpen?.mockRestore();
+    goal.retireGoalDraftsFor(conversationId);
+    if (helper) await input.cancelInput(helper.id);
+    if (archive) await fs.rm(archive, { force: true });
+  }
 });
 
 it('wakes the connected browser as soon as a temporary helper enters the durable outbox', async () => {

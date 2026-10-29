@@ -2,11 +2,11 @@
 
 This is the real custom Chat On Steroids application and browser companion source, exported for code review and research. It is a clean-history code export, not an upstream release or a backup of anyone's chats.
 
-- Source commit: `7c0882a5ad8160db08bf6f114781b6a6881b1249`.
-- Source tree: `a082d776b434a6343580746f20356edd9fa9c1e8`.
+- Source commit: `3df4e77c99e64c4fa29fee80a8eaae44b04fecce`.
+- Source tree: `7aa9e763eb30349efcdc6901ed71e2efbec4a87e`.
 - Export date: October 29, 2026.
-- Review state: controlled candidate97, source-only; not a newly qualified installer or an installed/executing browser update.
-- Latest repair scope: exact helper replay/archive custody, bounded pre-Send diagnostics, settled join counters and protected discarded/frozen tab wake. Qualified96 and actual installed94 remain separate private evidence.
+- Review state: controlled candidate98, source-only; not a newly qualified installer or an installed/executing browser update.
+- Latest repair scope: delivered-helper collection separated from permission to continue, exact normalized archive/answer routes, pre-/post-archive readiness races, strict-policy late-result STOP fencing, non-counting Goal waits, and operation-scoped renderer wake/selection restoration. Source checks:1325 Input/Goal/HTTP cases and977 extension cases passed, with2 existing platform skips. A new canonical package qualification is running; this mirror is not a binary qualification or deployment claim. Qualified96 and actual installed94 remain separate private evidence.
 - This export preserves the existing sanitized files and clean history; only the reviewed source/test delta was applied. Personal prompts, account records, stores and operational logs remain excluded.
 - Upstream: https://github.com/totec448-spec/chat-on-steroids
 - Intended code mirror: https://github.com/sp1ffyparsley/chat-on-steroids-code

@@ -4306,7 +4306,7 @@ async function saveDecisionOutput(row: InputEntry, response: string, _conversati
 /** Fresh local readback immediately before browser closure. No Send/retry authority. */
 export async function browserDecisionOutputSaved(id: string, owner: string, conversationId?: string | null): Promise<boolean> {
   const row = (await listInputs()).find(entry => entry.id === id && entry.owner === owner && entry.purpose === 'decision' && entry.lifetime === 'temporary-planner');
-  if (!row || (row.conversationId && row.conversationId !== conversationId) || !['sent', 'failed', 'cancelled'].includes(row.state)) return false;
+  if (!row || row.conversationId !== (conversationId ?? null) || !['sent', 'failed', 'cancelled'].includes(row.state)) return false;
   if (!row.decisionOutput) return row.state !== 'sent' && helperConfirmedUnsent(row);
   try {
     const file = decisionOutputFile(id);
@@ -4378,22 +4378,25 @@ export function completeBrowserDecision(id: string, owner: string, response: str
     if (!row) return false;
     if (conversationId && row.conversationId && conversationId !== row.conversationId) return false;
     const waiter = decisionWaiters.get(id);
+    const collecting = liveDeliveredBrowserDecision(row);
+    // Native ACK is the sole owner that may bind a route-less Temporary Chat.
+    // Its later answer cannot silently replace that already-confirmed route.
+    if (collecting && row.conversationId !== (conversationId ?? null)) return false;
     const forward = await deliveryHooks?.settledTurnForwardReadiness?.(row, current,
-      liveDeliveredBrowserDecision(row) ? 'collect' : undefined);
-    if (forward === false) return false;
-    let acceptedHandoff: BrowserDecisionHandoff | null;
-    try {
-      // The Goal owner may need to re-read its approved archived original and
-      // recorded human history before this serial transaction commits a STOP
-      // or queues an ordinary continuation. No second Send owner is created.
-      acceptedHandoff = await waiter?.onAccepted?.(response, current) ?? null;
-    } catch (error) {
-      if (!(error instanceof BrowserDecisionProtocolRejection) || !waiter ||
-          row.lifetime !== 'temporary-planner') throw error;
-      // Failed decision != failed prompt Send. Preserve its exact native receipt and
-      // return the raw answer only to the original live Goal owner, which already owns
-      // protocol parsing and the three-attempt budget. Durable planner bodies stay redacted.
-      const decisionOutput = await saveDecisionOutput(row, response, conversationId);
+      collecting ? 'collect' : undefined);
+    // Forward permission cannot discard a positively native-Sent answer. Only its
+    // exact live route/owner may cross this collection boundary; canonical Goal
+    // validation still runs, and a refused proof can never commit STOP or a child.
+    const collectForwardRefused = forward === false && collecting && !!waiter &&
+      row.conversationId === (conversationId ?? null) && decisionWaiters.get(id) === waiter;
+    if (forward === false && !collectForwardRefused) return false;
+    if (collecting && decisionWaiters.get(id) !== waiter) return false;
+    const rejectCollectedDecision = async (error: BrowserDecisionProtocolRejection,
+      savedOutput?: InputEntry['decisionOutput'], forwardRefused = false): Promise<boolean> => {
+      if (!waiter || row.lifetime !== 'temporary-planner') throw error;
+      // Failed decision != failed prompt Send. Reuse the exact archive even if
+      // its write yielded to a new readiness veto; no accepted STOP/child is saved.
+      const decisionOutput = savedOutput ?? await saveDecisionOutput(row, response, conversationId);
       await commit(current.map(entry => entry === row ? { ...entry, decisionOutput,
         conversationId: conversationId ?? row.conversationId, state: 'failed',
         error: error.code, goalDecisionRejection: error.code, response
@@ -4401,15 +4404,31 @@ export function completeBrowserDecision(id: string, owner: string, response: str
       if (decisionWaiters.get(id) !== waiter) return false;
       const resolvedConversation = conversationId ?? row.conversationId;
       if (resolvedConversation) waiter.onConversation?.(resolvedConversation);
-      // An authority revision is not malformed helper JSON and cannot be
-      // interpreted as an accepted STOP or executable Continue downstream.
-      // Reject only the original waiting Goal request; its native helper Send
-      // and the failed answer receipt remain durable, with no replacement Send.
-      if (error.code === 'goal_canonical_scope_changed' ||
+      // A refused forward proof must reject, not resolve raw CONTINUE text.
+      // Canonical/history/plan revisions retain their more precise rejection.
+      if (forwardRefused || error.code === 'goal_canonical_scope_changed' ||
           error.code === 'goal_human_history_changed' || error.code === 'goal_plan_changed')
         waiter.reject(error);
       else waiter.resolve(response);
       return true;
+    };
+    let acceptedHandoff: BrowserDecisionHandoff | null;
+    try {
+      // The Goal owner may need to re-read its approved archived original and
+      // recorded human history before this serial transaction commits a STOP
+      // or queues an ordinary continuation. No second Send owner is created.
+      acceptedHandoff = await waiter?.onAccepted?.(response, current) ?? null;
+      if (collectForwardRefused) throw new BrowserDecisionProtocolRejection('native_completion_unverified');
+    } catch (error) {
+      if (!(error instanceof BrowserDecisionProtocolRejection) || !waiter ||
+          row.lifetime !== 'temporary-planner') throw error;
+      const canonicalRevision = error.code === 'goal_canonical_scope_changed' ||
+        error.code === 'goal_human_history_changed' || error.code === 'goal_plan_changed';
+      if (collectForwardRefused && !canonicalRevision && error.code !== 'native_completion_unverified')
+        logInfo(`browser helper: forward proof refused with protocol ${error.code}; retaining the answer under native completion wait`);
+      const rejection = collectForwardRefused && !canonicalRevision
+        ? new BrowserDecisionProtocolRejection('native_completion_unverified') : error;
+      return rejectCollectedDecision(rejection, undefined, collectForwardRefused);
     }
     const handoff = acceptedHandoff;
     let next = current.map((entry) => entry === row ? {
@@ -4489,11 +4508,15 @@ export function completeBrowserDecision(id: string, owner: string, response: str
         logInfo(`browser continuation lifecycle input=${lifecycle.inputId.slice(0, 8)} recovery=${lifecycle.recoveryChainId?.slice(0, 8) ?? 'none'} state=${lifecycle.continuationState} receipt=${lifecycle.receiptState}`);
       }
     }
-    if (forward && !await forward()) return false;
+    if (forward && !await forward()) return collecting
+      ? rejectCollectedDecision(new BrowserDecisionProtocolRejection('native_completion_unverified'), undefined, true)
+      : false;
     const decisionOutput = await saveDecisionOutput(row, response, conversationId);
     if (decisionOutput) next = next.map(entry => entry.id === row.id ? { ...entry, decisionOutput } : entry);
     if ((!waiter || decisionWaiters.get(id) !== waiter) && !allowMissingWaiter) return false;
-    if (forward && !await forward()) return false;
+    if (forward && !await forward()) return collecting
+      ? rejectCollectedDecision(new BrowserDecisionProtocolRejection('native_completion_unverified'), decisionOutput, true)
+      : false;
     await commit(next);
     // The active request may abort during the durable rename itself. A successful
     // write is not permission to resolve its now-retired waiter or leave an

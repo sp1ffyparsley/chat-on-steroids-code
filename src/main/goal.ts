@@ -514,7 +514,12 @@ export function configureLoopForwardReadiness(check: NonNullable<typeof loopForw
   finiteCompletionReadiness = completionReady ?? null;
 }
 function finiteNativeCompletionReady(draft: GoalDraft): boolean {
-  return draft.continuationPolicy !== 'settled-turn' || finiteCompletionReadiness?.(draft.conversationId) === true;
+  // A configured native owner remains authoritative under strict policy too.
+  // Rejected answer collection must wait for its missing receipts without spending
+  // another helper attempt; standalone/offline callers retain their prior contract.
+  return finiteCompletionReadiness
+    ? finiteCompletionReadiness(draft.conversationId)
+    : draft.continuationPolicy !== 'settled-turn';
 }
 export function onGoalChange(listener: () => void): () => void {
   goalListeners.add(listener); return () => goalListeners.delete(listener);
@@ -2479,7 +2484,7 @@ export function startGoalDraft(input: StartGoalDraftInput): GoalDraftView {
   // obligation behind it survives regardless — see ackGoalDraft — so the turn is still owed
   // its answer once the setting that broke it is fixed.
   const spentFailure =
-    existing?.stage === 'failed' && existing.acknowledged && !SETTLED_FAILURE.test(existing.error ?? '');
+    existing?.stage === 'failed' && existing.acknowledged && retryableGoalFailure(existing.error ?? '', existing);
   if (existing && existing.turnId === input.turnId && !spentFailure) return view(existing);
   // A different turn supersedes whatever the last one left behind, including an unfinished
   // request: the answer it was writing was about a conversation that has since moved on.

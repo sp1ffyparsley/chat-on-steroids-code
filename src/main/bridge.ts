@@ -13020,9 +13020,23 @@ export async function settledTurnInputForwardProof(entry: Readonly<InputEntry>, 
   const id = session?.conversationId;
   if (!id || !goalActiveFor(id)) return false;
   if (getConfig().goal.continuationPolicy !== 'settled-turn') {
-    // Policy changes cannot grandfather a previously admitted settled-turn continuation.
-    // The default policy still requires the exact native result fence.
-    return nativeFinalEvidenceWait(coreBrowserEvidence(id)) ? false : null;
+    // Strict collection keeps a negative readiness recheck across archive I/O.
+    // A null proof here previously let a late native parent commit an earlier STOP.
+    // This is not result or Send authority; Input still owns canonical disposition.
+    if (nativeFinalEvidenceWait(coreBrowserEvidence(id))) return false;
+    if (phase !== 'collect' || entry !== helper || !liveDeliveredBrowserDecision(entry)) return null;
+    const policy = getConfig().goal.continuationPolicy;
+    const pending = goalPendingReplyFor(id), draft = goalViewFor(id);
+    return async () => {
+      const latest = await getSession(session!.id);
+      const current = goalPendingReplyFor(id), currentDraft = goalViewFor(id);
+      return latest?.conversationId === id && goalActiveFor(id) &&
+        getConfig().ui.automationPaused !== true && getConfig().goal.continuationPolicy === policy &&
+        current?.sessionId === pending?.sessionId && current?.turnId === pending?.turnId &&
+        current?.replyId === pending?.replyId && current?.acceptedAt === pending?.acceptedAt &&
+        current?.eventSeq === pending?.eventSeq && currentDraft?.token === draft?.token &&
+        goalNativeCompletionReady(id);
+    };
   }
   const pending = goalPendingReplyFor(id), draft = goalViewFor(id);
   if (entry.sourceHelperId && entry.sourceHelperAcceptedAt !== pending?.acceptedAt) return false;

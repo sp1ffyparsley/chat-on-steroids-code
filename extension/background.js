@@ -3576,13 +3576,40 @@ async function retryRepairMessageAfterTabWake(
   message,
   mayRetry,
   allowFocusedWindowWake = false,
-  beforeWake = null
+  wakeGuard = null
 ) {
   if (!mayRetry(first) || target?.active === true || !Number.isInteger(target?.id) ||
       !Number.isInteger(target?.windowId)) return first;
   const windowId = target.windowId;
+  const key = String(target.id);
+  const owner = { epoch: connectionEpoch, instanceId, token, port, browserId,
+    documentId: tabDocuments[key], navigationEpoch: tabEpochs[key] };
+  const admitted = conversationAdmission(null, conversationId);
+  // Restoration owns only the reversible selection, not permission to start work.
+  const sameOwner = () => owner.epoch === connectionEpoch && owner.instanceId === instanceId &&
+    owner.token === token && owner.port === port && owner.browserId === browserId &&
+    !disconnected && !companionReloadFlight && admitted() && !browserControlsTab(target.id) &&
+    tabDocuments[key] === owner.documentId && tabEpochs[key] === owner.navigationEpoch;
   let previous = null;
   let selectionIssued = false;
+  let selectionObserved = false;
+  let selectionInterrupted = false;
+  const activated = info => {
+    if (!Number.isInteger(info?.windowId) || !Number.isInteger(info?.tabId)) { selectionInterrupted = true; return; }
+    if (info.windowId !== windowId) return;
+    if (selectionIssued && !selectionObserved && info.tabId === target.id) { selectionObserved = true; return; }
+    // A user away-and-back is still an intervention, even if the final active bit matches.
+    selectionInterrupted = true;
+  };
+  const updated = (id, change) => {
+    if (id === target.id && (change?.status === 'loading' || change?.pendingUrl ||
+        (typeof change?.url === 'string' && conversationFromUrl(change.url) !== conversationId)))
+      selectionInterrupted = true;
+  };
+  if (!chrome.tabs.onActivated?.addListener || !chrome.tabs.onActivated?.removeListener ||
+      !chrome.tabs.onUpdated?.addListener || !chrome.tabs.onUpdated?.removeListener) return first;
+  chrome.tabs.onActivated.addListener(activated);
+  chrome.tabs.onUpdated.addListener(updated);
   try {
     // Day mode is attended: waking an inactive renderer must not visibly replace the tab the
     // user is reading. In an unfocused/background Chrome window the same bounded selection is
@@ -3606,32 +3633,44 @@ async function retryRepairMessageAfterTabWake(
       Number.isInteger(tab.id) && tab.id !== target.id) ?? null;
     // Unknown active-tab state cannot authorize even a reversible selection change.
     if (!previous) return first;
-    if (beforeWake && !await beforeWake(false)) return first;
-    if (beforeWake && !allowFocusedWindowWake) {
-      // The fresh policy guard awaited I/O. Day mode must recheck focus after it,
-      // immediately before selecting, so an attended window is never displaced.
-      const currentWindow = await chrome.windows.get(windowId).catch(() => null);
-      if (!currentWindow || currentWindow.focused !== false) return first;
+    if (wakeGuard && !await wakeGuard.refresh(false)) return first;
+    if (!(wakeGuard ? wakeGuard.focusedAllowed() : allowFocusedWindowWake)) {
+      const latestWindow = await chrome.windows.get(windowId).catch(() => null);
+      if (latestWindow?.focused !== false) return { ok: false, error: 'tab_wake_deferred' };
     }
+    // No await after the final ownership gate: a late focus response cannot carry
+    // an obsolete pairing, document, policy snapshot or controller lease into selection.
+    if (!sameOwner() || selectionInterrupted || (wakeGuard && !wakeGuard.current())) return first;
     selectionIssued = true;
     await chrome.tabs.update(target.id, { active: true });
     await new Promise(resolve => setTimeout(resolve, 350));
-    if (beforeWake && !await beforeWake(true)) return first;
-    // The new hygiene caller only pings; use the incumbent bounded reply owner.
-    // Existing Retry callers retain their original message-delivery semantics.
-    return beforeWake ? await tabReply(target.id, message)
+    if (wakeGuard && !await wakeGuard.refresh(true)) return first;
+    if (!(wakeGuard ? wakeGuard.focusedAllowed() : allowFocusedWindowWake)) {
+      const latestWindow = await chrome.windows.get(windowId).catch(() => null);
+      if (latestWindow?.focused !== false) return first;
+    }
+    if (!sameOwner() || !selectionObserved || selectionInterrupted || (wakeGuard && !wakeGuard.current())) return first;
+    // Hygiene only pings. The existing Retry/collection callers keep their
+    // original delivery semantics, including an ambiguous unanswered message.
+    return wakeGuard ? await tabReply(target.id, message,
+      typeof owner.documentId === 'string' ? { documentId: owner.documentId } : undefined)
       : await chrome.tabs.sendMessage(target.id, message).catch(() => null);
   } finally {
-    if (previous && selectionIssued) {
+    if (previous && selectionIssued && selectionObserved && !selectionInterrupted && sameOwner()) {
       try {
         const after = await chrome.tabs.query({ windowId });
         const currentTarget = after.find(tab => tab.id === target.id);
         const priorStillExists = after.some(tab => tab.id === previous.id && tab.windowId === windowId);
-        // Do not undo a user switch or restore across a route/document ownership change.
-        if (currentTarget?.active === true && conversationForTab(currentTarget) === conversationId &&
+        // Pause may safely unwind our own selection. Ownership loss, navigation or
+        // any intervening activation cannot borrow that cleanup permission.
+        if (sameOwner() && !selectionInterrupted && currentTarget?.active === true &&
+            currentTarget.windowId === windowId && !currentTarget.pendingUrl && currentTarget.status !== 'loading' &&
+            concreteConversationForTab(currentTarget) === conversationId &&
             priorStillExists) await chrome.tabs.update(previous.id, { active: true });
       } catch { /* The user closed/switched the window while the bounded wake was running. */ }
     }
+    chrome.tabs.onUpdated.removeListener(updated);
+    chrome.tabs.onActivated.removeListener(activated);
   }
 }
 
@@ -3676,34 +3715,47 @@ async function wakeManagedRenderers(tabs, policy, protectedChats) {
     const admitted = conversationAdmission(null, conversationId);
     // Re-read policy and Chrome facts after all awaited observations. Registry fallback is
     // intentionally excluded: it cannot authorize waking a different or navigating page.
-    const current = async (afterWake = false) => {
-      if (!paired() || !admitted() || browserControlsTab(tab.id) || tabDocuments[key] !== documentId ||
-          tabEpochs[key] !== epoch) return false;
-      const settings = await call('/settings', { method: 'GET' }, false, admitted);
-      if (!settings.ok || settings.data?.ui?.automationPaused !== false) return false;
-      const latest = await chrome.tabs.get(tab.id).catch(() => null);
-      return paired() && admitted() && !browserControlsTab(tab.id) && tabDocuments[key] === documentId &&
-        tabEpochs[key] === epoch && latest?.id === tab.id && latest.windowId === tab.windowId &&
+    const sameScope = () => paired() && admitted() && !browserControlsTab(tab.id) &&
+      tabDocuments[key] === documentId && tabEpochs[key] === epoch;
+    let inspected = null;
+    const current = () => {
+      const latest = inspected?.tab;
+      return sameScope() && inspected?.eligible === true && latest?.id === tab.id && latest.windowId === tab.windowId &&
         !latest.pendingUrl && latest.status !== 'loading' && concreteConversationForTab(latest) === conversationId &&
         (kind === 'discarded' ? latest.discarded === true && latest.active !== true :
-          afterWake ? latest.active === true : latest.frozen === true && latest.active !== true);
+          inspected.afterWake ? latest.active === true : latest.frozen === true && latest.active !== true);
+    };
+    const refresh = async (afterWake = false) => {
+      inspected = null;
+      if (!sameScope()) return false;
+      const status = await call('/status', { method: 'GET' }, false, admitted);
+      if (!sameScope() || !status.ok || status.data?.automationPaused !== false ||
+          !Array.isArray(status.data.mainConversations) || !Array.isArray(status.data.nonDiscardableConversations) ||
+          !status.data.mainConversations.map(cleanConversationId).includes(conversationId) ||
+          !status.data.nonDiscardableConversations.map(cleanConversationId).includes(conversationId)) return false;
+      const settings = await call('/settings', { method: 'GET' }, false, admitted);
+      if (!sameScope() || !settings.ok || settings.data?.ui?.automationPaused !== false) return false;
+      const latest = await chrome.tabs.get(tab.id).catch(() => null);
+      inspected = { tab: latest, afterWake, eligible: true,
+        focusedAllowed: ['overnight', 'rotation'].includes(settings.data.ui.automationProfile) };
+      return current();
     };
     try {
-      if (!await current()) continue;
+      if (!await refresh()) continue;
       budget--;
       attempts[key] = { conversationId, at: Date.now() };
       while (Object.keys(attempts).length > 128) delete attempts[Object.keys(attempts)[0]];
       // Persist before attempting; a rejected browser API is still a spent wake this minute.
       await chrome.storage.session.set({ managedRendererWakeAttempts: attempts });
       if (kind === 'discarded') {
-        if (!await current()) continue;
+        if (!await refresh() || !current()) continue;
         await chrome.tabs.reload(tab.id);
         console.info('[Chat On Steroids] managed renderer wake requested', { tab: tab.id, kind });
       } else {
         const first = { ok: false, error: 'renderer_frozen' };
         const reply = await retryRepairMessageAfterTabWake(tab, conversationId, first,
           { type: 'clf-recorder-ping' }, result => result === first,
-          policy.automationProfile === 'overnight' || policy.automationProfile === 'rotation', current);
+          inspected.focusedAllowed, { refresh, current, focusedAllowed: () => inspected?.focusedAllowed === true });
         console.info('[Chat On Steroids] managed renderer wake observed', {
           tab: tab.id, kind, outcome: reply?.ok === true ? 'receiver-reachable' : 'deferred-or-unverified'
         });
@@ -3713,7 +3765,6 @@ async function wakeManagedRenderers(tabs, policy, protectedChats) {
     }
   }
 }
-
 
 function inputReuseProbe(tabId, documentId) {
   return tabReply(tabId, { type: 'clf-input-reuse-state' }, { documentId });
@@ -10422,7 +10473,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 97;
+const PAGE_RECORDER_VERSION = 98;
 
 let deferredRecoveryWork = null;
 

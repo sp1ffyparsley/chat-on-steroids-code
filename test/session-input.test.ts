@@ -589,23 +589,33 @@ describe('settled-turn Input boundary revalidation', () => {
     expect(retained.deliveredAt).toBeUndefined();
   });
 
-  it('keeps an already delivered helper answer unaccepted when its exact forward proof is revoked', async () => {
+  it('archives an already delivered helper as rejected when its exact forward proof is revoked', async () => {
     let ready = true;
     const accepted = vi.fn(() => { ready = false; return null; });
     configureInputDelivery({ applyAutomation: automate, changed, settledTurnForwardReadiness: async () => () => ready });
     const controller = new AbortController();
     const decision = requestBrowserDecision('Keep the existing helper custody', controller.signal,
       { lifetime: 'temporary-planner', onAccepted: accepted });
+    const rejection = expect(decision).rejects.toThrow('native_completion_unverified');
     const [row] = await listInputs();
-    expect(await claimBrowserInput(row!.id, 'settled-helper', null, true)).not.toBeNull();
-    expect(await authorizeBrowserInput(row!.id, 'settled-helper', null)).toBe(true);
-    expect(await acknowledgeBrowserInput(row!.id, 'settled-helper', null, 'native-delivered-helper')).toBe(true);
-    expect(await completeBrowserDecision(row!.id, 'settled-helper', 'Exact native answer', null)).toBe(false);
-    expect((await listInputs()).find(entry => entry.id === row!.id)).toMatchObject({ state: 'decision', owner: 'settled-helper',
-      messageId: 'native-delivered-helper' });
-    expect((await listInputs()).some(entry => entry.sourceHelperId === row!.id)).toBe(false);
-    const cancellation = expect(decision).rejects.toThrow('goal_browser_cancelled');
-    controller.abort(); await cancellation;
+    const file = path.join(os.tmpdir(), 'CoS-helper-outputs', `${row!.id}.json`);
+    try {
+      expect(await claimBrowserInput(row!.id, 'settled-helper', null, true)).not.toBeNull();
+      expect(await authorizeBrowserInput(row!.id, 'settled-helper', null)).toBe(true);
+      expect(await acknowledgeBrowserInput(row!.id, 'settled-helper', null, 'native-delivered-helper')).toBe(true);
+      const nativeSent = (await listInputs()).find(entry => entry.id === row!.id)!;
+      expect(await completeBrowserDecision(row!.id, 'settled-helper', 'Exact native answer', null)).toBe(true);
+      await rejection;
+      const retained = (await listInputs()).find(entry => entry.id === row!.id)!;
+      expect(retained).toMatchObject({ state: 'failed', owner: 'settled-helper',
+        messageId: 'native-delivered-helper', sendAuthorizedAt: nativeSent.sendAuthorizedAt,
+        deliveredAt: nativeSent.deliveredAt, goalDecisionRejection: 'native_completion_unverified',
+        decisionOutput: { sha256: createHash('sha256').update('Exact native answer').digest('hex') } });
+      expect(retained.goalStopDisposition).toBeUndefined();
+      expect(await browserDecisionOutputSaved(row!.id, 'settled-helper', null)).toBe(true);
+      expect((await listInputs()).some(entry => entry.sourceHelperId === row!.id)).toBe(false);
+      expect(accepted).toHaveBeenCalledOnce();
+    } finally { controller.abort(); await fs.rm(file, { force: true }); }
   });
 
   it('preserves the incumbent unrelated/strict path when the hook returns null', async () => {
@@ -5450,6 +5460,103 @@ describe('rejected helper answer replay custody', () => {
     resetInputForTests(); resetDurableForTests(); initDurableStore(directory);
     return (await listInputs())[0]!;
   }
+  describe('helper output readback route and archive custody', () => {
+    it.each([
+      ['warm', null], ['warm', 'helper-bound-conversation'],
+      ['cold', null], ['cold', 'helper-bound-conversation']
+    ] as const)('reads only the exact native helper route and owner (%s/%s)', async (restore, route) => {
+      const helper = await rejectNativeHelper(route);
+      if (restore === 'cold') await coldRestore();
+      const before = await listInputs(), row = before[0]!;
+      expect(row.messageId).toBe('exact-native-user-id');
+      expect(row.requiresAuthorization).toBe(true);
+      expect(row.createdAt).toBeLessThanOrEqual(row.sendAuthorizedAt!);
+      expect(row.sendAuthorizedAt!).toBeLessThanOrEqual(row.deliveredAt!);
+      expect(row.deliveredAt!).toBeLessThanOrEqual(now);
+      const bytes = await fs.readFile(helper.file);
+      expect(await browserDecisionOutputSaved(row.id, helper.owner, route)).toBe(true);
+      expect(await browserDecisionOutputSaved(row.id, helper.owner, undefined)).toBe(route === null);
+      expect(await browserDecisionOutputSaved(row.id, helper.owner, null)).toBe(route === null);
+      expect(await browserDecisionOutputSaved(row.id, helper.owner, 'foreign-helper-conversation')).toBe(false);
+      expect(await browserDecisionOutputSaved(row.id, 'foreign-native-document', route)).toBe(false);
+      expect(await browserDecisionOutputSaved(randomUUID(), helper.owner, route)).toBe(false);
+      expect(await fs.readFile(helper.file)).toEqual(bytes);
+      expect(await listInputs()).toEqual(before);
+      expect(helper.onAccepted).toHaveBeenCalledOnce();
+      expect(automate).not.toHaveBeenCalled();
+    });
+    it.each(['warm', 'cold'] as const)('refuses every changed archive binding or answer byte (%s)', async restore => {
+      const helper = await rejectNativeHelper(null);
+      if (restore === 'cold') await coldRestore();
+      const before = await listInputs(), bytes = await fs.readFile(helper.file, 'utf8');
+      const record = JSON.parse(bytes);
+      const changes = [
+        { version: 2 }, { inputId: randomUUID() }, { owner: 'foreign-native-document' },
+        { sourceSessionId: 'foreign-source-session' }, { sourceTurnId: 'foreign-source-turn' },
+        { bytes: record.bytes + 1 }, { sha256: '0'.repeat(64) },
+        { response: record.response.replace('stop', 'STOP') }
+      ];
+      for (const change of changes) {
+        await fs.writeFile(helper.file, JSON.stringify({ ...record, ...change }), 'utf8');
+        expect(await browserDecisionOutputSaved(helper.row.id, helper.owner, null), Object.keys(change)[0]).toBe(false);
+        expect(await listInputs()).toEqual(before);
+      }
+      await fs.writeFile(helper.file, '{not-json', 'utf8');
+      expect(await browserDecisionOutputSaved(helper.row.id, helper.owner, null)).toBe(false);
+      await fs.unlink(helper.file);
+      expect(await browserDecisionOutputSaved(helper.row.id, helper.owner, null)).toBe(false);
+      await fs.writeFile(helper.file, bytes, 'utf8');
+      expect(await browserDecisionOutputSaved(helper.row.id, helper.owner, null)).toBe(true);
+      expect(helper.onAccepted).toHaveBeenCalledOnce();
+      expect(await listInputs()).toEqual(before);
+    });
+    it('retains accepted answer-before-ACK semantics while only the exact late ACK binds its route', async () => {
+      const onAccepted = vi.fn(() => null);
+      const answer = requestBrowserDecision('Keep this original accepted answer.', new AbortController().signal, {
+        sourceSessionId: sessionId, sourceTurnId: 'accepted-source-turn', lifetime: 'temporary-planner', onAccepted
+      });
+      const row = (await listInputs())[0]!, owner = 'accepted-native-document';
+      const file = path.join(os.tmpdir(), 'CoS-helper-outputs', `${row.id}.json`); archives.push(file);
+      expect(await claimBrowserInput(row.id, owner, null, true)).not.toBeNull();
+      now++;
+      expect(await authorizeBrowserInput(row.id, owner, null)).toBe(true);
+      const response = '{"action":"stop","reply":""}';
+      expect(await completeBrowserDecision(row.id, owner, response, null)).toBe(true);
+      await expect(answer).resolves.toBe(response);
+      expect((await listInputs())[0]).toMatchObject({ state: 'sent', conversationId: null });
+      expect((await listInputs())[0]?.messageId).toBeUndefined();
+      expect(await browserDecisionOutputSaved(row.id, owner, null)).toBe(true);
+      expect(await browserDecisionOutputSaved(row.id, owner, 'late-helper-conversation')).toBe(false);
+      now++;
+      expect(await acknowledgeBrowserInput(row.id, owner, 'late-helper-conversation', 'actual-late-native-user')).toBe(true);
+      const bound = await coldRestore();
+      expect(bound).toMatchObject({ state: 'sent', messageId: 'actual-late-native-user', conversationId: 'late-helper-conversation' });
+      expect(bound.createdAt).toBeLessThan(bound.sendAuthorizedAt!);
+      expect(bound.sendAuthorizedAt!).toBeLessThan(bound.deliveredAt!);
+      expect(await browserDecisionOutputSaved(row.id, owner, 'late-helper-conversation')).toBe(true);
+      expect(await browserDecisionOutputSaved(row.id, owner, null)).toBe(false);
+      expect(await browserDecisionOutputSaved(row.id, owner, 'foreign-helper-conversation')).toBe(false);
+      expect(onAccepted).toHaveBeenCalledOnce();
+      expect(await listInputs()).toHaveLength(1);
+      expect(automate).not.toHaveBeenCalled();
+    });
+    it.each([null, 'unsent-helper-conversation'])('keeps the positively-unsent no-output exception on only its exact route (%s)', async route => {
+      const controller = new AbortController();
+      const answer = requestBrowserDecision('Do not send this cancelled helper.', controller.signal,
+        { lifetime: 'temporary-planner', conversationId: route });
+      const cancelled = expect(answer).rejects.toThrow('goal_browser_cancelled');
+      const row = (await listInputs())[0]!, owner = 'unsent-native-document';
+      expect(await claimBrowserInput(row.id, owner, route, true)).not.toBeNull();
+      controller.abort(); await cancelled;
+      const cold = await coldRestore();
+      expect(cold).toMatchObject({ state: 'cancelled', owner, conversationId: route });
+      expect(cold.decisionOutput).toBeUndefined(); expect(cold.sendAuthorizedAt).toBeUndefined();
+      expect(await browserDecisionOutputSaved(row.id, owner, route)).toBe(true);
+      expect(await browserDecisionOutputSaved(row.id, owner, 'foreign-helper-conversation')).toBe(false);
+      expect(await browserDecisionOutputSaved(row.id, 'foreign-native-document', route)).toBe(false);
+      expect(await listInputs()).toHaveLength(1);
+    });
+  });
   it.each([null, undefined])('refuses omitted incoming route %s for a route-bound rejected answer', async route => {
     const helper = await rejectNativeHelper();
     const before = await fs.readFile(helper.file);

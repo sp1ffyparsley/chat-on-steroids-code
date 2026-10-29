@@ -11,7 +11,7 @@ import { promises as fs } from 'node:fs';
 import { webcrypto } from 'node:crypto';
 import path from 'node:path';
 import vm from 'node:vm';
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest';
 
 const { APP_VERSION, BRIDGE_PROTOCOL } = await import('../src/main/version.js');
 const EXTENSION_BRIDGE_PROTOCOL = 16;
@@ -632,6 +632,10 @@ interface WorkerHarness {
   /** Fires Chrome's tab-created lifecycle event, the way opening a link in a new tab does. */
   createTab(tab: { id: number; url?: string; pendingUrl?: string; autoDiscardable?: boolean; discarded?: boolean; active?: boolean }): Promise<void>;
   updateTabLifecycle(tabId: number, change: { discarded?: boolean; frozen?: boolean }): Promise<void>;
+  /** Delivers a real tab-activation event, including deliberate user switches. */
+  activateTab(tabId: number, windowId?: number): Promise<void>;
+  activationListenerCount(): number;
+  updateListenerCount(): number;
   tabsCreate: ReturnType<typeof vi.fn>;
   tabsQuery: ReturnType<typeof vi.fn>;
   tabsUpdate: ReturnType<typeof vi.fn>;
@@ -670,7 +674,7 @@ function loadWorker(options: {
   >;
   tabsCreate?: (properties: Record<string, unknown>) => Promise<Record<string, unknown>>;
   tabsUpdate?: (tabId: number, properties: Record<string, unknown>) => Promise<Record<string, unknown>>;
-  tabsSendMessage?: (tabId: number, message: Record<string, unknown>) => Promise<unknown>;
+  tabsSendMessage?: (tabId: number, message: Record<string, unknown>, delivery?: Record<string, unknown>) => Promise<unknown>;
   windowsGet?: (windowId: number) => Promise<{ id?: number; focused?: boolean; state?: string }>;
   windowsUpdate?: (windowId: number, properties: Record<string, unknown>) => Promise<Record<string, unknown>>;
   WebSocket?: unknown;
@@ -680,6 +684,7 @@ function loadWorker(options: {
   const tabRemovedListeners: Array<(tabId: number, removeInfo?: { windowId?: number; isWindowClosing?: boolean }) => void> = [];
   const tabCreatedListeners: Array<(tab: { id?: number; url?: string; pendingUrl?: string }) => void> = [];
   const tabUpdatedListeners: Array<(tabId: number, changeInfo: { url?: string; status?: string }) => void> = [];
+  const tabActivatedListeners = new Set<(info: { tabId: number; windowId: number }) => void>();
   const installedListeners: Array<(details: { reason: string }) => void> = [];
   const startupListeners: Array<() => void> = [];
   const alarmListeners: Array<(alarm: { name: string }) => void> = [];
@@ -704,13 +709,22 @@ function loadWorker(options: {
       (!urls.length || urls.some(pattern => matchesUrlPattern(tab.url, pattern)))
     );
   });
-  const tabsUpdate = vi.fn(options.tabsUpdate ?? (async (id: number, properties: { autoDiscardable?: boolean; active?: boolean } = {}) => {
+  const updateTab = options.tabsUpdate ?? (async (id: number, properties: { autoDiscardable?: boolean; active?: boolean } = {}) => {
     const tab = knownTabs.get(id);
     if (tab && typeof properties.autoDiscardable === 'boolean') tab.autoDiscardable = properties.autoDiscardable;
     if (tab && typeof properties.active === 'boolean') tab.active = properties.active;
     if (tab && typeof (properties as { url?: unknown }).url === 'string') tab.url = (properties as { url: string }).url;
     return { id, windowId: 7, ...properties };
-  }));
+  });
+  const tabsUpdate = vi.fn(async (id: number, properties: Record<string, unknown> = {}) => {
+    const result = await updateTab(id, properties);
+    if (properties.active === true) {
+      const windowId = Number(result.windowId ?? knownTabs.get(id)?.windowId ?? 7);
+      for (const tab of knownTabs.values()) if (tab.windowId === windowId) tab.active = tab.id === id;
+      for (const fn of tabActivatedListeners) fn({ tabId: id, windowId });
+    }
+    return result;
+  });
   const tabsSendMessage = vi.fn(options.tabsSendMessage ?? (async () => ({ ok: true })));
   const tabsRemove = vi.fn(async (id: number) => { removedTabs.add(id); knownTabs.delete(id); });
   const tabsReload = vi.fn(async (id: number) => {
@@ -773,6 +787,10 @@ function loadWorker(options: {
       }
     },
     tabs: {
+      onActivated: {
+        addListener(fn: (info: { tabId: number; windowId: number }) => void) { tabActivatedListeners.add(fn); },
+        removeListener(fn: (info: { tabId: number; windowId: number }) => void) { tabActivatedListeners.delete(fn); }
+      },
       create: tabsCreate,
       query: tabsQuery,
       update: tabsUpdate,
@@ -795,6 +813,10 @@ function loadWorker(options: {
       onUpdated: {
         addListener(fn: (tabId: number, changeInfo: { url?: string; status?: string }) => void) {
           tabUpdatedListeners.push(fn);
+        },
+        removeListener(fn: (tabId: number, changeInfo: { url?: string; status?: string }) => void) {
+          const index = tabUpdatedListeners.indexOf(fn);
+          if (index >= 0) tabUpdatedListeners.splice(index, 1);
         }
       }
     }
@@ -867,6 +889,14 @@ function loadWorker(options: {
       for (const fn of tabUpdatedListeners) fn(tabId, change as { status?: string });
       for (let turn = 0; turn < 20; turn++) await new Promise(resolve => setTimeout(resolve, 0));
     },
+    async activateTab(tabId, windowId = 7) {
+      for (const tab of await queryTabs({ windowId })) if (tab.windowId === windowId) tab.active = tab.id === tabId;
+      for (const tab of knownTabs.values()) if (tab.windowId === windowId) tab.active = tab.id === tabId;
+      for (const fn of tabActivatedListeners) fn({ tabId, windowId });
+      for (let turn = 0; turn < 4; turn++) await new Promise(resolve => setTimeout(resolve, 0));
+    },
+    activationListenerCount: () => tabActivatedListeners.size,
+    updateListenerCount: () => tabUpdatedListeners.length,
     async closeTab(tabId: number, removeInfo = { windowId: 7, isWindowClosing: false }) {
       knownTabs.delete(tabId);
       for (const fn of tabRemovedListeners) fn(tabId, removeInfo);
@@ -6041,6 +6071,124 @@ describe('managed renderer lifecycle wake', () => {
     expect(target.active).toBe(false); expect(previous.active).toBe(true);
   });
 
+  describe('fresh wake permission and uninterrupted selection custody', () => {
+    it.each(['overnight-to-day', 'main-withdrawn', 'protection-withdrawn', 'day-focus-after-settings'] as const)(
+      'refuses automatic selection after fresh %s', async reason => {
+      const target = { id: 81, windowId: 7, url: `https://chatgpt.com/c/${CHAT}`, active: false, frozen: true };
+      const previous = { id: 82, windowId: 7, url: 'https://example.com/', active: true };
+      let focused = reason === 'overnight-to-day', statusReads = 0, settingsReads = 0;
+      const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }), session: new FakeStorageArea(),
+        tabsQuery: async () => [target, previous], tabsGet: async () => target,
+        tabsSendMessage: async () => ({ ok: true, recorderVersion: currentRecorderVersion, freshTurnProtocol: 1 }),
+        tabsUpdate: async (id, properties) => {
+          if (properties.active === true) { target.active = id === 81; previous.active = id === 82; }
+          return { ...(id === 81 ? target : previous), ...properties };
+        }, windowsGet: async () => ({ id: 7, focused }),
+        fetch: async input => {
+          const route = new URL(input).pathname;
+          if (route === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+          if (route === '/settings') {
+            settingsReads++;
+            if (reason === 'day-focus-after-settings' && settingsReads >= 2) focused = true;
+            return response(200, { ui: { automationPaused: false, automationProfile: 'day' } });
+          }
+          if (route === '/status') {
+            statusReads++;
+            return response(200, { ok: true, automationPaused: false,
+              automationProfile: reason === 'overnight-to-day' ? 'overnight' : 'day', repairs: [],
+              mainConversations: reason === 'main-withdrawn' && statusReads > 1 ? [] : [CHAT],
+              nonDiscardableConversations: reason === 'protection-withdrawn' && statusReads > 1 ? [] : [CHAT] });
+          }
+          return response(404, {});
+        } });
+      await worker.fireAlarm();
+      await new Promise(resolve => setTimeout(resolve, 420));
+      expect(worker.tabsUpdate.mock.calls.filter(([, properties]) => properties.active === true)).toEqual([]);
+      expect(target.active).toBe(false); expect(previous.active).toBe(true);
+      expect(worker.activationListenerCount()).toBe(0);
+      expect(worker.tabsReload).not.toHaveBeenCalled();
+      expect(worker.tabsRemove).not.toHaveBeenCalled(); expect(worker.tabsCreate).not.toHaveBeenCalled();
+    });
+
+    it.each(['document', 'pairing', 'route', 'spa-route'] as const)('rechecks synchronous ownership after the last focus await: %s', async reason => {
+      const target = { id: 81, windowId: 7, url: `https://chatgpt.com/c/${CHAT}`, active: false, frozen: true };
+      const previous = { id: 82, windowId: 7, url: 'https://example.com/', active: true };
+      let focusReads = 0, release!: () => void;
+      const focusHeld = new Promise<void>(resolve => { release = resolve; });
+      onTestFinished(() => release());
+      const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+        session: new FakeStorageArea({ tabDocuments: { '81': 'original-document' }, tabEpochs: { '81': 0 }, tabConversations: { '81': CHAT } }),
+        tabsQuery: async () => [target, previous], tabsGet: async () => ({ ...target }),
+        tabsSendMessage: async () => ({ ok: true, recorderVersion: currentRecorderVersion, freshTurnProtocol: 1 }),
+        windowsGet: async () => { if (++focusReads === 2) await focusHeld; return { id: 7, focused: false }; },
+        fetch: async input => new URL(input).pathname === '/hello'
+          ? response(200, { app: 'chat-on-steroids', paired: true })
+          : response(200, { ok: true, automationPaused: false, automationProfile: 'day', repairs: [],
+            ui: { automationPaused: false, automationProfile: 'day' }, mainConversations: [CHAT], nonDiscardableConversations: [CHAT] }) });
+      const existingUpdates = worker.updateListenerCount();
+      await worker.fireAlarm();
+      await vi.waitFor(() => expect(focusReads >= 2 || worker.tabsUpdate.mock.calls.some(([, properties]) => properties.active === true)).toBe(true));
+      expect(worker.tabsUpdate.mock.calls.filter(([, properties]) => properties.active === true)).toEqual([]);
+      if (reason === 'document') expect(await worker.registerTab(81, 'replacement-document')).toMatchObject({ ok: true });
+      if (reason === 'pairing') expect(await worker.send({ type: 'unpair' })).toMatchObject({ ok: true });
+      if (reason === 'route') { target.url = 'https://example.com/'; await worker.changeTabUrl(81, target.url); }
+      if (reason === 'spa-route') {
+        target.url = 'https://chatgpt.com/c/bbbbbbbb-cccc-4ddd-8eee-ffffffffffff';
+        await worker.changeTabUrl(81, target.url);
+      }
+      release();
+      await new Promise(resolve => setTimeout(resolve, 420));
+      expect(worker.tabsUpdate.mock.calls.filter(([, properties]) => properties.active === true)).toEqual([]);
+      expect(worker.activationListenerCount()).toBe(0);
+      expect(worker.updateListenerCount()).toBe(existingUpdates);
+    });
+
+    it.each(['document', 'away-and-back', 'route-away-and-back', 'pairing', 'pause', 'unchanged'] as const)(
+      'unwinds only the same uninterrupted owned selection after %s', async reason => {
+      const target = { id: 81, windowId: 7, url: `https://chatgpt.com/c/${CHAT}`, active: false, frozen: true };
+      const previous = { id: 82, windowId: 7, url: 'https://example.com/', active: true };
+      const other = { id: 83, windowId: 7, url: 'https://example.org/', active: false };
+      let paused = false;
+      const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+        session: new FakeStorageArea({ tabDocuments: { '81': 'original-document' }, tabEpochs: { '81': 0 }, tabConversations: { '81': CHAT } }),
+        tabsQuery: async () => [target, previous, other], tabsGet: async () => target,
+        tabsSendMessage: async () => ({ ok: true, recorderVersion: currentRecorderVersion, freshTurnProtocol: 1 }),
+        tabsUpdate: async (id, properties) => {
+          if (properties.active === true) {
+            target.active = id === 81; previous.active = id === 82; other.active = id === 83;
+            if (id === 81) target.frozen = false;
+          }
+          return { ...(id === 81 ? target : previous), ...properties };
+        }, windowsGet: async () => ({ id: 7, focused: false }),
+        fetch: async input => new URL(input).pathname === '/hello'
+          ? response(200, { app: 'chat-on-steroids', paired: true })
+          : response(200, { ok: true, automationPaused: paused, automationProfile: 'day', repairs: [],
+            ui: { automationPaused: paused, automationProfile: 'day' }, mainConversations: [CHAT], nonDiscardableConversations: [CHAT] }) });
+      const existingUpdates = worker.updateListenerCount();
+      await worker.fireAlarm();
+      await vi.waitFor(() => expect(worker.tabsUpdate).toHaveBeenCalledWith(81, { active: true }));
+      const beforeMutation = worker.tabsSendMessage.mock.calls.length;
+      if (reason === 'document') expect(await worker.registerTab(81, 'replacement-document')).toMatchObject({ ok: true });
+      if (reason === 'away-and-back') { await worker.activateTab(83); await worker.activateTab(81); }
+      if (reason === 'route-away-and-back') {
+        target.url = 'https://chatgpt.com/c/bbbbbbbb-cccc-4ddd-8eee-ffffffffffff'; await worker.changeTabUrl(81, target.url);
+        target.url = `https://chatgpt.com/c/${CHAT}`; await worker.changeTabUrl(81, target.url);
+      }
+      if (reason === 'pairing') expect(await worker.send({ type: 'unpair' })).toMatchObject({ ok: true });
+      if (reason === 'pause') paused = true;
+      await new Promise(resolve => setTimeout(resolve, 420));
+      const selections = worker.tabsUpdate.mock.calls.filter(([, properties]) => properties.active === true).map(([id]) => id);
+      expect(selections).toEqual(['pause', 'unchanged'].includes(reason) ? [81, 82] : [81]);
+      expect(target.active).toBe(!['pause', 'unchanged'].includes(reason));
+      expect(worker.activationListenerCount()).toBe(0);
+      expect(worker.updateListenerCount()).toBe(existingUpdates);
+      const pingAfterSelection = worker.tabsSendMessage.mock.calls.slice(beforeMutation).filter(([, message, delivery]) =>
+        message.type === 'clf-recorder-ping' && delivery?.documentId === 'original-document');
+      expect(pingAfterSelection.length).toBe(reason === 'unchanged' ? 1 : 0);
+      expect(worker.tabsRemove).not.toHaveBeenCalled(); expect(worker.tabsCreate).not.toHaveBeenCalled();
+    });
+  });
+
   it('uses a discarded lifecycle event to wake an existing protected main without waiting for another alarm', async () => {
     const session = new FakeStorageArea();
     const tab = { id: 81, windowId: 7, url: `https://chatgpt.com/c/${CHAT}`, active: false, discarded: false };
@@ -6078,7 +6226,8 @@ describe('managed renderer lifecycle wake', () => {
       fetch: async input => {
         const route = new URL(input).pathname;
         if (route === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
-        if (route === '/settings') return response(200, { ui: { automationPaused: false } });
+        if (route === '/settings') return response(200, { ui: { automationPaused: false,
+          automationProfile: kind === 'frozen-overnight' ? 'overnight' : 'day' } });
         if (route === '/status') return response(200, { ok: true, automationPaused: false,
           automationProfile: kind === 'frozen-overnight' ? 'overnight' : 'day',
           mainConversations: [CHAT], managedConversations: [CHAT], nonDiscardableConversations: [CHAT], repairs: [] });
@@ -6184,12 +6333,23 @@ describe('managed renderer lifecycle wake', () => {
     const end = backgroundSource.indexOf('\n/**', start);
     const target = { id: 81, windowId: 7, active: false, url: `https://chatgpt.com/c/${CHAT}` };
     const previous = { id: 82, windowId: 7, active: true };
-    const update = vi.fn(async (id: number) => { target.active = id === 81; previous.active = id === 82; });
+    const activated = new Set<(info: { tabId: number; windowId: number }) => void>();
+    const updated = new Set<unknown>();
+    const update = vi.fn(async (id: number) => {
+      target.active = id === 81; previous.active = id === 82;
+      for (const fn of activated) fn({ tabId: id, windowId: 7 });
+    });
     const ping = vi.fn(async () => ({ ok: true }));
     const run = vm.runInNewContext(backgroundSource.slice(start, end) + '; retryRepairMessageAfterTabWake', {
       chrome: { windows: { get: async () => ({ focused: false }) }, tabs: {
-        query: async () => [target, previous], update } }, tabReply: ping,
-      conversationForTab: () => CHAT, REPAIR_PAGE_REPLY_MS: 3000, setTimeout, console
+        query: async () => [target, previous], update,
+        onUpdated: { addListener: (fn: unknown) => updated.add(fn), removeListener: (fn: unknown) => updated.delete(fn) },
+        onActivated: { addListener: (fn: (info: { tabId: number; windowId: number }) => void) => activated.add(fn),
+          removeListener: (fn: (info: { tabId: number; windowId: number }) => void) => activated.delete(fn) } } }, tabReply: ping,
+      connectionEpoch: 0, instanceId: 'test-instance', token: 'paired', port: 8765, browserId: 'test-browser',
+      disconnected: false, companionReloadFlight: null, tabDocuments: { '81': 'original-document' }, tabEpochs: { '81': 0 },
+      conversationAdmission: () => () => true, browserControlsTab: () => false,
+      concreteConversationForTab: () => CHAT, conversationFromUrl: () => CHAT, setTimeout, console
     });
     const first = { ok: false };
     const guard = async (after: boolean) => {
@@ -6197,8 +6357,11 @@ describe('managed renderer lifecycle wake', () => {
       if (after && mode === 'user-switched') { target.active = false; previous.active = false; return false; }
       return !after;
     };
-    expect(await run(target, CHAT, first, { type: 'clf-recorder-ping' }, () => true, false, guard)).toBe(first);
+    expect(await run(target, CHAT, first, { type: 'clf-recorder-ping' }, () => true, false,
+      { refresh: guard, current: () => true, focusedAllowed: () => false })).toBe(first);
     expect(ping).not.toHaveBeenCalled();
+    expect(activated.size).toBe(0);
+    expect(updated.size).toBe(0);
     if (mode === 'before-selection') {
       expect(update).not.toHaveBeenCalled();
       expect(target.active).toBe(true);

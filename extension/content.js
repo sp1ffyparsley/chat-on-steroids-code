@@ -95,7 +95,7 @@
   // Revision 92 retains current identity-refusal diagnostics across nonfinal reader states.
   // Revision 95 schedules the exact quiet-helper stability recheck without changing acceptance.
   // Revision 96 fences asynchronous status/startup effects to the current recorder and account intent.
-  const RECORDER_VERSION = 97;
+  const RECORDER_VERSION = 98;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
