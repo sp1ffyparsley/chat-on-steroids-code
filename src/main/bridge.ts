@@ -6733,6 +6733,26 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
           });
           diagnosticAccepted = accepted;
           const current = accepted ? coreBrowserEvidence(id) : null;
+          if (current?.pendingCompletion && !previous?.pendingCompletion) {
+            const pending = current.pendingCompletion;
+            const rawFinal = parsed['ordinaryFinal'];
+            const fields = rawFinal && typeof rawFinal === 'object' && !Array.isArray(rawFinal)
+              ? rawFinal as Record<string, unknown> : null;
+            const admission = (key: string, captured: boolean) => captured ? 'captured'
+              : fields && Object.prototype.hasOwnProperty.call(fields, key) ? 'supplied-unadmitted' : 'absent';
+            const binding = createHash('sha256').update(JSON.stringify([
+              getActiveInstanceRuntime().profile.id, id, pending
+            ])).digest('hex').slice(0, 32); // Grouping only; stays below the existing opaque-token redactor.
+            // First observation only. This is neither a durable commit nor completion;
+            // print fixed shape classifications and an opaque binding, never native IDs.
+            logInfo('bridge: native completion birth phase=observed completionAsserted=false' +
+              ` reason=${pending.reason} binding=${binding}` +
+              ` source=${admission('sourceUserMessageId', pending.sourceUserMessageId !== null)}` +
+              ` coreParents=${admission('coreCallMessageIds', pending.coreCallMessageIds !== null)}` +
+              ` codeParents=${admission('codeCallMessageIds', pending.codeCallMessageIds !== null)}` +
+              ` coreCalls=${pending.calls} codeCalls=${pending.codeCalls}` +
+              ` requestMappings=${pending.allCoreRequestIds?.length ?? 0} turnPresent=${Boolean(current.turnId)}`);
+          }
           const scan = current?.shellScan ?? null;
           const priorScan = previous?.shellScan ?? null;
           const documentChanged = current !== null &&

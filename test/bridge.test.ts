@@ -30,6 +30,7 @@ import type { SwarmSnapshot } from '../src/main/agents.js';
 import type { Config } from '../src/shared/types.js';
 import {
   coreBrowserEvidence,
+  nativeCompletionCandidate,
   nativeFinalEvidenceWait,
   nativeIdentityRefusalSummary,
   settledNativeTurnCandidate,
@@ -8328,6 +8329,29 @@ describe('activity feed', () => {
     expect((await sessionStoreModule.readSessionNativeCompletionFenceCheckpoint(
       f.sessionId, f.conversationId, f.profileId))?.fence).toEqual(f.expected);
     expect(await input.listInputs()).toEqual(originalInputs);
+  });
+
+  it.each(['absent', 'invalid', 'captured'] as const)('records %s first-fence identity provenance without inferring completion', async kind => {
+    const f = await privateNativeCheckpointFixture(false);
+    const source = { ...f.diagnostic.ordinaryFinal } as Record<string, unknown>;
+    if (kind === 'absent') { delete source.sourceUserMessageId; delete source.coreCallMessageIds; }
+    if (kind === 'invalid') { source.sourceUserMessageId = 'PRIVATE invalid source'; source.coreCallMessageIds = [null]; }
+    const lines = () => f.logger.getLog().filter(row => row.message.startsWith('bridge: native completion birth ')).map(row => row.message);
+    const before = lines().length;
+    expect((await f.report(source)).status).toBe(200);
+    const born = coreBrowserEvidence(f.conversationId)!.pendingCompletion;
+    const fresh = lines().slice(before);
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0]).toContain('phase=observed completionAsserted=false');
+    expect(fresh[0]).toContain(`source=${kind === 'captured' ? 'captured' : kind === 'invalid' ? 'supplied-unadmitted' : 'absent'}`);
+    expect(fresh[0]).toContain(`coreParents=${kind === 'captured' ? 'captured' : kind === 'invalid' ? 'supplied-unadmitted' : 'absent'}`);
+    expect(fresh[0]).toMatch(/binding=[a-f0-9]{32}(?:\s|$)/);
+    for (const privateValue of [f.conversationId, 'PRIVATE invalid source', f.diagnostic.documentId])
+      expect(fresh[0]).not.toContain(privateValue);
+    expect((await f.report(source)).status).toBe(200);
+    expect(lines()).toHaveLength(before + 1);
+    expect(coreBrowserEvidence(f.conversationId)?.pendingCompletion).toEqual(born);
+    expect(nativeCompletionCandidate(f.conversationId)).toBeNull();
   });
 
   it('persists exact private native completion checkpoint identities across an HTTP process-style restart', async () => {

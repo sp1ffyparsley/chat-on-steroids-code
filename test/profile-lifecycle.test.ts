@@ -9,6 +9,7 @@ import { NEW_WORK_KINDS, WorkAdmissionGate } from '../src/main/work-admission.js
 function fixture(initialBlockers: ActiveWorkBlocker[] = []) {
   const profileId = 'source';
   const admission = new WorkAdmissionGate();
+  const prepareShutdown = vi.fn(async (): Promise<void> => {});
   let blockers = initialBlockers;
   let durable: DeferredProfileSwitch | null = null;
   let now = 1_000;
@@ -45,6 +46,7 @@ function fixture(initialBlockers: ActiveWorkBlocker[] = []) {
     onSwitchReady: ready,
     applyUpdate: update,
     applyShutdown: shutdown,
+    prepareShutdown,
     now: () => now,
     idFactory: () => `transition-${++nextId}`
   });
@@ -55,6 +57,7 @@ function fixture(initialBlockers: ActiveWorkBlocker[] = []) {
     ready,
     update,
     shutdown,
+    prepareShutdown,
     census,
     writes,
     writeAdmissionModes,
@@ -281,7 +284,7 @@ describe('standalone Drain', () => {
       phase: 'shutdown-applied', transitionId: ready.transitionId,
       admission: { mode: 'finalizing', owner: ready.transitionId }
     });
-    expect(f.census).toHaveBeenCalledTimes(callsAtReady);
+    expect(f.census).toHaveBeenCalledTimes(callsAtReady + 2);
     expect(f.shutdown).toHaveBeenCalledTimes(1);
   });
 });
@@ -409,6 +412,44 @@ describe('Drain and apply update', () => {
 });
 
 describe('safe maintenance shutdown', () => {
+  it('rechecks a ready Drain before converting it to shutdown', async () => {
+    const f = fixture();
+    await f.coordinator.requestDrain();
+    const transitionId = f.coordinator.getStatus().transitionId;
+    f.setBlockers([{ category: 'late-native-work', count: 1 }]);
+    const result = await f.coordinator.requestShutdown();
+    expect(result.outcome).toBe('draining');
+    expect(result.status).toMatchObject({ phase: 'draining-shutdown', transitionId,
+      blockerCount: 1, admission: { mode: 'draining', owner: transitionId } });
+    expect(f.prepareShutdown).not.toHaveBeenCalled();
+    expect(f.shutdown).not.toHaveBeenCalled();
+    f.setBlockers([]);
+    await Promise.all([f.coordinator.poll(), f.coordinator.notifyWorkChanged()]);
+    expect(f.shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the same Drain when work appears during reversible store flushing', async () => {
+    const f = fixture();
+    let release!: () => void;
+    const flushing = new Promise<void>(resolve => { release = resolve; });
+    f.prepareShutdown.mockImplementationOnce(() => flushing);
+    const request = f.coordinator.requestShutdown();
+    try {
+      for (let step = 0; step < 20; step++) await Promise.resolve();
+      expect(f.prepareShutdown).toHaveBeenCalledTimes(1);
+      f.setBlockers([{ category: 'late-recording-write', count: 1 }]);
+    } finally { release(); }
+    const result = await request;
+    expect(result.outcome).toBe('draining');
+    expect(result.status).toMatchObject({ phase: 'draining-shutdown', admission: { mode: 'draining' } });
+    expect(f.shutdown).not.toHaveBeenCalled();
+    const transitionId = result.status.transitionId;
+    f.setBlockers([]);
+    await Promise.all([f.coordinator.poll(), f.coordinator.notifyWorkChanged()]);
+    expect(f.coordinator.getStatus()).toMatchObject({ phase: 'shutdown-applied', transitionId });
+    expect(f.shutdown).toHaveBeenCalledTimes(1);
+  });
+
   it('pauses new work, waits for admitted work, and closes exactly once', async () => {
     const f = fixture([{ category: 'provider-turn', count: 1 }]);
 

@@ -6974,7 +6974,7 @@ it('does not call an earlier failed helper current after a newer exact helper ac
     `.work-overview-section[data-work-section="updates"] [data-session-id="${row.id}"]`)!.click();
   await settle();
   const pane = app.w.document.getElementById('workOverviewPane')!;
-  expect(pane.textContent).toContain('Original Goal reply pending after helper acceptance');
+  expect(pane.textContent).toContain('Goal decision pending');
   expect(pane.textContent).not.toContain('Helper retry budget exhausted');
   expect(pane.textContent).not.toContain('new native Send is authorized');
   expect(app.live.sent).toEqual([]);
@@ -7014,6 +7014,34 @@ it('does not promote an opaque helper error when the latest exact controls canno
   expect(app.live.controlCalls).toEqual([]);
 });
 
+it.each([false, true])('keeps an owed Goal decision separate from helper acceptance (rejected=%s)', async rejected => {
+  const row = { ...summary([]), id: 'owed-goal-only', conversationId: 'owed-source', chatIds: ['owed-source'],
+    fileEdits: 1, lastFileChangeAt: T0 + 1_000 };
+  const custody: SessionDecisionHelperCustody = { sessionId: row.id, conversationId: row.conversationId,
+    pendingOriginalReply: { replyId: 'recorded-source', sourceTurnId: 'source-turn', acceptedAt: T0 },
+    retainedTotal: rejected ? 1 : 0, truncated: false, helpers: rejected ? [{ id: 'rejected-helper',
+      sourceTurnId: 'source-turn', createdAt: T0, state: 'failed', phase: 'answer-rejected',
+      nativeSend: 'confirmed', nativeMessageId: 'native-helper', sendAuthorizedAt: T0,
+      deliveredAt: T0 + 1, answer: 'rejected', rejection: 'native_completion_unverified',
+      sourceSuperseded: false, continuation: null }] : [] };
+  const app = await boot([], true, [], [], { sessions: [row] });
+  (app.w as any).api.decisionHelperCustody = () => Promise.resolve({ ok: true, data: custody });
+  app.w.document.querySelector<HTMLButtonElement>(
+    `.work-overview-section[data-work-section="updates"] [data-session-id="${row.id}"]`)!.click();
+  await settle();
+  const pane = app.w.document.getElementById('workOverviewPane')!;
+  expect(pane.textContent).toContain('Goal decision pending');
+  expect(pane.textContent).not.toContain('accepted decision recorded');
+  expect(pane.textContent).not.toContain('An answer was accepted');
+  if (rejected) {
+    expect(pane.textContent).toContain('Native Send confirmed');
+    expect(pane.textContent).toContain('Helper answer rejected');
+    expect(pane.textContent).toContain('reason: native_completion_unverified');
+  }
+  expect(app.live.sent).toEqual([]);
+  expect(app.live.controlCalls).toEqual([]);
+});
+
 it('shows bounded private-helper delivery, answer and Goal reply custody in Work detail without claiming Send', async () => {
   const row = { ...summary([]), id: 'helper-custody-work-detail', conversationId: 'original-helper-source',
     chatIds: ['original-helper-source'], title: 'Original Goal with saved private helpers',
@@ -7048,8 +7076,8 @@ it('shows bounded private-helper delivery, answer and Goal reply custody in Work
   const pane = app.w.document.getElementById('workOverviewPane')!;
   const field = [...pane.querySelectorAll<HTMLElement>('.work-overview-pane-field')]
     .find(item => item.querySelector('b')?.textContent === 'Private helper & Goal reply')!;
-  expect(field.textContent).toContain('Original Goal reply pending');
-  expect(field.textContent).toContain('native Send not confirmed');
+  expect(field.textContent).toContain('Goal decision pending');
+  expect(field.textContent).toContain('helper acceptance and delivery tracked separately');
   expect(field.textContent).toContain('43 retained private helpers');
   const disclosure = pane.querySelector<HTMLDetailsElement>('.work-overview-helper-custody')!;
   expect(disclosure).not.toBeNull();
@@ -7064,7 +7092,7 @@ it('shows bounded private-helper delivery, answer and Goal reply custody in Work
   expect(pane.textContent).not.toContain('continuation-still-queued');
   expect(pane.textContent).not.toContain('Original Goal reply sent');
   expect(pane.textContent).not.toContain('Task accepted as complete');
-  expect(pane.textContent).toContain('Original Goal reply pending after helper acceptance');
+  expect(pane.textContent).toContain('Goal decision pending');
   custody.pendingOriginalReply = null;
   await app.append([]);
   expect(pane.textContent).toContain('Saved source continuation after helper acceptance');
@@ -7156,7 +7184,7 @@ it('does not expose another local session’s helper custody after a Work detail
   const pane = app.w.document.getElementById('workOverviewPane')!;
   expect(pane.querySelector('#workOverviewPaneTitle')?.textContent).toBe(beta.title);
   expect(pane.textContent).not.toContain('private-reply-only-A');
-  expect(pane.textContent).not.toContain('Original Goal reply pending');
+  expect(pane.textContent).not.toContain('Goal decision pending');
   expect(pane.querySelector('.work-overview-helper-custody')).toBeNull();
   expect(app.live.sent).toEqual([]);
 });

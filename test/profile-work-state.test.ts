@@ -929,6 +929,18 @@ describe('profile lifecycle input census', () => {
     } finally { resetCoreBrowserEvidenceForTests(); }
   });
 
+  it('does not treat a future positive maintenance bit as verified quiescence', async () => {
+    resetCoreBrowserEvidenceForTests();
+    const conversationId = randomUUID();
+    await createSession({ conversationId });
+    expect(noteCoreBrowserEvidence({ conversationId, documentId: 'future-maintenance', navigationEpoch: 0,
+      observedAt: Date.now() + 1000, shell: 'classic', shellDiscovery: 'compatible', requestIds: [], turnId: null,
+      ordinaryFinal: { reason: 'busy', questions: 0, calls: 0, openCalls: 0, codeCalls: 0,
+        openCodeCalls: 0, activeTurnMapped: false, maintenanceIdle: true } })).toBe(true);
+    expect((await activeProfileWorkCensus()).blockers).toContainEqual(expect.objectContaining({ category: 'active-turn', count: 1 }));
+    resetCoreBrowserEvidenceForTests();
+  });
+
   it('counts every simultaneous native busy page without inventing recorder turns', async () => {
     resetCoreBrowserEvidenceForTests();
     const sessions = await Promise.all(Array.from({ length: 5 }, () => createSession({ conversationId: randomUUID() })));

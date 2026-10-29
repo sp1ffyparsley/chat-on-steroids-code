@@ -1473,9 +1473,9 @@ function workOverviewAttention(
   if (helperRead === 'unavailable' && helperRelevant) add('Private helper custody unavailable',
     'Only the last confirmed helper state is retained; its newest answer and original Goal reply cannot be verified.',
     'Use Retry helper status in this Work detail when the existing read becomes available.');
-  else if (boundHelper?.pendingOriginalReply) add('Original Goal reply pending after helper acceptance',
-    'An answer was accepted, but native Send of the original Goal reply is not confirmed.',
-    'Inspect the original Goal reply and exact delivery in Open full chat / Progress; do not resend it.');
+  else if (boundHelper?.pendingOriginalReply) add('Goal decision pending',
+    'The source reply is recorded. Helper acceptance and executor delivery require their own receipts.',
+    'Inspect the source reply and its separate helper and continuation receipts in Open full chat / Progress.');
   else if (boundHelper) {
     const awaiting = [...boundHelper.helpers].reverse().find(item => !item.sourceSuperseded &&
       ['awaiting-answer', 'awaiting-native-send', 'native-send-unresolved'].includes(item.phase));
@@ -1874,7 +1874,7 @@ function workOverviewHelperStatus(helper: SessionDecisionHelperCustody['helpers'
   const outgoing = continuation ? `source continuation ${continuation.state} · ${continuation.nativeSend === 'confirmed'
     ? 'native Send confirmed' : continuation.nativeSend === 'unresolved' ? 'native Send unresolved' : 'native Send not confirmed'}`
     : '';
-  return [native, answer, phase, outgoing,
+  return [native, answer, helper.rejection ? `reason: ${helper.rejection}` : '', phase, outgoing,
     helper.sourceSuperseded ? 'original source superseded' : ''].filter(Boolean).join(' · ');
 }
 
@@ -2659,7 +2659,7 @@ function paintWorkOverviewPane(): void {
     workOverviewEarlierNativeDeliveryLabel(nativeDelivery.previousConfirmed, nativeDelivery.previousOrderKnown)));
   if (privateCustody && (privateCustody.retainedTotal || privateCustody.pendingOriginalReply)) {
     const pendingReply = privateCustody.pendingOriginalReply
-      ? `Original Goal reply pending · accepted decision recorded ${clockTime(privateCustody.pendingOriginalReply.acceptedAt)} · native Send not confirmed`
+      ? `Goal decision pending · source reply recorded ${clockTime(privateCustody.pendingOriginalReply.acceptedAt)} · helper acceptance and delivery tracked separately`
       : 'No pending original Goal reply is recorded in this snapshot';
     fields.push(field('Private helper & Goal reply',
       `${privateCustody.retainedTotal} retained private helpers · ${pendingReply}${workOverviewHelperCustodyRead === 'unavailable'
@@ -2871,7 +2871,7 @@ function paintWorkOverviewPane(): void {
     children.push(note);
     if (privateCustody.pendingOriginalReply) {
       children.push(el('p', 'work-overview-result-note',
-        `Original Goal reply pending since ${clockTime(privateCustody.pendingOriginalReply.acceptedAt)} · native Send not confirmed.`));
+        `Goal decision pending since ${clockTime(privateCustody.pendingOriginalReply.acceptedAt)} · helper acceptance and executor delivery are separate receipts.`));
     }
     if (privateCustody.helpers.length) {
       const list = el('ol', 'work-overview-helper-list');

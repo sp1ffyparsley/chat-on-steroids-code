@@ -979,6 +979,48 @@ async function reinjectContentRecorder(active: Harness): Promise<Hook> {
 
 let live: Harness | null = null;
 
+describe('status presentation cannot strand recorder startup', () => {
+  it('finishes the normal resume handshake after one stream renderer failure', async () => {
+    live = await harness();
+    const adapter = (live.window as any).CLF_DOM;
+    const presentationTurns = adapter.presentationTurns;
+    let armed = false, failures = 0;
+    adapter.presentationTurns = () => {
+      if (armed) { armed = false; failures++; throw new Error('test stream paint failed'); }
+      return presentationTurns();
+    };
+    live.reply.set('status', () => {
+      armed = true;
+      return { connected: true, paired: true, port: 8765, pending: 0 };
+    });
+    const before = live.sent.length;
+    await reinjectContentRecorder(live);
+    await settle(100);
+    expect(failures).toBe(1);
+    const next = live.sent.slice(before);
+    expect(next.some(message => message.type === 'bind')).toBe(true);
+    expect(next.some(message => message.type === 'activity')).toBe(true);
+    expect(next.some(message => ['desktop_input', 'compact', 'goal_ack'].includes(message.type))).toBe(false);
+  });
+
+  it('isolates control rendering without hiding authoritative status failures', async () => {
+    live = await harness();
+    const root = live.document.querySelector<HTMLElement>('[data-clf-composer]')!;
+    expect(root).toBeTruthy();
+    let failures = 0;
+    Object.defineProperty(root, 'hidden', { configurable: true, set: () => {
+      failures++; throw new Error('test control paint failed');
+    } });
+    try {
+      await expect(live.hook.checkStatus()).resolves.toBeUndefined();
+      expect(failures).toBe(1);
+    } finally { delete (root as any).hidden; }
+    (live.window as any).CLF_DOM.setConnectorApps = () => { throw new Error('test authoritative status failure'); };
+    live.reply.set('status', () => ({ connected: true, paired: true, connectorApps: [{ id: 'app' }] }));
+    await expect(live.hook.checkStatus()).rejects.toThrow('test authoritative status failure');
+  });
+});
+
 describe('native approval automation ownership', () => {
   const unpaused = { activity: () => ({ ok: true, data: { automationPaused: false } }) };
   async function ready(url?: string): Promise<Harness> {

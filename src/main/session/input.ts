@@ -3376,7 +3376,21 @@ export async function sessionDecisionHelperCustody(
 ): Promise<SessionDecisionHelperCustody | null> {
   const session = await getSession(sessionId);
   if (!session || session.conversationId !== conversationId) return null;
-  const rows = await listInputs();
+  const rows = await serial(async () => {
+    // Inspection is not startup/recovery. Never cancel a helper, expire a receipt,
+    // materialize a stage or wake delivery merely because its Work view was opened.
+    if (!durableStoreReady()) throw new Error('Message outbox custody is not initialized');
+    const parsed = z.array(entrySchema).safeParse((entries ?? await readDurableStrict<unknown>(STATE)) ?? []);
+    if (!parsed.success) throw new Error('Message outbox custody could not be read safely');
+    const unique = new Map<string, InputEntry>();
+    for (const row of parsed.data) {
+      const previous = unique.get(row.id);
+      if (previous && JSON.stringify(previous) !== JSON.stringify(row))
+        throw new Error('Message outbox custody contains conflicting message identity');
+      if (!previous) unique.set(row.id, row);
+    }
+    return [...unique.values()]; // Schema parsing detaches every returned row.
+  });
   // The selected session can be rebound while the durable store is being read. Never
   // publish another conversation's old helper receipts under the replacement session.
   if ((await getSession(sessionId))?.conversationId !== conversationId) return null;

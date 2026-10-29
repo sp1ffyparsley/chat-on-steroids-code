@@ -156,7 +156,7 @@ export async function activeProfileWorkCensus(): Promise<ActiveWorkCensus> {
     // grant Send or certify tool completion. Old/open-call history is not busy.
     const native = coreBrowserEvidence(session.conversationId);
     return native?.shellDiscovery === 'compatible' && native.ordinaryFinal?.reason === 'busy' &&
-      native.ordinaryFinal.maintenanceIdle !== true &&
+      (native.ordinaryFinal.maintenanceIdle !== true || native.observedAt > now) &&
       Number.isFinite(native.observedAt) &&
       Math.abs(now - native.observedAt) <= CORE_BROWSER_EVIDENCE_MAX_AGE_MS;
   }).length;

@@ -1385,9 +1385,11 @@ void app.whenReady().then(async () => {
       quitting = true;
       app.quit();
     },
-    applyShutdown: async () => {
+    prepareShutdown: async () => {
       await flushRecorder();
       await Promise.all([flushSessions(), flushDurable()]);
+    },
+    applyShutdown: () => {
       logEvent('maintenance.drain.ready', 'Verified idle; closing once so the external update owner can replace and reopen the app');
       quitting = true;
       app.quit();

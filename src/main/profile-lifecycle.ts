@@ -60,6 +60,8 @@ export interface ProfileLifecycleDependencies {
   applyUpdate: () => void | Promise<void>;
   /** Closes for external maintenance only after all admitted work has settled and stores are flushed. */
   applyShutdown: () => void | Promise<void>;
+  /** Reversible store flushes. The same Drain rechecks live work after this await. */
+  prepareShutdown?: () => void | Promise<void>;
   now?: () => number;
   idFactory?: () => string;
   onStatusChange?: (status: ProfileLifecycleStatus) => void;
@@ -499,6 +501,15 @@ export class ProfileLifecycleCoordinator {
       return;
     }
 
+    if (operation.kind === 'shutdown') {
+      await this.deps.prepareShutdown?.();
+      const latest = await this.readCensus();
+      if (this.operation !== operation) return;
+      if (latest.blockerCount > 0) {
+        this.publish('draining-shutdown', null, operation.transitionId, latest.blockers);
+        return;
+      }
+    }
     operation.callbackStarted = true;
     if (operation.kind === 'update') {
       this.deps.admission.promoteToFinalization(operation.transitionId, 'update is ready to apply');
@@ -554,18 +565,17 @@ export class ProfileLifecycleCoordinator {
 
   private async convertReadyDrainToShutdown(
     drain: DrainOperation
-  ): Promise<Extract<ShutdownRequestResult, { outcome: 'applied' }>> {
+  ): Promise<ShutdownRequestResult> {
     if (drain.verifiedIdleAt === null) throw new Error('Standalone Drain is not yet verified idle');
     const operation: ShutdownOperation = {
       kind: 'shutdown',
       transitionId: drain.transitionId,
-      callbackStarted: true
+      callbackStarted: false
     };
     this.operation = operation;
-    this.deps.admission.promoteToFinalization(operation.transitionId, 'maintenance shutdown is ready to apply');
     this.publish('draining-shutdown', null, operation.transitionId, []);
-    await this.applyShutdownOperation(operation);
-    return { outcome: 'applied', status: this.getStatus() };
+    await this.evaluateCurrent();
+    return { outcome: this.status.phase === 'shutdown-applied' ? 'applied' : 'draining', status: this.getStatus() };
   }
 
   private async applyUpdateOperation(operation: UpdateOperation): Promise<void> {

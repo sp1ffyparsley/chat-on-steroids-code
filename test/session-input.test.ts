@@ -261,6 +261,49 @@ describe('model route pause custody', () => {
 });
 
 describe('session-scoped private helper custody readback', () => {
+  it.each([false, true])('never rewrites duplicate stored helper rows during inspection (conflict=%s)', async conflict => {
+    const helper: InputEntry = { ...input({ sessionId: null }), purpose: 'decision', lifetime: 'temporary-planner',
+      decisionSourceSessionId: sessionId, decisionSourceTurnId: 'source-turn', state: 'queued',
+      owner: null, createdAt: Date.now(), conversationId: null };
+    await writeDurableNow('session-input', [helper, { ...helper, ...(conflict ? { text: 'Different retained scope' } : {}) }]);
+    resetInputForTests();
+    const file = path.join(directory, 'state', 'session-input.json');
+    const before = await fs.readFile(file, 'utf8');
+    changed.mockClear();
+    if (conflict) await expect(sessionDecisionHelperCustody(sessionId, 'conversation-a')).rejects.toThrow('conflicting message identity');
+    else expect((await sessionDecisionHelperCustody(sessionId, 'conversation-a'))?.helpers).toHaveLength(1);
+    expect(await fs.readFile(file, 'utf8')).toBe(before);
+    expect(changed).not.toHaveBeenCalled();
+  });
+
+  it('does not recover helpers or materialize stages while reading cold custody', async () => {
+    const at = Date.now();
+    const helper: InputEntry = { ...input({ sessionId: null }), purpose: 'decision', lifetime: 'temporary-planner',
+      decisionSourceSessionId: sessionId, decisionSourceTurnId: 'source-turn', state: 'decision',
+      owner: 'helper-page', requiresAuthorization: true, createdAt: at - 40,
+      sendAuthorizedAt: at - 30, deliveredAt: at - 20, messageId: 'native-helper', conversationId: null };
+    const staged: InputEntry = { ...input(), state: 'sent', owner: 'source-page',
+      conversationId: 'conversation-a', createdAt: at - 100, deliveredAt: at - 80,
+      messageId: 'native-source', historyRecorded: true, historyProjectionVersion: 1,
+      historyProvenanceRecorded: true, stages: ['Next owned step'], stagesApplied: false };
+    await writeDurableNow('session-input', [helper, staged]);
+    resetInputForTests();
+    const file = path.join(directory, 'state', 'session-input.json');
+    const before = await fs.readFile(file, 'utf8');
+    changed.mockClear();
+    vi.mocked(noteChatOrigin).mockClear();
+    for (let count = 0; count < 2; count++) {
+      const view = await sessionDecisionHelperCustody(sessionId, 'conversation-a');
+      expect(view?.helpers).toHaveLength(1);
+      expect(view?.helpers[0]).toMatchObject({ id: helper.id, state: 'decision',
+        nativeSend: 'confirmed', answer: 'not-recorded' });
+    }
+    expect(liveDeliveredBrowserDecision(helper)).toBe(false);
+    expect(await fs.readFile(file, 'utf8')).toBe(before);
+    expect(changed).not.toHaveBeenCalled();
+    expect(noteChatOrigin).not.toHaveBeenCalled();
+  });
+
   it('keeps a cancelled native-delivered helper and its original answer uncertainty visible after cold restore without exposing planner text', async () => {
     const at = Date.now();
     const helperId = randomUUID();
@@ -323,9 +366,8 @@ describe('session-scoped private helper custody readback', () => {
     const byId = new Map(snapshot!.helpers.map(row => [row.id, row]));
     expect(byId.get(unsent.id)).toMatchObject({ phase: 'cancelled-before-native-send', nativeSend: 'not-confirmed', answer: 'not-recorded' });
     expect(byId.get(failedBeforeSend.id)).toMatchObject({ phase: 'failed-before-native-send', nativeSend: 'not-confirmed', answer: 'not-recorded' });
-    // The existing recovery owner can cancel an old claimed row at load; its
-    // Send authorization still prevents a false confirmed-unsent classification.
-    expect(byId.get(ambiguous.id)).toMatchObject({ phase: 'unresolved-cancellation', nativeSend: 'unresolved', answer: 'not-recorded' });
+    // Inspection retains the stored row; only the recovery owner may cancel it.
+    expect(byId.get(ambiguous.id)).toMatchObject({ phase: 'native-send-unresolved', nativeSend: 'unresolved', answer: 'not-recorded' });
     expect(byId.get(accepted.id)).toMatchObject({ phase: 'answer-accepted', nativeSend: 'confirmed', answer: 'accepted',
       continuation: { id: continuation.id, nativeSend: 'confirmed', state: 'sent', nativeMessageId: 'native-continuation' } });
     expect(snapshot?.retainedTotal).toBe(4);
