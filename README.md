@@ -2,9 +2,12 @@
 
 This is the real custom Chat On Steroids application and browser companion source, exported for code review and research. It is a clean-history code export, not an upstream release or a backup of anyone's chats.
 
-- Source commit: `6c2920d252eec85c13a2561d189059759e24cb3e`.
-- Source tree: `32a51a1ba424724f64636ff0c0421c9b7efa2879`.
+- Source commit: `7c0882a5ad8160db08bf6f114781b6a6881b1249`.
+- Source tree: `a082d776b434a6343580746f20356edd9fa9c1e8`.
 - Export date: October 29, 2026.
+- Review state: controlled candidate97, source-only; not a newly qualified installer or an installed/executing browser update.
+- Latest repair scope: exact helper replay/archive custody, bounded pre-Send diagnostics, settled join counters and protected discarded/frozen tab wake. Qualified96 and actual installed94 remain separate private evidence.
+- This export preserves the existing sanitized files and clean history; only the reviewed source/test delta was applied. Personal prompts, account records, stores and operational logs remain excluded.
 - Upstream: https://github.com/totec448-spec/chat-on-steroids
 - Intended code mirror: https://github.com/sp1ffyparsley/chat-on-steroids-code
 

@@ -2070,8 +2070,7 @@ async function drainCommandAcks(targetId = null) {
               confirmedUnsent: true,
               error: entry.error === 'After-turn pickup was withdrawn before Send.'
                 ? entry.error : 'Native Send was not attempted.',
-              ...(entry.error === 'After-turn pickup was withdrawn before Send.' &&
-                typeof entry.detail === 'string' && /^[a-z-]{1,40}$/.test(entry.detail)
+              ...(retainedUnsentDetail(entry.error, entry.detail)
                 ? { detail: entry.detail } : {}) }
           : commandAckPayload(
         entry.id,
@@ -2219,6 +2218,12 @@ async function ackDesktopInput(id, owner, conversationId, messageId, acceptance 
   return { ok: true, data: { ok: true }, queued: commandAckOutbox.some(entry => entry.kind === 'input' && entry.id === id) };
 }
 
+function retainedUnsentDetail(error, detail) {
+  if (typeof detail !== 'string' || !/^[a-z-]{1,40}$/.test(detail)) return false;
+  return error === 'After-turn pickup was withdrawn before Send.' || error === 'Native Send was not attempted.' &&
+    ['authorization-policy', 'authorization-scope', 'authorization-route', 'authorization-lease',
+      'authorization-timeout', 'app-refused', 'lease-lost', 'provider-blocked'].includes(detail);
+}
 /** Positive page proof that this exact authorization never crossed native Send.
  *
  * Keep it in the existing bounded receipt journal before talking to Main. A response can vanish
@@ -2233,8 +2238,7 @@ async function releaseDesktopInputBeforeSend(id, owner, conversationId, error, d
   if (commandAckOutbox.some(entry => entry.kind === 'input' && entry.id === id)) return { ok: false, error: 'conflicting_send_receipt' };
   const recoveryError = error === 'After-turn pickup was withdrawn before Send.'
     ? error : 'Native Send was not attempted.';
-  const recoveryDetail = recoveryError === 'After-turn pickup was withdrawn before Send.' &&
-    typeof detail === 'string' && /^[a-z-]{1,40}$/.test(detail) ? detail : undefined;
+  const recoveryDetail = retainedUnsentDetail(recoveryError, detail) ? detail : undefined;
   const previous = commandAckOutbox.find(entry => entry.kind === 'input-unsent' && entry.id === id);
   if (previous && (previous.owner !== owner || previous.conversationId !== conversationId ||
       (previous.error ?? 'Native Send was not attempted.') !== recoveryError ||
@@ -3571,12 +3575,14 @@ async function retryRepairMessageAfterTabWake(
   first,
   message,
   mayRetry,
-  allowFocusedWindowWake = false
+  allowFocusedWindowWake = false,
+  beforeWake = null
 ) {
   if (!mayRetry(first) || target?.active === true || !Number.isInteger(target?.id) ||
       !Number.isInteger(target?.windowId)) return first;
   const windowId = target.windowId;
   let previous = null;
+  let selectionIssued = false;
   try {
     // Day mode is attended: waking an inactive renderer must not visibly replace the tab the
     // user is reading. In an unfocused/background Chrome window the same bounded selection is
@@ -3600,11 +3606,23 @@ async function retryRepairMessageAfterTabWake(
       Number.isInteger(tab.id) && tab.id !== target.id) ?? null;
     // Unknown active-tab state cannot authorize even a reversible selection change.
     if (!previous) return first;
+    if (beforeWake && !await beforeWake(false)) return first;
+    if (beforeWake && !allowFocusedWindowWake) {
+      // The fresh policy guard awaited I/O. Day mode must recheck focus after it,
+      // immediately before selecting, so an attended window is never displaced.
+      const currentWindow = await chrome.windows.get(windowId).catch(() => null);
+      if (!currentWindow || currentWindow.focused !== false) return first;
+    }
+    selectionIssued = true;
     await chrome.tabs.update(target.id, { active: true });
     await new Promise(resolve => setTimeout(resolve, 350));
-    return await chrome.tabs.sendMessage(target.id, message).catch(() => null);
+    if (beforeWake && !await beforeWake(true)) return first;
+    // The new hygiene caller only pings; use the incumbent bounded reply owner.
+    // Existing Retry callers retain their original message-delivery semantics.
+    return beforeWake ? await tabReply(target.id, message)
+      : await chrome.tabs.sendMessage(target.id, message).catch(() => null);
   } finally {
-    if (previous) {
+    if (previous && selectionIssued) {
       try {
         const after = await chrome.tabs.query({ windowId });
         const currentTarget = after.find(tab => tab.id === target.id);
@@ -3616,6 +3634,86 @@ async function retryRepairMessageAfterTabWake(
     }
   }
 }
+
+/**
+ * Keep an already-owned renderer reachable, not merely exempt from future discards.
+ * A discarded page has no content script; a frozen page has no runnable handlers.
+ * Reuse maintenance and the reversible hydration wake, never Send/Retry authority.
+ * Session-only cooldown survives MV3 suspension; no timer or background page is added.
+ */
+async function wakeManagedRenderers(tabs, policy, protectedChats) {
+  if (policy.automationPaused !== false || disconnected || token === null || companionReloadFlight) return;
+  const main = new Set((Array.isArray(policy.mainConversations) ? policy.mainConversations : [])
+    .map(cleanConversationId).filter(Boolean));
+  const candidates = tabs.filter(tab => Number.isInteger(tab?.id) &&
+    main.has(concreteConversationForTab(tab)) && protectedChats.has(concreteConversationForTab(tab)) &&
+    (tab.discarded === true || tab.frozen === true));
+  if (!candidates.length) return;
+  const connection = { epoch: connectionEpoch, instanceId, token, port, browserId };
+  const startedAt = Date.now();
+  const paired = () => connection.epoch === connectionEpoch && connection.instanceId === instanceId &&
+    connection.token === token && connection.port === port && connection.browserId === browserId &&
+    !disconnected && !companionReloadFlight && Date.now() >= startedAt && Date.now() - startedAt < 15_000;
+  let attempts;
+  try {
+    const stored = (await chrome.storage.session.get(['managedRendererWakeAttempts'])).managedRendererWakeAttempts;
+    attempts = Object.fromEntries(Object.entries(stored && typeof stored === 'object' ? stored : {})
+      .filter(([, row]) => row && Number.isFinite(row.at) && row.at <= Date.now() &&
+        Date.now() - row.at < 60_000 && cleanConversationId(row.conversationId)).slice(-128));
+  } catch {
+    console.warn('[Chat On Steroids] managed renderer wake held: cooldown storage unavailable');
+    return;
+  }
+  let budget = 2;
+  for (const tab of candidates) {
+    if (budget <= 0 || !paired()) break;
+    const conversationId = concreteConversationForTab(tab);
+    const key = String(tab.id);
+    const kind = tab.discarded === true ? 'discarded' : 'frozen';
+    if (attempts[key]?.conversationId === conversationId) continue;
+    const documentId = tabDocuments[key];
+    const epoch = tabEpochs[key];
+    const admitted = conversationAdmission(null, conversationId);
+    // Re-read policy and Chrome facts after all awaited observations. Registry fallback is
+    // intentionally excluded: it cannot authorize waking a different or navigating page.
+    const current = async (afterWake = false) => {
+      if (!paired() || !admitted() || browserControlsTab(tab.id) || tabDocuments[key] !== documentId ||
+          tabEpochs[key] !== epoch) return false;
+      const settings = await call('/settings', { method: 'GET' }, false, admitted);
+      if (!settings.ok || settings.data?.ui?.automationPaused !== false) return false;
+      const latest = await chrome.tabs.get(tab.id).catch(() => null);
+      return paired() && admitted() && !browserControlsTab(tab.id) && tabDocuments[key] === documentId &&
+        tabEpochs[key] === epoch && latest?.id === tab.id && latest.windowId === tab.windowId &&
+        !latest.pendingUrl && latest.status !== 'loading' && concreteConversationForTab(latest) === conversationId &&
+        (kind === 'discarded' ? latest.discarded === true && latest.active !== true :
+          afterWake ? latest.active === true : latest.frozen === true && latest.active !== true);
+    };
+    try {
+      if (!await current()) continue;
+      budget--;
+      attempts[key] = { conversationId, at: Date.now() };
+      while (Object.keys(attempts).length > 128) delete attempts[Object.keys(attempts)[0]];
+      // Persist before attempting; a rejected browser API is still a spent wake this minute.
+      await chrome.storage.session.set({ managedRendererWakeAttempts: attempts });
+      if (kind === 'discarded') {
+        if (!await current()) continue;
+        await chrome.tabs.reload(tab.id);
+        console.info('[Chat On Steroids] managed renderer wake requested', { tab: tab.id, kind });
+      } else {
+        const first = { ok: false, error: 'renderer_frozen' };
+        const reply = await retryRepairMessageAfterTabWake(tab, conversationId, first,
+          { type: 'clf-recorder-ping' }, result => result === first,
+          policy.automationProfile === 'overnight' || policy.automationProfile === 'rotation', current);
+        console.info('[Chat On Steroids] managed renderer wake observed', {
+          tab: tab.id, kind, outcome: reply?.ok === true ? 'receiver-reachable' : 'deferred-or-unverified'
+        });
+      }
+    } catch {
+      console.warn('[Chat On Steroids] managed renderer wake failed; retained work unchanged', { tab: tab.id, kind });
+    }
+  }
+}
+
 
 function inputReuseProbe(tabId, documentId) {
   return tabReply(tabId, { type: 'clf-input-reuse-state' }, { documentId });
@@ -6586,6 +6684,7 @@ async function maintainTabHygiene(policy, nonDiscardable, closable, additiveOrga
     }
     if (changed) await persistLive().catch(() => undefined);
   }
+  await wakeManagedRenderers(tabs, policy, nonDiscardable);
   return { complete: true, attentionWork };
 }
 
@@ -10182,6 +10281,11 @@ chrome.tabs.onRemoved.addListener((id, removeInfo) => {
 // which fires no `loading` status, remains the content script's to prove.
 chrome.tabs.onUpdated.addListener((id, changeInfo) => {
   if (!changeInfo) return;
+  if (changeInfo.discarded === true || changeInfo.frozen === true) {
+    // Lifecycle events reuse the coalesced owner; cached membership grants no wake.
+    void load().then(() => cleanConversationId(protectedMainTabs[String(id)]) ? maintain(true) : undefined)
+      .catch(() => undefined);
+  }
   if (typeof changeInfo.url === 'string' && appOpeningMarker(changeInfo.url)) {
     void load().then(() => rememberAppOwnedOpeningTab({ id, url: changeInfo.url })).catch(() => undefined);
   }
@@ -10318,7 +10422,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 96;
+const PAGE_RECORDER_VERSION = 97;
 
 let deferredRecoveryWork = null;
 

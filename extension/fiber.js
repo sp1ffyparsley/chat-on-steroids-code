@@ -2436,14 +2436,14 @@
         if ((!reference?.id || sourceCounts.get(reference.id) === 1) && unreferencedInvocation(call))
           invocationIds.add(call.messageId);
         else unprovedInvocations.add(call.messageId);
-        if (call.answered !== true) shellDiagnostic(rejects, !reference?.id ? 'callJoinReferenceMissing'
+        shellDiagnostic(rejects, !reference?.id ? 'callJoinReferenceMissing'
           : !selected.has(reference.id) ? 'callJoinReferenceUnselected' : 'callJoinReferenceConflict');
         note(call, reference?.id && sourceCounts.get(reference.id) > 1 ? 'callReceiptConflict' : 'callReceiptMissing');
         continue;
       }
       const result = messageAt(reference.id);
       if (result?.author?.role !== 'tool') {
-        if (call.answered !== true) shellDiagnostic(rejects, result ? 'callJoinResultIdentity' : 'callJoinResultMissing');
+        shellDiagnostic(rejects, result ? 'callJoinResultIdentity' : 'callJoinResultMissing');
         note(call, result ? 'callReceiptConflict' : 'callReceiptMissing'); continue;
       }
       const resource = resultOf(result);

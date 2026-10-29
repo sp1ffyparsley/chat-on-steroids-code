@@ -95,7 +95,7 @@
   // Revision 92 retains current identity-refusal diagnostics across nonfinal reader states.
   // Revision 95 schedules the exact quiet-helper stability recheck without changing acceptance.
   // Revision 96 fences asynchronous status/startup effects to the current recorder and account intent.
-  const RECORDER_VERSION = 96;
+  const RECORDER_VERSION = 97;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -182,6 +182,9 @@
   const STATUS_MS = 15_000;
   /** One bounded worker round trip at the irreversible native Send boundary. */
   const DESKTOP_INPUT_PRECLICK_REPLY_MS = 11_000;
+  const NATIVE_INPUT_AUTHORIZATION_REFUSALS = new Set([
+    'authorization-policy', 'authorization-scope', 'authorization-route', 'authorization-lease'
+  ]);
   /** Same-document recovery for a redeem response that may have been lost after app claim. */
   const COMMAND_REDEEM_RECONCILE_MS = STATUS_MS;
   const COMMAND_REDEEM_RECONCILE_WINDOW_MS = 55_000;
@@ -16508,7 +16511,8 @@
         sendAuthorizationRequested = true;
         const authorized = await ask({ type: 'desktop_input', id: input.id, owner: input.owner, conversationId: target,
           authorize: true, freshTurnProtocol: 1, receipt: receiptProof }, null, DESKTOP_INPUT_PRECLICK_REPLY_MS);
-        if (authorized?.data?.ok !== true) noteWithdraw('app-refused');
+        if (authorized?.data?.ok !== true) noteWithdraw(authorized === WORKER_REPLY_TIMEOUT ? 'authorization-timeout'
+          : NATIVE_INPUT_AUTHORIZATION_REFUSALS.has(authorized?.data?.detail) ? authorized.data.detail : 'app-refused');
         if (!sendCurrent() || authorized?.data?.ok !== true || !onTarget() || !draft.current()) {
           withdrawWhy('lease-lost');
           return false;
@@ -16686,9 +16690,14 @@
         // sendAttempted flips only immediately before sendSubmittedText is allowed to click native
         // Send. Persist that positive pre-click result through the companion's existing receipt
         // journal so Main/app reconstruction can safely re-arm the same durable UUID.
+        // Carry only this fixed adapter refusal code when the provider changed
+        // after authorization; never forward native dialog copy or error text.
         await ask({ type: 'desktop_input', id: claimedInput.id, owner: claimedInput.owner,
           conversationId: target, fail: true, confirmedUnsent: true,
-          error: target && deletedConversations.has(target.toLowerCase()) ? CONVERSATION_DELETED : 'Native Send was not attempted.'
+          error: target && deletedConversations.has(target.toLowerCase()) ? CONVERSATION_DELETED : 'Native Send was not attempted.',
+          ...((NATIVE_INPUT_AUTHORIZATION_REFUSALS.has(withdrawReason) ||
+            ['app-refused', 'authorization-timeout', 'lease-lost', 'provider-blocked'].includes(withdrawReason))
+            ? { detail: withdrawReason } : {})
         }, null, DESKTOP_INPUT_PRECLICK_REPLY_MS).catch(() => undefined);
       }
       if (draft) {

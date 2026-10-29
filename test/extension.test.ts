@@ -631,6 +631,7 @@ interface WorkerHarness {
   registerTab(tabId: number, documentId?: string, senderUrl?: string): Promise<any>;
   /** Fires Chrome's tab-created lifecycle event, the way opening a link in a new tab does. */
   createTab(tab: { id: number; url?: string; pendingUrl?: string; autoDiscardable?: boolean; discarded?: boolean; active?: boolean }): Promise<void>;
+  updateTabLifecycle(tabId: number, change: { discarded?: boolean; frozen?: boolean }): Promise<void>;
   tabsCreate: ReturnType<typeof vi.fn>;
   tabsQuery: ReturnType<typeof vi.fn>;
   tabsUpdate: ReturnType<typeof vi.fn>;
@@ -859,6 +860,12 @@ function loadWorker(options: {
       });
       for (const fn of tabCreatedListeners) fn(tab);
       for (let turn = 0; turn < 6; turn += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    },
+    async updateTabLifecycle(tabId, change) {
+      const tab = knownTabs.get(tabId);
+      if (tab) Object.assign(tab, change);
+      for (const fn of tabUpdatedListeners) fn(tabId, change as { status?: string });
+      for (let turn = 0; turn < 20; turn++) await new Promise(resolve => setTimeout(resolve, 0));
     },
     async closeTab(tabId: number, removeInfo = { windowId: 7, isWindowClosing: false }) {
       knownTabs.delete(tabId);
@@ -1425,7 +1432,15 @@ describe('browser identity', () => {
 });
 
 describe('confirmed pre-Send recovery receipts', () => {
-  it('durably preserves the exact recovery refusal and detail across a worker restart', async () => {
+  it.each([
+    ['After-turn pickup was withdrawn before Send.', 'app-refused'],
+    ['Native Send was not attempted.', 'authorization-policy'],
+    ['Native Send was not attempted.', 'authorization-scope'],
+    ['Native Send was not attempted.', 'authorization-route'],
+    ['Native Send was not attempted.', 'authorization-lease'],
+    ['Native Send was not attempted.', 'private-native-error-text']
+  ])('durably preserves the exact recovery refusal and detail across a worker restart (%s/%s)', async (error, detail) => {
+    const expectedDetail = detail === 'private-native-error-text' ? {} : { detail };
     const conversationId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
     const inputId = 'ffffffff-1111-4222-8333-444444444444';
     const documentId = 'recovery-document';
@@ -1451,12 +1466,12 @@ describe('confirmed pre-Send recovery receipts', () => {
     const result = await first.send({
       type: 'desktop_input', id: inputId, owner: `1:${documentId}:0`, conversationId,
       fail: true, confirmedUnsent: true,
-      error: 'After-turn pickup was withdrawn before Send.', detail: 'app-refused'
+      error, detail
     }, 1, documentId);
     expect(result).toMatchObject({ ok: true, queued: true });
     expect(session.data.commandAckOutbox).toMatchObject([{
       kind: 'input-unsent', id: inputId, conversationId,
-      error: 'After-turn pickup was withdrawn before Send.', detail: 'app-refused'
+      error, ...expectedDetail
     }]);
 
     healthy = true;
@@ -1467,8 +1482,10 @@ describe('confirmed pre-Send recovery receipts', () => {
     expect(bodies.at(-1)).toEqual({
       id: inputId, owner: `1:${documentId}:0`, conversationId,
       confirmedUnsent: true,
-      error: 'After-turn pickup was withdrawn before Send.', detail: 'app-refused'
+      error, ...expectedDetail
     });
+    expect(JSON.stringify(session.data.commandAckOutbox)).not.toContain('private-native-error-text');
+    expect(JSON.stringify(bodies)).not.toContain('private-native-error-text');
     expect(session.data.commandAckOutbox).toEqual([]);
   });
 });
@@ -5990,6 +6007,206 @@ describe('active agent tab discard protection', () => {
     expect(worker.tabsUpdate).not.toHaveBeenCalled();
   });
 });
+
+describe('managed renderer lifecycle wake', () => {
+  const CHAT = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+
+  it('does not replace the user selection when Day Chrome gains focus during the fresh settings guard', async () => {
+    const target = { id: 81, windowId: 7, url: `https://chatgpt.com/c/${CHAT}`, active: false, frozen: true };
+    const previous = { id: 82, windowId: 7, url: 'https://example.com/', active: true };
+    let focused = false, settingsReads = 0;
+    const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }), session: new FakeStorageArea(),
+      tabsQuery: async () => [target, previous], tabsGet: async id => id === 81 ? target : previous,
+      windowsGet: async () => ({ id: 7, focused }),
+      tabsUpdate: async (id, properties) => {
+        if (typeof properties.active === 'boolean') { target.active = id === 81; previous.active = id === 82; }
+        return { ...(id === 81 ? target : previous), ...properties };
+      },
+      tabsSendMessage: async () => ({ ok: true }),
+      fetch: async input => {
+        const route = new URL(input).pathname;
+        if (route === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (route === '/settings') {
+          if (++settingsReads === 2) focused = true;
+          return response(200, { ui: { automationPaused: false } });
+        }
+        if (route === '/status') return response(200, { ok: true, automationPaused: false,
+          automationProfile: 'day', mainConversations: [CHAT], managedConversations: [CHAT], nonDiscardableConversations: [CHAT], repairs: [] });
+        return response(404, {});
+      }
+    });
+    await worker.fireAlarm();
+    await vi.waitFor(() => expect(settingsReads).toBeGreaterThanOrEqual(2));
+    expect(worker.tabsUpdate.mock.calls.filter(([, value]) => 'active' in value)).toEqual([]);
+    expect(target.active).toBe(false); expect(previous.active).toBe(true);
+  });
+
+  it('uses a discarded lifecycle event to wake an existing protected main without waiting for another alarm', async () => {
+    const session = new FakeStorageArea();
+    const tab = { id: 81, windowId: 7, url: `https://chatgpt.com/c/${CHAT}`, active: false, discarded: false };
+    const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }), session,
+      tabsGet: async () => tab,
+      fetch: async input => new URL(input).pathname === '/hello'
+        ? response(200, { app: 'chat-on-steroids', paired: true })
+        : response(200, { ok: true, ui: { automationPaused: false }, automationPaused: false,
+          mainConversations: [CHAT], nonDiscardableConversations: [CHAT], repairs: [] }) });
+    await worker.createTab({ id: 81, url: `https://chatgpt.com/c/${CHAT}`, active: false });
+    await worker.fireAlarm();
+    expect(session.data.protectedMainTabs).toEqual({ '81': CHAT });
+    expect(worker.tabsReload).not.toHaveBeenCalled();
+    tab.discarded = true;
+    await worker.updateTabLifecycle(81, { discarded: true });
+    await vi.waitFor(() => expect(worker.tabsReload).toHaveBeenCalledExactlyOnceWith(81));
+    expect(worker.tabsUpdate.mock.calls.every(([, value]) => !('active' in value))).toBe(true);
+  });
+
+  it.each(['discarded', 'frozen', 'frozen-overnight'] as const)('wakes an exact protected %s main chat without a manual tab visit or Send', async kind => {
+    const target = { id: 81, windowId: 7, url: `https://chatgpt.com/c/${CHAT}`,
+      active: false, autoDiscardable: true, discarded: kind === 'discarded', frozen: kind !== 'discarded' };
+    const previous = { id: 82, windowId: 7, url: 'https://example.com/', active: true };
+    const session = new FakeStorageArea();
+    const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }), session,
+      tabsQuery: async () => [target, previous], tabsGet: async id => id === 81 ? target : previous,
+      tabsUpdate: async (id, properties) => {
+        if (typeof properties.active === 'boolean') {
+          target.active = id === 81; previous.active = id === 82;
+          if (id === 81) target.frozen = false;
+        }
+        return { ...(id === 81 ? target : previous), ...properties };
+      }, windowsGet: async () => ({ id: 7, focused: kind === 'frozen-overnight' }),
+      tabsSendMessage: async () => ({ ok: true, recorderVersion: currentRecorderVersion, freshTurnProtocol: 1 }),
+      fetch: async input => {
+        const route = new URL(input).pathname;
+        if (route === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (route === '/settings') return response(200, { ui: { automationPaused: false } });
+        if (route === '/status') return response(200, { ok: true, automationPaused: false,
+          automationProfile: kind === 'frozen-overnight' ? 'overnight' : 'day',
+          mainConversations: [CHAT], managedConversations: [CHAT], nonDiscardableConversations: [CHAT], repairs: [] });
+        return response(404, {});
+      }
+    });
+    await worker.fireAlarm();
+    await vi.waitFor(() => kind === 'discarded'
+      ? expect(worker.tabsReload).toHaveBeenCalledExactlyOnceWith(81)
+      : expect(worker.tabsUpdate).toHaveBeenCalledWith(82, { active: true }));
+    if (kind !== 'discarded') {
+      expect(worker.tabsUpdate).toHaveBeenCalledWith(81, { active: true });
+      expect(worker.tabsReload).not.toHaveBeenCalled();
+      expect(target.active).toBe(false);
+    } else expect(worker.tabsUpdate.mock.calls.every(([, value]) => !('active' in value))).toBe(true);
+    expect(worker.tabsCreate).not.toHaveBeenCalled();
+    expect(worker.tabsRemove).not.toHaveBeenCalled();
+    expect(worker.tabsSendMessage.mock.calls.every(([, message]) =>
+      !['clf-desktop-input', 'clf-native-retry', 'clf-goal-repair'].includes(message.type))).toBe(true);
+    // A stale discarded inventory and a restarted MV3 worker cannot cause a reload loop.
+    const restarted = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }), session,
+      tabsQuery: async () => [target], tabsGet: async () => target,
+      fetch: async input => new URL(input).pathname === '/hello'
+        ? response(200, { app: 'chat-on-steroids', paired: true })
+        : response(200, { ok: true, ui: { automationPaused: false }, automationPaused: false,
+          mainConversations: [CHAT], nonDiscardableConversations: [CHAT], repairs: [] }) });
+    await restarted.fireAlarm();
+    expect(restarted.tabsReload).not.toHaveBeenCalled();
+  });
+
+  it.each(['paused', 'unknown-policy', 'settings-paused', 'settings-unavailable', 'not-main', 'not-protected',
+    'route-changed', 'navigating', 'focused-frozen', 'loading', 'settings-route-race', 'settings-paused-late'] as const)(
+    'preserves the renderer under %s', async reason => {
+    let settingsReads = 0;
+    const original = { id: 81, windowId: 7, url: `https://chatgpt.com/c/${CHAT}`, active: false,
+      autoDiscardable: false, discarded: reason !== 'focused-frozen', frozen: reason === 'focused-frozen',
+      ...(reason === 'loading' ? { status: 'loading' } : {}) };
+    const current = { ...original,
+      ...(reason === 'route-changed' ? { url: 'https://chatgpt.com/c/bbbbbbbb-cccc-4ddd-8eee-ffffffffffff' } : {}),
+      ...(reason === 'navigating' ? { pendingUrl: 'https://example.com/' } : {}) };
+    const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }), session: new FakeStorageArea(),
+      tabsQuery: async () => [original], tabsGet: async () => current,
+      windowsGet: async () => ({ id: 7, focused: true }),
+      fetch: async input => {
+        const route = new URL(input).pathname;
+        if (route === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (route === '/settings') {
+          settingsReads++;
+          if (reason === 'settings-route-race') current.url = 'https://example.com/';
+          return reason === 'settings-unavailable' ? response(503, {})
+            : response(200, { ui: { automationPaused: reason === 'settings-paused' ||
+              reason === 'settings-paused-late' && settingsReads >= 2 } });
+        }
+        if (route === '/status') return response(200, { ok: true, repairs: [],
+          ...(reason === 'unknown-policy' ? {} : { automationPaused: reason === 'paused' }),
+          mainConversations: reason === 'not-main' ? [] : [CHAT],
+          nonDiscardableConversations: reason === 'not-protected' ? [] : [CHAT] });
+        return response(404, {});
+      }
+    });
+    await worker.fireAlarm();
+    expect(worker.tabsReload).not.toHaveBeenCalled();
+    expect(worker.tabsUpdate.mock.calls.every(([, value]) => !('active' in value))).toBe(true);
+    expect(worker.tabsCreate).not.toHaveBeenCalled();
+  });
+
+  it.each(['budget', 'storage-failure', 'reload-failure'] as const)('bounds managed wake effects under %s', async mode => {
+    const ids = Array.from({ length: 4 }, (_, n) => `aaaaaaaa-bbbb-4ccc-8ddd-${String(n).padStart(12, '0')}`);
+    const tabs = ids.map((id, n) => ({ id: 81 + n, windowId: 7, url: `https://chatgpt.com/c/${id}`,
+      active: false, autoDiscardable: false, discarded: true }));
+    const session = new FakeStorageArea();
+    const write = session.set.bind(session);
+    let cooldownWrites = 0;
+    session.set = async values => {
+      if ('managedRendererWakeAttempts' in values) {
+        cooldownWrites++;
+        if (mode === 'storage-failure') throw Error('write unavailable');
+      }
+      return write(values);
+    };
+    const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }), session,
+      tabsQuery: async () => tabs, tabsGet: async id => tabs.find(tab => tab.id === id)!,
+      fetch: async input => new URL(input).pathname === '/hello'
+        ? response(200, { app: 'chat-on-steroids', paired: true })
+        : response(200, { ok: true, ui: { automationPaused: false }, automationPaused: false,
+          mainConversations: ids, nonDiscardableConversations: ids, repairs: [] }) });
+    if (mode === 'reload-failure') worker.tabsReload.mockRejectedValue(new Error('Chrome unavailable'));
+    await worker.fireAlarm();
+    expect(worker.tabsReload).toHaveBeenCalledTimes(mode === 'storage-failure' ? 0 : 2);
+    expect(cooldownWrites).toBe(2);
+    expect(worker.tabsCreate).not.toHaveBeenCalled();
+    expect(worker.tabsRemove).not.toHaveBeenCalled();
+    if (mode !== 'storage-failure') {
+      await worker.fireAlarm();
+      // The original two are cooled down even when Chrome rejected both reloads.
+      expect(worker.tabsReload.mock.calls.filter(([id]) => id === 81 || id === 82)).toHaveLength(2);
+    }
+  });
+
+  it.each(['before-selection', 'after-selection', 'user-switched'] as const)(
+    'preserves the user selection and refuses stale hydration under %s', async mode => {
+    const start = backgroundSource.indexOf('async function retryRepairMessageAfterTabWake(');
+    const end = backgroundSource.indexOf('\n/**', start);
+    const target = { id: 81, windowId: 7, active: false, url: `https://chatgpt.com/c/${CHAT}` };
+    const previous = { id: 82, windowId: 7, active: true };
+    const update = vi.fn(async (id: number) => { target.active = id === 81; previous.active = id === 82; });
+    const ping = vi.fn(async () => ({ ok: true }));
+    const run = vm.runInNewContext(backgroundSource.slice(start, end) + '; retryRepairMessageAfterTabWake', {
+      chrome: { windows: { get: async () => ({ focused: false }) }, tabs: {
+        query: async () => [target, previous], update } }, tabReply: ping,
+      conversationForTab: () => CHAT, REPAIR_PAGE_REPLY_MS: 3000, setTimeout, console
+    });
+    const first = { ok: false };
+    const guard = async (after: boolean) => {
+      if (mode === 'before-selection') { target.active = true; previous.active = false; return false; }
+      if (after && mode === 'user-switched') { target.active = false; previous.active = false; return false; }
+      return !after;
+    };
+    expect(await run(target, CHAT, first, { type: 'clf-recorder-ping' }, () => true, false, guard)).toBe(first);
+    expect(ping).not.toHaveBeenCalled();
+    if (mode === 'before-selection') {
+      expect(update).not.toHaveBeenCalled();
+      expect(target.active).toBe(true);
+    } else if (mode === 'user-switched') expect(update.mock.calls).toEqual([[81, { active: true }]]);
+    else expect(update.mock.calls).toEqual([[81, { active: true }], [82, { active: true }]]);
+  });
+});
+
 
 describe('app-owned retained tab pool', () => {
   it('keeps a later manual close queued when an older automatic close response arrives', async () => {

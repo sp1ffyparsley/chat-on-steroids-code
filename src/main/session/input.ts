@@ -1970,45 +1970,58 @@ export function rearmQueuedBrowserInput(
 }
 
 /** Revalidate the same durable claim immediately before sending; never hand out text again. */
-export function authorizeBrowserInput(id: string, owner: string, conversationId: string | null): Promise<boolean> {
+export type NativeInputAuthorizationRefusal = 'authorization-lease' | 'authorization-policy' |
+  'authorization-route' | 'authorization-scope';
+export function authorizeBrowserInput(id: string, owner: string, conversationId: string | null,
+  onRefusal?: (reason: NativeInputAuthorizationRefusal) => void): Promise<boolean> {
+  const refuse = (reason: NativeInputAuthorizationRefusal): false => {
+    try { onRefusal?.(reason); } catch { /* diagnostics cannot change admission */ }
+    return false;
+  };
   return serial(async () => {
     const current = await load();
-    const row = current.find(row => row.id === id && row.owner === owner && row.state === 'browser' && row.conversationId === conversationId);
-    if (!row || row.sendAuthorizedAt !== undefined || companionOf(current, row) || !workflowInputReady(row, current)) return false;
+    const row = current.find(row => row.id === id && row.owner === owner && row.state === 'browser');
+    if (!row || row.sendAuthorizedAt !== undefined || companionOf(current, row)) return refuse('authorization-lease');
+    if (row.conversationId !== conversationId) return refuse('authorization-route');
+    if (!workflowInputReady(row, current)) return refuse('authorization-policy');
     // Preparation and authorization independently enforce the exact same frozen bytes.
     // Legacy/uncertain claims are held, never rewritten or replayed to add a missing wrapper.
     assertOperatorPromptEnvelope(row.deliveryText ?? row.text);
     const forward = await deliveryHooks?.settledTurnForwardReadiness?.(row, current);
-    if (forward === false) return false;
+    if (forward === false) return refuse('authorization-policy');
     const idleProbe = !!row.sessionId && await manualIdleBrowserProbeAllowed(row, await sessionInputPolicy(row.sessionId));
     // Native ingestion does not share Input's serializer. Retain the idle-only admission
     // across awaited scope/history checks; a new native turn must not become steering
     // authority for this already-claimed probe.
     const idleProbeCurrent = async (): Promise<boolean> => !idleProbe ||
       (!!row.sessionId && await manualIdleBrowserProbeAllowed(row, await sessionInputPolicy(row.sessionId)));
-    if (!(await browserInputAllowed(row)) || await target(row) !== conversationId) return false;
+    if (!(await browserInputAllowed(row))) return refuse('authorization-policy');
+    if (await target(row) !== conversationId) return refuse('authorization-route');
     if (row.companionInputId) {
       const companion = current.find(other => other.id === row.companionInputId && other.state === 'browser' && other.owner === owner && other.sessionId === row.sessionId);
       const session = row.sessionId ? await getSession(row.sessionId) : null;
-      if (!companion || !session || !queuedAfterTurn({ ...companion, state: 'queued' }, session)) return false;
+      if (!companion || !session || !queuedAfterTurn({ ...companion, state: 'queued' }, session)) return refuse('authorization-policy');
     }
-    if (row.purpose === 'decision' && browserDecisionHoldError()) return false;
-    if (forward && !await forward()) return false;
+    if (row.purpose === 'decision' && browserDecisionHoldError()) return refuse('authorization-policy');
+    if (forward && !await forward()) return refuse('authorization-policy');
     const scopeCurrent = async (): Promise<boolean> => {
       try { return (await deliveryHooks?.beforeAuthorizeNativeScope?.(row, current)) !== false; }
       catch { logWarn('native Input task-version authorization held: human task custody is unverified'); return false; }
     };
-    if (!await scopeCurrent() || !await idleProbeCurrent() ||
-        !current.filter(entry => sameDelivery(row, entry)).every(routedInputAllowed) ||
-        (row.purpose === 'decision' && browserDecisionHoldError())) return false;
+    if (!await scopeCurrent()) return refuse('authorization-scope');
+    if (!await idleProbeCurrent()) return refuse('authorization-policy');
+    if (!current.filter(entry => sameDelivery(row, entry)).every(routedInputAllowed)) return refuse('authorization-route');
+    if (row.purpose === 'decision' && browserDecisionHoldError()) return refuse('authorization-policy');
     await commit(current.map(entry => sameDelivery(row, entry) ? { ...entry, sendAuthorizedAt: Date.now() } : entry));
-    if ((forward && !await forward()) || !await scopeCurrent() || !await idleProbeCurrent() ||
-        !current.filter(entry => sameDelivery(row, entry)).every(routedInputAllowed) ||
-        (row.purpose === 'decision' && browserDecisionHoldError())) {
+    const heldAfterCommit: NativeInputAuthorizationRefusal | null = forward && !await forward() ? 'authorization-policy'
+      : !await scopeCurrent() ? 'authorization-scope' : !await idleProbeCurrent() ? 'authorization-policy'
+        : !current.filter(entry => sameDelivery(row, entry)).every(routedInputAllowed) ? 'authorization-route'
+          : row.purpose === 'decision' && browserDecisionHoldError() ? 'authorization-policy' : null;
+    if (heldAfterCommit) {
       // This response has not left Main: this exact newly-created authorization is known
       // unsent. Restore only its pre-authorization row, retaining its exclusive browser owner.
       await commit(current);
-      return false;
+      return refuse(heldAfterCommit);
     }
     if (!row.sourceHelperId && row.completedTurnId && row.sessionId && conversationId)
       await consumeGoalReplyForInputNow(conversationId, row.sessionId, row.completedTurnId);
@@ -3811,6 +3824,11 @@ export async function failBrowserInput(id: string, owner: string, error: string,
         deliveredAtPresent: entry.deliveredAt !== undefined,
         error: exactFailure
       });
+      // Preserve only fixed pre-click diagnostics in the incumbent history. This
+      // adds no evidence to the classifier and cannot change retry/Send authority.
+      const refusalDetail = detail && /^(?:authorization-(?:policy|scope|route|lease|timeout)|app-refused|lease-lost|provider-blocked)$/.test(detail)
+        ? detail : undefined;
+      if (refusalDetail) recoveryFailure.detail += ` Refusal: ${refusalDetail}.`;
       let next = current.map(row => sameDelivery(entry, row) ? {
         ...row,
         state: retry ? 'queued' as const : 'failed' as const,
@@ -3849,8 +3867,8 @@ export async function failBrowserInput(id: string, owner: string, error: string,
         rejectDecision('goal_browser_send_failed: ' + error.slice(0, 200));
       }
       logInfo(retry
-        ? `input ${id}: re-armed exact browser delivery after confirmed pre-Send release (${attempt}/${MAX_PRE_SEND_REOFFERS})`
-        : `input ${id}: retained for attention after ${attempt} confirmed pre-Send preparation failures; native Send was never attempted`);
+        ? `input ${id}: re-armed exact browser delivery after confirmed pre-Send release (${attempt}/${MAX_PRE_SEND_REOFFERS})${refusalDetail ? `; refusal=${refusalDetail}` : ''}`
+        : `input ${id}: retained for attention after ${attempt} confirmed pre-Send preparation failures; native Send was never attempted${refusalDetail ? `; refusal=${refusalDetail}` : ''}`);
       return true;
     }
     const recoveryFailure = classifyProviderRecoveryFailure({
@@ -4328,12 +4346,13 @@ export function completeBrowserDecision(id: string, owner: string, response: str
       // A lost answer ACK may close the same owned helper after rejection, including a
       // cold restore. It must not reinterpret that response, resolve another waiter,
       // restore its private body or authorize another Send.
-      if (conversationId && rejected.conversationId !== conversationId) return false;
-      if (rejected.decisionOutput) {
-        if (createHash('sha256').update(response).digest('hex') !== rejected.decisionOutput.sha256) return false;
-        await saveDecisionOutput(rejected, response, conversationId); return true;
-      }
-      return rejected.response !== undefined ? rejected.response === response : true;
+      if (rejected.conversationId !== (conversationId ?? null) ||
+          !helperNativeSendConfirmed(rejected) || !rejected.decisionOutput) return false;
+      // Temporary answer bodies are scrubbed on disk. Only the retained native
+      // receipt and exact archived digest can acknowledge this same lost response;
+      // an absent body is not proof of arbitrary bytes or a different route.
+      if (createHash('sha256').update(response).digest('hex') !== rejected.decisionOutput.sha256) return false;
+      await saveDecisionOutput(rejected, response, conversationId); return true;
     }
     const settled = current.find(entry => entry.id === id && entry.owner === owner &&
       entry.purpose === 'decision' && entry.state === 'sent');

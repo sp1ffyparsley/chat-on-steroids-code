@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import { getLog } from '../src/main/logger.js';
 import { flushDurable, initDurableStore, readDurable, resetDurableForTests, writeDurableNow } from '../src/main/durable.js';
@@ -4988,13 +4988,16 @@ describe('browser decision lifetime', () => {
       expect(await completeBrowserDecision(row.id, 'foreign-owner', raw, null)).toBe(false);
       expect(await completeBrowserDecision(row.id, owner, raw, null)).toBe(true);
       await expect(decision).resolves.toBe(raw);
-      expect(await completeBrowserDecision(row.id, owner, raw, null)).toBe(true);
+      // Rejection retention is not a native Send receipt. Only the already-confirmed
+      // sequence may acknowledge an exact replay before the late ACK arrives.
+      expect(await completeBrowserDecision(row.id, owner, raw, null)).toBe(sequence === 'ack-before-answer');
       expect(await completeBrowserDecision(row.id, owner, 'different answer', null)).toBe(false);
       if (sequence === 'ack-after-cold-restore') resetInputForTests();
       expect(await authorizeBrowserInput(row.id, owner, null)).toBe(false);
       expect(await acknowledgeBrowserInput(row.id, 'foreign-owner', null, 'exact-native-helper-user')).toBe(false);
       expect(await acknowledgeBrowserInput(row.id, owner, null, 'exact-native-helper-user')).toBe(true);
       expect(await acknowledgeBrowserInput(row.id, owner, null, 'exact-native-helper-user')).toBe(true);
+      expect(await completeBrowserDecision(row.id, owner, raw, null)).toBe(true);
       expect(await acknowledgeBrowserInput(row.id, owner, null, 'contradictory-native-user')).toBe(false);
       // A late route is learned only from this native ACK, not from a different answer route.
       expect(await completeBrowserDecision(row.id, owner, raw, 'late-helper-route')).toBe(false);
@@ -5413,6 +5416,128 @@ describe('browser decision lifetime', () => {
     expect(await pendingBrowserInputs()).toEqual([]);
     expect((await listInputs())[0]?.state).toBe('cancelled');
     expect(await completeBrowserDecision(row.id, 'document', 'late')).toBe(false);
+  });
+});
+
+describe('rejected helper answer replay custody', () => {
+  const archives: string[] = [];
+  afterEach(async () => { for (const file of archives.splice(0)) await fs.rm(file, { force: true }); });
+  async function rejectNativeHelper(route: string | null = 'helper-bound-conversation') {
+    const controller = new AbortController();
+    const onAccepted = vi.fn(() => { throw new BrowserDecisionProtocolRejection('native_completion_unverified'); });
+    const answer = requestBrowserDecision('Choose within original scope.', controller.signal, {
+      sourceSessionId: sessionId, sourceTurnId: 'original-source-turn',
+      lifetime: 'temporary-planner', conversationId: route, onAccepted
+    });
+    const row = (await listInputs())[0]!;
+    const owner = 'same-native-document';
+    const file = path.join(os.tmpdir(), 'CoS-helper-outputs', `${row.id}.json`);
+    archives.push(file);
+    expect(await claimBrowserInput(row.id, owner, route, true)).not.toBeNull();
+    expect(await authorizeBrowserInput(row.id, owner, route)).toBe(true);
+    expect(await acknowledgeBrowserInput(row.id, owner, route, 'exact-native-user-id')).toBe(true);
+    const response = '{"action":"stop","reply":""}';
+    expect(await completeBrowserDecision(row.id, owner, response, route)).toBe(true);
+    await expect(answer).resolves.toBe(response);
+    expect((await listInputs())[0]).toMatchObject({ id: row.id, state: 'failed',
+      goalDecisionRejection: 'native_completion_unverified', error: 'native_completion_unverified',
+      messageId: 'exact-native-user-id', decisionOutput: { sha256: createHash('sha256').update(response).digest('hex') } });
+    expect(await browserDecisionOutputSaved(row.id, owner, route)).toBe(true);
+    return { row: (await listInputs())[0]!, owner, route, response, file, onAccepted };
+  }
+  async function coldRestore(row?: InputEntry) {
+    if (row) await writeDurableNow('session-input', [row]);
+    resetInputForTests(); resetDurableForTests(); initDurableStore(directory);
+    return (await listInputs())[0]!;
+  }
+  it.each([null, undefined])('refuses omitted incoming route %s for a route-bound rejected answer', async route => {
+    const helper = await rejectNativeHelper();
+    const before = await fs.readFile(helper.file);
+    expect(await completeBrowserDecision(helper.row.id, helper.owner, helper.response, route)).toBe(false);
+    expect(await fs.readFile(helper.file)).toEqual(before);
+    expect(helper.onAccepted).toHaveBeenCalledOnce();
+    expect(await listInputs()).toHaveLength(1);
+  });
+  it.each(['helper-bound-conversation', null])('retains exact %s rejected replay after durable private-body scrubbing without a new waiter', async route => {
+    const helper = await rejectNativeHelper(route);
+    const cold = await coldRestore();
+    expect(cold.response).toBeUndefined();
+    expect(await completeBrowserDecision(cold.id, helper.owner, helper.response, route)).toBe(true);
+    expect(await browserDecisionOutputSaved(cold.id, helper.owner, route)).toBe(true);
+    expect((await listInputs())[0]).toMatchObject({ id: cold.id, state: 'failed',
+      goalDecisionRejection: 'native_completion_unverified', messageId: 'exact-native-user-id' });
+    expect(helper.onAccepted).toHaveBeenCalledOnce(); expect(automate).not.toHaveBeenCalled();
+    expect(await listInputs()).toHaveLength(1);
+  });
+  it('refuses a cold rejected row without retained answer proof instead of acknowledging arbitrary bytes', async () => {
+    const helper = await rejectNativeHelper();
+    const cold = await coldRestore({ ...helper.row, response: undefined, decisionOutput: undefined });
+    expect(cold.response).toBeUndefined();
+    expect(await completeBrowserDecision(cold.id, helper.owner, 'unproved different answer', helper.route)).toBe(false);
+    expect((await listInputs())[0]).toMatchObject({ state: 'failed', goalDecisionRejection: 'native_completion_unverified' });
+    expect(await listInputs()).toHaveLength(1);
+  });
+  it.each(['message-id', 'authorization', 'authorization-policy', 'chronology', 'future-receipt'] as const)
+    ('refuses archived rejected replay with unproved native Send: %s', async kind => {
+      const helper = await rejectNativeHelper();
+      const changed: InputEntry = { ...helper.row, response: undefined };
+      if (kind === 'message-id') changed.messageId = undefined;
+      if (kind === 'authorization') changed.sendAuthorizedAt = undefined;
+      if (kind === 'authorization-policy') changed.requiresAuthorization = false;
+      if (kind === 'chronology') changed.sendAuthorizedAt = changed.createdAt - 1;
+      if (kind === 'future-receipt') changed.deliveredAt = now + 1;
+      const cold = await coldRestore(changed);
+      const before = await fs.readFile(helper.file);
+      expect(await completeBrowserDecision(cold.id, helper.owner, helper.response, helper.route)).toBe(false);
+      expect(await fs.readFile(helper.file)).toEqual(before);
+      expect(await listInputs()).toHaveLength(1);
+    });
+  it('retains exact archived bytes when a foreign owner, UUID, route, answer or source attempts rejected replay', async () => {
+    const helper = await rejectNativeHelper();
+    const before = await fs.readFile(helper.file);
+    expect(await completeBrowserDecision(helper.row.id, 'foreign-document', helper.response, helper.route)).toBe(false);
+    expect(await completeBrowserDecision(randomUUID(), helper.owner, helper.response, helper.route)).toBe(false);
+    expect(await completeBrowserDecision(helper.row.id, helper.owner, helper.response, 'foreign-conversation')).toBe(false);
+    expect(await completeBrowserDecision(helper.row.id, helper.owner, '{"action":"continue","reply":"different"}', helper.route)).toBe(false);
+    const changed = await coldRestore({ ...helper.row, response: undefined, decisionSourceTurnId: 'changed-source-turn' });
+    await expect(completeBrowserDecision(changed.id, helper.owner, helper.response, helper.route))
+      .rejects.toThrow(/archive conflicts/);
+    expect(await fs.readFile(helper.file)).toEqual(before);
+    expect(helper.onAccepted).toHaveBeenCalledOnce();
+    expect(await listInputs()).toHaveLength(1);
+  });
+  it('keeps cancelled source-superseded output archive-only and rejects conflicting bytes before overwrite', async () => {
+    const controller = new AbortController();
+    const onAccepted = vi.fn(() => null);
+    const answer = requestBrowserDecision('Old exact source.', controller.signal, {
+      sourceSessionId: sessionId, sourceTurnId: 'old-source-turn', lifetime: 'temporary-planner', onAccepted
+    });
+    const cancelled = expect(answer).rejects.toThrow('goal_browser_cancelled');
+    const row = (await listInputs())[0]!; const owner = 'obsolete-native-document';
+    const file = path.join(os.tmpdir(), 'CoS-helper-outputs', `${row.id}.json`); archives.push(file);
+    expect(await claimBrowserInput(row.id, owner, null, true)).not.toBeNull();
+    expect(await authorizeBrowserInput(row.id, owner, null)).toBe(true);
+    expect(await acknowledgeBrowserInput(row.id, owner, null, 'obsolete-native-user-id')).toBe(true);
+    vi.mocked(readRecentEvents).mockResolvedValueOnce([{ kind: 'assistant_message', seq: 1, time: now,
+      source: 'extension', turnId: 'old-source-turn', final: true,
+      message: { text: 'Earlier final.', truncated: false, chars: 14 } }]);
+    vi.mocked(readRecentEvents).mockResolvedValueOnce([{ kind: 'user_message', seq: 2, time: now,
+      source: 'extension', message: { text: 'New source.', truncated: false, chars: 11 } }]);
+    controller.abort(new BrowserDecisionSourceSuperseded(sessionId, binding.conversationId, 'old-source-turn'));
+    await cancelled;
+    const response = '{"action":"stop","reply":""}';
+    expect(await completeBrowserDecision(row.id, owner, response, null)).toBe(true);
+    const before = await fs.readFile(file);
+    await expect(completeBrowserDecision(row.id, owner, '{"action":"continue","reply":"different"}', null))
+      .rejects.toThrow(/differs from its accepted receipt/);
+    expect(await fs.readFile(file)).toEqual(before);
+    await coldRestore();
+    expect(await completeBrowserDecision(row.id, owner, response, null)).toBe(true);
+    expect(await browserDecisionOutputSaved(row.id, owner, null)).toBe(true);
+    expect((await listInputs())[0]).toMatchObject({ state: 'cancelled', goalSourceSuperseded: true,
+      error: 'goal_browser_source_superseded', messageId: 'obsolete-native-user-id' });
+    expect(onAccepted).not.toHaveBeenCalled(); expect(automate).not.toHaveBeenCalled();
+    expect(await listInputs()).toHaveLength(1);
   });
 });
 
@@ -6102,6 +6227,49 @@ describe('Astra delivery boundaries and stacked direct input', () => {
     active = false;
     expect(await authorizeBrowserInput(row.id, 'page', binding.conversationId)).toBe(true);
   });
+  it.each(['policy', 'scope', 'route', 'lease'] as const)('reports the actual native authorization %s refusal without changing custody', async reason => {
+    let busy = false, scope = true;
+    configureInputDelivery({ applyAutomation: automate, changed,
+      activity: () => ({ possible: busy, exact: busy }), beforeAuthorizeNativeScope: async () => scope });
+    const row = await enqueueInput(input());
+    expect(await claimBrowserInput(row.id, 'exact-page', binding.conversationId, true)).not.toBeNull();
+    const originalRoute = binding.conversationId;
+    if (reason === 'policy') busy = true;
+    if (reason === 'scope') scope = false;
+    if (reason === 'route') binding.conversationId = 'conversation-b';
+    const before = await listInputs(), refused = vi.fn();
+    expect(await authorizeBrowserInput(row.id, reason === 'lease' ? 'foreign-page' : 'exact-page', originalRoute, refused)).toBe(false);
+    expect(refused).toHaveBeenCalledExactlyOnceWith('authorization-' + reason);
+    expect(await listInputs()).toEqual(before);
+    expect((await listInputs())[0]?.sendAuthorizedAt).toBeUndefined();
+    busy = false; scope = true; binding.conversationId = originalRoute;
+    refused.mockClear();
+    expect(await authorizeBrowserInput(row.id, 'exact-page', originalRoute, refused)).toBe(true);
+    expect(refused).not.toHaveBeenCalled();
+    const authorized = await listInputs();
+    expect(await authorizeBrowserInput(row.id, 'exact-page', originalRoute, refused)).toBe(false);
+    expect(refused).toHaveBeenCalledExactlyOnceWith('authorization-lease');
+    expect(await listInputs()).toEqual(authorized);
+  });
+  it.each(['authorization-policy', 'authorization-scope', 'authorization-route', 'authorization-lease'])(
+    'retains fixed pre-click refusal %s in the existing recovery history without resetting its budget', async detail => {
+      const row = await enqueueInput(input());
+      expect(await claimBrowserInput(row.id, 'exact-unsent-page', binding.conversationId, true)).not.toBeNull();
+      expect(await failBrowserInput(row.id, 'exact-unsent-page', 'Native Send was not attempted.', {
+        confirmedUnsent: true, conversationId: binding.conversationId, detail
+      })).toBe(true);
+      const held = (await listInputs())[0]!;
+      expect(held.recoveryFailure).toMatchObject({ phase: 'pre_send_preparation', retrySafe: true,
+        detail: expect.stringContaining(detail) });
+      expect(held.recoveryTransitions?.at(-1)?.reason).toContain(detail);
+      expect(held.preSendReoffers).toBe(1);
+      expect(held.sendAuthorizedAt).toBeUndefined();
+      expect(held.messageId).toBeUndefined();
+      expect(getLog().filter(event => event.message.includes(row.id) && event.message.includes(`refusal=${detail}`))).toHaveLength(1);
+      resetInputForTests();
+      expect((await listInputs())[0]).toMatchObject({ preSendReoffers: 1, recoveryFailure: held.recoveryFailure,
+        recoveryTransitions: held.recoveryTransitions });
+    });
   it.each([null, { kind: 'turn_end', outcome: 'unknown', turnId: 'unknown', time: 1000 }])('requires confirmed terminal evidence for an existing Astra chat (%j)', async end => {
     binding.end = end;
     const row = await enqueueInput(input());

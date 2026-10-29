@@ -1991,6 +1991,32 @@ describe('alternate shell turn/message provenance', () => {
     } finally { page.dom.window.close(); }
   });
 
+  it.each([
+    ['absent reference', 'callJoinReferenceMissing', (_mapping: any, entry: any) => { delete entry.turn.items[1].widgetStateSource; }],
+    ['malformed reference', 'callJoinReferenceMissing', (_mapping: any, entry: any) => { entry.turn.items[1].widgetStateSource.messageId = 42; }],
+    ['conflicting reference', 'callJoinReferenceConflict', (mapping: any, entry: any) => {
+      entry.turn.items.splice(2, 0, { ...entry.turn.items[1], callId: EXEC });
+      mapping[EXEC] = { ...mapping[CALL], id: EXEC, message: { ...mapping[CALL].message, id: EXEC } };
+    }],
+    ['missing result', 'callJoinResultMissing', (mapping: any) => { delete mapping[RESULT]; }],
+    ['conflicting result role', 'callJoinResultIdentity', (mapping: any) => { mapping[RESULT].message.author.role = 'assistant'; }]
+  ] as const)('reports the early join reason for settled native calls without lifting identity guards: %s', async (label, key, nativeCallMutation) => {
+    const page = await shellHarness({ withCall: true, nativeCallReceipt: true, callCompleted: true, nativeCallMutation });
+    try {
+      const count = label === 'conflicting reference' ? 2 : 1;
+      expect(page.fiber.turns[0].calls.every((call: any) => call.answered === true)).toBe(true);
+      expect(page.fiber.shellScan.rejects[key]).toBe(count);
+      expect(page.fiber.shellScan.rejects.callCompletionVeto).toBe(0);
+      if (label === 'conflicting reference') {
+        expect(page.fiber.turns[0].calls.every((call: any) => call.requestId == null)).toBe(true);
+      }
+      const diagnostic = JSON.stringify(page.fiber.shellScan);
+      for (const privateValue of [USER, CALL, RESULT, REQUEST, APP, LINK, 'PRIVATE_TOOL_RESULT'])
+        expect(diagnostic).not.toContain(privateValue);
+    } finally { page.dom.window.close(); }
+  });
+
+
   it.each([true, 'missing'] as const)('leaves accepted native results and join counters unchanged: %s', async callCompleted => {
     const page = await shellHarness({ withCall: true, nativeCallReceipt: true, callCompleted });
     try {

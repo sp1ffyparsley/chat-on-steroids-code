@@ -444,7 +444,7 @@ export { setBrowserWorkArea } from './browser-window-layout.js';
 import { pendingBrowserPreferenceRequest, acknowledgeBrowserPreferences } from './browser-preferences.js';
 import { sessionFinishHeld, releaseSessionFinish, getSessionFinishDraft, sessionFinishWaiting } from './session/finish.js';
 import { observeUsage } from './session/usage.js';
-import { pendingBrowserInputs, browserDecisionPreclaimRecovery, claimBrowserInput, acknowledgeBrowserInput, acknowledgeToolInput, bindBrowserInputProject, failBrowserInput, completeBrowserDecision, browserDecisionOutputSaved, supersededBrowserDecisionArchiveEligible, rejectedBrowserDecision, listInputs, fileSilenceInput, hasQueuedAfterTurnInput, inputBeforeGoal, pendingQueuedPickups, deferSilenceInput, revokeSilenceInputs, userRequestedInput, continuationTransportDiagnostics, retainedSourceHelperContinuationFor, rebindRetainedSourceHelperContinuation, retainedInputExecutionResumeFor, ordinaryInputTerminalReply, ordinaryInputWatchdogBoundary, rememberOrdinaryInputFinalNow } from './session/input.js';
+import { pendingBrowserInputs, browserDecisionPreclaimRecovery, claimBrowserInput, acknowledgeBrowserInput, acknowledgeToolInput, bindBrowserInputProject, failBrowserInput, completeBrowserDecision, browserDecisionOutputSaved, supersededBrowserDecisionArchiveEligible, rejectedBrowserDecision, listInputs, fileSilenceInput, hasQueuedAfterTurnInput, inputBeforeGoal, pendingQueuedPickups, deferSilenceInput, revokeSilenceInputs, userRequestedInput, continuationTransportDiagnostics, retainedSourceHelperContinuationFor, rebindRetainedSourceHelperContinuation, retainedInputExecutionResumeFor, ordinaryInputTerminalReply, ordinaryInputWatchdogBoundary, rememberOrdinaryInputFinalNow, type NativeInputAuthorizationRefusal } from './session/input.js';
 /**
  * The local bridge between the Chrome extension and this app.
  *
@@ -5923,7 +5923,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }, origin);
     if (inputCloseGuard()) return manuallyClosedInput();
     if (body.authorize === true) {
-      const authorized = await authorizeBrowserInput(body.id, body.owner, target);
+      let refusal: NativeInputAuthorizationRefusal | undefined;
+      const authorized = await authorizeBrowserInput(body.id, body.owner, target, reason => { refusal = reason; });
       if (authorized && inputCloseGuard()) {
         // A close can arrive while Input commits this fresh authorization. Its response has
         // not crossed to Chrome, so native Send is positively impossible for this grant.
@@ -5934,7 +5935,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         });
         return manuallyClosedInput();
       }
-      return json(res, 200, { ok: authorized }, origin);
+      return json(res, 200, { ok: authorized, ...(!authorized && refusal ? { detail: refusal } : {}) }, origin);
     }
     if (target && runningToolCalls(target) > 0) return json(res, 200, { input: null }, origin);
     if (await inputHeldElsewhere({ id: body.id, conversationId: target, owner: body.owner }, browserOf(req), body.freshTurnProtocol === 1))

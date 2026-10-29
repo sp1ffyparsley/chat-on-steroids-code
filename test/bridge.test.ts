@@ -3081,6 +3081,38 @@ describe('provisioning', () => {
     expect(results.map(result => result.status).sort()).toEqual([200, 409]);
     expect(results.find(result => result.status === 409)?.body.token).toBeUndefined();
   });
+  it.each(['allow', 'scope', 'route', 'lease'] as const)(
+    'returns only the actual native authorization discriminator through real HTTP (%s)', async outcome => {
+      await pair();
+      const input = await import('../src/main/session/input.js');
+      await writeDurableNow('session-input', []); input.resetInputForTests();
+      input.configureInputDelivery({ applyAutomation: async () => undefined, changed: () => undefined,
+        beforeAuthorizeNativeScope: async () => outcome !== 'scope' });
+      const row = await input.enqueueInput({ id: randomUUID(), sessionId: null, text: 'Inspect the current cleanup checkpoint.',
+        mode: 'auto', dueAt: Date.now(), model: null, reasoningEffort: null });
+      const owner = 'exact-authorization-http-page';
+      expect(await input.claimBrowserInput(row.id, owner, null, true)).not.toBeNull();
+      const before = await input.listInputs();
+      try {
+        const result = await request('POST', '/input/claim', { body: { id: row.id,
+          owner: outcome === 'lease' ? 'foreign-page' : owner, conversationId: outcome === 'route' ? randomUUID() : null,
+          authorize: true } });
+        expect(result.status).toBe(200);
+        expect(result.body).toEqual(outcome === 'allow' ? { ok: true } : { ok: false, detail: 'authorization-' + outcome });
+        if (outcome !== 'allow') expect(await input.listInputs()).toEqual(before);
+        else {
+          const authorized = await input.listInputs();
+          expect(authorized[0]?.sendAuthorizedAt).toEqual(expect.any(Number));
+          expect((await request('POST', '/input/claim', { body: {
+            id: row.id, owner, conversationId: null, authorize: true
+          } })).body).toEqual({ ok: false, detail: 'authorization-lease' });
+          expect(await input.listInputs()).toEqual(authorized);
+        }
+        expect((await input.listInputs())[0]?.messageId).toBeUndefined();
+        expect(await input.listInputs()).toHaveLength(1);
+      } finally { await writeDurableNow('session-input', []); input.resetInputForTests(); }
+    });
+
   it('pairs the Pearson helper without rotating or authorizing with the Chrome companion token', async () => {
     const chromeToken = await pair();
     const study = await request('POST', '/study-helper/pair', {
@@ -3241,14 +3273,16 @@ describe('provisioning', () => {
         body: operation.endsWith('answer') ? answer : ack
       });
       expect(replay.status, JSON.stringify(replay.body)).toBe(200);
-      expect(replay.body.ok).toBe(true);
-      expect((await request('POST', '/input/answer', { body: answer })).body.ok).toBe(true);
+      // An exact rejected body alone does not prove that native Send happened.
+      expect(replay.body.ok).toBe(!operation.endsWith('answer'));
+      expect((await request('POST', '/input/answer', { body: answer })).body.ok).toBe(!operation.endsWith('answer'));
       expect((await request('POST', '/input/answer', { body: { ...answer, response: 'different output' } })).body.ok).toBe(false);
       expect((await request('POST', '/input/answer', { body: { ...answer, owner: 'foreign-page' } })).status).toBe(409);
       expect((await request('POST', '/input/ack', { body: { ...ack, owner: 'foreign-page' } })).status).toBe(409);
       // Only an exact native ACK may learn a previously absent Temporary Chat route.
       expect((await request('POST', '/input/answer', { body: { ...answer, conversationId: lateRoute } })).body.ok).toBe(false);
       expect((await request('POST', '/input/ack', { body: ack })).body.ok).toBe(true);
+      expect((await request('POST', '/input/answer', { body: answer })).body.ok).toBe(true);
       expect((await request('POST', '/input/ack', { body: { ...ack, messageId: randomUUID() } })).body.ok).toBe(false);
       expect((await request('POST', '/input/ack', { body: { ...ack, conversationId: lateRoute } })).body.ok).toBe(true);
       expect((await request('POST', '/input/answer', { body: { ...answer, conversationId: lateRoute } })).body.ok).toBe(true);

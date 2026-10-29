@@ -4473,6 +4473,22 @@ describe('desktop input delivery and helper ownership', () => {
       ]);
     });
 
+  it.each(['authorization-policy', 'authorization-scope', 'authorization-route', 'authorization-lease', 'private-native-error-text'])(
+    'preserves only a fixed native authorization refusal in the unsent receipt (%s)', async detail => {
+      live = await harness(`https://chatgpt.com/?cos-input=${inputId}`, {
+        desktop_input: message => ({ ok: true, data: message.authorize ? { ok: false, detail }
+          : message.stage || message.confirmedUnsent ? { ok: true } : { input: claimed() } })
+      });
+      const clicks = watchSend(live.document);
+      expect(await live.runtimeMessage({ type: 'clf-desktop-input', id: inputId, conversationId: null })).toEqual({ ok: false });
+      expect(clicks()).toBe(0);
+      const releases = live.sent.filter(message => message.type === 'desktop_input' && message.confirmedUnsent);
+      expect(releases).toEqual([expect.objectContaining({ id: inputId, owner: 'input-owner', fail: true,
+        detail: detail.startsWith('authorization-') ? detail : 'app-refused' })]);
+      expect(live.sent.some(message => message.ack)).toBe(false);
+      expect(JSON.stringify(releases)).not.toContain('private-native-error-text');
+    });
+
   it('keeps a manual native Send ambiguous when its authorization reply is lost', async () => {
     let authorizationRequested!: () => void;
     const requested = new Promise<void>(resolve => { authorizationRequested = resolve; });
