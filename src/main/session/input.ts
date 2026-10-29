@@ -3329,7 +3329,7 @@ export function supersededBrowserDecisionArchiveEligible(
   // only null-to-null collection; a later provider route must first bind through
   // the incumbent ACK owner, never borrow an arbitrary conversation here.
   const routeMatches = Boolean(row.conversationId?.trim()) && row.conversationId === conversationId ||
-    expired && row.conversationId === null && conversationId == null;
+    (superseded || expired) && row.conversationId === null && conversationId == null;
   return row.owner === owner && row.purpose === 'decision' && row.lifetime === 'temporary-planner' &&
     row.state === 'cancelled' && (superseded || expired) && helperNativeSendConfirmed(row as InputEntry) &&
     Boolean(row.decisionSourceSessionId?.trim()) && Boolean(row.decisionSourceTurnId?.trim()) && routeMatches;

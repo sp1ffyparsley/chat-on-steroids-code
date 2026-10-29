@@ -94,7 +94,8 @@
   // Revision 91 retires abandoned SPA claims without releasing a newer chat's lock.
   // Revision 92 retains current identity-refusal diagnostics across nonfinal reader states.
   // Revision 95 schedules the exact quiet-helper stability recheck without changing acceptance.
-  const RECORDER_VERSION = 95;
+  // Revision 96 fences asynchronous status/startup effects to the current recorder and account intent.
+  const RECORDER_VERSION = 96;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -841,6 +842,7 @@
   /** Exact request id -> one durable local turn, null when the retained stream conflicts. */
   const streamRequestTurnOwners = new Map();
   let pulling = null; // The incumbent observation flight, released before Goal/compaction work.
+  let pullingOwner = null; // Scope of that same promise, not another observation owner.
 
   /**
    * `'resume' | 'worker' | null` — whether this chat was opened by the app, and how.
@@ -1990,13 +1992,14 @@
    */
   let boundId = null;
   let bindRetryAt = 0;
-  async function bindConversation(id) {
-    if (!id || boundId === id) return;
+  async function bindConversation(id, current = null) {
+    if (!id || boundId === id || (current && !current())) return;
     // Latch on the worker's answer, never on the attempt. Marking the id bound up front made
     // a single refused `bind` permanent: the worker kept the tab pointed at the *previous*
     // conversation, and nothing ever asked again. That is what left the popup showing the
     // old chat's id beside the new chat's URL while the app had no session for either.
-    const reply = await ask({ type: 'bind', conversationId: id });
+    const reply = await ask({ type: 'bind', conversationId: id }, current);
+    if (current && !current()) return;
     if (reply && reply.ok === true) {
       boundId = id;
       // A Temporary Chat receives its /c route after Send. Witness that route while the exact
@@ -2145,7 +2148,8 @@
     }
   }
 
-  async function resumeOpenTurn() {
+  async function resumeOpenTurn(current = () => alive) {
+    if (!current()) return;
     const id = CLF_DOM.conversationId();
     // A chat with no id yet has no app-side record to resume: ChatGPT assigns the id when it
     // accepts the first message, so this is a fresh composer, not a reload into a live turn.
@@ -2155,10 +2159,16 @@
     // activity request fails, the ordinary 2s activity poll will resolve the same question
     // later. Until then observe() refuses to invent a replacement generation id.
     resumeIdentityPending = true;
-    await bindConversation(id);
+    await bindConversation(id, current);
+    if (!current()) return;
     // The boot pull, brought forward rather than added to: it is the request the start-up
     // sequence was going to make anyway, and it carries the answer.
-    await pullActivity();
+    // Join a real current pull without publishing it twice. A previous route's
+    // unfinished pull is not this answer; use the incumbent fresh-read barrier.
+    const pending = pulling;
+    if (pending && pullingOwner?.work === pending && pullingOwner.conversationId === id && pullingOwner.epoch === epoch)
+      await pending;
+    else await pullActivity(true);
   }
 
   /**
@@ -8172,6 +8182,8 @@
     pulling = ownPull;
     const forId = conversationId;
     const forEpoch = epoch;
+    const ownScope = { work: ownPull, conversationId: forId, epoch: forEpoch };
+    pullingOwner = ownScope;
     const current = () => alive && conversationId === forId && epoch === forEpoch;
     try {
       const reply = await ask({
@@ -8414,6 +8426,7 @@
       armNextActivityPull();
     } finally {
       if (pulling === ownPull) pulling = null;
+      if (pullingOwner === ownScope) pullingOwner = null;
       releasePull();
     }
     // Outside the guard, and last: startCompact runs for tens of seconds and polls this
@@ -9391,6 +9404,7 @@
 
   async function connectMenuAccount(selected) {
     if (menuBusy || !menuAccounts?.some(row => row.instanceId === selected && row.compatible)) return;
+    statusAccountIntent++;
     const forEpoch = epoch;
     const current = () => alive && epoch === forEpoch;
     menuBusy = true;
@@ -9424,6 +9438,8 @@
       }
       if (!reply?.ok) menuAccountError = accountPairError(reply);
       else {
+        // Also invalidate polls admitted while the pairing request was settling.
+        statusAccountIntent++;
         await checkStatus();
         if (!current()) return;
         if (!status.connected || !status.paired || status.instanceId !== selected)
@@ -12991,15 +13007,73 @@
 
   // -------------------------------------------------------------- commands
 
-  async function checkStatus() {
+  let statusSequence = 0;
+  let statusAppliedSequence = 0;
+  let statusAppliedOwner = null;
+  let statusAccountIntent = 0;
+  let recorderStartupPending = false;
+  let recorderStartupFlight = null;
+
+  function statusOwnerCurrent(owner) {
+    return !!owner && alive && epoch === owner.epoch && statusAccountIntent === owner.accountIntent &&
+      location.pathname === owner.pathname && markerId() === owner.marker &&
+      CLF_DOM.conversationId() === owner.conversationId;
+  }
+
+  function startupStatusCurrent(owner) {
+    return statusOwnerCurrent(owner) && statusOwnerCurrent(statusAppliedOwner) &&
+      owner.instanceId === statusAppliedOwner.instanceId;
+  }
+
+  /** Only the current status owner may finish the existing restoration handshake.
+   * Later status polls stay independent; one hung poll never locks the cadence. */
+  async function restoreRecorderStartup(owner) {
+    // A fresh URL delivery precedes restoration. An existing-chat revival has
+    // no journal gate and must still be able to wait for recorder readiness.
+    const deliveryPending = () => commandJournalGate && commandAttempt?.source === 'url';
+    if (!recorderStartupPending || commandReadinessInitialized || deliveryPending() || !startupStatusCurrent(owner)) return;
+    if (recorderStartupFlight && startupStatusCurrent(recorderStartupFlight.owner))
+      return recorderStartupFlight.work;
+    const flight = { owner, work: null };
+    recorderStartupFlight = flight;
+    const current = () => recorderStartupPending && !commandReadinessInitialized &&
+      recorderStartupFlight === flight && !deliveryPending() && startupStatusCurrent(owner);
+    const work = (async () => {
+      await resumeOpenTurn(current).catch(() => undefined);
+      if (!current()) return;
+      // The established boot order stays intact; a route/owner change during
+      // restoration leaves this work pending for a later current status poll.
+      if (hiddenObservationActive(true)) observe();
+      if (!current()) return;
+      commandReadinessInitialized = true;
+      recorderStartupPending = false;
+      notifyCommandReadiness();
+      injectControl();
+      injectStage();
+      if (startupCommandId && OPENED_CONVERSATION && !OPENED_PROJECT_ENTRY) void runCommand(startupCommandId);
+    })();
+    flight.work = work;
+    try { await work; }
+    finally { if (recorderStartupFlight === flight) recorderStartupFlight = null; }
+  }
+
+  async function checkStatus(initializing = false) {
     // A redeem can commit this exact document as owner before its HTTP response is lost. Reuse
     // the existing status cadence to ask for that exact command again; this stays serialized
     // through runCommand() and never grows a second browser-delivery queue.
+    if (!alive) return;
     await reconcileCommandRedeem();
+    if (!alive) return;
+    // Capture after reconciliation: that incumbent command may legitimately
+    // have assigned its fresh route. Epoch also rejects an observed A→B→A move.
+    const owner = { sequence: ++statusSequence, epoch, accountIntent: statusAccountIntent,
+      pathname: location.pathname, conversationId: CLF_DOM.conversationId(), marker: markerId(), instanceId: null };
+    const current = () => statusOwnerCurrent(owner) && owner.sequence >= statusAppliedSequence;
     const authState = typeof CLF_DOM.authenticationState === 'function'
       ? CLF_DOM.authenticationState()
       : 'unknown';
-    const reply = await ask({ type: 'status', authState });
+    const reply = await ask({ type: 'status', authState }, current);
+    if (!current()) return;
     if (reply) {
       if (reply.connectorApps) CLF_DOM.setConnectorApps?.(reply.connectorApps);
       if (reply.connectorNames) CLF_DOM.setConnectorNames?.(reply.connectorNames);
@@ -13009,18 +13083,34 @@
         disconnected: reply.disconnected === true,
         instanceId: typeof reply.instanceId === 'string' ? reply.instanceId : null
       };
+      // Advance only after the authoritative registries/status have applied.
+      // A later started/hung/throwing request must not suppress this reply.
+      owner.instanceId = status.instanceId;
+      statusAppliedSequence = owner.sequence;
+      statusAppliedOwner = owner;
       if (commandAttentionRetry) await retryOwnedAttentionCommand(reply.browserAttentionCommandIds);
+      if (!current()) return;
       void retryOwnedPendingResumeFailure(reply.browserAttentionCommandIds);
     }
     // A signed-out marked page never crossed command redemption, so its original marker remains
     // the exact retry authority. Once the provider itself proves this profile is signed in again,
     // retry only that same marker through the existing single-owner runCommand path.
+    const currentAuthState = typeof CLF_DOM.authenticationState === 'function'
+      ? CLF_DOM.authenticationState() : authState;
     const pendingMarker = markerId();
-    if (authState === 'signed-in' && pendingMarker && !commandAttempt && !commandsHandled.has(pendingMarker)) {
+    if (currentAuthState === 'signed-in' && pendingMarker && !commandAttempt && !commandsHandled.has(pendingMarker)) {
       void runCommand(pendingMarker);
     }
     try { renderStreams(); } catch { /* Presentation cannot retire recorder restoration. */ }
     try { renderControl(); } catch { /* Preserve the independent renderer and startup order. */ }
+    if (statusAppliedOwner === owner) {
+      // The initial chain retains its established status→restore ordering.
+      // Routine status callers never wait for a reader/Goal operation at boot.
+      if (initializing) return owner;
+      void restoreRecorderStartup(owner).catch(() => {
+        console.warn('[Chat On Steroids] recorder restoration remains pending after status; no readiness was inferred.');
+      });
+    }
   }
 
   /**
@@ -17313,17 +17403,16 @@
   void commandStartup
     .catch(() => undefined)
     .then(loadRenderPreference)
-    .then(checkStatus)
-    .then(() => resumeOpenTurn().catch(() => undefined))
     .then(() => {
-      // A restored hidden idle chat already has durable history. Its observers wake any real
-      // new work; scanning that complete transcript here made extension reloads freeze Chrome.
-      if (hiddenObservationActive(true)) observe();
-      commandReadinessInitialized = true;
-      notifyCommandReadiness();
-      injectControl();
-      injectStage();
-      if (startupCommandId && OPENED_CONVERSATION && !OPENED_PROJECT_ENTRY) void runCommand(startupCommandId);
+      if (!alive) return;
+      recorderStartupPending = true;
+      return checkStatus(true);
+    })
+    .then(owner => {
+      if (owner) return restoreRecorderStartup(owner);
+    })
+    .catch(() => {
+      console.warn('[Chat On Steroids] recorder startup status failed; restoration remains pending.');
     });
 
   syncTheme();
@@ -17472,6 +17561,7 @@
       injectControl,
       injectStage,
       checkStatus,
+      startupReady: () => commandReadinessInitialized,
       pullActivity,
       activityIsCurrentWork,
       activityPullDelay,

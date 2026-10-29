@@ -3357,6 +3357,95 @@ describe('provisioning', () => {
     expect((await inputOwner.listInputs()).filter(entry => entry.decisionSourceSessionId === sourceSessionId)).toHaveLength(1);
   });
 
+  it.each([false, true])('archives a route-less helper through real HTTP after its incumbent source-supersession writer (cold=%s)', async cold => {
+    await pair();
+    const inputOwner = await import('../src/main/session/input.js');
+    await writeDurableNow('session-input', []);
+    inputOwner.resetInputForTests();
+    onTestFinished(async () => { await writeDurableNow('session-input', []); inputOwner.resetInputForTests(); });
+    const os = (await import('node:os')).default;
+    const temporary = path.join(dir, 'route-less-superseded-http-' + randomUUID());
+    await fs.mkdir(temporary, { recursive: true });
+    const temp = vi.spyOn(os, 'tmpdir').mockReturnValue(temporary);
+    onTestFinished(() => temp.mockRestore());
+    const conversationId = randomUUID(), oldTurn = 'original-helper-source-' + randomUUID();
+    const opening = await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'user_message', messageId: randomUUID(), text: 'Preserve the complete original scope.', time: Date.now() },
+      { kind: 'turn_start', turnId: oldTurn, time: Date.now() },
+      { kind: 'assistant_message', messageId: randomUUID(), turnId: oldTurn, final: true, state: 'final',
+        text: 'Original exact source checkpoint.', time: Date.now() },
+      { kind: 'turn_end', turnId: oldTurn, outcome: 'completed', time: Date.now() }
+    ] } });
+    expect(opening.status).toBe(200);
+    const sourceSessionId = opening.body.sessionId as string, controller = new AbortController();
+    const accepted = vi.fn(() => null);
+    const options = { sourceSessionId, sourceTurnId: oldTurn, lifetime: 'temporary-planner' as const, onAccepted: accepted };
+    const answer = inputOwner.requestBrowserDecision('Decide only for this original native source.', controller.signal, options);
+    const cancelled = expect(answer).rejects.toThrow('goal_browser_cancelled');
+    let helper!: Awaited<ReturnType<typeof inputOwner.listInputs>>[number];
+    await vi.waitFor(async () => {
+      helper = (await inputOwner.listInputs()).find(row => row.decisionSourceSessionId === sourceSessionId)!;
+      expect(helper).toBeDefined();
+    });
+    const owner = 'exact-route-less-superseded-page', nativeId = randomUUID();
+    expect((await request('POST', '/input/claim', { body: {
+      id: helper.id, owner, conversationId: null, requiresAuthorization: true
+    } })).body.input).toMatchObject({ id: helper.id });
+    expect((await request('POST', '/input/claim', { body: {
+      id: helper.id, owner, conversationId: null, authorize: true
+    } })).body.ok).toBe(true);
+    expect((await request('POST', '/input/ack', { body: {
+      id: helper.id, owner, conversationId: null, messageId: nativeId
+    } })).body.ok).toBe(true);
+    const native = (await inputOwner.listInputs())[0]!;
+    try {
+      // Positive source advancement is recorded by the normal native event owner. The
+      // cancellation marker itself must be written by requestBrowserDecision's finally.
+      expect((await request('POST', '/events', { body: { conversationId, events: [
+        { kind: 'user_message', messageId: randomUUID(), text: 'A new native question advances the exact source.', time: Date.now() }
+      ] } })).status).toBe(200);
+      controller.abort(new inputOwner.BrowserDecisionSourceSuperseded(sourceSessionId, conversationId, oldTurn));
+      await cancelled;
+      const superseded = (await inputOwner.listInputs())[0]!;
+      expect(superseded).toMatchObject({ id: helper.id, state: 'cancelled', owner,
+        goalSourceSuperseded: true, error: 'goal_browser_source_superseded', conversationId: null,
+        messageId: nativeId, sendAuthorizedAt: native.sendAuthorizedAt, deliveredAt: native.deliveredAt,
+        decisionSourceSessionId: sourceSessionId, decisionSourceTurnId: oldTurn });
+      if (cold) inputOwner.resetInputForTests();
+      const response = '{"action":"stop","reply":""}';
+      const body = { id: helper.id, owner, conversationId: null, response };
+      expect((await request('POST', '/input/answer', { body: { ...body, id: randomUUID() } })).status).toBe(409);
+      expect((await request('POST', '/input/answer', { body: { ...body, owner: 'foreign-page' } })).status).toBe(409);
+      expect((await request('POST', '/input/answer', { body: { ...body, conversationId: randomUUID() } })).status).toBe(409);
+      const result = await request('POST', '/input/answer', { body });
+      expect(result.status, JSON.stringify(result.body)).toBe(200);
+      expect(result.body.ok).toBe(true);
+      expect((await request('POST', '/input/output', { body })).body.ok).toBe(true);
+      const archive = JSON.parse(await fs.readFile(path.join(temporary, 'CoS-helper-outputs', helper.id + '.json'), 'utf8'));
+      expect(archive).toMatchObject({ inputId: helper.id, owner, sourceSessionId,
+        sourceTurnId: oldTurn, response, bytes: Buffer.byteLength(response) });
+      expect((await request('POST', '/input/answer', { body })).body.ok).toBe(true);
+      inputOwner.resetInputForTests();
+      expect((await request('POST', '/input/output', { body })).body.ok).toBe(true);
+      expect((await request('POST', '/input/answer', { body })).body.ok).toBe(true);
+      await expect(inputOwner.requestBrowserDecision('Never restart the retired source.', new AbortController().signal,
+        { ...options, allowAmbiguousRetry: true })).rejects.toThrow('goal_browser_source_superseded');
+      const rows = await inputOwner.listInputs();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ id: helper.id, state: 'cancelled', owner, conversationId: null,
+        goalSourceSuperseded: true, error: 'goal_browser_source_superseded', text: '[Temporary planner]',
+        messageId: nativeId, sendAuthorizedAt: superseded.sendAuthorizedAt, deliveredAt: superseded.deliveredAt,
+        decisionSourceSessionId: sourceSessionId, decisionSourceTurnId: oldTurn,
+        decisionOutput: { sha256: archive.sha256, bytes: archive.bytes } });
+      expect(rows[0]?.response).toBeUndefined();
+      expect(rows[0]?.sourceHelperId).toBeUndefined();
+      expect(await inputOwner.pendingBrowserInputs()).toEqual([]);
+      expect(accepted).not.toHaveBeenCalled();
+    } finally {
+      controller.abort(); await cancelled;
+    }
+  });
+
   it.each((['superseded', 'expired'] as const).flatMap(disposition =>
     (['saved', 'cold', 'unknown-send', 'ordinary-cancel', 'foreign-owner', 'foreign-route',
       'missing-route', 'unmarked-history', 'foreign-route-from-null'] as const).map(condition => ({ disposition, condition }))))(
@@ -3393,8 +3482,7 @@ describe('provisioning', () => {
       const body = { id: helper.id, owner: condition === 'foreign-owner' ? 'foreign-helper-page' : owner,
         conversationId: ['foreign-route', 'foreign-route-from-null'].includes(condition) ? randomUUID() : helper.conversationId, response };
       const answer = await request('POST', '/input/answer', { body });
-      const eligible = condition === 'saved' || condition === 'cold' ||
-        disposition === 'expired' && condition === 'missing-route';
+      const eligible = condition === 'saved' || condition === 'cold' || condition === 'missing-route';
       expect(answer.status, JSON.stringify(answer.body)).toBe(eligible ? 200 : 409);
       if (eligible) expect(answer.body.ok).toBe(true);
       const rows = await inputOwner.listInputs();
@@ -6738,8 +6826,13 @@ describe('ordinary input receipt-backed native terminal join', () => {
       expect(goalDraftBusy(chat)).toBe(false);
     });
     expect(goalPendingReplyFor(chat)).toEqual(currentPending);
-    expect(await input.completeBrowserDecision(helper.id, owner,
-      JSON.stringify({ action: 'continue', reply: 'This obsolete answer must not publish.' }))).toBe(false);
+    const beforeArchive = await input.listInputs();
+    const lateResponse = JSON.stringify({ action: 'continue', reply: 'This obsolete answer must not publish.' });
+    expect(await input.completeBrowserDecision(helper.id, owner, lateResponse)).toBe(true);
+    expect(await input.browserDecisionOutputSaved(helper.id, owner, null)).toBe(true);
+    expect(await input.listInputs()).toEqual(beforeArchive.map(entry => entry.id === helper.id ? {
+      ...entry, decisionOutput: { sha256: expect.stringMatching(/^[a-f0-9]{64}$/), bytes: Buffer.byteLength(lateResponse) }
+    } : entry));
     expect((await input.listInputs()).filter(entry => entry.sourceHelperId === helper.id)).toHaveLength(0);
     expect((await input.listInputs()).filter(entry => entry.purpose === 'decision')).toHaveLength(1);
     await flushDurable();
@@ -6784,8 +6877,12 @@ describe('ordinary input receipt-backed native terminal join', () => {
         expect(successor).toMatchObject({ state: 'queued', owner: null });
       });
       expect((await input.listInputs()).filter(entry => entry.purpose === 'decision')).toHaveLength(2);
-      expect(await input.completeBrowserDecision(helper.id, owner,
-        JSON.stringify({ action: 'continue', reply: 'The old result must stay refused after successor admission.' }))).toBe(false);
+      await expect(input.completeBrowserDecision(helper.id, owner,
+        JSON.stringify({ action: 'continue', reply: 'The old result must stay refused after successor admission.' })))
+        .rejects.toThrow('Helper output differs from its accepted receipt');
+      expect((await input.listInputs()).filter(entry => entry.sourceHelperId === helper.id)).toHaveLength(0);
+      expect((await input.listInputs()).filter(entry => entry.purpose === 'decision')).toHaveLength(2);
+      expect(goalPendingReplyFor(chat)).toEqual(currentPending);
       goal.retireGoalDrafts();
     }
   });
@@ -6834,9 +6931,14 @@ describe('ordinary input receipt-backed native terminal join', () => {
         expect(goalPendingReplyFor(chat)).toEqual(pending);
         expect(snapshotGoalReplies().replies.find(entry => entry.conversationId === chat)).toEqual(debt);
       }
-      expect(await input.completeBrowserDecision(helper.id, owner,
-        JSON.stringify({ action: 'continue', reply: 'The superseded result must stay refused.' }))).toBe(false);
-      expect(await input.listInputs()).toEqual(before);
+      const lateResponse = JSON.stringify({ action: 'continue', reply: 'The superseded result must stay refused.' });
+      expect(await input.completeBrowserDecision(helper.id, owner, lateResponse)).toBe(true);
+      expect(await input.browserDecisionOutputSaved(helper.id, owner, null)).toBe(true);
+      expect(await input.listInputs()).toEqual(before.map(entry => entry.id === helper.id ? {
+        ...entry, decisionOutput: { sha256: expect.stringMatching(/^[a-f0-9]{64}$/), bytes: Buffer.byteLength(lateResponse) }
+      } : entry));
+      expect(wakeDecision).not.toHaveBeenCalled();
+      expect(goalPendingReplyFor(chat)).toEqual(pending);
       await flushDurable();
       expect((await readDurable<any>(GOAL_REPLIES_STATE))?.replies.find((entry: any) => entry.conversationId === chat)).toEqual(debt);
     } finally {

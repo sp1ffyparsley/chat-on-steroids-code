@@ -492,6 +492,7 @@ interface Hook {
   injectControl(): void;
   injectStage(): void;
   checkStatus(): Promise<void>;
+  startupReady(): boolean;
   pullActivity(): Promise<void>;
   activityIsCurrentWork(entry: Record<string, unknown>): boolean;
   activityPullDelay(input: Record<string, boolean>): number;
@@ -980,6 +981,238 @@ async function reinjectContentRecorder(active: Harness): Promise<Hook> {
 let live: Harness | null = null;
 
 describe('status presentation cannot strand recorder startup', () => {
+  const routeA = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  const routeB = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff';
+  const connected = (id: string) => ({ connected: true, paired: true, instanceId: id,
+    connectorApps: [{ id }], connectorNames: [id] });
+  function gate() {
+    let resolve!: (value: any) => void;
+    const promise = new Promise<any>(done => { resolve = done; });
+    return { promise, resolve };
+  }
+  function registry(active: Harness) {
+    const applied: string[] = [];
+    const adapter = (active.window as any).CLF_DOM;
+    adapter.setConnectorApps = (apps: Array<{ id: string }>) => { applied.push('apps:' + apps[0]?.id); };
+    adapter.setConnectorNames = (names: string[]) => { applied.push('names:' + names[0]); };
+    return applied;
+  }
+
+  it('keeps a newer applied status ahead of an older disconnected reply without repainting or replacing registries', async () => {
+    live = await harness();
+    const applied = registry(live), older = gate(), newer = gate();
+    let calls = 0;
+    live.reply.set('status', () => (++calls === 1 ? older.promise : newer.promise));
+    const first = live.hook.checkStatus(), second = live.hook.checkStatus();
+    await settle(); expect(calls).toBe(2);
+    newer.resolve(connected('newer'));
+    await second;
+    const root = live.document.querySelector<HTMLElement>('[data-clf-composer]')!;
+    let paints = 0;
+    Object.defineProperty(root, 'hidden', { configurable: true, set: () => { paints++; } });
+    try {
+      older.resolve({ ...connected('older'), connected: false, paired: false, disconnected: true });
+      await first;
+      expect(applied).toEqual(['apps:newer', 'names:newer']);
+      expect(paints).toBe(0);
+    } finally { delete (root as any).hidden; }
+  });
+
+  it('lets an earlier valid status apply while a later status never settles', async () => {
+    live = await harness();
+    const applied = registry(live), earlier = gate();
+    let calls = 0;
+    live.reply.set('status', () => (++calls === 1 ? earlier.promise : new Promise(() => undefined)));
+    const first = live.hook.checkStatus();
+    let laterSettled = false;
+    void live.hook.checkStatus().then(() => { laterSettled = true; });
+    await settle(); expect(calls).toBe(2);
+    earlier.resolve(connected('earlier-valid'));
+    await first;
+    expect(applied).toEqual(['apps:earlier-valid', 'names:earlier-valid']);
+    expect(laterSettled).toBe(false);
+  });
+
+  it.each(['route', 'aba-epoch', 'retired-recorder'] as const)(
+    'discards a status reply from an obsolete document owner before registry or status effects (%s)', async change => {
+      live = await harness('https://chatgpt.com/c/' + routeA);
+      const applied = registry(live), reply = gate();
+      live.reply.set('status', () => reply.promise);
+      const pending = live.hook.checkStatus();
+      await settle();
+      if (change === 'retired-recorder') (live.window as any).__CLF_CONTENT_RECORDER__.stop();
+      else {
+        live.dom.reconfigure({ url: 'https://chatgpt.com/c/' + routeB }); live.hook.observe();
+        if (change === 'aba-epoch') {
+          live.dom.reconfigure({ url: 'https://chatgpt.com/c/' + routeA }); live.hook.observe();
+        }
+      }
+      reply.resolve(connected('obsolete'));
+      await pending;
+      expect(applied).toEqual([]);
+    });
+
+  it('does not treat an obsolete startup status as readiness and restores only after a current status', async () => {
+    const stale = gate();
+    live = await harness('https://chatgpt.com/c/' + routeA, { status: () => stale.promise });
+    const applied = registry(live);
+    expect(live.hook.startupReady()).toBe(false);
+    live.dom.reconfigure({ url: 'https://chatgpt.com/c/' + routeB }); live.hook.observe();
+    stale.resolve(connected('obsolete-startup'));
+    await settle(150);
+    expect(live.hook.startupReady()).toBe(false);
+    expect(applied).toEqual([]);
+    live.reply.set('status', () => connected('current-startup'));
+    await live.hook.checkStatus();
+    await settle(150);
+    expect(live.hook.startupReady()).toBe(true);
+    expect(applied).toEqual(['apps:current-startup', 'names:current-startup']);
+  });
+
+  it('keeps a retired startup continuation inert after a replacement recorder becomes ready', async () => {
+    const stale = gate();
+    live = await harness('https://chatgpt.com/c/' + routeA, { status: () => stale.promise });
+    const old = live.hook, applied = registry(live);
+    live.reply.set('status', () => connected('replacement'));
+    await reinjectContentRecorder(live);
+    await settle(150);
+    expect(live.hook.startupReady()).toBe(true);
+    expect(old.startupReady()).toBe(false);
+    stale.resolve(connected('retired-startup'));
+    await settle(150);
+    expect(old.startupReady()).toBe(false);
+    expect(applied).toEqual(['apps:replacement', 'names:replacement']);
+  });
+
+  it('joins the current startup restoration without duplicating its bind when another status applies', async () => {
+    const held = gate();
+    live = await harness('https://chatgpt.com/c/' + routeA, {
+      activity: () => held.promise
+    });
+    expect(live.hook.startupReady()).toBe(false);
+    const pending = live.hook.checkStatus();
+    await settle(80);
+    expect(live.sent.filter(message => message.type === 'bind')).toHaveLength(1);
+    expect(live.hook.startupReady()).toBe(false);
+    held.resolve({ ok: true, data: { entries: [], stream: [], job: null } });
+    await pending;
+    await settle(150);
+    expect(live.hook.startupReady()).toBe(true);
+  });
+
+  it('does not claim startup ready from a skipped current pull while the previous route activity is pending', async () => {
+    const held = gate();
+    live = await harness('https://chatgpt.com/c/' + routeA, {
+      activity: message => message.conversationId === routeA ? held.promise
+        : { ok: true, data: { entries: [], stream: [], job: null } }
+    });
+    expect(live.hook.startupReady()).toBe(false);
+    live.dom.reconfigure({ url: 'https://chatgpt.com/c/' + routeB }); live.hook.observe();
+    const pending = live.hook.checkStatus();
+    await settle(80);
+    expect(live.hook.startupReady()).toBe(false);
+    held.resolve({ ok: true, data: { entries: [], stream: [], job: null } });
+    await pending; await settle(100);
+    expect(live.sent.some(message => message.type === 'activity' && message.conversationId === routeB)).toBe(true);
+    expect(live.hook.startupReady()).toBe(true);
+  });
+
+  it('does not advance the applied status watermark when an authoritative registry update fails', async () => {
+    live = await harness();
+    const applied = registry(live), earlier = gate();
+    const adapter = (live.window as any).CLF_DOM;
+    adapter.setConnectorNames = (names: string[]) => {
+      if (names[0] === 'failed') throw new Error('test authoritative names failure');
+      applied.push('names:' + names[0]);
+    };
+    let calls = 0;
+    live.reply.set('status', () => (++calls === 1 ? earlier.promise : connected('failed')));
+    const first = live.hook.checkStatus();
+    await expect(live.hook.checkStatus()).rejects.toThrow('test authoritative names failure');
+    earlier.resolve(connected('earlier-valid'));
+    await first;
+    expect(applied).toEqual(['apps:failed', 'apps:earlier-valid', 'names:earlier-valid']);
+  });
+
+  it('keeps an authoritative startup failure non-ready without an unhandled rejection and restores after a valid status', async () => {
+    let page: any, originalApps: ((apps: unknown[]) => void) | undefined;
+    let reject = true;
+    live = await harness('https://chatgpt.com/c/' + routeA, {
+      status: () => {
+        if (reject) {
+          originalApps ??= page.CLF_DOM.setConnectorApps;
+          page.CLF_DOM.setConnectorApps = () => { throw new Error('test initial authoritative status failure'); };
+        }
+        return connected('startup-owner');
+      }
+    }, document => { page = document.defaultView; });
+    await settle(100);
+    expect(live.hook.startupReady()).toBe(false);
+    await expect(live.hook.checkStatus()).rejects.toThrow('test initial authoritative status failure');
+    reject = false;
+    page.CLF_DOM.setConnectorApps = originalApps;
+    await live.hook.checkStatus(); await settle(150);
+    expect(live.hook.startupReady()).toBe(true);
+  });
+
+  it.each(['changed-marker', 'startup-delivery'] as const)(
+    'rechecks status and startup ownership around a real attention-command await (%s)', async mode => {
+    const id = 'cmd-status-attention', nextId = 'cmd-status-new-marker';
+    const text = prepareOperatorPrompt('[[CLF-RESUME:0123456789abcdef0123456789abcdef]]\n\nRetain this exact handoff.', upper => upper - 1);
+    const command = { id, type: 'resume', text, agent: null, expiresAt: 1_700_001_000_000, coreConnector: TEST_CORE };
+    let blockPicker = true, attention = false, redeems = 0, sends = 0;
+    let ownedDocument!: Document;
+    const held = gate();
+    const selectCore = () => {
+      blockPicker = false;
+      ownedDocument.querySelector<HTMLButtonElement>('[data-composer-navigation-target="add-context"]')!.click();
+      ownedDocument.querySelector<HTMLButtonElement>('[data-clf-test-core-option]')!.click();
+      attention = true;
+    };
+    live = await harness('https://chatgpt.com/?clf=' + id, {
+      status: () => ({ ...connected('attention-owner'), browserAttentionCommandIds: attention ? [id] : [] }),
+      redeem: message => {
+        if (message.id !== id) return { ok: true, gone: true, command: null };
+        return ++redeems === 1 ? { ok: true, command } : held.promise;
+      },
+      compact: message => ({ ok: true, data: message.destinationAttempt ? { allowed: true,
+        destinationSend: { state: 'attempted-unresolved', conversationId: null, messageId: null } } : { armed: true } }),
+      ack: message => {
+        if (mode === 'startup-delivery' && message.status === 'attention' && redeems === 1) selectCore();
+        return { ok: true, final: message.status === 'sent', committed: message.status === 'sent', outcome: message.status };
+      }
+    }, document => {
+      ownedDocument = document;
+      const profile = document.createElement('button'); profile.dataset.testid = 'accounts-profile-button';
+      profile.dataset.clfTestRendered = '1'; document.body.append(profile);
+      document.querySelector('[data-composer-navigation-target="add-context"]')!.addEventListener('click', event => {
+        if (blockPicker) event.stopImmediatePropagation();
+      }, true);
+      document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => { sends++; });
+    });
+    await settle(300);
+    expect(live.sent.some(message => message.type === 'ack' && message.status === 'attention')).toBe(true);
+    if (mode === 'changed-marker') { expect(redeems).toBe(1); selectCore(); }
+    else { expect(redeems).toBe(2); expect(live.hook.startupReady()).toBe(false); }
+    const pending = live.hook.checkStatus();
+    await settle(100); expect(redeems).toBe(2);
+    if (mode === 'startup-delivery') {
+      expect(live.hook.startupReady()).toBe(false);
+      // The incumbent app owner refuses the held redeem; this is not a Send.
+      held.resolve({ ok: false, error: 'command_taken' });
+      await pending; await settle(100);
+      await live.hook.checkStatus();
+      expect(live.hook.startupReady()).toBe(true);
+      expect(sends).toBe(0);
+      return;
+    }
+    live.dom.reconfigure({ url: 'https://chatgpt.com/?clf=' + nextId });
+    held.resolve({ ok: true, command });
+    await pending; await settle(100);
+    expect(live.sent.filter(message => message.type === 'redeem' && message.id === nextId)).toEqual([]);
+    expect(sends).toBe(0);
+  });
+
   it('finishes the normal resume handshake after one stream renderer failure', async () => {
     live = await harness();
     const adapter = (live.window as any).CLF_DOM;

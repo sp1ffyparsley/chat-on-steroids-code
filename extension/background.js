@@ -82,7 +82,8 @@ function shellScanDiagnostic(raw) {
     'callRequestIdPresent', 'callRequestIdMissing', 'callInventoryMissing', 'callInventoryIncomplete',
     'callVetoReceiptChecked', 'callVetoReceiptMatched',
     'callJoinReferenceMissing', 'callJoinReferenceUnselected', 'callJoinReferenceConflict',
-    'callJoinResultMissing', 'callJoinResultIdentity', 'callJoinDescriptorUnsupported',    'callIdentityRecovered', 'callIdentityPriorPair', 'callIdentityUserUnproved',
+    'callJoinResultMissing', 'callJoinResultIdentity', 'callJoinDescriptorUnsupported',
+    'callIdentityRecovered', 'callIdentityPriorPair', 'callIdentityUserUnproved',
     'callIdentityNativeUnproved', 'callIdentityScopeUnproved', 'callIdentityParentUnproved',
     'callIdentitySelectedWithheld',
     'assistantTerminalReceiptChecked', 'assistantTerminalReceiptMatched',
@@ -10317,7 +10318,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 95;
+const PAGE_RECORDER_VERSION = 96;
 
 let deferredRecoveryWork = null;
 

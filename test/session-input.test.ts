@@ -4319,7 +4319,11 @@ describe('browser decision lifetime', () => {
       sendAuthorizedAt: native.sendAuthorizedAt, ...(native.deliveredAt !== undefined
         ? { deliveredAt: native.deliveredAt, messageId: native.messageId } : {}) });
     expect(retired.goalSourceSuperseded).toBe(superseded ? true : undefined);
-    expect(await completeBrowserDecision(original.id, 'original-helper-page', 'Late obsolete result', null, true)).toBe(false);
+    expect(await completeBrowserDecision(original.id, 'original-helper-page', 'Late obsolete result', null, true)).toBe(superseded);
+    expect(await browserDecisionOutputSaved(original.id, 'original-helper-page', null)).toBe(superseded);
+    expect((await listInputs())[0]).toMatchObject({ id: original.id, state: 'cancelled',
+      owner: native.owner, ...(superseded ? { error: 'goal_browser_source_superseded' } : {}) });
+    expect((await listInputs()).filter(row => row.sourceHelperId === original.id)).toEqual([]);
     if (!superseded) {
       expect(await pausedBrowserHelpers()).toContainEqual({ id: original.id, sourceSessionId: sessionId });
       await expect(requestBrowserDecision('A different source still cannot borrow ambiguous custody.', new AbortController().signal,
@@ -4398,7 +4402,12 @@ describe('browser decision lifetime', () => {
       expect(replacement).toMatchObject({ state: 'queued', owner: null, decisionSourceTurnId: nextTurn });
       expect(rows.find(row => row.id === retained.id)).toEqual({ ...retained,
         goalSourceSuperseded: true, error: 'goal_browser_source_superseded' });
-      expect(await completeBrowserDecision(retained.id, 'cancelled-helper-document', 'Late original answer', null, true)).toBe(false);
+      expect(await completeBrowserDecision(retained.id, 'cancelled-helper-document', 'Late original answer', null, true)).toBe(true);
+      expect(await browserDecisionOutputSaved(retained.id, 'cancelled-helper-document', null)).toBe(true);
+      const archivedRows = await listInputs();
+      expect(archivedRows).toHaveLength(2);
+      expect(archivedRows.find(row => row.id === replacement!.id)).toEqual(replacement);
+      expect(archivedRows.filter(row => row.sourceHelperId === retained.id)).toEqual([]);
       await expect(requestBrowserDecision('The old source must not be replayed.', new AbortController().signal, {
         sourceSessionId: sessionId, sourceTurnId: oldTurn, lifetime: 'temporary-planner', allowAmbiguousRetry: true
       })).rejects.toThrow('goal_browser_source_superseded');

@@ -2,13 +2,13 @@
 
 This is the real custom Chat On Steroids application and browser companion source, exported for code review and research. It is a clean-history code export, not an upstream release or a backup of anyone's chats.
 
-- Source commit: `14937ebb22fd4dcbd2e8ca00cc3f25f5e29e53c0`.
-- Source tree: `634eebb82dfb2afa35e941f9d4ddc9e0e39c52e7`.
-- Export date: October 28, 2026.
+- Source commit: `6c2920d252eec85c13a2561d189059759e24cb3e`.
+- Source tree: `32a51a1ba424724f64636ff0c0421c9b7efa2879`.
+- Export date: October 29, 2026.
 - Upstream: https://github.com/totec448-spec/chat-on-steroids
 - Intended code mirror: https://github.com/sp1ffyparsley/chat-on-steroids-code
 
-The package retains the custom branch's `2.1.39` version. This does not mean the export includes upstream 2.1.46 wholesale. The original private repository, history, branches, tags and operational records are not included.
+The package retains the custom branch's `2.1.39` version. This does not mean the export includes upstream 2.1.47 wholesale. The original private repository, history, branches, tags and operational records are not included.
 
 ## Included application
 
@@ -112,4 +112,8 @@ Qualification follow-up: the first private canonical run passed 67/70 developmen
 
 A later upstream review reached main66820bd6 with releasev2.1.47 unchanged. PR1901 separates queued-only inputs from active browser claims during extension updates; PR1907 extends the unified model picker. Both were reviewed as follow-up candidates, not merged into this already qualified runtime. The custom one-use reload and retained-custody contracts require compatibility work; this mirror does not claim every later upstream feature.
 
-Current source `14937ebb` repairs quiet-helper collection: a strict Temporary Chat decision observed without provider terminal metadata now schedules its existing document-owned 2.5-second stability recheck. The exact user, target/epoch, strict JSON, native generation, tool and idempotent publication checks remain. There is no new Send, helper, watcher, store or acceptance authority. Recorder/background markers are synchronized at95. Three failure-first cases reproduced the missing callback;22focused checks passed. The first full content run passed1609cases and failed two native-join fixtures because instant harness timers let the newly working DOM fallback finish before their Fiber assertions. Those fixtures now hold only that fallback timer; all original negative assertions remain, and five native/quiet cases passed. Typechecking passed. A new canonical private qualification is running; this source is NOT a newly qualified or installed package. The previously accepted private runtime remains99fd/recovery94. This sanitized mirror separately passed all five native/quiet helper checks; that is limited export validation, not package qualification.
+Current source `6c2920d2` combines three bounded repairs. Strict quiet Temporary Chat JSON arms the incumbent stability recheck; asynchronous status/startup effects are fenced to the current recorder, route/epoch/marker and account intent using an applied-response watermark; exact source-superseded native-Sent null-route helpers may archive late output without reviving cancellation, a waiter, Goal debt or an outgoing instruction. Recorder/background96 are synchronized. Routine status checks remain independent of reader/Goal work. Existing Send/Retry/result/authorization guards remain unchanged.
+
+The controlled private cut passed canonical qualification: 96 preliminary and 12,498 main checks passed, with61 platform skips; all33 receipt checks and bare activation readiness passed. Exact package/source/payload hashes were independently reviewed. The first full run remains failed:12,493 passed and five obsolete archive=false assertions failed. Corrected expectations preserve no-child/no-wake/unchanged-source-debt and different-byte refusal;13 affected cases passed before the second canonical run. The installed predecessor receipt advanced only after independent full291-file verification of the already accepted program. No production guard or full-run result was relabelled to hide that failure.
+
+This sanitized export independently passed typechecking and25 focused real content/Bridge cases covering status ownership/startup, quiet helper collection and superseded archive/no-replay behavior. These are limited export checks, not a full public mirror suite or binary qualification. The new private package is qualified but NOT installed; the previous recovery94 remains the accepted installed runtime. Native shutdown capture and executing-browser verification remain unresolved boundaries. No public installer, private account data, runtime state or claim of all-profile useful autonomy is supplied.
