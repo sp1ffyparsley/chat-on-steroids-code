@@ -27,6 +27,7 @@ import {
   shouldQuitOnWindowAllClosed
 } from '../src/main/window-lifecycle.js';
 import { helperReasoningSettingsRequest } from '../src/main/window-lifecycle.js';
+import * as lifecycleExports from '../src/main/window-lifecycle.js';
 import { ProfileLifecycleCoordinator } from '../src/main/profile-lifecycle.js';
 import { WorkAdmissionGate } from '../src/main/work-admission.js';
 
@@ -1177,5 +1178,65 @@ describe('Windows login startup', () => {
     expect(pendingFence).toBeGreaterThan(coldStartAccept);
     expect(bridgeStart).toBeGreaterThan(pendingFence);
     expect(source.slice(runtimeAssignment, pendingFence)).not.toContain('resumeAutomationAfterExplicitRequest(');
+  });
+});
+
+
+describe('one-shot controls across native relaunch', () => {
+  it.each([
+    ['C:\\CoS\\app.exe', '--background'],
+    ['/Applications/CoS.app/Contents/MacOS/CoS', '--disable-gpu'],
+    ['/usr/bin/electron', '/workspace/CoS', '--background']
+  ])('retains runtime and host arguments without mutating %s', (...ordinary) => {
+    const once = ['--resume-automation', '--pause-automation', '--pause-session-automation=local-session',
+      '--cos-enqueue-input=private-path', '--cos-retry-queued-input=private-id', '--cos-cancel-queued-input=private-id',
+      '--cos-connection-origin=private-origin', '--cos-settings-action=save', '--cos-share-drive=private-path',
+      '--cos-future-command=private-value', '--set-helper-reasoning=high', '--helper-settings-profile=profile-foot',
+      '--set-chat-default-model=gpt-6-thinking', '--retire-recorded-chats', '--enable-signout-emergency-alerts',
+      '--disable-signout-emergency-alerts', '--defer-companion-reload=profile-foot', '--reload-companion=profile-foot',
+      '--discard-unexportable-companion-buffers', '--safe-close-for-update=profile-foot',
+      '--safe-close-for-update-status=profile-foot', '--safe-close-for-update-cancel=profile-foot',
+      '--safe-close-for-update-pid=123', '--safe-close-for-update-generation=123', '--updated'];
+    const argv = Object.freeze([...ordinary, '--cos-instance-runtime=profile-foot', ...once]);
+    const expected = [...ordinary.slice(1), '--cos-instance-runtime=profile-foot'];
+    expect(lifecycleExports.relaunchArguments(argv)).toEqual(expected);
+    expect(lifecycleExports.relaunchArguments([ordinary[0]!, ...expected])).toEqual(expected);
+    expect(argv).toEqual([...ordinary, '--cos-instance-runtime=profile-foot', ...once]);
+  });
+
+  it('leaves a later saved Pause in control at the real successor startup decision', () => {
+    const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');
+    const start = source.indexOf('export function startupAutomationResumeRequested');
+    const end = source.indexOf('\nconst PAUSE_SESSION_AUTOMATION_ARG', start);
+    const code = stripTypeScriptTypes(source.slice(start, end).replace('export function', 'function'));
+    const argv = ['app.exe', '--background', '--resume-automation'];
+    const context = vm.createContext({ argv });
+    expect(vm.runInContext(code + '\nstartupAutomationResumeRequested(argv)', context)).toBe(true);
+    context.argv = ['app.exe', ...lifecycleExports.relaunchArguments(argv)];
+    expect(vm.runInContext('startupAutomationResumeRequested(argv)', context)).toBe(false);
+  });
+
+  it('does not replay Resume or queued work when the actual profile-switch owner restarts', async () => {
+    const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');
+    const start = source.indexOf('    onSwitchReady: async (state) => {');
+    const end = source.indexOf('    applyUpdate: async () => {', start);
+    expect(start).toBeGreaterThan(-1); expect(end).toBeGreaterThan(start);
+    const argv = ['app.exe', '--background', '--cos-instance-runtime=profile-rivera',
+      '--resume-automation', '--cos-enqueue-input=private-payload', '--cos-enqueue-receipt=private-receipt'];
+    let successor: string[] = [];
+    const order: string[] = [];
+    const context = vm.createContext({ ...lifecycleExports, process: { argv }, quitting: false,
+      logEvent: () => undefined, logInfo: () => undefined,
+      flushRecorder: async () => { order.push('recorder'); },
+      flushSessions: async () => { order.push('sessions'); }, flushDurable: async () => { order.push('durable'); },
+      stageInstanceActivationForNextStart: async () => { order.push('stage'); },
+      app: { relaunch: (options?: { args?: string[] }) => {
+        successor = options?.args ?? argv.slice(1); order.push('relaunch');
+      }, quit: () => { order.push('quit'); } }
+    });
+    await vm.runInContext(stripTypeScriptTypes('({' + source.slice(start, end) + '}).onSwitchReady({sourceProfileId:"profile-rivera",targetProfileId:"profile-foot"})'), context);
+    expect(successor).toEqual(['--background', '--cos-instance-runtime=profile-rivera']);
+    expect(order).toEqual(['recorder', 'sessions', 'durable', 'stage', 'relaunch', 'quit']);
+    expect(context.quitting).toBe(true);
   });
 });

@@ -109,6 +109,7 @@ import {
   createWindowActivationGate,
   childProcessFailureDiagnostic,
   isBackgroundLaunch,
+  relaunchArguments,
   helperReasoningSettingsRequest,
   signOutEmergencyAlertSettingRequest,
   ownsAppRuntime,
@@ -1373,7 +1374,9 @@ void app.whenReady().then(async () => {
       await Promise.all([flushSessions(), flushDurable()]);
       await stageInstanceActivationForNextStart(state.targetProfileId);
       logEvent('profile.switch.staged', `Staged ${state.targetProfileId} for the next application start`);
-      app.relaunch();
+      const args = relaunchArguments(process.argv);
+      logEvent('profile.switch.relaunch', `Restarting with ${process.argv.length - 1 - args.length} consumed control arguments removed; saved settings remain authoritative`);
+      app.relaunch({ args });
       quitting = true;
       app.quit();
     },

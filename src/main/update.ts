@@ -47,6 +47,7 @@ import { pipeline } from 'node:stream/promises';
 import { app } from 'electron';
 import { logInfo, logWarn } from './logger.js';
 import { APP_VERSION } from './version.js';
+import { relaunchArguments } from './window-lifecycle.js';
 import { isNewer, type UpdateStatus } from '../shared/types.js';
 
 const REPO = 'totec448-spec/chat-on-steroids';
@@ -415,7 +416,11 @@ export async function applyStagedUpdate(): Promise<void> {
       await rename(next, ready.target);
       // No installer to hand the "start it again" to, so this process arranges its own successor.
       // Electron spawns it as this one exits, which is the app.exit() that ends the shutdown.
-      if (relaunch) app.relaunch({ execPath: ready.target });
+      if (relaunch) {
+        const args = relaunchArguments(process.argv);
+        logInfo(`update: relaunch removes ${process.argv.length - 1 - args.length} consumed control arguments; saved settings remain authoritative`);
+        app.relaunch({ execPath: ready.target, args: [...args, '--updated'] });
+      }
     }
     logInfo(
       relaunch

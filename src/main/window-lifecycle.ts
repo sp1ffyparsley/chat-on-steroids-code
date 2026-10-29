@@ -329,6 +329,16 @@ function conflictsWithSafeClose(argument: string): boolean {
     argument.startsWith('--cos-retry-queued-input-receipt=');
 }
 
+/**
+ * Electron otherwise replays the argv that launched this process. Operator commands belong to
+ * one admission, not every later profile switch or update. Retain the executable-independent
+ * Electron/development arguments and exact account runtime; persisted settings own the restart.
+ */
+export function relaunchArguments(argv: readonly string[]): string[] {
+  return argv.slice(1).filter(argument =>
+    !conflictsWithSafeClose(argument) && !argument.startsWith('--safe-close-for-update'));
+}
+
 function assertSafeCloseForUpdateExclusive(argv: readonly string[]): void {
   if (argv.some(conflictsWithSafeClose)) {
     throw new Error('--safe-close-for-update cannot share a launch with input, retry, pause, or resume controls');

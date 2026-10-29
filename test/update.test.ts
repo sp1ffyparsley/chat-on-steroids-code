@@ -30,14 +30,14 @@ vi.mock('node:child_process', () => ({
 let userData = '';
 let packaged = true;
 const originalResourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
-const relaunched: Array<{ execPath?: string }> = [];
+const relaunched: Array<{ execPath?: string; args?: string[] }> = [];
 vi.mock('electron', () => ({
   app: {
     getPath: () => userData,
     get isPackaged() {
       return packaged;
     },
-    relaunch: (options: { execPath?: string }) => relaunched.push(options)
+    relaunch: (options: { execPath?: string; args?: string[] }) => relaunched.push(options)
   }
 }));
 vi.mock('../src/main/logger.js', () => ({ logInfo: () => undefined, logWarn: () => undefined }));
@@ -478,7 +478,21 @@ describe('installing on request', () => {
     });
 
     expect(readFileSync(live, 'utf8')).toBe(body);
-    expect(relaunched).toEqual([{ execPath: live }]);
+    expect(relaunched).toEqual([{ execPath: live, args: [...process.argv.slice(1), '--updated'] }]);
+  });
+
+  it('does not replay old Resume, delivery or maintenance controls through the real AppImage updater', async () => {
+    const live = path.join(userData, 'Chat-On-Steroids.AppImage');
+    writeFileSync(live, 'old'); github();
+    const previousArgv = process.argv;
+    process.argv = [live, '--background', '--cos-instance-runtime=profile-foot', '--resume-automation',
+      '--cos-enqueue-input=private', '--safe-close-for-update=profile-foot', '--safe-close-for-update-pid=123'];
+    try {
+      await asPlatform('linux', live, async () => {
+        await checkForUpdates(); expect(markInstallOnQuit()).toBe(true); await applyStagedUpdate();
+      });
+      expect(relaunched).toEqual([{ execPath: live, args: ['--background', '--cos-instance-runtime=profile-foot', '--updated'] }]);
+    } finally { process.argv = previousArgv; }
   });
 
   /** Nothing staged, nothing to do — and above all, no quit. */

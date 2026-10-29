@@ -2,11 +2,12 @@
 
 This is the real custom Chat On Steroids application and browser companion source, exported for code review and research. It is a clean-history code export, not an upstream release or a backup of anyone's chats.
 
-- Logical source provenance (NOT a public Git ref): `a87210ab6d2957e07a15d0dcc082bfa6e8b1da1d`.
-- Logical source tree: `81778757a5820befd03b68a28f712e1d22360fa5`.
+- Logical source provenance (NOT a public Git ref): `3970dbdb59d285162975b076f4a15ab559cb71b7`.
+- Logical source tree: `10d4ad3884ccc52161b9431ddec314f3275b0191`.
 - Export date: October 29, 2026.
 - Public blob URLs must use this mirror's OWN commit SHA. The logical source provenance above belongs to a different private history and will not resolve as a public Git ref.
-- Review state: controlled candidate98 passed the full strict build; exact package reviewed and pinned;33 post-pin installer checks and readiness passed. Actual private installation is now98 after normal installer exit and exact program/account-state acceptance; executing browser generation and useful autonomy remain unverified. This source export is not a public binary release.
+- Latest source-only follow-up: consumed startup commands are removed from both native relaunch paths, retaining account/runtime and host arguments. Real profile-switch and AppImage regression tests reproduced replay before repair;109 controlled lifecycle/updater/isolation checks and TypeScript passed. This follow-up is NOT qualified or installed; actual accepted installation remains sourcea87210ab/custom98. The actor behind earlier unexpected launches remains unproved.
+- Prior accepted build98 review state: controlled candidate98 passed the full strict build; exact package reviewed and pinned;33 post-pin installer checks and readiness passed. Actual private installation is now98 after normal installer exit and exact program/account-state acceptance; executing browser generation and useful autonomy remain unverified. This source export is not a public binary release.
 - Latest repair scope: delivered-helper collection separated from permission to continue, exact normalized archive/answer routes, pre-/post-archive readiness races, strict-policy late-result STOP fencing, non-counting Goal waits, and operation-scoped renderer wake/selection restoration. Affected checks1325 Input/Goal/HTTP and977 extension PASS/2 existing platform skips. Full controlled qualification96 preliminary+12597 Main PASS/61 existing skips;33 post-pin installer checks PASS and readiness0. Previous failed runs remain failed; only obsolete immutable-helper fixtures and owned Windows Document readiness were corrected. Production native timeout/text limits are unchanged. The installed-predecessor receipt now binds only independently verified96 fingerprints. This mirror is not a binary deployment or a full public-suite qualification.
 - This export preserves the existing sanitized files and clean history; only the reviewed source/test delta was applied. Personal prompts, account records, stores and operational logs remain excluded.
 - Upstream: https://github.com/totec448-spec/chat-on-steroids

@@ -7,11 +7,11 @@ describe('isolated account process selection', () => {
   const root = path.resolve('account-runtime-fixture');
 
   it('selects only a validated account id and derives the path internally', () => {
-    const argument = isolatedProcessArgument('profile-Zeta');
+    const argument = isolatedProcessArgument('profile-zeta');
     expect(isolatedProcessSelection(['app.exe', argument], root)).toEqual({
-      instanceId: 'profile-Zeta',
+      instanceId: 'profile-zeta',
       canonicalRoot: root,
-      runtimeRoot: path.join(root, 'instances', 'profile-Zeta', 'runtime')
+      runtimeRoot: path.join(root, 'instances', 'profile-zeta', 'runtime')
     });
   });
 
@@ -19,7 +19,7 @@ describe('isolated account process selection', () => {
     expect(isolatedProcessSelection(['app.exe'], root)).toBeNull();
     expect(() => isolatedProcessSelection(['app.exe', isolatedProcessArgument('profile-a'), isolatedProcessArgument('profile-b')], root))
       .toThrow(/Exactly one/);
-    for (const id of ['local-instance', '../profile-Zeta', 'profile-a\\..\\b', 'profile-']) {
+    for (const id of ['local-instance', '../profile-zeta', 'profile-a\\..\\b', 'profile-']) {
       expect(() => isolatedProcessArgument(id)).toThrow(/Invalid/);
     }
     expect(() => isolatedProcessSelection(['app.exe', isolatedProcessArgument('profile-a')], 'relative-data'))
@@ -28,7 +28,7 @@ describe('isolated account process selection', () => {
 
   it('refuses a stale private Chrome binding or bridge port while allowing nickname changes', () => {
     const canonical = {
-      id: 'profile-Zeta', platform: 'win32', deviceId: 'device-a',
+      id: 'profile-zeta', platform: 'win32', deviceId: 'device-a',
       state: { mode: 'isolated', root: 'C:\\account' }, bridge: { host: '127.0.0.1', port: 8768 },
       connector: { identity: 'Zeta-core' }, tunnelProfileRef: 'setup-Zeta',
       browser: { profileDirectory: 'Profile', family: 'chrome', electronPartition: 'Zeta' },
