@@ -95,7 +95,7 @@
   // Revision 92 retains current identity-refusal diagnostics across nonfinal reader states.
   // Revision 95 schedules the exact quiet-helper stability recheck without changing acceptance.
   // Revision 96 fences asynchronous status/startup effects to the current recorder and account intent.
-  const RECORDER_VERSION = 98;
+  const RECORDER_VERSION = 99;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -10619,8 +10619,12 @@
 
   /** One presentation rule for both the stage and tab; never clears the old receipt fence. */
   function goalAnswerReplacesPriorError(goal) {
+    const draft = goal?.draft;
+    const failedTypedHold = draft?.stage === 'failed' && draft.error === 'native_completion_unverified' &&
+      draft.outboxContinuationOwned !== true;
     return Boolean(goal?.enabled === true && goal.wait?.reason === 'answer' &&
-      goal.errorCode === 'native_completion_unverified' && !goal.draft && !goal.opening &&
+      (goal.errorCode === 'native_completion_unverified' || (!goal.errorCode && failedTypedHold)) &&
+      (!draft || failedTypedHold) && !goal.opening &&
       !['sending', 'model-wait'].includes(goal.phase) &&
       !['paused', 'blocked', 'stalled'].includes(goal.health?.state) &&
       goal.error !== 'ChatGPT would not send the message');

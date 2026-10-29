@@ -6926,3 +6926,65 @@ describe('one silence delivery for a correction and its next checkpoint', () => 
     } finally { vi.mocked(turnHasMcpCall).mockResolvedValue(true); }
   });
 });
+
+
+it.each([false, true])('preserves native-Sent helper output custody when its waiter retires during archive I/O (recorder fallback: %s)', async allowMissingWaiter => {
+  const controller = new AbortController();
+  const answer = requestBrowserDecision('Keep this exact finished helper', controller.signal, {
+    sourceSessionId: sessionId, sourceTurnId: 'archive-retirement-source', lifetime: 'temporary-planner', onAccepted: () => null
+  });
+  const rejected = expect(answer).rejects.toThrow('goal_browser_cancelled');
+  const row = (await listInputs())[0]!;
+  expect(await claimBrowserInput(row.id, 'archive-retirement-owner', null, true)).not.toBeNull();
+  expect(await authorizeBrowserInput(row.id, 'archive-retirement-owner', null)).toBe(true);
+  expect(await acknowledgeBrowserInput(row.id, 'archive-retirement-owner', null, 'exact-native-helper-question')).toBe(true);
+  const file = path.join(directory, 'CoS-helper-outputs', row.id + '.json');
+  const response = '{"action":"stop","reply":""}';
+  let entered!: () => void, release!: () => void;
+  const atRename = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const rename = fs.rename.bind(fs);
+  const spy = vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+    if (String(to) === file) { entered(); await gate; }
+    return rename(from, to);
+  });
+  const completing = completeBrowserDecision(row.id, 'archive-retirement-owner', response, null, allowMissingWaiter);
+  try {
+    await atRename; controller.abort(); release();
+    expect(await completing).toBe(false); await rejected;
+    const retained = (await listInputs()).find(entry => entry.id === row.id)!;
+    expect(JSON.parse(await fs.readFile(file, 'utf8')).response).toBe(response);
+    expect(retained).toMatchObject({ state: 'cancelled', messageId: 'exact-native-helper-question',
+      decisionOutput: { sha256: createHash('sha256').update(response).digest('hex'), bytes: Buffer.byteLength(response) } });
+    expect(retained.response).toBeUndefined();
+    expect(await browserDecisionOutputSaved(row.id, 'archive-retirement-owner', null)).toBe(true);
+    expect((await listInputs()).filter(entry => entry.sourceHelperId === row.id)).toEqual([]);
+    resetInputForTests();
+    expect(await browserDecisionOutputSaved(row.id, 'archive-retirement-owner', null)).toBe(true);
+  } finally { release(); await completing.catch(() => false); controller.abort(); await rejected; spy.mockRestore(); }
+});
+
+
+it('keeps cold-restored native helpers cancelled without reviving their acceptance owner', async () => {
+  const temporary = true;
+  const controller = new AbortController();
+  const answer = requestBrowserDecision('Same existing native helper', controller.signal, {
+    sourceSessionId: sessionId, sourceTurnId: 'cold-helper-original',
+    ...(temporary ? { lifetime: 'temporary-planner' as const } : {}), onAccepted: () => null
+  });
+  const ended = answer.catch(() => undefined);
+  const row = (await listInputs())[0]!;
+  expect(await claimBrowserInput(row.id, 'cold-helper-owner', null, true)).not.toBeNull();
+  expect(await authorizeBrowserInput(row.id, 'cold-helper-owner', null)).toBe(true);
+  expect(await acknowledgeBrowserInput(row.id, 'cold-helper-owner', null, 'cold-native-message')).toBe(true);
+  await flushDurable(); resetInputForTests();
+  try {
+    const completed = await completeBrowserDecision(row.id, 'cold-helper-owner', '{"action":"stop","reply":""}', null, true);
+    expect(completed).toBe(!temporary);
+    const retained = (await listInputs()).find(entry => entry.id === row.id)!;
+    expect(retained.messageId).toBe('cold-native-message');
+    expect(retained.state).toBe('cancelled');
+    if (temporary) expect(retained.decisionOutput).toBeUndefined();
+    expect((await listInputs()).filter(entry => entry.sourceHelperId === row.id)).toEqual([]);
+  } finally { controller.abort(); await ended; }
+});

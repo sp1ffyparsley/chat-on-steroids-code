@@ -20010,6 +20010,33 @@ describe('the field above the composer', () => {
       'settings_set', 'desktop_input', 'compact', 'recovery'].includes(message.type))).toBe(false);
   });
 
+  it.each([['loop', 'native_completion_unverified'], ['goal', 'native_completion_unverified'], ['loop', undefined], ['goal', undefined]])('shows the verified current %s answer despite an earlier failed typed-hold draft (%s)', async (mode, errorCode) => {
+    live = await harness();
+    const goal = { enabled: true, mode, phase: 'retrying',
+      draft: { stage: 'failed', error: 'native_completion_unverified' },
+      errorCode, error: 'Earlier exact result remains unresolved.',
+      health: { state: 'working' }, wait: { reason: 'answer', detail: 'Current exact native turn is active.' } };
+    const saved = JSON.stringify(goal);
+    expect(live.hook.goalStageView(goal)).toMatchObject({
+      stage: (mode === 'loop' ? 'Loop' : 'Goal') + ' is on · waiting for this answer',
+      detail: expect.stringContaining(goal.error), done: false });
+    expect(JSON.stringify(goal)).toBe(saved);
+    expect(live.sent.some(message => ['goal_draft', 'goal_prepare', 'goal_ack', 'goal_event', 'settings_set', 'compact'].includes(message.type))).toBe(false);
+  });
+
+  it.each(['foreign-error', 'owned-delivery', 'ordinary-failure'])('does not hide a real %s behind an active-answer caption', async kind => {
+    live = await harness();
+    const goal = { enabled: true, mode: 'loop', phase: 'retrying',
+      draft: { stage: 'failed', error: kind === 'ordinary-failure' ? 'provider_failure' : 'native_completion_unverified',
+        ...(kind === 'owned-delivery' ? { outboxContinuationOwned: true } : {}) },
+      errorCode: kind === 'foreign-error' ? 'provider_restricted' : 'native_completion_unverified',
+      error: 'Retain this real hold.', health: { state: 'working' }, wait: { reason: 'answer' } };
+    const saved = JSON.stringify(goal);
+    expect(live.hook.goalStageView(goal)?.stage).not.toBe('Loop is on · waiting for this answer');
+    expect(JSON.stringify(goal)).toBe(saved);
+    expect(live.sent.some(message => ['goal_draft', 'goal_ack', 'settings_set', 'compact'].includes(message.type))).toBe(false);
+  });
+
   it('keeps approval, pause, provider block, unsent draft and unconfirmed Send above an older-error active-answer caption', async () => {
     live = await harness();
     const base = { enabled: true, mode: 'loop', phase: 'retrying', draft: null,

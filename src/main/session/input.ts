@@ -4378,6 +4378,10 @@ export function completeBrowserDecision(id: string, owner: string, response: str
     if (!row) return false;
     if (conversationId && row.conversationId && conversationId !== row.conversationId) return false;
     const waiter = decisionWaiters.get(id);
+    // Recorder fallback may begin without a waiter; it may never outlive or
+    // take over an acceptance owner captured at entry.
+    const waiterCurrent = () => waiter ? decisionWaiters.get(id) === waiter
+      : allowMissingWaiter && !decisionWaiters.has(id);
     const collecting = liveDeliveredBrowserDecision(row);
     // Native ACK is the sole owner that may bind a route-less Temporary Chat.
     // Its later answer cannot silently replace that already-confirmed route.
@@ -4513,7 +4517,19 @@ export function completeBrowserDecision(id: string, owner: string, response: str
       : false;
     const decisionOutput = await saveDecisionOutput(row, response, conversationId);
     if (decisionOutput) next = next.map(entry => entry.id === row.id ? { ...entry, decisionOutput } : entry);
-    if ((!waiter || decisionWaiters.get(id) !== waiter) && !allowMissingWaiter) return false;
+    // Retirement can race the archive rename as well as the outbox commit. Preserve
+    // the verified archive receipt in either case, without reviving its waiter/child.
+    const cancelRetiredAfterArchive = async (): Promise<false> => {
+      await commit((await load()).map(entry => entry.id === id
+        ? { ...entry, ...(decisionOutput ? { decisionOutput } : {}),
+          ...(entry.goalStopDisposition ? {} : { state: 'cancelled' as const }), response: undefined }
+        : entry.sourceHelperId === id && entry.state === 'queued'
+          ? { ...entry, state: 'cancelled', error: 'Goal source was cancelled before helper acceptance returned.' }
+          : entry));
+      logInfo(`browser helper ${id}: archive receipt retained after waiter retirement; no continuation authorized`);
+      return false;
+    };
+    if (!waiterCurrent()) return cancelRetiredAfterArchive();
     if (forward && !await forward()) return collecting
       ? rejectCollectedDecision(new BrowserDecisionProtocolRejection('native_completion_unverified'), decisionOutput, true)
       : false;
@@ -4522,15 +4538,7 @@ export function completeBrowserDecision(id: string, owner: string, response: str
     // write is not permission to resolve its now-retired waiter or leave an
     // undelivered follow-up eligible in this process. Keep the original Send
     // receipt, but close both answer and unclaimed outgoing authority together.
-    if ((!waiter || decisionWaiters.get(id) !== waiter) && !allowMissingWaiter) {
-      await commit((await load()).map(entry => entry.id === id
-        ? entry.goalStopDisposition ? { ...entry, response: undefined }
-          : { ...entry, state: 'cancelled', response: undefined }
-        : entry.sourceHelperId === id && entry.state === 'queued'
-          ? { ...entry, state: 'cancelled', error: 'Goal source was cancelled before helper acceptance returned.' }
-          : entry));
-      return false;
-    }
+    if (!waiterCurrent()) return cancelRetiredAfterArchive();
     const resolvedConversation = conversationId ?? row.conversationId;
     if (waiter && resolvedConversation) waiter.onConversation?.(resolvedConversation);
     waiter?.resolve(response);

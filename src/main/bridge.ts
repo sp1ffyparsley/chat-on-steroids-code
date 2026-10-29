@@ -6791,9 +6791,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
             logInfo(`bridge: native terminal scan conversation=${JSON.stringify(current.conversationId)} ` +
               (terminal ? `reason=${terminal.reason} questions=${terminal.questions} calls=${terminal.calls} ` +
                 `openCalls=${terminal.openCalls} codeCalls=${terminal.codeCalls} openCodeCalls=${terminal.openCodeCalls} ` +
-                `activeTurnMapped=${terminal.activeTurnMapped}` : 'reason=unknown') +
-              ` identityRefusalCalls=${identity?.calls ?? 'unavailable'}` +
-              ` identityReasons=${identity ? identity.reasons.map(row => `${row.code}:${row.calls}`).join(',') || 'none' : 'unavailable'}`);
+                `activeTurnMapped=${terminal.activeTurnMapped}` +
+                ` identityRefusalCalls=${identity?.calls ?? 'unavailable'}` +
+                ` identityReasons=${identity ? identity.reasons.map(row => `${row.code}:${row.calls}`).join(',') || 'none' : 'unavailable'}`
+                : 'reason=unknown'));
             if (current.shellDiscovery === 'compatible' && terminal && terminal.questions > 0 &&
                 ((terminal.reason === 'turn-invalid' && terminal.callInventoryComplete === false) ||
                  (terminal.reason === 'open-call' && terminal.openCalls > 0) ||
