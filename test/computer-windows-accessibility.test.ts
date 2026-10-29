@@ -62,7 +62,12 @@ public static class AccessibilityFixture {
           window.Dispatcher.Invoke(new Action(delegate {
             if (command == "document") {
               if (browserWindow != null) { browserPage.Visibility = Visibility.Visible; browserWindow.UpdateLayout(); }
-              else { document.Visibility = Visibility.Visible; window.UpdateLayout(); }
+              else {
+                // Semantic controls have already passed their action assertions. Keep the
+                // same earlier editor and document for this independent text-precedence phase.
+                panel.Children.Clear(); panel.Children.Add(editor); panel.Children.Add(document);
+                document.Visibility = Visibility.Visible; window.UpdateLayout();
+              }
             }
             if (command == "browser") {
               // Class identity is lifetime-stable in real browser providers. Mutating an
@@ -186,8 +191,19 @@ try {
   # Like a browser toolbar editor preceding its page, an earlier TextPattern
   # must not claim document_text before the actual Document is visited.
   $owned.StandardInput.WriteLine('document'); $owned.StandardInput.Flush(); $null = $owned.StandardOutput.ReadLine()
-  $page = Handle-Request @{ op = 'snapshot'; id = $id; includeScreenshot = $false; includeUi = $true; maxResults = 100 }
-  if (-not @($page.elements | Where-Object { $_.automationId -eq 'document' -and $_.role -eq 'Document' }).Count) { throw 'document fixture provider missing' }
+  # Dispatcher visibility acknowledgement is not a cross-process UIA provider receipt.
+  # Observe the actual owned document, within the same bounded readiness window used below.
+  $documentReady = [System.Diagnostics.Stopwatch]::StartNew()
+  do {
+    $page = Handle-Request @{ op = 'snapshot'; id = $id; includeScreenshot = $false; includeUi = $true; maxResults = 100 }
+    $documentRows = @($page.elements | Where-Object { $_.automationId -eq 'document' -and $_.role -eq 'Document' }).Count
+    if ($documentRows -gt 0 -and $page.truncated -ne $true) { break }
+    Start-Sleep -Milliseconds 25
+  } while ($documentReady.ElapsedMilliseconds -lt 2000)
+  $documentShape = @{ truncated=$page.truncated; visited=$page.visited; rows=@($page.elements).Count;
+    documentRows=$documentRows; unavailable=$page.uiUnavailable.code; textChars=([string]$page.document_text).Length } | ConvertTo-Json -Compress
+  if ($documentRows -eq 0) { throw ('document fixture provider missing: ' + $documentShape) }
+  if ($page.truncated -eq $true) { throw ('document fixture observation incomplete: ' + $documentShape) }
   if ($page.document_text -notmatch '^Page document body') { throw 'earlier editor displaced the page document text' }
   if (($page.document_text.Length + $page.selected_text.Length) -gt 8000) { throw 'document text exceeded shared budget' }
   # A browser without an observed page must not label its toolbar editor as

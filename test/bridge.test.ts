@@ -1167,7 +1167,7 @@ describe('opt-in settled-turn Loop forward-readiness', () => {
       expect(await settledForwardBridge.settledTurnContinuationAllowed(f.sessionId, f.conversationId, f.turnId)).toBe(false);
     });
 
-  it.each(['helper-claim', 'helper-authorize', 'helper-collect', 'outgoing-claim', 'outgoing-authorize'] as const)(
+  it.each(['helper-claim', 'helper-authorize', 'outgoing-claim', 'outgoing-authorize'] as const)(
     'rechecks stopped Resume at %s against a new native approval and draft hold', async phase => {
       const f = await stoppedResumeFixture();
       await request('POST', '/goal/draft', { body: { conversationId: f.conversationId, turnId: f.turnId, clientId: 'stopped-stage-source' } });
@@ -1188,7 +1188,6 @@ describe('opt-in settled-turn Loop forward-readiness', () => {
       }
       const attempt = () => phase === 'helper-claim' ? f.input.claimBrowserInput(helper.id, 'stopped-stage-helper', null, true)
         : phase === 'helper-authorize' ? f.input.authorizeBrowserInput(helper.id, 'stopped-stage-helper', null)
-        : phase === 'helper-collect' ? f.input.completeBrowserDecision(helper.id, 'stopped-stage-helper', answer, null)
         : phase === 'outgoing-claim' ? f.input.claimBrowserInput(outgoing!.id, 'stopped-stage-source', f.conversationId, true)
         : f.input.authorizeBrowserInput(outgoing!.id, 'stopped-stage-source', f.conversationId);
       await request('GET', `/activity?conversationId=${f.conversationId}&approval=1`);
@@ -1200,6 +1199,122 @@ describe('opt-in settled-turn Loop forward-readiness', () => {
       expect(Boolean(await attempt())).toBe(true);
       expect((await f.input.listInputs()).filter(row => row.decisionSourceSessionId === f.sessionId)).toHaveLength(1);
       expect((await f.input.listInputs()).filter(row => row.sourceHelperId === helper.id).length).toBeLessThanOrEqual(1);
+    });
+
+  it.each(['approval', 'busy'] as const)(
+    'preserves one rejected stopped Resume helper answer during paused Drain (%s)', async hold => {
+      const f = await stoppedResumeFixture();
+      const { activeProfileWorkCensus } = await import('../src/main/profile-work-state.js');
+      const { ProfileLifecycleCoordinator } = await import('../src/main/profile-lifecycle.js');
+      const { profileWorkAdmission } = await import('../src/main/work-admission.js');
+      const { createHash } = await import('node:crypto');
+      const os = await import('node:os');
+      expect((await request('POST', '/goal/draft', { body: {
+        conversationId: f.conversationId, turnId: f.turnId, clientId: 'stopped-rejected-source'
+      } })).status).toBe(200);
+      let helper!: Awaited<ReturnType<typeof f.input.listInputs>>[number];
+      await vi.waitFor(async () => {
+        helper = (await f.input.listInputs()).find(row => row.purpose === 'decision' && row.decisionSourceSessionId === f.sessionId)!;
+        expect(helper).toBeDefined();
+      });
+      const owner = 'stopped-rejected-native-helper', nativeId = randomUUID();
+      const answer = JSON.stringify({ action: 'continue', reply: 'Reconcile and continue only the original work.' });
+      expect(await f.input.claimBrowserInput(helper.id, owner, null, true)).not.toBeNull();
+      expect(await f.input.authorizeBrowserInput(helper.id, owner, null)).toBe(true);
+      expect(await f.input.acknowledgeBrowserInput(helper.id, owner, null, nativeId)).toBe(true);
+      const delivered = (await f.input.listInputs()).find(row => row.id === helper.id)!;
+      const owed = goalPendingReplyFor(f.conversationId);
+      const originalFence = coreBrowserEvidence(f.conversationId)?.pendingCompletion;
+      const sourceEnds = await readEvents(f.sessionId, { kinds: ['turn_end'] });
+      await saveConfig({ ...getConfig(), ui: { ...getConfig().ui, automationPaused: true } });
+      applyAutomationPause(true);
+      const cutover = vi.fn(async () => {});
+      const lifecycle = new ProfileLifecycleCoordinator({ profileId: getConfig().instances!.activeInstanceId,
+        admission: profileWorkAdmission, census: activeProfileWorkCensus,
+        readDeferredSwitch: async () => null, writeDeferredSwitch: async () => {},
+        onSwitchReady: cutover, applyUpdate: cutover, applyShutdown: cutover });
+      const archive = path.join(os.tmpdir(), 'CoS-helper-outputs', `${helper.id}.json`);
+      let entered!: () => void, releaseArchive!: () => void;
+      const atArchive = new Promise<void>(resolve => { entered = resolve; });
+      const archiveGate = new Promise<void>(resolve => { releaseArchive = resolve; });
+      const open = fs.open;
+      const archiveSpy = vi.spyOn(fs, 'open').mockImplementation(async (file, flags, mode) => {
+        if (typeof file === 'string' && file.startsWith(archive + '.') && file.endsWith('.tmp')) {
+          entered(); await archiveGate;
+        }
+        return open(file, flags, mode);
+      });
+      let publication: Promise<boolean> | undefined;
+      let poll: ReturnType<typeof lifecycle.poll> | undefined;
+      let censusReadSpy: ReturnType<typeof vi.spyOn> | undefined;
+      try {
+        const held = await lifecycle.requestShutdown();
+        expect(held.outcome).toBe('draining');
+        expect(held.status.blockers).toContainEqual(expect.objectContaining({ category: 'browser-helper', count: 1,
+          detail: expect.stringContaining('answer collection') }));
+        if (hold === 'approval') await request('GET', `/activity?conversationId=${f.conversationId}&approval=1`);
+        else { f.diagnostic.ordinaryFinal.reason = 'busy'; await f.publish(); }
+        publication = f.input.completeBrowserDecision(helper.id, owner, answer, null);
+        await atArchive;
+        // The real census waits behind Input's archive transaction. Observe that
+        // admission instead of recursively awaiting its serialized read here.
+        let enteredCensus!: () => void;
+        const atCensusRead = new Promise<void>(resolve => { enteredCensus = resolve; });
+        const list = f.input.listInputs;
+        censusReadSpy = vi.spyOn(f.input, 'listInputs').mockImplementation(() => {
+          enteredCensus(); return list();
+        });
+        poll = lifecycle.poll();
+        await atCensusRead;
+        expect(lifecycle.getStatus().blockers).toContainEqual(expect.objectContaining({
+          category: 'browser-helper', count: 1, detail: expect.stringContaining('answer collection=1')
+        }));
+        expect(cutover).not.toHaveBeenCalled();
+        releaseArchive();
+        expect(await publication).toBe(true);
+        await poll;
+        censusReadSpy.mockRestore(); censusReadSpy = undefined;
+        await vi.waitFor(() => expect(f.goal.goalViewFor(f.conversationId)).toMatchObject({ stage: 'failed', retryable: false }));
+        const retained = (await f.input.listInputs()).find(row => row.id === helper.id)!;
+        expect(retained).toMatchObject({ state: 'failed', owner, messageId: nativeId,
+          sendAuthorizedAt: delivered.sendAuthorizedAt, deliveredAt: delivered.deliveredAt,
+          decisionSourceSessionId: f.sessionId, decisionSourceTurnId: f.turnId,
+          goalDecisionRejection: 'native_completion_unverified', error: 'native_completion_unverified',
+          decisionOutput: { sha256: createHash('sha256').update(answer).digest('hex'), bytes: Buffer.byteLength(answer) }
+        });
+        expect(retained.goalStopDisposition).toBeUndefined();
+        expect((await f.input.listInputs()).filter(row => row.sourceHelperId === helper.id)).toEqual([]);
+        expect(goalPendingReplyFor(f.conversationId)).toEqual(owed);
+        expect(coreBrowserEvidence(f.conversationId)?.pendingCompletion).toEqual(originalFence);
+        expect(await readEvents(f.sessionId, { kinds: ['turn_end'] })).toEqual(sourceEnds);
+        expect(await f.input.browserDecisionOutputSaved(helper.id, owner, null)).toBe(true);
+        const bytes = await fs.readFile(archive);
+        expect(JSON.parse(bytes.toString('utf8'))).toMatchObject({ inputId: helper.id, owner,
+          sourceSessionId: f.sessionId, sourceTurnId: f.turnId, response: answer });
+        if (hold === 'approval') await request('GET', `/activity?conversationId=${f.conversationId}&approval=0`);
+        else { f.diagnostic.ordinaryFinal.reason = 'turn-invalid'; await f.publish(); }
+        // Cold reconstruction retains only the exact archived answer receipt.
+        await flushDurable();
+        f.input.resetInputForTests(); resetDurableForTests(); initDurableStore(dir);
+        expect((await f.input.listInputs()).find(row => row.id === helper.id)?.response).toBeUndefined();
+        // Restored physical readiness cannot rewrite a rejected helper's immutable output.
+        expect(await f.input.completeBrowserDecision(helper.id, owner, answer, null)).toBe(true);
+        expect(await f.input.browserDecisionOutputSaved(helper.id, owner, null)).toBe(true);
+        expect(await f.input.completeBrowserDecision(helper.id, owner,
+          JSON.stringify({ action: 'continue', reply: 'A different answer cannot reuse this helper.' }), null)).toBe(false);
+        expect(await fs.readFile(archive)).toEqual(bytes);
+        expect((await f.input.listInputs()).filter(row => row.sourceHelperId === helper.id)).toEqual([]);
+        await lifecycle.poll();
+        expect(cutover).toHaveBeenCalledOnce();
+        expect((await f.input.listInputs()).filter(row => row.decisionSourceSessionId === f.sessionId)).toHaveLength(1);
+      } finally {
+        releaseArchive(); archiveSpy.mockRestore(); censusReadSpy?.mockRestore();
+        if (publication) await publication;
+        if (poll) await poll;
+        const heldOwner = profileWorkAdmission.snapshot().owner;
+        if (heldOwner) profileWorkAdmission.release(heldOwner);
+        await fs.rm(archive, { force: true });
+      }
     });
 
   async function settledFixture(own = true, historicalProcess = false,
@@ -2484,16 +2599,6 @@ describe('opt-in settled-turn Loop forward-readiness', () => {
       expect(held.status.blockers).toContainEqual(expect.objectContaining({ category: 'browser-helper', count: 1,
         detail: expect.stringContaining('answer collection') }));
       expect(cutover).not.toHaveBeenCalled();
-      await request('GET', `/activity?conversationId=${f.conversationId}&approval=1`);
-      expect(await input.completeBrowserDecision(helper.id, owner, JSON.stringify({ action: 'continue', reply: 'Must not bypass human approval.' }), null)).toBe(false);
-      await request('GET', `/activity?conversationId=${f.conversationId}&approval=0`);
-      const busyDiagnostic = { ...f.diagnostic, observedAt: Date.now(), ordinaryFinal: { ...f.diagnostic.ordinaryFinal,
-        reason: 'busy', settledFinalMessageId: undefined } };
-      await request('POST', `/activity?conversationId=${f.conversationId}`, { body: { coreDiagnostic: busyDiagnostic, observationOnly: true } });
-      expect(await input.completeBrowserDecision(helper.id, owner, JSON.stringify({ action: 'continue', reply: 'Must not bypass a native draft or generation hold.' }), null)).toBe(false);
-      await request('POST', `/activity?conversationId=${f.conversationId}`, { body: {
-        coreDiagnostic: { ...f.diagnostic, observedAt: Date.now() }, observationOnly: true
-      } });
       expect(await input.completeBrowserDecision(helper.id, owner, JSON.stringify({
         action: 'continue', reply: 'Reconcile saved state and continue the original task after maintenance.'
       }), null)).toBe(true);

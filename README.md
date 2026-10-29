@@ -2,11 +2,11 @@
 
 This is the real custom Chat On Steroids application and browser companion source, exported for code review and research. It is a clean-history code export, not an upstream release or a backup of anyone's chats.
 
-- Source commit: `3df4e77c99e64c4fa29fee80a8eaae44b04fecce`.
-- Source tree: `7aa9e763eb30349efcdc6901ed71e2efbec4a87e`.
+- Source commit: `eee4dd56525ceb253d4871104a2eca3aa6e7543e`.
+- Source tree: `0b9a9fd8008c21b77a34417b7190c7cc434a4ca9`.
 - Export date: October 29, 2026.
 - Review state: controlled candidate98, source-only; not a newly qualified installer or an installed/executing browser update.
-- Latest repair scope: delivered-helper collection separated from permission to continue, exact normalized archive/answer routes, pre-/post-archive readiness races, strict-policy late-result STOP fencing, non-counting Goal waits, and operation-scoped renderer wake/selection restoration. Source checks:1325 Input/Goal/HTTP cases and977 extension cases passed, with2 existing platform skips. A new canonical package qualification is running; this mirror is not a binary qualification or deployment claim. Qualified96 and actual installed94 remain separate private evidence.
+- Latest repair scope: delivered-helper collection separated from permission to continue, exact normalized archive/answer routes, pre-/post-archive readiness races, strict-policy late-result STOP fencing, non-counting Goal waits, and operation-scoped renderer wake/selection restoration. Source checks:1325 Input/Goal/HTTP cases and977 extension cases passed, with2 existing platform skips. The first new full qualification failed4 obsolete collection-contract assertions and1 offscreen UIA fixture readiness check. A test-only follow-up preserves all production runtime bytes, isolates immutable helper negatives, retains positive maintenance barriers and waits for the actual owned Document provider.13 affected Bridge and1 native checks pass. The final canonical package qualification is running; failed runs remain failed, and this mirror is not a binary qualification or deployment claim. Qualified96 and actual installed94 remain separate private evidence.
 - This export preserves the existing sanitized files and clean history; only the reviewed source/test delta was applied. Personal prompts, account records, stores and operational logs remain excluded.
 - Upstream: https://github.com/totec448-spec/chat-on-steroids
 - Intended code mirror: https://github.com/sp1ffyparsley/chat-on-steroids-code
