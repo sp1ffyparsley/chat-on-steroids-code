@@ -4443,8 +4443,13 @@ export function completeBrowserDecision(id: string, owner: string, response: str
       if (row.lifetime !== 'temporary-planner' ||
           row.decisionSourceSessionId !== handoff.sessionId ||
           row.decisionSourceTurnId !== handoff.sourceTurnId ||
-          (!isStop && !handoff.text.trim()) || isChatBlocked(handoff.conversationId))
+          (!isStop && !handoff.text.trim()))
         return false;
+      // A blocked destination refuses the handoff, not preservation of the exact
+      // native-Sent helper answer. Legacy/unacknowledged rows gain no archive path.
+      if (isChatBlocked(handoff.conversationId)) return collecting
+        ? rejectCollectedDecision(new BrowserDecisionProtocolRejection('native_completion_unverified'), undefined, true)
+        : false;
       const session = await getSession(handoff.sessionId);
       const owed = goalPendingReplyFor(handoff.conversationId);
       const [sourceEnd] = await readRecentEvents(handoff.sessionId, 1, {
@@ -4470,7 +4475,9 @@ export function completeBrowserDecision(id: string, owner: string, response: str
           owed?.turnId !== handoff.sourceTurnId ||
           (handoff.sourceAcceptedAt !== undefined && owed?.acceptedAt !== handoff.sourceAcceptedAt) ||
           !goalArmedFor(handoff.conversationId) ||
-          decisionWaiters.get(id) !== waiter) return false;
+          decisionWaiters.get(id) !== waiter) return collecting
+        ? rejectCollectedDecision(new BrowserDecisionProtocolRejection('native_completion_unverified'), undefined, true)
+        : false;
       if (isStop) {
         // A stop sends no message. Save its final disposition in the SAME durable
         // accepted-answer row; Goal's existing ledger reconciles this on completion

@@ -22999,6 +22999,61 @@ describe('unattributed activity recovery', () => {
     await deleteSession(session!.id);
   });
 
+  it.each([
+    ['watchdog/same-time', 'watchdog_stalled', 0], ['native/same-time', undefined, 0],
+    ['watchdog/backward-clock', 'watchdog_stalled', -5000], ['native/backward-clock', undefined, -5000]
+  ] as const)('does not attach an older typed error to a newer recorded turn (%s)', async (_label, reason, delta) => {
+    await pair();
+    const time = Date.now();
+    await events(OTHER, [
+      { kind: 'user_message', time, messageId: 'typed-old-question', text: 'Original work.' },
+      Object.assign({}, openTurn('typed-old-turn'), { time }),
+      { kind: 'turn_end', time, turnId: 'typed-old-turn', outcome: 'completed' },
+      { kind: 'user_message', time: time + delta, messageId: 'typed-new-question', text: 'New work.' },
+      Object.assign({}, openTurn('typed-new-turn'), { time: time + delta })
+    ]);
+    const session = await findSessionByConversation(OTHER, { requireUnique: true });
+    try {
+      await events(OTHER, [{ kind: 'chat_error', time, turnId: 'typed-old-turn', reason,
+        text: 'Message delivery timed out. Please try again.', recoverable: true }]);
+      expect(await maintenance()).toBeNull();
+      await events(OTHER, [{ kind: 'chat_error', time: Date.now(), turnId: 'typed-new-turn', reason,
+        text: 'Message delivery timed out. Please try again.', recoverable: true }]);
+      expect((await maintenance())?.reason).toBe('assistant-error');
+    } finally { if (session) await deleteSession(session.id); }
+  });
+
+  it.each(['watchdog_stalled', undefined] as const)('does not acquire a newer question while typed recovery source awaits (%s)', async reason => {
+    await pair();
+    await events(OTHER, [
+      { kind: 'user_message', time: Date.now(), messageId: 'typed-await-question', text: 'First work.' },
+      openTurn('typed-await-turn')
+    ]);
+    const session = await findSessionByConversation(OTHER, { requireUnique: true });
+    const original = sessionStoreModule.readLatestUserMessage;
+    let reads = 0, entered = () => {}, release = () => {};
+    const reading = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const lookup = vi.spyOn(sessionStoreModule, 'readLatestUserMessage').mockImplementation(async id => {
+      if (id === session!.id && ++reads === 2) { entered(); await gate; }
+      return original(id);
+    });
+    try {
+      const oldFailure = events(OTHER, [{ kind: 'chat_error', time: Date.now(), turnId: 'typed-await-turn', reason,
+        text: 'Message delivery timed out. Please try again.', recoverable: true }]);
+      await reading;
+      await events(OTHER, [
+        { kind: 'user_message', time: Date.now(), messageId: 'typed-await-next-question', text: 'Next work.' },
+        openTurn('typed-await-next-turn')
+      ]);
+      release(); await oldFailure;
+      expect(await maintenance()).toBeNull();
+      await events(OTHER, [{ kind: 'chat_error', time: Date.now(), turnId: 'typed-await-next-turn', reason,
+        text: 'Message delivery timed out. Please try again.', recoverable: true }]);
+      expect((await maintenance())?.reason).toBe('assistant-error');
+    } finally { release(); lookup.mockRestore(); if (session) await deleteSession(session.id); }
+  });
+
   it('cannot acquire a newer question while its missing-stream source read is in flight', async () => {
     await pair();
     await events(OTHER, [

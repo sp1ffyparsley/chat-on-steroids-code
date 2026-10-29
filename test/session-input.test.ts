@@ -5432,6 +5432,66 @@ describe('browser decision lifetime', () => {
 describe('rejected helper answer replay custody', () => {
   const archives: string[] = [];
   afterEach(async () => { for (const file of archives.splice(0)) await fs.rm(file, { force: true }); });
+  it.each([['blocked', 'stop'], ['blocked', 'continue'], ['active-turn', 'stop'], ['active-turn', 'continue']] as const)('preserves native-Sent output at a %s handoff veto (%s)', async (gate, kind) => {
+    const controller = new AbortController(), sourceTurnId = 'blocked-handoff-source';
+    const answer = requestBrowserDecision('Stay within the exact original scope.', controller.signal, {
+      sourceSessionId: sessionId, sourceTurnId, lifetime: 'temporary-planner',
+      onAccepted: async () => {
+        if (gate === 'blocked') binding.blocked = true;
+        else binding.activeTurnId = 'newer-active-turn';
+        return kind === 'stop'
+          ? { kind: 'stop' as const, sessionId, conversationId: binding.conversationId, sourceTurnId }
+          : { kind: 'continue' as const, sessionId, conversationId: binding.conversationId, sourceTurnId, text: 'Verify the original source repair.' };
+      }
+    });
+    const settled = answer.then(() => undefined, () => undefined);
+    const row = (await listInputs())[0]!, owner = 'blocked-handoff-document';
+    archives.push(path.join(os.tmpdir(), 'CoS-helper-outputs', row.id + '.json'));
+    try {
+      expect(await claimBrowserInput(row.id, owner, null, true)).not.toBeNull();
+      expect(await authorizeBrowserInput(row.id, owner, null)).toBe(true);
+      expect(await acknowledgeBrowserInput(row.id, owner, null, 'exact-blocked-handoff-ack')).toBe(true);
+      const response = JSON.stringify({ action: kind, reply: kind === 'stop' ? '' : 'Verify the original source repair.' });
+      expect(await completeBrowserDecision(row.id, owner, response, null)).toBe(true);
+      await expect(answer).rejects.toThrow('native_completion_unverified');
+      const rows = await listInputs();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ state: 'failed', messageId: 'exact-blocked-handoff-ack',
+        goalDecisionRejection: 'native_completion_unverified', decisionOutput: { sha256: createHash('sha256').update(response).digest('hex') } });
+      expect(rows[0]!.goalStopDisposition).toBeUndefined();
+      expect(automate).not.toHaveBeenCalled();
+      expect(await browserDecisionOutputSaved(row.id, owner, null)).toBe(true);
+      await coldRestore();
+      expect(await browserDecisionOutputSaved(row.id, owner, null)).toBe(true);
+      expect(await browserDecisionOutputSaved(row.id, 'foreign-document', null)).toBe(false);
+    } finally { controller.abort(); await settled; }
+  });
+  it.each(['unacknowledged', 'foreign-source'] as const)('does not archive a blocked %s handoff', async refusal => {
+    const controller = new AbortController(), sourceTurnId = 'blocked-negative-source';
+    const answer = requestBrowserDecision('Preserve the original scope.', controller.signal, {
+      sourceSessionId: sessionId, sourceTurnId, lifetime: 'temporary-planner',
+      onAccepted: async () => {
+        binding.blocked = true;
+        return { kind: 'stop' as const, sessionId, conversationId: binding.conversationId,
+          sourceTurnId: refusal === 'foreign-source' ? 'different-source-turn' : sourceTurnId };
+      }
+    });
+    const settled = answer.then(() => undefined, () => undefined);
+    try {
+      const row = (await listInputs())[0]!, owner = 'blocked-negative-document';
+      expect(await claimBrowserInput(row.id, owner, null, true)).not.toBeNull();
+      expect(await authorizeBrowserInput(row.id, owner, null)).toBe(true);
+      if (refusal === 'foreign-source')
+        expect(await acknowledgeBrowserInput(row.id, owner, null, 'negative-source-ack')).toBe(true);
+      expect(await completeBrowserDecision(row.id, owner, '{"action":"stop","reply":""}', null)).toBe(false);
+      const current = await listInputs();
+      expect(current).toHaveLength(1);
+      expect(current[0]?.decisionOutput).toBeUndefined();
+      expect(current[0]?.goalStopDisposition).toBeUndefined();
+      expect(await browserDecisionOutputSaved(row.id, owner, null)).toBe(false);
+      expect(automate).not.toHaveBeenCalled();
+    } finally { controller.abort(); await settled; }
+  });
   async function rejectNativeHelper(route: string | null = 'helper-bound-conversation') {
     const controller = new AbortController();
     const onAccepted = vi.fn(() => { throw new BrowserDecisionProtocolRejection('native_completion_unverified'); });

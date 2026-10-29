@@ -3489,7 +3489,7 @@ describe('desktop input delivery and helper ownership', () => {
     expect(live.sent.filter(message => message.type === 'desktop_input' && message.ack)).toHaveLength(1);
   });
 
-  it.each(['trigger_missing', 'choice_unavailable', 'owner_changed', 'picker_not_closed', 'unknown'] as const)(
+  it.each(['trigger_missing', 'choice_unavailable', 'choice_denied', 'owner_changed', 'picker_not_closed', 'unknown'] as const)(
     'records only a bounded ordinary model refusal before native Send (%s)', async reason => {
       live = await harness(`https://chatgpt.com/c/${chatA}`, {
         desktop_input: message => ({ ok: true, data: message.authorize || message.ack || message.fail || message.stage
@@ -3542,7 +3542,7 @@ describe('desktop input delivery and helper ownership', () => {
     expect(live.sent.filter(message => message.type === 'desktop_input' && (message.authorize || message.ack))).toHaveLength(0);
   });
 
-  it.each(['trigger_missing', 'snapshot_missing', 'unknown', 'choice_unavailable', 'owner-lost', 'navigation',
+  it.each(['trigger_missing', 'snapshot_missing', 'unknown', 'choice_unavailable', 'choice_denied', 'owner-lost', 'navigation',
     'draft', 'attachment', 'auth', 'approval', 'stopped', 'expired', 'twice-missing'] as const)(
     'reobserves only one transient first helper picker failure under its original owner and deadline (%s)', async cause => {
       const succeeds = cause === 'trigger_missing' || cause === 'snapshot_missing';
@@ -3577,7 +3577,7 @@ describe('desktop input delivery and helper ownership', () => {
           live!.document.querySelector('form')!.append(stop); stop.click(); stop.remove();
         }
         live!.advance(cause === 'expired' ? 15000 : 1000);
-        if (cause !== 'unknown') detail?.failure?.(cause === 'choice_unavailable' ? cause
+        if (cause !== 'unknown') detail?.failure?.(['choice_unavailable', 'choice_denied'].includes(cause) ? cause
           : cause === 'snapshot_missing' ? cause : 'trigger_missing');
         return false;
       });
@@ -3597,7 +3597,7 @@ describe('desktop input delivery and helper ownership', () => {
       expect(new Set(deadlines).size).toBe(1);
       if (cause === 'draft') expect(live.document.querySelector('#prompt-textarea')!.textContent).toBe('Private accidental draft');
       const stages = live.sent.filter(message => message.stage).map(message => message.stage);
-      if (cause !== 'unknown') expect(stages).toContain(`model:first:${cause === 'choice_unavailable' ? cause
+      if (cause !== 'unknown') expect(stages).toContain(`model:first:${['choice_unavailable', 'choice_denied'].includes(cause) ? cause
         : cause === 'snapshot_missing' ? cause : 'trigger_missing'}`);
       expect(JSON.stringify(stages)).not.toContain('Private accidental draft');
     });

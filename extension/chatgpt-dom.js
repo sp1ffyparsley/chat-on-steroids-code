@@ -4331,12 +4331,12 @@ var CLF_DOM = (() => {
           (!effort || choice.effort === effort) && choice.available === false);
         // A complete native snapshot can positively deny the exact requested pair. That
         // denial must survive an unrelated version's missing/hydrating snapshot below.
-        if (deniedRequestedChoice(original)) return refused('choice_unavailable');
+        if (deniedRequestedChoice(original)) return refused('choice_denied');
         let requestedFamily = model ? original.choices.find(choice => choice.id === model)?.familyId : null;
         const offered = [];
         for (const version of [original.versions.find(v => v.id === original.version), ...original.versions.filter(v => v.id !== original.version)]) {
           const state = await ui.version(version.id); if (!state) return refused('selection_unconfirmed');
-          if (deniedRequestedChoice(state)) return refused('choice_unavailable');
+          if (deniedRequestedChoice(state)) return refused('choice_denied');
           requestedFamily ||= model ? state.choices.find(choice => choice.id === model)?.familyId : null;
           for (const choice of state.choices) {
             if (!choice.available) continue;

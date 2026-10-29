@@ -96,7 +96,8 @@
   // Revision 95 schedules the exact quiet-helper stability recheck without changing acceptance.
   // Revision 96 fences asynchronous status/startup effects to the current recorder and account intent.
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
-  const RECORDER_VERSION = 100;
+  // Revision 101 separates positive model denial from a missing native choice; neither is retried.
+  const RECORDER_VERSION = 101;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -16180,7 +16181,7 @@
             const ok = await CLF_DOM.selectModelSettings(input.model, input.reasoningEffort, current,
               { deadline, observationMs, exact: true, failure: code => {
                 // Only incumbent fixed codes enter the existing owner-checked stage log.
-                if (['trigger_missing', 'snapshot_missing', 'choice_unavailable', 'surface_unconfirmed',
+                if (['trigger_missing', 'snapshot_missing', 'choice_unavailable', 'choice_denied', 'surface_unconfirmed',
                   'selection_unconfirmed', 'selection_ambiguous', 'picker_not_closed', 'composer_unwritable',
                   'owner_changed', 'preparation_expired'].includes(code)) reason ??= code;
               } });
@@ -16204,7 +16205,7 @@
           let refusal = null;
           confirmed = await CLF_DOM.selectModelSettings(input.model, input.reasoningEffort, onTarget,
             { failure: code => {
-              if (['trigger_missing', 'snapshot_missing', 'choice_unavailable', 'surface_unconfirmed',
+              if (['trigger_missing', 'snapshot_missing', 'choice_unavailable', 'choice_denied', 'surface_unconfirmed',
                 'selection_unconfirmed', 'selection_ambiguous', 'picker_not_closed', 'composer_unwritable',
                 'owner_changed', 'preparation_expired'].includes(code)) refusal ??= code;
             } });

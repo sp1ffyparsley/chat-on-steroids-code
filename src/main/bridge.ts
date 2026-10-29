@@ -14958,6 +14958,15 @@ async function noteRecoveryObservations(
       continue;
     }
     if (item.recoverable !== true) continue;
+    // A typed provider error belongs to its recorded turn, not a later question
+    // discovered while this handler awaits. Recorder append order outranks clocks.
+    if (item.turnId && sessionId) {
+      const [latestStart] = await readRecentEvents(sessionId, 1, { kinds: ['turn_start'] });
+      const current = await getSession(sessionId);
+      if (current?.conversationId !== conversationId ||
+          (latestStart?.turnId && latestStart.turnId !== item.turnId) ||
+          (current.activeTurnId && current.activeTurnId !== item.turnId)) continue;
+    }
     // Resume can legitimately return 404 on an idle page. Only the recorder's exact current
     // generation may own this recovery fact; a stale tab or completed final cannot claim it.
     if (item.reason === 'stream_gone' && (!sessionId || recorded?.conversationId !== conversationId ||
@@ -14986,16 +14995,19 @@ async function noteRecoveryObservations(
       break;
     }
     const source = sessionId ? await assistantRepairSource(sessionId) : null;
-    if (source && item.reason === 'watchdog_stalled') source.watchdogStalled = true;
-    if (item.reason === 'stream_gone') {
-      // Reads above yield. Recheck the exact question and turn before spending that turn's
-      // bounded repair budget; a newly-authored question must never inherit an old 404.
-      const currentSource = await assistantRepairSource(sessionId!);
-      const current = await getSession(sessionId!);
-      if (!source || source.turnId !== item.turnId || source.completed ||
-          current?.conversationId !== conversationId || current.activeTurnId !== item.turnId ||
-          currentSource.key !== source.key || currentSource.turnId !== source.turnId || currentSource.completed) continue;
+    if (sessionId && item.turnId) {
+      // The source read yields for every typed error, not only missing streams.
+      // Keep the existing completed-page repair, but never borrow a newer source.
+      const currentSource = await assistantRepairSource(sessionId);
+      const current = await getSession(sessionId);
+      if (!source || source.turnId !== item.turnId ||
+          current?.conversationId !== conversationId ||
+          (current.activeTurnId && current.activeTurnId !== item.turnId) ||
+          currentSource.key !== source.key || currentSource.turnId !== source.turnId ||
+          (item.reason === 'stream_gone' &&
+            (source.completed || currentSource.completed || current.activeTurnId !== item.turnId))) continue;
     }
+    if (source && item.reason === 'watchdog_stalled') source.watchdogStalled = true;
     // One authored question owns one transport episode whether fetch or its DOM card wins.
     const episode = `assistant-error:${source?.key ?? 'page'}`;
     // How many turns this chat will have finished once the broken turn is over. The turn that

@@ -409,7 +409,7 @@ it.each(['disabled', 'denied', 'unavailable', 'owner_changed', 'expired'] as con
     expect(await f.api.selectModelSettings('gpt-5-6-thinking', effort, () => cause !== 'owner_changed',
       { failure, deadline: page.window.Date.now() + (cause === 'expired' ? -1 : 2000), exact: true })).toBe(false);
     expect(failure).toHaveBeenCalledExactlyOnceWith(cause === 'owner_changed' ? 'owner_changed'
-      : cause === 'expired' ? 'preparation_expired' : 'choice_unavailable');
+      : cause === 'expired' ? 'preparation_expired' : cause === 'denied' ? 'choice_denied' : 'choice_unavailable');
     if (['disabled', 'owner_changed', 'expired'].includes(cause)) expect(f.actions).not.toHaveBeenCalled();
     expect(JSON.stringify(failure.mock.calls)).not.toContain('workspace_policy');
   });
@@ -456,7 +456,7 @@ it('retains exact native denial before inspecting an unrelated unavailable versi
   f.decorateVersionRows((row, version) => { if (version.id === 'future') row.setAttribute('aria-disabled', 'true'); });
   expect(await f.api.selectModelSettings('gpt-5-6-thinking', 'high', () => true,
     { failure, deadline: page.window.Date.now() + 1000, exact: true })).toBe(false);
-  expect(failure).toHaveBeenCalledExactlyOnceWith('choice_unavailable');
+  expect(failure).toHaveBeenCalledExactlyOnceWith('choice_denied');
   expect(f.actions).not.toHaveBeenCalled();
 });
 it('records unavailable and rate-limited native choices as evidence without adding them to selectable models', async () => {
@@ -741,6 +741,18 @@ it('keeps an explicit model denial unavailable even when the preset is visible',
   const f = fixture(); (f.props.modelSwitcherDenialsBySlug as any)['future-model'] = { reason: 'workspace_policy' };
   expect(await f.api.inspectModelSettings()).toEqual([{ id: 'gpt-5-6-thinking', label: 'GPT-5.6 Sol', efforts: ['medium', 'high'], aliases: ['gpt-5-6-thinking'] }]);
 });
+it.each([
+  ['positive-denial', 'gpt-6-pro', 'pro', 'choice_denied'],
+  ['not-offered', 'missing-provider-model', 'high', 'choice_unavailable']
+] as const)('distinguishes exact picker %s without selecting a fallback', async (_case, model, effort, code) => {
+  const f = fixture(), failure = vi.fn(), original = f.state.currentSelection;
+  expect(await f.api.selectModelSettings(model, effort, () => true, { exact: true, failure })).toBe(false);
+  expect(failure).toHaveBeenCalledOnce();
+  expect(failure).toHaveBeenCalledWith(code);
+  expect(f.state.currentSelection).toBe(original);
+  expect(page.window.document.querySelector('[data-testid="composer-intelligence-picker-content"]')).toBeNull();
+});
+
 it('observes the September closed 6 Pro selection without opening or changing a working composer', async () => {
   const f = fixture(), doc = page.window.document, trigger = doc.querySelector('button')!;
   const pro = f.selections[0]![2]!;
