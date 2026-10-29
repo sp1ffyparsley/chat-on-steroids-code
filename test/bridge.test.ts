@@ -6260,6 +6260,39 @@ describe('ordinary input receipt-backed native terminal join', () => {
     expect(renewed.replyId).toBe(accepted.replyId);
   });
 
+  it.each(['valid', 'foreign-parent', 'unknown-code'] as const)('logs bounded native identity refusal counts through actual HTTP without result authority (%s)', async shape => {
+    const { sessionId } = await setup(); resetCoreBrowserEvidenceForTests();
+    const { listInputs } = await import('../src/main/session/input.js');
+    const parents = [randomUUID(), randomUUID()];
+    const reason = shape === 'unknown-code' ? 'PRIVATE_UNKNOWN_REASON' : 'turnExchangeMissing';
+    const diagnostic = { documentId: 'PRIVATE_ORIGINAL_DOCUMENT', navigationEpoch: 3,
+      observedAt: Date.now(), shell: 'alternate', shellDiscovery: 'compatible', requestIds: [], turnId: null,
+      ordinaryFinal: { reason: 'open-call', questions: 1, calls: 2, openCalls: 2,
+        codeCalls: 0, openCodeCalls: 0, activeTurnMapped: false,
+        coreCallMessageIds: parents,
+        identityRefusals: parents.map((messageId, index) => ({
+          messageId: shape === 'foreign-parent' && index === 1 ? 'PRIVATE_FOREIGN_PARENT' : messageId,
+          reasons: [reason] })) } };
+    const seen: string[] = [];
+    const releaseLog = onLog(row => { if (row.message.startsWith('bridge: native terminal scan')) seen.push(row.message); });
+    const beforeInputs = await listInputs(), beforeCommands = pendingCommands();
+    try {
+      const publish = () => request('POST', '/activity?conversationId=' + chat,
+        { body: { observationOnly: true, coreDiagnostic: { ...diagnostic, observedAt: Date.now() } } });
+      expect((await publish()).body).toMatchObject({ observationAccepted: true, completionVerified: false });
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toContain(shape === 'valid'
+        ? 'identityRefusalCalls=2 identityReasons=turnExchangeMissing:2'
+        : 'identityRefusalCalls=unavailable identityReasons=unavailable');
+      for (const privateValue of [...parents, diagnostic.documentId, 'PRIVATE_UNKNOWN_REASON', 'PRIVATE_FOREIGN_PARENT'])
+        expect(seen.join('\n')).not.toContain(privateValue);
+      expect((await publish()).body.observationAccepted).toBe(true); expect(seen).toHaveLength(1);
+      expect(await listInputs()).toEqual(beforeInputs); expect(pendingCommands()).toEqual(beforeCommands);
+      expect(nativeCompletionCandidate(chat)).toBeNull();
+      expect((await sessionControlsFor(sessionId)).nativeEvidence?.completion?.reason).toBe('original-source-missing');
+    } finally { releaseLog(); resetCoreBrowserEvidenceForTests(); }
+  });
+
   it('publishes refreshed native evidence without settling its fence until the normal durable-result owner checks it', async () => {
     const { sessionId } = await setup();
     resetCoreBrowserEvidenceForTests();
