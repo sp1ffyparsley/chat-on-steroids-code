@@ -73,6 +73,7 @@ const USER_PROJECTION_KEYS = ['userTypedMissing', 'userIdentityInvalid', 'userTe
 const EMPTY_USER_PROJECTION = Object.fromEntries(USER_PROJECTION_KEYS.map(key => [key, 0]));
 
 interface ShellOptions {
+  appIds?: { appId: string; linkId: string; surface: string; name: string }[];
   diagnosticLogs?: string[];
   status?: 'in_progress' | 'complete';
   assistantCompleted?: boolean;
@@ -529,7 +530,7 @@ async function shellHarness(options: ShellOptions = {}) {
     });
   });
   win.dispatchEvent(new win.MessageEvent('message', {
-    data: { source: 'clf-fiber-ask', nonce }, source: win
+    data: { source: 'clf-fiber-ask', nonce, appIds: options.appIds }, source: win
   }));
   const fiber = await reply;
   win.eval(domSource);
@@ -1414,6 +1415,53 @@ describe('alternate shell turn/message provenance', () => {
       const diagnostic = JSON.stringify(page.fiber.shellScan);
       for (const privateValue of [USER, CALL, RESULT, REQUEST, APP, LINK, 'PRIVATE_TOOL_RESULT'])
         expect(diagnostic).not.toContain(privateValue);
+    } finally { page.dom.window.close(); }
+  });
+
+  it.each(['proven exact app and link', 'unproved app', 'foreign link', 'foreign surface', 'ambiguous app'] as const)(
+    'recovers identity from an opaque native app path only with exact paired proof: %s', async variant => {
+      const app = { appId: ASDK, linkId: LINK, surface: 'core', name: 'Luna Forge X7 Core' };
+      const appIds = variant === 'unproved app' ? [] : [app];
+      if (variant === 'foreign surface') appIds[0] = { ...app, surface: 'plugins', name: 'Luna Forge X7 Plugins' };
+      if (variant === 'ambiguous app') appIds.push({ ...app, surface: 'plugins' });
+      const page = await shellHarness({ withCall: true, nativeCallReceipt: true, nativeCallLive: false,
+        callCompleted: false, assistantCompleted: false, appIds,
+        nativeCallMutation(mapping, entry) {
+          delete entry.turn.items[1].widgetStateSource;
+          entry.turn.messageIds = [USER, CALL, ASSISTANT];
+          const link = variant === 'foreign link' ? 'link_foreign' : LINK;
+          mapping[CALL].message.content.text = JSON.stringify({ path: '/' + ASDK + '/' + link + '/read', args: {} });
+        } });
+      try {
+        const call = page.fiber.turns[0].calls[0];
+        expect(call).toMatchObject({ messageId: CALL, requestId: variant === 'proven exact app and link' ? REQUEST : null,
+          answered: false });
+        expect(page.fiber.turns[0].endMessageId).toBeNull();
+        expect(JSON.stringify(page.fiber)).not.toContain('PRIVATE_TOOL_RESULT');
+      } finally { page.dom.window.close(); }
+    }
+  );
+
+  it.each([false, true])('keeps opaque-path prior pairs bound to the same link (foreign=%s)', async foreign => {
+    const second = 'call_opaque_second';
+    const page = await shellHarness({ withCall: true, nativeCallReceipt: true, nativeCallLive: false,
+      callCompleted: false, assistantCompleted: false,
+      appIds: [{ appId: ASDK, linkId: LINK, surface: 'core', name: 'Luna Forge X7 Core' }],
+      nativeCallMutation(mapping, entry) {
+        delete entry.turn.items[1].widgetStateSource;
+        mapping[CALL].message.content.text = JSON.stringify({ path: '/' + ASDK + '/' + LINK + '/read', args: {} });
+        if (foreign) mapping[RESULT].message.metadata.invoked_resource.resource_uri = '/' + ASDK + '/link_foreign/read';
+        entry.turn.items.splice(2, 0, { type: 'mcp-tool-call', callId: second, completed: false,
+          invocation: { server: APP, tool: 'read' } });
+        entry.turn.messageIds = [USER, CALL, RESULT, second, ASSISTANT];
+        mapping[second] = { id: second, parent: RESULT, message: { id: second, author: { role: 'assistant' },
+          recipient: 'api_tool.call_tool', content: { text: JSON.stringify({ path: '/' + ASDK + '/' + LINK + '/read', args: {} }) },
+          metadata: { parent_id: RESULT, request_id: 'request_opaque_second', working_turn_id: TURN, turn_exchange_id: USER } } };
+      } });
+    try {
+      expect(page.fiber.turns[0].calls[1]).toMatchObject({ requestId: foreign ? null : 'request_opaque_second', answered: false });
+      expect(page.fiber.turns[0].endMessageId).toBeNull();
+      expect(JSON.stringify(page.fiber)).not.toContain('PRIVATE_TOOL_RESULT');
     } finally { page.dom.window.close(); }
   });
 

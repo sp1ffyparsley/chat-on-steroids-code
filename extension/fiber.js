@@ -196,6 +196,17 @@
     const names = [...OUR_APPS, ...configuredApps.filter(Boolean), ...provenApps.map(app => app.name).filter(Boolean)];
     return names.find(app => name === app || name === app.replaceAll(' ', '_')) || null;
   }
+  /** Opaque app namespaces need the paired app/link proof, not a display-name comparison.
+   * This joins request identity only; it never marks a tool result completed. */
+  function nativeRequestServerMatches(path, server) {
+    if (!path || !server) return false;
+    const id = appIdOf(path);
+    if (!id) return ownServerName(path.slice(1, path.indexOf('/', 1))) === server;
+    const matches = provenApps.filter(app => app.appId === id);
+    const link = linkIdOf(path);
+    return matches.length === 1 && !!link && matches[0].linkId === link &&
+      matches[0].surface === surfaceOfName(server);
+  }
   function pluginsConnectorApp(name, appId) {
     return surfaceOfName(name) === 'plugins' || provenApps.some(app => app.surface === 'plugins' && app.appId === appId);
   }
@@ -2192,7 +2203,7 @@
         const requestId = str(nativeField(metadata, 'request_id'));
         const workingTurn = str(nativeField(metadata, 'working_turn_id'));
         const turnExchange = str(nativeField(metadata, 'turn_exchange_id'));
-        const pathServer = path ? ownServerName(path.slice(1, path.indexOf('/', 1))) : null;
+        const pathServerMatches = nativeRequestServerMatches(path, server);
         const scopeReasons = [];
         if (nativeField(author, 'role') !== 'assistant' || nativeField(invocation, 'recipient') !== 'api_tool.call_tool')
           scopeReasons.push('nativeInvocationMismatch');
@@ -2200,7 +2211,7 @@
         if (!path) scopeReasons.push('decodedPathMissing');
         else if (!ourPath(path)) scopeReasons.push('decodedPathForeign');
         if (!server) scopeReasons.push('serverMissing');
-        if (path && server && pathServer !== server) scopeReasons.push('serverMismatch');
+        if (path && server && !pathServerMatches) scopeReasons.push('serverMismatch');
         if (path && toolName(path) !== call.tool) scopeReasons.push('toolMismatch');
         if (workingTurn !== shell.turnId) scopeReasons.push(workingTurn ? 'workingTurnMismatch' : 'workingTurnMissing');
         if (turnExchange !== typedUserId) scopeReasons.push(turnExchange ? 'turnExchangeMismatch' : 'turnExchangeMissing');
@@ -2238,10 +2249,10 @@
             const priorCall = shell.calls.find(entry => entry.messageId === id);
             const previousPath = nativeRequestPath(row.message);
             const priorServer = ownServerName(shell.callSources.get(id)?.server);
-            const previousPathServer = previousPath ? ownServerName(previousPath.slice(1, previousPath.indexOf('/', 1))) : null;
+            const previousServerMatches = nativeRequestServerMatches(previousPath, priorServer);
             const isPreviousInvocation = previousToolResult !== null && role === 'assistant' &&
               recipient === 'api_tool.call_tool' && selected.has(id) && Boolean(priorCall) &&
-              previousPath && ourPath(previousPath) && priorServer && previousPathServer === priorServer &&
+              previousPath && ourPath(previousPath) && priorServer && previousServerMatches &&
               toolName(previousPath) === priorCall.tool &&
               (!previousToolResult.resourceApp || ownServerName(previousToolResult.resourceApp) === priorServer) &&
               (!previousToolResult.resourceUri || (toolName(previousToolResult.resourceUri) === priorCall.tool &&
@@ -2253,7 +2264,7 @@
               if (!previousPath) previousScopeReasons.push('decodedPathMissing');
               else if (!ourPath(previousPath)) previousScopeReasons.push('decodedPathForeign');
               if (!priorServer) previousScopeReasons.push('serverMissing');
-              if (previousPath && priorServer && previousPathServer !== priorServer)
+              if (previousPath && priorServer && !previousServerMatches)
                 previousScopeReasons.push('serverMismatch');
               if (previousPath && toolName(previousPath) !== priorCall.tool) previousScopeReasons.push('toolMismatch');
               if (previousToolResult.resourceApp && (!priorServer ||
