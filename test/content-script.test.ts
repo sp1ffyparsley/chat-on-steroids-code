@@ -3697,6 +3697,11 @@ describe('desktop input delivery and helper ownership', () => {
           : { input: claimed({ purpose: 'decision', lifetime: 'temporary-planner' }) } };
       }
     });
+    // Keep the DOM-fallback deadline pending: this case specifically verifies native
+    // Fiber joins and must not finish through the separate stable-DOM recovery path.
+    const nativeTimer = live.window.setTimeout;
+    live.window.setTimeout = ((callback: () => void, milliseconds?: number) =>
+      milliseconds === 2500 ? 0 : nativeTimer(callback, milliseconds)) as typeof live.window.setTimeout;
     const toggle = live.document.createElement('button'); toggle.setAttribute('aria-label', '一時チャット'); toggle.innerHTML = '<svg><use href="/sprite.svg#chat-temp-checked"></use></svg>'; Object.defineProperty(toggle, 'getClientRects', { value: () => [{}] }); live.document.body.append(toggle);
     live.document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
       userTurn(live!.document, 'temp-user', text);
@@ -3945,6 +3950,50 @@ describe('desktop input delivery and helper ownership', () => {
     live.hook.observe(); await settle();
     expect(live.sent.filter(message => message.type === 'desktop_input' && message.response)).toHaveLength(results.length);
   });
+
+  it.each(['continue', 'stop', 'navigated'] as const)(
+    'settles an exact quiet Temporary Chat helper without another observation (%s)', async state => {
+      const response = state === 'stop' ? '{"action":"stop","reply":""}'
+        : '{"action":"continue","reply":"Continue the exact accepted task."}';
+      live = await harness(`https://chatgpt.com/?temporary-chat=true&cos-input=${inputId}`, {
+        desktop_input: message => ({ ok: true, data: message.authorize || message.ack || message.response
+          ? { ok: true } : { input: claimed({ purpose: 'decision', lifetime: 'temporary-planner' }) } })
+      });
+      Object.defineProperty(live.document, 'visibilityState', { configurable: true, value: 'hidden' });
+      const toggle = live.document.createElement('button');
+      toggle.setAttribute('aria-label', 'Turn off temporary chat');
+      toggle.innerHTML = '<svg><use href="/sprite.svg#chat-temp-checked"></use></svg>';
+      Object.defineProperty(toggle, 'getClientRects', { value: () => [{}] });
+      live.document.body.append(toggle);
+      const nativeSend = vi.fn(() => {
+        userTurn(live!.document, 'quiet-helper-user', text);
+        live!.document.querySelector('#prompt-textarea')!.textContent = '';
+      });
+      live.document.querySelector('[data-testid="send-button"]')!.addEventListener('click', nativeSend);
+      expect(await live.runtimeMessage({ type: 'clf-desktop-input', id: inputId,
+        conversationId: null, lifetime: 'temporary-planner' })).toEqual({ ok: true });
+      const timer = live.window.setTimeout;
+      const deadlines: Array<() => void> = [];
+      live.window.setTimeout = ((callback: () => void, milliseconds?: number) => {
+        if (milliseconds === 2500) { deadlines.push(callback); return 0; }
+        return timer(callback, milliseconds);
+      }) as typeof live.window.setTimeout;
+      prose(live.document, assistantTurn(live.document, 'quiet-helper-final', []), 'quiet-helper-message', response);
+      live.hook.observe(); await settle();
+      expect(live.sent.filter(message => message.response)).toEqual([]);
+      // Periodic loops are disabled by the real-content harness. No observe, Fiber reply or
+      // status poll is allowed to provide the missing second pass for this assertion.
+      expect(deadlines).toHaveLength(1);
+      if (state === 'navigated') {
+        live.dom.reconfigure({ url: `https://chatgpt.com/c/${chatB}` });
+        live.document.querySelector('[data-turn-id="quiet-helper-user"]')!.remove();
+      }
+      live.advance(2500); deadlines.shift()!(); await settle();
+      expect(live.sent.filter(message => message.response)).toEqual(state === 'navigated' ? [] : [
+        expect.objectContaining({ id: inputId, owner: 'input-owner', response })
+      ]);
+      expect(nativeSend).toHaveBeenCalledOnce();
+    });
 
   it.each(['plain', 'fenced', 'code-controls', 'new-renderer'])('recovers one stable strict Temporary Chat decision when provider terminal metadata is absent (%s)', async (shape) => {
     const json = '{"action":"continue","reply":"Continue the exact accepted task."}';

@@ -93,7 +93,8 @@
   // Revision 90 distinguishes presentation-only retained errors from actionable evidence waits.
   // Revision 91 retires abandoned SPA claims without releasing a newer chat's lock.
   // Revision 92 retains current identity-refusal diagnostics across nonfinal reader states.
-  const RECORDER_VERSION = 94;
+  // Revision 95 schedules the exact quiet-helper stability recheck without changing acceptance.
+  const RECORDER_VERSION = 95;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -15587,8 +15588,12 @@
     }
     if (!validDesktopDecisionResponse(response)) { resetTemporaryDecisionDomCandidate(decision); return; }
     if (decision.domCandidate !== response) {
+      resetTemporaryDecisionDomCandidate(decision);
       decision.domCandidate = response;
       decision.domCandidateAt = Date.now();
+      // A finished hidden helper may never redraw. Reuse its document-owned check so
+      // stability is revalidated without another status/Fiber observation or native Send.
+      scheduleDesktopDecisionCheck(decision, TEMPORARY_DECISION_DOM_SETTLE_MS);
       return;
     }
     if (!decision.domCandidateAt || Date.now() - decision.domCandidateAt < TEMPORARY_DECISION_DOM_SETTLE_MS) return;
