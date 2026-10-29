@@ -2,10 +2,11 @@
 
 This is the real custom Chat On Steroids application and browser companion source, exported for code review and research. It is a clean-history code export, not an upstream release or a backup of anyone's chats.
 
-- Logical source provenance (NOT a public Git ref): `52d4cc10c79a0df4e5b0776cdb55547d2288a1a3`.
-- Logical source tree: `71223fe7cf113d244275530be0d8ae42ef5b5a2b`.
+- Logical source provenance (NOT a public Git ref): `253403d967e29ce457bd2002f49340a82ecd04cc`.
+- Logical source tree: `ed860684e4220e807f174272347eb4a80f7d1986`.
 - Export date: October 29, 2026.
 - Public blob URLs must use this mirror's OWN commit SHA. The logical source provenance above belongs to a different private history and will not resolve as a public Git ref.
+- Candidate observer100 is under full private strict qualification; it is NOT installed. It adds fixed, once-per-gate helper collection diagnostics through the existing owner-checked stage endpoint after native Send, with no new timers, retries, output acceptance or Send authority.3237 companion and19 focused Bridge checks passed; the current private99 predecessor was independently verified before updating only six activation fingerprints. Public export is source only.
 - Latest source-only follow-up: identity recovery now handles opaque native app namespaces using one exact paired app ID/link and matching connector surface. It does not mark calls completed or clear retained debt. Seven new current/prior-pair cases and487 adjacent reader cases passed in the controlled source; no new package or installation is claimed. Installed99 remains the separately qualified source15669591.
 - Current returned-research runtime (recorder/background99): exact helper archive custody survives acceptance-owner retirement, recorder fallback retains its captured acceptance owner, and a verified current answer outranks only a stale typed evidence-failure draft. Prior debt and real provider/Pause/approval/outgoing holds remain binding.
 - Private qualification for the installed source15669591 (not the source-only follow-up above) passed96 preliminary and12616 Main tests (61 existing skips), followed by33 post-pin checks and exact-package readiness. Private installation then completed normal NSIS and independent protected-state/full-program verification before successor launch. This source export is not a public binary release. Executing Chrome cohort and useful automatic successor remain UNVERIFIED.

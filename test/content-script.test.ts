@@ -3959,6 +3959,11 @@ describe('desktop input delivery and helper ownership', () => {
     expect(live.sent.filter(message => message.response)).toEqual([expect.objectContaining({ response: canonical })]);
     await live.hook.flush();
     expect(live.sent.filter(message => message.type === 'events')).toEqual([]);
+    const collectionStages = live.sent.filter(message => message.stage?.startsWith('answer:')).map(message => message.stage);
+    expect(collectionStages.filter(code => code === 'answer:publication-start')).toHaveLength(1);
+    expect(collectionStages.filter(code => code === 'answer:publication-accepted')).toHaveLength(1);
+    expect(collectionStages.every(code => /^answer:[a-z-]+$/.test(code))).toBe(true);
+    expect(JSON.stringify(collectionStages)).not.toContain(canonical);
     await settle();
     if (providerId) expect(preAckClose).toMatchObject({ safe: true, temporary: true, conversationId: providerId });
     // ChatGPT assigns the helper its server route and drops cos-input after Send. The exact

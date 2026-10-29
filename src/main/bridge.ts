@@ -5833,8 +5833,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     if (route === '/input/stage') {
       const stage = typeof body.stage === 'string' && /^[a-z][a-z0-9:_-]{0,63}$/i.test(body.stage)
         ? body.stage : null;
+      const collectionStage = stage && /^answer:(waiting-tools|stopped|user-binding|assistant-missing|assistant-scope|terminal-missing|native-scope|user-fiber-scope|empty-answer|envelope-invalid|dom-settling|publication-start|publication-accepted|publication-unacknowledged)$/.test(stage);
+      // Read-only progress for the same acknowledged helper, never Send/retry authority.
       const entry = (await listInputs()).find(row => row.id === body.id && row.owner === body.owner &&
-        ['browser', 'sent'].includes(row.state));
+        (['browser', 'sent'].includes(row.state) || collectionStage && liveDeliveredBrowserDecision(row)));
       if (!stage || !entry) return json(res, 409, { error: 'input_stage_not_owned' }, origin);
       logInfo(`input ${body.id}: browser stage ${stage}`);
       return json(res, 200, { ok: true }, origin);

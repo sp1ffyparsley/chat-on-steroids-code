@@ -95,7 +95,8 @@
   // Revision 92 retains current identity-refusal diagnostics across nonfinal reader states.
   // Revision 95 schedules the exact quiet-helper stability recheck without changing acceptance.
   // Revision 96 fences asynchronous status/startup effects to the current recorder and account intent.
-  const RECORDER_VERSION = 99;
+  // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
+  const RECORDER_VERSION = 100;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -15305,22 +15306,40 @@
     return Boolean((desktopDecisionSession && desktopDecisionSession.conversationId === CLF_DOM.conversationId()) || desktopDecision?.onTarget());
   }
   const DESKTOP_DECISION_ACK_RETRY_DELAYS_MS = [2500, 5000, 15000];
+  const DESKTOP_DECISION_COLLECTION_STAGES = new Set([
+    'waiting-tools', 'stopped', 'user-binding', 'assistant-missing', 'assistant-scope',
+    'terminal-missing', 'native-scope', 'user-fiber-scope', 'empty-answer', 'envelope-invalid',
+    'dom-settling', 'publication-start', 'publication-accepted', 'publication-unacknowledged'
+  ]);
+  /** One fixed-code observation per gate for this exact delivered helper; no result/Send authority. */
+  function noteDesktopDecisionCollection(decision, code) {
+    if (!decision?.temporary || desktopDecision !== decision || !decision.messageId ||
+        !decision.onTarget() || !DESKTOP_DECISION_COLLECTION_STAGES.has(code)) return;
+    const seen = decision.collectionStages || (decision.collectionStages = new Set());
+    if (seen.has(code)) return;
+    seen.add(code);
+    void ask({ type: 'desktop_input', id: decision.id, owner: decision.owner,
+      stage: 'answer:' + code }).catch(() => undefined);
+  }
   function publishDesktopDecision(decision) {
     if (desktopDecision !== decision || decision.accepted || decision.publishing || !decision.response ||
         (!decision.conversationId && !decision.temporary) || !decision.onTarget() ||
         Date.now() < (decision.nextPublishAt || 0)) return;
     clearDesktopDecisionCheck(decision);
     decision.publishing = true;
+    noteDesktopDecisionCollection(decision, 'publication-start');
     decision.nextPublishAt = Date.now() + 2500;
     const noteUnacknowledged = () => {
       if (decision.publicationWarning) return;
       decision.publicationWarning = true;
+      noteDesktopDecisionCollection(decision, 'publication-unacknowledged');
       console.warn('[Chat On Steroids] Helper result acknowledgement missing; retaining the exact result for bounded owner retry.', decision.id);
     };
     void ask({ type: 'desktop_input', id: decision.id, owner: decision.owner, lifetime: decision.temporary ? 'temporary-planner' : undefined, response: decision.response }).then((reply) => {
       if (reply?.data?.ok === true && desktopDecision === decision && decision.onTarget()) {
         // Keep the exact receipt if immediate closure was vetoed; maintenance may retire it.
         // Its owner/text proves later safe closure without publishing the answer twice.
+        noteDesktopDecisionCollection(decision, 'publication-accepted');
         if (decision.temporary) decision.accepted = true;
         else desktopDecision = null;
         if (decision.publicationWarning) console.info('[Chat On Steroids] Retained helper result acknowledged.', decision.id);
@@ -15683,11 +15702,15 @@
       if (publishSettledEmptyDecision(decision, assistant.id)) return;
       resetTemporaryDecisionDomCandidate(decision); return;
     }
-    if (!validDesktopDecisionResponse(response)) { resetTemporaryDecisionDomCandidate(decision); return; }
+    if (!validDesktopDecisionResponse(response)) {
+      noteDesktopDecisionCollection(decision, 'envelope-invalid');
+      resetTemporaryDecisionDomCandidate(decision); return;
+    }
     if (decision.domCandidate !== response) {
       resetTemporaryDecisionDomCandidate(decision);
       decision.domCandidate = response;
       decision.domCandidateAt = Date.now();
+      noteDesktopDecisionCollection(decision, 'dom-settling');
       // A finished hidden helper may never redraw. Reuse its document-owned check so
       // stability is revalidated without another status/Fiber observation or native Send.
       scheduleDesktopDecisionCheck(decision, TEMPORARY_DECISION_DOM_SETTLE_MS);
@@ -15700,7 +15723,11 @@
   }
   function completeDesktopDecision() {
     const decision = desktopDecision;
-    if (!decision?.messageId || !decision.onTarget() || pendingTools > 0 || userStopped) return;
+    if (!decision?.messageId || !decision.onTarget()) return;
+    if (pendingTools > 0 || userStopped) {
+      noteDesktopDecisionCollection(decision, userStopped ? 'stopped' : 'waiting-tools');
+      return;
+    }
     // Temporary helpers intentionally do not record transcripts. Their native account
     // restriction must still reach Main through the same exact owned failure receipt,
     // even when the provider rendered no assistant answer. Never click its Retry.
@@ -15725,12 +15752,17 @@
     }
     const userDropped = decision.temporary && userIndex < 0 && pageTurns.length === 1 &&
       pageTurns[0].role === 'assistant';
-    if ((!userDropped && (userIndex < 0 || messages[userIndex].id !== decision.messageId)) ||
-        assistant?.role !== 'assistant' ||
-        !assistant.id || !assistant.node?.isConnected || isStale(assistant.node) || retiredMessages.has(assistant.id)) return;
+    if (!userDropped && (userIndex < 0 || messages[userIndex].id !== decision.messageId)) {
+      noteDesktopDecisionCollection(decision, 'user-binding'); return;
+    }
+    if (assistant?.role !== 'assistant' || !assistant.id || !assistant.node?.isConnected ||
+        isStale(assistant.node) || retiredMessages.has(assistant.id)) {
+      noteDesktopDecisionCollection(decision, 'assistant-missing'); return;
+    }
     const pageTurn = pageTurns.at(-1);
     const nodes = pageTurn?.nodes || (pageTurn?.node ? [pageTurn.node] : []);
     if (pageTurn?.role !== 'assistant' || !nodes.some(node => node.contains(assistant.node))) {
+      noteDesktopDecisionCollection(decision, 'assistant-scope');
       resetTemporaryDecisionDomCandidate(decision); return;
     }
     // React may replace the section after local turn_end but before canonical final text.
@@ -15738,6 +15770,7 @@
     // section, reusable data-turn-id or previous terminal must never own the helper result.
     const turn = stampedFiberTurn(pageTurn, [...fiberTurns.values()], fiberScanToken);
     if (!turn?.endMessageId) {
+      noteDesktopDecisionCollection(decision, 'terminal-missing');
       completeSettledTemporaryDecisionFromDom(decision, messages, pageTurn);
       return;
     }
@@ -15750,6 +15783,7 @@
     const callsOpen = (turn.calls || []).some(call => call.answered !== true);
     if (turn.conversationConflict || turn.endMessageId !== assistant.id ||
         (callsOpen && !(userDropped && !CLF_DOM.generating()))) {
+      noteDesktopDecisionCollection(decision, 'native-scope');
       resetTemporaryDecisionDomCandidate(decision); return;
     }
     const providerFailure = decisionHasRecoverableProviderFailure(decision, pageTurn);
@@ -15768,6 +15802,7 @@
         if (!user || user.conversationConflict || user.conversationId !== turn.conversationId ||
             !(user.messages || []).some(message => message.role === 'user' &&
               (message.rawMessageId === decision.messageId || message.messageId === decision.messageId))) {
+          noteDesktopDecisionCollection(decision, 'user-fiber-scope');
           resetTemporaryDecisionDomCandidate(decision); return;
         }
       } else if (!decision.temporaryProviderConversationWitnessed ||

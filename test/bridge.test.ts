@@ -19958,6 +19958,33 @@ describe('delivering a bootstrap', () => {
     }
   });
 
+  it.each(['owned', 'foreign-owner', 'unknown-code'] as const)('records a native-Sent helper collection stage without changing custody (%s)', async variant => {
+    await pair();
+    const input = await import('../src/main/session/input.js');
+    const controller = new AbortController();
+    const sourceId = 'collection-stage-' + randomUUID();
+    const pending = input.requestBrowserDecision('Choose only for this existing native source.', controller.signal,
+      { sourceSessionId: sourceId, sourceTurnId: 'collection-stage-turn', lifetime: 'temporary-planner',
+        onAccepted: async () => null });
+    const finished = pending.catch(error => String(error));
+    let row: Awaited<ReturnType<typeof input.listInputs>>[number] | undefined;
+    try {
+      await vi.waitFor(async () => { row = (await input.listInputs()).find(item => item.decisionSourceSessionId === sourceId); expect(row).toBeDefined(); });
+      const owner = 'collection-stage-owner';
+      expect((await request('POST', '/input/claim', { body: { id: row!.id, owner, conversationId: null, requiresAuthorization: true } })).status).toBe(200);
+      expect((await request('POST', '/input/claim', { body: { id: row!.id, owner, conversationId: null, authorize: true } })).body.ok).toBe(true);
+      expect((await request('POST', '/input/ack', { body: { id: row!.id, owner, conversationId: null, messageId: randomUUID() } })).body.ok).toBe(true);
+      const before = await input.listInputs();
+      expect(before.find(item => item.id === row!.id)?.state).toBe('decision');
+      const result = await request('POST', '/input/stage', { body: { id: row!.id,
+        owner: variant === 'foreign-owner' ? 'other-page' : owner,
+        stage: variant === 'unknown-code' ? 'answer:private-provider-text' : 'answer:terminal-missing' } });
+      expect(result.status).toBe(variant === 'owned' ? 200 : 409);
+      expect(await input.listInputs()).toEqual(before);
+      expect((await request('GET', '/status')).body.inputs).not.toContainEqual(expect.objectContaining({ sourceHelperId: row!.id }));
+    } finally { controller.abort(); await finished; }
+  });
+
   it('keeps an explicit composer message deliverable while automation is globally paused', async () => {
     const previous = getConfig();
     const { enqueueInput, listInputs, resetInputForTests } = await import('../src/main/session/input.js');
