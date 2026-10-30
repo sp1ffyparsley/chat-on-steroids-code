@@ -210,8 +210,10 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
   });
 
   it('does not check the frame for semantic refs, which do not use coordinates', async () => {
-    const stale = await screenshot({ window: fixtureWindow, maxWidth: 320 });
-    await screenshot({ window: fixtureWindow, maxWidth: 320 });
+    // Semantic-ref validation is independent of window geometry. Keep these frames real
+    // without coupling UNKNOWN_UI_REF to a transient owned-window capture.
+    const stale = await screenshot({ maxWidth: 320 });
+    await screenshot({ maxWidth: 320 });
     // Nothing here should mention the frame: the failure must be about the ref itself.
     await expect(
       act([{ type: 'click_ref', ref: 'g1_e999999_999999' }], { frameId: stale.frameId })
