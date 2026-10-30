@@ -465,6 +465,8 @@ interface GoalDraft extends Omit<GoalDraftView, 'retryable'> {
   sessionId: string;
   /** Pickup episode frozen before the external decision request begins. */
   sourceAcceptedAt: number | null;
+  /** Stable reply identity for read-only hold projection; never an action grant. */
+  sourceReplyId: string | null;
   endpoint: GoalEndpoint;
   reasoning: GoalReasoning;
   /** Frozen with the draft, just like its model, so one request never mixes two settings saves. */
@@ -725,12 +727,14 @@ export function restoreGoalReplies(snapshot: GoalRepliesSnapshot | null): void {
       raw.missingMcpDetectedAt! >= acceptedAt && raw.missingMcpDetectedAt! <= now + GOAL_RESTORE_FUTURE_SKEW_MS
       ? Math.min(raw.missingMcpDetectedAt!, now)
       : null;
-    const helperFailureCount = raw.state === 'pending' && Number.isSafeInteger(raw.helperFailureCount) &&
+    // Off and a refused activation can retain this exact reply's spent budget.
+    // Its failure predates a later pickup epoch; neither transition grants a refund.
+    const helperFailureCount = Number.isSafeInteger(raw.helperFailureCount) &&
       raw.helperFailureCount! > 0 && raw.helperFailureCount! <= MAX_AUTOMATIC_BROWSER_HELPER_FAILURES
       ? raw.helperFailureCount!
       : null;
     const helperFailureAt = helperFailureCount !== null && Number.isSafeInteger(raw.helperFailureAt) &&
-      raw.helperFailureAt! >= acceptedAt && raw.helperFailureAt! <= now + GOAL_RESTORE_FUTURE_SKEW_MS
+      raw.helperFailureAt! > 0 && raw.helperFailureAt! <= now + GOAL_RESTORE_FUTURE_SKEW_MS
       ? Math.min(raw.helperFailureAt!, now)
       : null;
     goalReplies.set(raw.conversationId, {
@@ -1742,7 +1746,16 @@ export function goalViewFor(conversationId: string, clientId?: string): GoalDraf
   const draft = drafts.get(conversationId);
   if (!draft) return null;
   expireDraftPayload(draft);
-  if (clientId !== undefined && draft.clientId !== clientId) return null;
+  if (clientId !== undefined && draft.clientId !== clientId) {
+    const pending = goalPendingReplyFor(conversationId);
+    // A replacement page may explain this exact native hold, never inherit its
+    // writer. All action owners retain their original client/token checks.
+    if (draft.backend !== 'chatgpt' || !isAutomaticDecisionHoldCode(draft.error) || !settledFailure(draft) ||
+        draft.sourceAcceptedAt === null || !draft.sourceReplyId || !pending ||
+        pending.sessionId !== draft.sessionId || pending.turnId !== draft.turnId ||
+        pending.replyId !== draft.sourceReplyId || pending.acceptedAt !== draft.sourceAcceptedAt) return null;
+    return { ...view(draft), text: '', reply: '' };
+  }
   // An acknowledged draft has already been acted on — typed, or decided against. It is kept
   // here only so the turn it belongs to cannot be drafted a second time, and reporting it
   // would leave the page polling fast and the panel above the composer describing something
@@ -2507,6 +2520,8 @@ export function startGoalDraft(input: StartGoalDraftInput): GoalDraftView {
     sessionId: input.sessionId,
     sourceAcceptedAt: reply?.state === 'pending' && reply.sessionId === input.sessionId &&
       reply.turnId === input.turnId ? reply.acceptedAt : null,
+    sourceReplyId: reply?.state === 'pending' && reply.sessionId === input.sessionId &&
+      reply.turnId === input.turnId ? reply.replyId : null,
     backend,
     endpoint: goalEndpoint(),
     reasoning: settings.reasoning,

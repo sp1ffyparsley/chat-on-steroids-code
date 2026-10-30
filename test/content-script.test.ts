@@ -29304,8 +29304,8 @@ describe('the goal loop', () => {
     expect(live.hook.goalStageView({ mode: 'loop', phase: 'settling', wait: {
       reason: 'pickup', until: Date.now() + 18_000
     } })).toMatchObject({
-      stage: 'Loop waiting to send · reply saved',
-      steps: ['Reply saved', 'Waiting to send'], at: 1, done: false
+      stage: 'Loop continuation pending · reply retained',
+      steps: ['Reply retained', 'Decision pending'], at: 1, done: false
     });
   });
 

@@ -27262,7 +27262,7 @@ describe('unattributed activity recovery', () => {
       expect(sessionInputActivity((await getSession(sessionId))!)).toMatchObject({ exact: false, possible: false });
       expect((await sessionControlsFor(sessionId)).goalWait).toMatchObject({
         reason: 'pickup',
-        detail: expect.stringContaining('sending is not confirmed'),
+        detail: expect.stringContaining('does not confirm a prepared or sent message'),
         nextAction: expect.stringContaining('not proof that the task is working')
       });
       expect((await request('GET', `/activity?conversationId=${chat}`)).body.goal.wait).toMatchObject({
@@ -27758,7 +27758,7 @@ describe('unattributed activity recovery', () => {
       if (state === 'settled') {
         expect(controls.goalWait).toMatchObject({
           reason: 'pickup',
-          detail: expect.stringContaining('sending is not confirmed')
+          detail: expect.stringContaining('does not confirm a prepared or sent message')
         });
         expect(drafted.status).toBe(200);
       } else {

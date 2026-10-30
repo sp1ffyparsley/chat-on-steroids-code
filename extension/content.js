@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 110;
+  const RECORDER_VERSION = 111;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -10803,13 +10803,13 @@
             wait?.reason === 'cooldown' ? 'ChatGPT asked us to slow down · retrying shortly' : wait?.reason === 'capacity' ? `${automation} queued for an available chat slot` :
               wait?.reason === 'answer' ? `${automation} is on · waiting for this answer` : wait?.reason === 'recovery' ? `${automation} is on · recovering this completed answer` :
                 wait?.reason === 'idle' ? `${automation} is on · ready for the next completed answer` : wait?.reason === 'pickup'
-                  ? `${automation} waiting to send · reply saved` : 'Waiting for exact final/tool evidence';
+                  ? `${automation} continuation pending · reply retained` : 'Waiting for exact final/tool evidence';
       const capacity = wait?.reason === 'capacity' && Number.isFinite(wait.active) && Number.isFinite(wait.limit)
         ? `${wait.active} chats are active · limit ${wait.limit}` : '';
       const why = [wait?.detail || '', wait?.nextAction || '', capacity, clock].filter(Boolean).join(' · ');
       if (wait?.reason === 'pickup') {
         return { stage, detail: why, body: '', kind: 'goal',
-          steps: ['Reply saved', 'Waiting to send'], at: 1, done: false };
+          steps: ['Reply retained', 'Decision pending'], at: 1, done: false };
       }
       return { stage, detail: why, body: '', kind: 'goal', ...bar(0) };
     }

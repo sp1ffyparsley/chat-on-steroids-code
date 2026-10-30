@@ -13237,11 +13237,11 @@ async function goalWaitFor(conversationId: string, sessionId: string, now = Date
     reason: 'pickup',
     ...(watch && watch.dueAt > now ? { until: watch.dueAt } : {}),
     detail: settledForward
-      ? 'The native reply is settled and this Goal/Loop permits a continuation after saved-state reconciliation. Individual tool receipts remain unverified; sending is not confirmed.'
-      : 'The next message is saved, but sending is not confirmed. No active tool or native-busy hold was found for this reply.',
+      ? 'The native reply is settled and a Goal/Loop continuation decision is pending. Individual tool receipts remain unverified; this status does not confirm a prepared or sent message.'
+      : 'The reply is retained for a continuation decision; this status does not confirm a prepared or sent message. No active tool or native-busy hold was found for this reply.',
     nextAction: watch
       ? 'CoS will check this chat again at the countdown. This wait is not proof that the task is working.'
-      : 'CoS is waiting for this chat to be ready to receive the saved message. This wait is not proof that the task is working.'
+      : 'CoS is waiting to reconcile this chat\'s pending continuation decision. This wait is not proof that the task is working.'
   };
 }
 

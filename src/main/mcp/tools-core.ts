@@ -262,7 +262,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
   const { ctx, caps, exposedCaps } = reg;
   if (exposedCaps.read || exposedCaps.browse || exposedCaps.metadata || exposedCaps.command) reg.register('settings_read', toolDeclaration('settings_read', () => ({
     title: 'Inspect account settings',
-    description: 'Read editable preferences, schema, revision, account identity and connection status. Full inspection uses local background controls.',
+    description: 'Read preferences/schema/revision/status. instanceId is this Core caller; sharedPreferences.owner governs shared edits. Profile/paths omitted.',
     inputSchema: z.object({}).strict(),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   })), async () => guard('settings_read', async () => {
