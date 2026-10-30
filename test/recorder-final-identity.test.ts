@@ -150,6 +150,51 @@ it.each([false, true])('treats a native activity label revision as presentation 
   expect((await getSession(opened.sessionId!))?.lastTurnOutcome).toBe(newer ? 'failed' : 'completed');
 });
 
+// This branch uses durable finishTurn/workSeq rather than upstream timelineTurns/readCompletedFinal.
+it.each([
+  { outcome: 'completed' as const, restart: false }, { outcome: 'completed' as const, restart: true },
+  { outcome: 'stopped' as const, restart: false }, { outcome: 'stopped' as const, restart: true }
+])('retains a late ended-turn note without renewing Goal work ($outcome, restart=$restart)', async ({ outcome, restart }) => {
+  const conversationId = 'late-ended-note-' + outcome + '-' + restart;
+  const opened = await recordChatObservations(conversationId, [
+    { kind: 'user_message', time: 9, messageId: 'question', text: 'Inspect the existing source.' },
+    { kind: 'turn_start', time: 10, turnId: 'settled-turn' },
+    { kind: 'assistant_message', time: 11, turnId: 'settled-turn', messageId: 'settled-final',
+      providerMessageId: 'native-settled-final', text: 'Source checked.', final: true, state: 'final', activeNow: true },
+    { kind: 'turn_end', time: 12, turnId: 'settled-turn', outcome }
+  ]);
+  const before = await getSession(opened.sessionId!);
+  expect(before?.finishTurn).toBeTruthy();
+  if (restart) { await flushSessions(); resetRecorderForTests(); resetSessionStoreForTests(); }
+  const result = await recordChatObservations(conversationId, [{ kind: 'assistant_message', time: 20,
+    turnId: 'settled-turn', messageId: 'late-note', providerMessageId: 'native-late-note',
+    text: 'I will inspect the source first.', state: 'streaming', activeNow: true }]);
+  expect(result.activity).toMatchObject({ meaningful: false, working: false, terminal: false });
+  const after = await getSession(opened.sessionId!);
+  expect(after?.activeTurnId).toBeNull();
+  expect(after?.lastTurnOutcome).toBe(outcome);
+  expect(after?.finishTurn?.workSeq).toBe(before?.finishTurn?.workSeq);
+  expect((await readEvents(opened.sessionId!, { kinds: ['assistant_message'] })).find(row =>
+    row.kind === 'assistant_message' && row.messageId === 'late-note')).toMatchObject({ message: { text: 'I will inspect the source first.' } });
+});
+
+it.each([false, true])('counts a fresh thinking-failure note as real resumed work (restart=%s)', async restart => {
+  const conversationId = 'fresh-thinking-note-' + restart;
+  const opened = await recordChatObservations(conversationId, [
+    { kind: 'turn_start', time: 10, turnId: 'thinking-turn' },
+    { kind: 'turn_end', time: 12, turnId: 'thinking-turn', outcome: 'failed', reason: 'thinking_failed' }
+  ]);
+  const before = await getSession(opened.sessionId!);
+  if (restart) { await flushSessions(); resetRecorderForTests(); resetSessionStoreForTests(); }
+  const result = await recordChatObservations(conversationId, [{ kind: 'assistant_message', time: 20,
+    turnId: 'thinking-turn', messageId: 'fresh-note', text: 'The current source is now available.',
+    state: 'streaming', activeNow: true }]);
+  expect(result.activity.working).toBe(true);
+  const after = await getSession(opened.sessionId!);
+  expect(after?.activeTurnId).toBe('thinking-turn');
+  expect(after?.finishTurn?.workSeq).toBeGreaterThan(before?.finishTurn?.workSeq ?? 0);
+});
+
 it.each([false, true])('records stopped partial-answer revisions without restoring activity (restart=%s)', async restart => {
   const conversationId = `stopped-partial-${restart}`;
   const opened = await recordChatObservations(conversationId, [

@@ -3207,6 +3207,8 @@
     // from an unreadable Fiber owner. No ids, labels, message text or React values cross worlds.
     const shellScan = { selectorMatches: 0, mapped: 0,
       rejects: { fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0,
+        // Observed zero is distinct from an older producer omitting the field.
+        callRequestIdPresent: 0, callRequestIdMissing: 0,
         callCompletionVeto: 0, callLiveMappingMissing: 0, callLiveMappingConflict: 0, callPathMissing: 0,
         callReceiptMissing: 0, callReceiptConflict: 0, callNativePending: 0, callScopeConflict: 0, callExecUnresolved: 0,
         callVetoReceiptChecked: 0, callVetoReceiptMatched: 0,

@@ -1575,6 +1575,13 @@ async function ensureOpen(id: string): Promise<OpenSession> {
 /** A hold-call result or app status is not evidence of new work. */
 function noteFinishWork(summary: SessionSummary, event: SessionEvent): void {
   if (!summary.finishTurn || (event.turnId && event.turnId !== summary.finishTurn.turnId)) return;
+  // ChatGPT draws a finished turn's steps as one collapsed group, so a progress note written before
+  // its tool calls can reach the page only after the turn ended. Kept in history, but it must not
+  // raise the finish turn's work stamp: after a restart that stamp looked like new work and the same
+  // settled answer was decided again forever. A turn that opens again counts its notes.
+  if (event.kind === 'assistant_message' && event.final !== true && event.state !== 'final' && !!event.turnId &&
+      summary.activeTurnId !== event.turnId &&
+      (summary.lastTurnOutcome === 'completed' || summary.lastTurnOutcome === 'stopped')) return;
   const meaningful = event.kind === 'user_message' || event.kind === 'assistant_message' ||
     (event.kind === 'progress' && event.source !== 'app') ||
     (event.kind === 'tool_call' && !['keep_astra_on_forever', 'session_finish'].includes(event.call.tool));

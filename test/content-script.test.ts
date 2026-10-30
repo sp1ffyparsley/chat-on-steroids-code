@@ -3983,6 +3983,88 @@ describe('desktop input delivery and helper ownership', () => {
       .toMatchObject({ safe: false });
   });
 
+  it.each(['accepted', 'delayed', 'rejected', 'navigation'] as const)('re-ACKs a route-less Temporary Chat helper before publishing its answer (%s)', async shape => {
+    // Live defect: ChatGPT accepts the helper Send while the page is still on `/`, then assigns
+    // `/c/<id>`. The durable receipt keeps conversationId null, and Main's only route binder for
+    // an already-acknowledged helper is a SECOND ACK from the same claimed page. Without that
+    // producer every later publish carries the tab's concrete route against a route-less row, so
+    // the finished answer is refused, archived at best, and the Goal reports an expiry the
+    // operator can see solved on screen. One proven join, one re-ACK, no new Send.
+    const canonical = '{"action":"continue","reply":"temporary result"}';
+    const routed = 'f0f00026-6666-4666-8666-666666666666';
+    let nativeSends = 0;
+    let releaseRouteAck: ((value: unknown) => void) | null = null;
+    live = await harness(`https://chatgpt.com/?temporary-chat=true&cos-input=${inputId}`, {
+      desktop_input: message => {
+        if (message.ack && message.conversationId === routed) {
+          if (shape === 'rejected') return { ok: true, data: { ok: false } };
+          if (shape === 'delayed' || shape === 'navigation')
+            return new Promise(resolve => { releaseRouteAck = resolve; });
+        }
+        return { ok: true, data: message.authorize || message.ack || message.response
+          ? { ok: true } : { input: claimed({ purpose: 'decision', lifetime: 'temporary-planner' }) } };
+      }
+    });
+    const toggle = live.document.createElement('button');
+    toggle.setAttribute('aria-label', 'Temporary chat');
+    toggle.innerHTML = '<svg><use href="/sprite.svg#chat-temp-checked"></use></svg>';
+    Object.defineProperty(toggle, 'getClientRects', { value: () => [{}] });
+    live.document.body.append(toggle);
+    live.document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
+      nativeSends += 1;
+      userTurn(live!.document, 'temp-user', text);
+      live!.document.querySelector('#prompt-textarea')!.textContent = '';
+    });
+    expect(await live.runtimeMessage({ type: 'clf-desktop-input', id: inputId, conversationId: null }))
+      .toEqual({ ok: true });
+    const acks = () => live!.sent.filter(message => message.type === 'desktop_input' && message.ack);
+    expect(acks()).toEqual([expect.objectContaining({ id: inputId, owner: 'input-owner',
+      conversationId: null, messageId: 'm-temp-user', lifetime: 'temporary-planner' })]);
+
+    // The markerless provider route is the same elected helper only while its single authored
+    // user row proves it, so give the page both the URL and the matching Fiber identity.
+    live.dom.reconfigure({ url: `https://chatgpt.com/c/${routed}` });
+    live.hook.observe();
+    await settle();
+    const userSection = live.document.querySelector('[data-turn-id="temp-user"]') as HTMLElement;
+    const section = assistantTurn(live.document, 'temp-final', []);
+    prose(live.document, section, 'temp-message', canonical);
+    live.hook.noteGoalTurn((live.window as any).CLF_DOM.turns()
+      .find((item: any) => item.id === 'temp-final'), 'completed', 'temp-final');
+    await bindFiberTurns([
+      { section: userSection, turn: { turnId: 'temp-user', conversationId: routed,
+        messages: [{ role: 'user', messageId: 'm-temp-user', rawMessageId: 'm-temp-user', rawText: text }] } },
+      { section, turn: { turnId: 'temp-final', conversationId: routed, endMessageId: 'temp-message',
+        messages: [{ role: 'assistant', messageId: 'temp-message', rawMessageId: 'temp-message', rawText: canonical }] } }
+    ]);
+    await settle();
+
+    expect(acks()).toEqual([
+      expect.objectContaining({ conversationId: null, messageId: 'm-temp-user' }),
+      ...Array.from({ length: shape === 'rejected' ? 4 : 1 }, () => expect.objectContaining({
+        id: inputId, owner: 'input-owner', conversationId: routed,
+        messageId: 'm-temp-user', lifetime: 'temporary-planner' }))
+    ]);
+    // A refusal spends only the existing initial+3 publication retries; all are
+    // the same idempotent receipt enrichment, with zero additional native Sends.
+    expect(nativeSends).toBe(1);
+    expect(live.sent.filter(message => message.type === 'desktop_input' && message.authorize))
+      .toHaveLength(1);
+    if (shape !== 'accepted') expect(live.sent.filter(message => message.response)).toEqual([]);
+    if (shape === 'delayed' || shape === 'navigation') {
+      expect(releaseRouteAck).not.toBeNull();
+      if (shape === 'navigation') {
+        live.dom.reconfigure({ url: 'https://chatgpt.com/c/f0f00027-7777-4777-8777-777777777777' });
+        live.hook.observe();
+      }
+      releaseRouteAck!({ ok: true, data: { ok: true } });
+      await settle();
+    }
+    expect(live.sent.filter(message => message.response)).toEqual(shape === 'accepted' || shape === 'delayed'
+      ? [expect.objectContaining({ id: inputId, response: canonical })] : []);
+    expect(nativeSends).toBe(1);
+  });
+
   it.each(['alone', 'stripped route after exact witness', 'stripped route / foreign navigation',
     'second answer', 'different route', 'same route / foreign Fiber', 'null Fiber identity',
     'missing terminal with dropped user', 'missing terminal / foreign Fiber', 'missing terminal / no witness',
@@ -17596,7 +17678,7 @@ describe('the Compact & resume control', () => {
       status: () => ({ connected: paired, paired, instanceId: paired ? 'profile-business' : null }),
       accountChoices: () => ({ ok: true, instanceId: null, accounts: [
         { instanceId: 'profile-business', name: 'Business', compatible: true },
-        { instanceId: 'profile-Epsilon', name: 'Epsilon', compatible: true }
+        { instanceId: 'profile-epsilon', name: 'Epsilon', compatible: true }
       ] }), pairTo
     });
     await live.hook.checkStatus();
@@ -17618,7 +17700,7 @@ describe('the Compact & resume control', () => {
   it.each(['accept', 'cancel', 'selection-changed', 'closed', 'wrong-target', 'extra-field', 'bad-digest', 'bad-count'])
     ('requires exact retained-history confirmation before pairing (%s)', async (mode) => {
       const offer = { version: 1, targetInstanceId: 'profile-business', snapshotDigest: 'a'.repeat(64), journalCount: 1, ordinaryCloseCount: 1 };
-      if (mode === 'wrong-target') offer.targetInstanceId = 'profile-Epsilon';
+      if (mode === 'wrong-target') offer.targetInstanceId = 'profile-epsilon';
       if (mode === 'extra-field') Object.assign(offer, { force: true });
       if (mode === 'bad-digest') offer.snapshotDigest = 'not-a-digest';
       if (mode === 'bad-count') offer.journalCount = -1;
@@ -17631,7 +17713,7 @@ describe('the Compact & resume control', () => {
         status: () => ({ connected: paired, paired, instanceId: paired ? 'profile-business' : null }),
         accountChoices: () => ({ ok: true, accounts: [
           { instanceId: 'profile-business', name: 'Business', compatible: true },
-          { instanceId: 'profile-Epsilon', name: 'Epsilon', compatible: true }
+          { instanceId: 'profile-epsilon', name: 'Epsilon', compatible: true }
         ] }), pairTo
       });
       await live.hook.checkStatus(); live.hook.injectControl(); live.hook.toggleMenu();
@@ -17641,7 +17723,7 @@ describe('the Compact & resume control', () => {
       const confirm = vi.spyOn(live.dom.window, 'confirm').mockImplementation(() => {
         if (mode === 'selection-changed') {
           const current = live!.document.querySelector('[aria-label="COS account"]') as HTMLSelectElement;
-          current.value = 'profile-Epsilon'; current.dispatchEvent(new live!.dom.window.Event('change', { bubbles: true }));
+          current.value = 'profile-epsilon'; current.dispatchEvent(new live!.dom.window.Event('change', { bubbles: true }));
         }
         if (mode === 'closed') live!.hook.closeMenu();
         return mode !== 'cancel';
@@ -17678,7 +17760,7 @@ describe('the Compact & resume control', () => {
       const accepts = ['accept', 'close-only'].includes(mode);
       const malformed = ['observations-only', 'wrong-target', 'extra-field', 'hidden-extra', 'accessor', 'bad-digest', 'bad-count', 'empty', 'wrong-key', 'missing-offer'].includes(mode);
       const getter = vi.fn(() => 1);
-      if (mode === 'wrong-target') offer.targetInstanceId = 'profile-Epsilon';
+      if (mode === 'wrong-target') offer.targetInstanceId = 'profile-epsilon';
       if (mode === 'extra-field') Object.assign(offer, { force: true });
       if (mode === 'hidden-extra') Object.defineProperty(offer, 'force', { value: true });
       if (mode === 'accessor') Object.defineProperty(offer, 'journalCount', { get: getter, enumerable: true });
@@ -17697,7 +17779,7 @@ describe('the Compact & resume control', () => {
         status: () => ({ connected: paired, paired, instanceId: paired ? 'profile-business' : null }),
         accountChoices: () => ({ ok: true, accounts: [
           { instanceId: 'profile-business', name: 'Business', compatible: true },
-          { instanceId: 'profile-Epsilon', name: 'Epsilon', compatible: true }
+          { instanceId: 'profile-epsilon', name: 'Epsilon', compatible: true }
         ] }), pairTo
       });
       await live.hook.checkStatus(); live.hook.injectControl(); live.hook.toggleMenu();
@@ -17707,7 +17789,7 @@ describe('the Compact & resume control', () => {
       const confirm = vi.spyOn(live.dom.window, 'confirm').mockImplementation(() => {
         if (mode === 'retarget') {
           const current = live!.document.querySelector('[aria-label="COS account"]') as HTMLSelectElement;
-          current.value = 'profile-Epsilon'; current.dispatchEvent(new live!.dom.window.Event('change', { bubbles: true }));
+          current.value = 'profile-epsilon'; current.dispatchEvent(new live!.dom.window.Event('change', { bubbles: true }));
         }
         if (mode === 'closed') live!.hook.closeMenu();
         if (mode === 'stale-document') {

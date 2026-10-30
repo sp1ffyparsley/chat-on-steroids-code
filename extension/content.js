@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 104;
+  const RECORDER_VERSION = 105;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -15327,6 +15327,7 @@
     if (desktopDecision !== decision || decision.accepted || decision.publishing || !decision.response ||
         (!decision.conversationId && !decision.temporary) || !decision.onTarget() ||
         Date.now() < (decision.nextPublishAt || 0)) return;
+    const response = decision.response;
     clearDesktopDecisionCheck(decision);
     decision.publishing = true;
     noteDesktopDecisionCollection(decision, 'publication-start');
@@ -15337,7 +15338,12 @@
       noteDesktopDecisionCollection(decision, 'publication-unacknowledged');
       console.warn('[Chat On Steroids] Helper result acknowledgement missing; retaining the exact result for bounded owner retry.', decision.id);
     };
-    void ask({ type: 'desktop_input', id: decision.id, owner: decision.owner, lifetime: decision.temporary ? 'temporary-planner' : undefined, response: decision.response }).then((reply) => {
+    void Promise.resolve(reacknowledgeHelperRoute(decision, decision.temporaryProviderConversation)).then(routeReady => {
+      if (routeReady === false || desktopDecision !== decision || decision.accepted ||
+          !decision.onTarget() || decision.response !== response) return null;
+      return ask({ type: 'desktop_input', id: decision.id, owner: decision.owner,
+        lifetime: decision.temporary ? 'temporary-planner' : undefined, response });
+    }).then((reply) => {
       if (reply?.data?.ok === true && desktopDecision === decision && decision.onTarget()) {
         // Keep the exact receipt if immediate closure was vetoed; maintenance may retire it.
         // Its owner/text proves later safe closure without publishing the answer twice.
@@ -15351,6 +15357,7 @@
       // only this idempotent result acknowledgement; it never clicks Send or opens a helper.
       noteUnacknowledged();
     }).finally(() => {
+      decision.routeReacknowledging = null;
       decision.publishing = false;
       if (desktopDecision !== decision || decision.accepted || !decision.response || !decision.onTarget()) return;
       // An idle helper may never redraw after a lost/refused acknowledgement. Reuse its
@@ -15666,7 +15673,35 @@
     }
     decision.temporaryProviderConversation = providerConversation;
     decision.temporaryProviderConversationWitnessed = true;
+    reacknowledgeHelperRoute(decision, providerConversation);
     return true;
+  }
+  function reacknowledgeHelperRoute(decision, providerConversation) {
+    if (!decision?.temporary || decision.conversationId ||
+        !decision.id || !decision.owner || !decision.messageId || !providerConversation ||
+        providerConversation !== CLF_DOM.conversationId() || !decision.onTarget()) return null;
+    if (decision.routeReacknowledged) return Promise.resolve(true);
+    if (decision.routeReacknowledging) return decision.routeReacknowledging;
+    const current = () => desktopDecision === decision && decision.onTarget() &&
+      CLF_DOM.conversationId() === providerConversation &&
+      decision.temporaryProviderConversationConflict !== true &&
+      decision.temporaryProviderConversationWitnessed === true &&
+      decision.temporaryProviderConversation === providerConversation;
+    if (!current()) return Promise.resolve(false);
+    // Coalesce this same receipt enrichment and require Main's positive ACK before
+    // publishing an answer against the learned route. It never performs another Send.
+    const work = ask({ type: 'desktop_input', id: decision.id, owner: decision.owner,
+      conversationId: providerConversation, messageId: decision.messageId,
+      lifetime: 'temporary-planner', ack: true }).then(reply => {
+      if (reply?.data?.ok !== true || !current()) return false;
+      decision.routeReacknowledged = true;
+      return true;
+    }, () => false).finally(() => {
+      // A refused ACK remains coalesced until the existing publication retry owns another attempt.
+      if (decision.routeReacknowledged && decision.routeReacknowledging === work) decision.routeReacknowledging = null;
+    });
+    decision.routeReacknowledging = work;
+    return work;
   }
   /**
    * Narrow recovery for a current Temporary Chat final whose provider Fiber descriptor never

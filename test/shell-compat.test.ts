@@ -71,6 +71,7 @@ const EMPTY_COMPLETION_VETO_STATUSES = Object.fromEntries(COMPLETION_VETO_STATUS
 const USER_PROJECTION_KEYS = ['userTypedMissing', 'userIdentityInvalid', 'userTextEmpty',
   'userTextUnsupported', 'userBudgetDropped', 'userProjected'] as const;
 const EMPTY_USER_PROJECTION = Object.fromEntries(USER_PROJECTION_KEYS.map(key => [key, 0]));
+const EMPTY_REQUEST_ID_SHAPES = { callRequestIdPresent: 0, callRequestIdMissing: 0 };
 
 interface ShellOptions {
   appIds?: { appId: string; linkId: string; surface: string; name: string }[];
@@ -1494,8 +1495,8 @@ describe('alternate shell turn/message provenance', () => {
       } });
     try {
       expect(page.fiber.turns[0].calls[0].answered).toBe(false);
-      expect(page.fiber.shellScan.rejects.callRequestIdPresent ?? 0).toBe(present ? 1 : 0);
-      expect(page.fiber.shellScan.rejects.callRequestIdMissing ?? 0).toBe(present ? 0 : 1);
+      expect(page.fiber.shellScan.rejects.callRequestIdPresent).toBe(present ? 1 : 0);
+      expect(page.fiber.shellScan.rejects.callRequestIdMissing).toBe(present ? 0 : 1);
       for (const sensitive of [REQUEST, CALL, RESULT, 'PRIVATE_TOOL_RESULT'])
         expect(JSON.stringify(page.fiber.shellScan)).not.toContain(sensitive);
     } finally { page.dom.window.close(); }
@@ -2672,7 +2673,7 @@ describe('alternate shell turn/message provenance', () => {
         selectorMatches: 1,
         mapped: 1,
         rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
-          ...EMPTY_USER_PROJECTION, ...EMPTY_VETO_RECEIPT_CHECKS, ...EMPTY_ASSISTANT_TERMINAL_RECEIPTS, userProjected: 1,
+          ...EMPTY_USER_PROJECTION, ...EMPTY_REQUEST_ID_SHAPES, ...EMPTY_VETO_RECEIPT_CHECKS, ...EMPTY_ASSISTANT_TERMINAL_RECEIPTS, userProjected: 1,
           fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0 }
       });
     } finally { page.dom.window.close(); }
@@ -2697,7 +2698,7 @@ describe('alternate shell turn/message provenance', () => {
         selectorMatches: 1,
         mapped: 1,
         rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
-          ...EMPTY_USER_PROJECTION, ...EMPTY_VETO_RECEIPT_CHECKS, ...EMPTY_ASSISTANT_TERMINAL_RECEIPTS, userProjected: 1,
+          ...EMPTY_USER_PROJECTION, ...EMPTY_REQUEST_ID_SHAPES, ...EMPTY_VETO_RECEIPT_CHECKS, ...EMPTY_ASSISTANT_TERMINAL_RECEIPTS, userProjected: 1,
           fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0 }
       });
     } finally { page.dom.window.close(); }
@@ -2716,7 +2717,7 @@ describe('alternate shell turn/message provenance', () => {
         selectorMatches: 1,
         mapped: 1,
         rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
-          ...EMPTY_USER_PROJECTION, ...EMPTY_VETO_RECEIPT_CHECKS, ...EMPTY_ASSISTANT_TERMINAL_RECEIPTS, userProjected: 1,
+          ...EMPTY_USER_PROJECTION, ...EMPTY_REQUEST_ID_SHAPES, ...EMPTY_VETO_RECEIPT_CHECKS, ...EMPTY_ASSISTANT_TERMINAL_RECEIPTS, userProjected: 1,
           fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0 }
       });
     } finally { page.dom.window.close(); }
@@ -2735,7 +2736,7 @@ describe('alternate shell turn/message provenance', () => {
         selectorMatches: 1,
         mapped: 0,
         rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
-          ...EMPTY_USER_PROJECTION, ...EMPTY_VETO_RECEIPT_CHECKS, ...EMPTY_ASSISTANT_TERMINAL_RECEIPTS,
+          ...EMPTY_USER_PROJECTION, ...EMPTY_REQUEST_ID_SHAPES, ...EMPTY_VETO_RECEIPT_CHECKS, ...EMPTY_ASSISTANT_TERMINAL_RECEIPTS,
           fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 1, itemsOverLimit: 0 }
       });
     } finally { page.dom.window.close(); }
@@ -2762,7 +2763,7 @@ describe('alternate shell turn/message provenance', () => {
           selectorMatches: 2,
           mapped,
           rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
-            ...EMPTY_USER_PROJECTION, ...EMPTY_VETO_RECEIPT_CHECKS, ...EMPTY_ASSISTANT_TERMINAL_RECEIPTS, userProjected: 1,
+            ...EMPTY_USER_PROJECTION, ...EMPTY_REQUEST_ID_SHAPES, ...EMPTY_VETO_RECEIPT_CHECKS, ...EMPTY_ASSISTANT_TERMINAL_RECEIPTS, userProjected: 1,
           fiberMissing: 0, ownerMissing: 0, stableKeyMismatch, itemsOverLimit: 0 }
         });
       } finally { page.dom.window.close(); }
@@ -2786,7 +2787,7 @@ describe('alternate shell turn/message provenance', () => {
         ...EMPTY_COMPLETION_VETO_STATUSES,
         ...EMPTY_VETO_RECEIPT_CHECKS,
         ...EMPTY_ASSISTANT_TERMINAL_RECEIPTS,
-        ...EMPTY_USER_PROJECTION,
+        ...EMPTY_USER_PROJECTION, ...EMPTY_REQUEST_ID_SHAPES,
         fiberMissing: 0,
         ownerMissing: 0,
         stableKeyMismatch: 1,
