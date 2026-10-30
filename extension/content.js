@@ -97,7 +97,8 @@
   // Revision 96 fences asynchronous status/startup effects to the current recorder and account intent.
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
-  const RECORDER_VERSION = 101;
+  // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
+  const RECORDER_VERSION = 102;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {

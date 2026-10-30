@@ -2140,6 +2140,50 @@
     };
     const typedUserId = typedUsers.length === 1
       ? str(typedUsers[0].messageId) || str(typedUsers[0].serverMessageId) : selectedNativeUser();
+    // Rendered entry IDs and native working/exchange IDs can use different namespaces.
+    // Use a native namespace only when an independent, exact current final anchors
+    // the entire mounted selected branch back to this typed native user. This
+    // recovers request identity only; every result/Code Mode receipt is still
+    // checked separately below before a call can become answered.
+    const mountedNativeScope = (() => {
+      if (!shell.calls.length || !live || !typedUserId || entry.turn.status !== 'complete' || !currentPath.length ||
+          currentPath[0] !== typedUserId || !currentPath.every(id => selected.has(id))) return null;
+      try {
+        const finals = entry.turn.items.filter(item => item?.type === 'assistant-message' && item.phase === 'final_answer');
+        if (finals.length !== 1) return null;
+        const finalId = str(finals[0].messageId);
+        if (!finalId || currentPath.at(-1) !== finalId) return null;
+        const terminal = shellProviderTerminalAt(mapping, finalId);
+        if (!terminal || shellItemText(finals[0]) !== terminal.text) return null;
+        const finalMeta = nativeField(messageAt(finalId), 'metadata');
+        const working = str(nativeField(finalMeta, 'working_turn_id'));
+        const exchange = str(nativeField(finalMeta, 'turn_exchange_id'));
+        if (!working || !exchange) return null;
+        for (let at = 0; at < currentPath.length; at++) {
+          const id = currentPath[at], node = nativeField(mapping, id), message = nativeField(node, 'message');
+          if (nativeField(node, 'id') !== id || nativeField(message, 'id') !== id) return null;
+          const role = nativeField(nativeField(message, 'author'), 'role');
+          if (at === 0) { if (role !== 'user') return null; continue; }
+          const metadata = nativeField(message, 'metadata');
+          const cachedNode = nativeField(nativeField(data, 'mapping'), id);
+          if (cachedNode && cachedNode !== node) {
+            const cachedMessage = nativeField(cachedNode, 'message'), cachedMeta = nativeField(cachedMessage, 'metadata');
+            if (nativeField(cachedNode, 'id') !== id || nativeField(cachedMessage, 'id') !== id ||
+                nativeField(cachedNode, 'parent') !== nativeField(node, 'parent') ||
+                ['parent_id', 'working_turn_id', 'turn_exchange_id', 'request_id'].some(key =>
+                  nativeField(cachedMeta, key) !== nativeField(metadata, key))) return null;
+          }
+          if ((role !== 'assistant' && role !== 'tool') ||
+              nativeField(node, 'parent') !== currentPath[at - 1] ||
+              nativeField(metadata, 'parent_id') !== currentPath[at - 1] ||
+              str(nativeField(metadata, 'working_turn_id')) !== working ||
+              str(nativeField(metadata, 'turn_exchange_id')) !== exchange) return null;
+        }
+        return { working, exchange };
+      } catch { return null; }
+    })();
+    const expectedWorkingTurn = mountedNativeScope?.working || shell.turnId;
+    const expectedTurnExchange = mountedNativeScope?.exchange || typedUserId;
     const typedExecIds = new Set(shell.executionIds);
     // A parent can be visited by many selected calls. Cache only its allowlisted path
     // during this synchronous scan, never args or a result across provider mutations.
@@ -2187,6 +2231,8 @@
       if (!typedUserId || !selected.has(typedUserId)) return refuse('callIdentityUserUnproved', [
         typedUserId ? 'currentQuestionUnselected' : 'currentQuestionMissing'
       ]);
+      if (mountedNativeScope && (!selected.has(call.messageId) || !currentIds.has(call.messageId)))
+        return refuse('callIdentityParentUnproved', ['nativeAncestryUnproved']);
       // The provider's optional mapping can contain accessors or malformed branches.
       // Only inspect own data fields and refuse that identity without losing this turn.
       try {
@@ -2213,8 +2259,8 @@
         if (!server) scopeReasons.push('serverMissing');
         if (path && server && !pathServerMatches) scopeReasons.push('serverMismatch');
         if (path && toolName(path) !== call.tool) scopeReasons.push('toolMismatch');
-        if (workingTurn !== shell.turnId) scopeReasons.push(workingTurn ? 'workingTurnMismatch' : 'workingTurnMissing');
-        if (turnExchange !== typedUserId) scopeReasons.push(turnExchange ? 'turnExchangeMismatch' : 'turnExchangeMissing');
+        if (workingTurn !== expectedWorkingTurn) scopeReasons.push(workingTurn ? 'workingTurnMismatch' : 'workingTurnMissing');
+        if (turnExchange !== expectedTurnExchange) scopeReasons.push(turnExchange ? 'turnExchangeMismatch' : 'turnExchangeMissing');
         if (scopeReasons.length) return refuse('callIdentityScopeUnproved', scopeReasons);
         // Later calls can follow a *previous* native tool result, whose parent is
         // its own invocation. This does not establish either call's completion: it
@@ -2288,9 +2334,9 @@
             const rowWorkingTurn = str(nativeField(rowMeta, 'working_turn_id'));
             const rowTurnExchange = str(nativeField(rowMeta, 'turn_exchange_id'));
             const rowScopeReasons = [];
-            if (rowWorkingTurn !== shell.turnId)
+            if (rowWorkingTurn !== expectedWorkingTurn)
               rowScopeReasons.push(rowWorkingTurn ? 'workingTurnMismatch' : 'workingTurnMissing');
-            if (rowTurnExchange !== typedUserId)
+            if (rowTurnExchange !== expectedTurnExchange)
               rowScopeReasons.push(rowTurnExchange ? 'turnExchangeMismatch' : 'turnExchangeMissing');
             if (rowScopeReasons.length) return refuse('callIdentityScopeUnproved', rowScopeReasons);
             if (isPreviousResult) {
@@ -2404,7 +2450,7 @@
               ` selectedCalls=${shape.selectedMissingCalls} nativeCalls=${shape.nativeMissingCalls}` +
               ` typedUser=${shape.typedUserPresent} selectedUser=${shape.typedUserSelected}` +
               ` requestIdPresent=${selectedRequestIdsPresent} requestIdMissing=${selectedRequestIdsMissing}` +
-              ` identityRefusals=${identityRefusalCalls}` +
+              ` identityRefusals=${identityRefusalCalls} nativeScope=${Boolean(mountedNativeScope)}` +
               ` identityReasons=${Object.entries(identityRefusalReasons).map(([kind, count]) => kind + ":" + count).join(',')}` +
               ` selectedResults=${selectedToolResults} witnessedResults=${witnessedToolResults}` +
               ` missingWithChild=${missingWithChild} missingWithWitness=${missingWithWitness}` +

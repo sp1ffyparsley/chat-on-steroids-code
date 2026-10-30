@@ -1782,6 +1782,139 @@ describe('alternate shell turn/message provenance', () => {
     } finally { page.dom.window.close(); }
   });
 
+
+  it.each([
+    ['identity only', true, false],
+    ['finished exact result', true, true],
+    ['cached mapping only', false, false]
+  ] as const)('joins an independently anchored native scope namespace: %s', async (_label, live, finished) => {
+    const page = await shellHarness({ withCall: true, nativeCallReceipt: true, nativeCallLive: live,
+      callCompleted: false, assistantCompleted: false,
+      nativeCallMutation(mapping, entry) {
+        delete entry.turn.items[1].widgetStateSource;
+        entry.turn.messageIds = [USER, CALL, RESULT, ASSISTANT];
+        for (const id of [CALL, RESULT, ASSISTANT]) {
+          Object.assign(mapping[id].message.metadata, {
+            working_turn_id: 'native-working-generation', turn_exchange_id: 'native-exchange-generation',
+            parent_id: mapping[id].parent
+          });
+        }
+        if (finished) mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: JSON.stringify({
+          content: [{ type: 'text', text: 'PRIVATE_TOOL_RESULT' }],
+          structuredContent: { cosResultReceipt: { version: 1, id: 'a'.repeat(48) } } }) };
+        else {
+          mapping[CALL].message.status = 'in_progress';
+          mapping[RESULT].message.status = 'in_progress';
+        }
+      } });
+    try {
+      const turn = page.fiber.turns[0];
+      expect(turn.calls[0].requestId).toBe(live ? REQUEST : null);
+      expect(turn.calls[0].answered).toBe(live && finished);
+      expect(turn.requests.some((row: any) => row.requestId === REQUEST && row.messageId === CALL)).toBe(live);
+      if (!finished || !live) expect(turn.endMessageId).toBeNull();
+      expect(JSON.stringify(page.fiber)).not.toContain('PRIVATE_TOOL_RESULT');
+      expect(JSON.stringify(page.fiber.shellScan)).not.toContain('native-working-generation');
+      expect(JSON.stringify(page.fiber.shellScan)).not.toContain('native-exchange-generation');
+    } finally { page.dom.window.close(); }
+  });
+
+  it.each([
+    'foreign final scope', 'missing final scope', 'final parent conflict', 'foreign original user',
+    'unselected final', 'unselected invocation', 'unselected result', 'changed result scope',
+    'conflicting cached request', 'scope getter', 'duplicate final'
+  ] as const)('refuses native scope namespace without an independent exact current anchor: %s', async variant => {
+    let accessorReads = 0;
+    const page = await shellHarness({ withCall: true, nativeCallReceipt: true,
+      nativeCallCacheConflict: variant === 'conflicting cached request',
+      callCompleted: false, assistantCompleted: false,
+      nativeCallMutation(mapping, entry) {
+        delete entry.turn.items[1].widgetStateSource;
+        entry.turn.messageIds = [USER, CALL, RESULT, ASSISTANT];
+        for (const id of [CALL, RESULT, ASSISTANT]) Object.assign(mapping[id].message.metadata, {
+          working_turn_id: 'native-working-generation', turn_exchange_id: 'native-exchange-generation',
+          parent_id: mapping[id].parent
+        });
+        mapping[CALL].message.status = 'in_progress';
+        mapping[RESULT].message.status = 'in_progress';
+        if (variant === 'foreign final scope') mapping[ASSISTANT].message.metadata.turn_exchange_id = 'foreign-exchange';
+        if (variant === 'missing final scope') delete mapping[ASSISTANT].message.metadata.working_turn_id;
+        if (variant === 'final parent conflict') mapping[ASSISTANT].message.metadata.parent_id = USER;
+        if (variant === 'foreign original user') {
+          mapping[USER].message.author.role = 'assistant';
+        }
+        if (variant === 'unselected final') entry.turn.messageIds = [USER, CALL, RESULT];
+        if (variant === 'unselected invocation') entry.turn.messageIds = [USER, RESULT, ASSISTANT];
+        if (variant === 'unselected result') entry.turn.messageIds = [USER, CALL, ASSISTANT];
+        if (variant === 'changed result scope') mapping[RESULT].message.metadata.working_turn_id = 'other-generation';
+        if (variant === 'scope getter') Object.defineProperty(mapping[ASSISTANT].message.metadata, 'working_turn_id', {
+          get() { accessorReads++; throw new Error('PRIVATE_SCOPE_GETTER'); }
+        });
+        if (variant === 'duplicate final') entry.turn.items.push({
+          type: 'assistant-message', messageId: RESULT, phase: 'final_answer', content: 'other final', completed: false
+        });
+      } });
+    try {
+      expect(page.fiber.turns[0].calls[0]).toMatchObject({ requestId: null, answered: false });
+      expect(page.fiber.turns[0].requests.some((row: any) => row.requestId === REQUEST && row.messageId === CALL)).toBe(false);
+      expect(page.fiber.turns[0].endMessageId).toBeNull();
+      expect(accessorReads).toBe(0);
+    } finally { page.dom.window.close(); }
+  });
+
+
+  it.each(['prior pair', 'Code Mode', 'off-branch sibling', 'cached scope conflict'] as const)(
+    'keeps native scope namespace request joins on their exact selected branch: %s', async variant => {
+      const secondId = 'call_native_scope_second', secondRequest = 'wfr_native_scope_second';
+      const page = await shellHarness({ withCall: true, withExec: variant === 'Code Mode', nativeCallReceipt: true,
+        callCompleted: false, assistantCompleted: false,
+        nativeCallMutation(mapping, entry) {
+          if (variant === 'Code Mode') completeExecBeforeCall(mapping, entry);
+          const call = entry.turn.items.find((item: any) => item.callId === CALL);
+          delete call.widgetStateSource;
+          if (variant === 'prior pair' || variant === 'off-branch sibling') {
+            entry.turn.items.splice(2, 0, { type: 'mcp-tool-call', callId: secondId,
+              completed: false, invocation: { server: APP, tool: 'read' } });
+            mapping[secondId] = { id: secondId,
+              parent: variant === 'prior pair' ? RESULT : USER,
+              message: { id: secondId, author: { role: 'assistant' }, recipient: 'api_tool.call_tool',
+                content: { text: JSON.stringify({ path: '/' + APP + '/' + LINK + '/read' }) },
+                metadata: { request_id: secondRequest,
+                  parent_id: variant === 'prior pair' ? RESULT : USER } } };
+            if (variant === 'prior pair') mapping[ASSISTANT].parent = secondId;
+          }
+          entry.turn.messageIds = [USER,
+            ...(variant === 'Code Mode' ? [EXEC, EXEC_RESULT] : []), CALL, RESULT,
+            ...(variant === 'prior pair' ? [secondId] : []), ASSISTANT];
+          for (const [id, row] of Object.entries(mapping) as [string, any][]) if (id !== USER) {
+            Object.assign(row.message.metadata, { working_turn_id: 'native-working-generation',
+              turn_exchange_id: 'native-exchange-generation', parent_id: row.parent });
+          }
+          mapping[CALL].message.status = 'in_progress';
+          mapping[RESULT].message.status = 'in_progress';
+        } });
+      try {
+        if (variant === 'cached scope conflict') {
+          const fiber = (page.win.document.getElementById('exchange') as any).__reactFiber$shellfixture;
+          const mapping = fiber.memoizedState.memoizedState.renderedConversation.mapping;
+          const cached = { ...mapping, [CALL]: { ...mapping[CALL],
+            message: { ...mapping[CALL].message, metadata: { ...mapping[CALL].message.metadata,
+              working_turn_id: 'foreign-cache-generation' } } } };
+          fiber.memoizedProps.client = queryClient(cached, {});
+          const fresh = await shellRescan(page, 'native-scope-cache-conflict');
+          expect(fresh.turns[0].calls[0].requestId).toBeNull();
+          expect(fresh.turns[0].calls[0].answered).toBe(false);
+        } else {
+          expect(page.fiber.turns[0].calls[0]).toMatchObject({ requestId: REQUEST, answered: false });
+          if (variant === 'prior pair' || variant === 'off-branch sibling')
+            expect(page.fiber.turns[0].calls[1]).toMatchObject({
+              requestId: variant === 'prior pair' ? secondRequest : null, answered: false });
+        }
+        expect(page.fiber.turns[0].endMessageId).toBeNull();
+        expect(JSON.stringify(page.fiber)).not.toContain('PRIVATE_TOOL_RESULT');
+      } finally { page.dom.window.close(); }
+    });
+
   it.each([
     ['decoded path missing', (mapping: any, _entry: any) => {
       mapping[CALL].message.content.text = JSON.stringify({ args: { secret: 'PRIVATE_ARGUMENT_SENTINEL' } });
