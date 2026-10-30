@@ -10111,6 +10111,26 @@ describe('extension observation journal', () => {
       callIdentityRecovered: 1, callIdentityPriorPair: 2, callIdentityUserUnproved: 3,
       callIdentityNativeUnproved: 4, callIdentityScopeUnproved: 5, callIdentityParentUnproved: 6,
       callIdentitySelectedWithheld: 7,
+      identityReasonCurrentQuestionMissing: 1,
+      identityReasonCurrentQuestionUnselected: 2,
+      identityReasonCurrentQuestionConflict: 3,
+      identityReasonNativeInvocationMissing: 4,
+      identityReasonNativeInvocationMismatch: 5,
+      identityReasonRequestIdMissing: 6,
+      identityReasonDecodedPathMissing: 7,
+      identityReasonDecodedPathForeign: 8,
+      identityReasonServerMissing: 9,
+      identityReasonServerMismatch: 10,
+      identityReasonToolMismatch: 11,
+      identityReasonWorkingTurnMissing: 12,
+      identityReasonWorkingTurnMismatch: 13,
+      identityReasonTurnExchangeMissing: 14,
+      identityReasonTurnExchangeMismatch: 15,
+      identityReasonNativeAncestryUnproved: 16,
+      identityReasonPriorRequestIdMissing: 17,
+      identityReasonPriorRequestIdMismatch: 18,
+      identityReasonPriorResultResourceIncomplete: 19,
+      identityReasonPriorToolScopeMismatch: 20,
       assistantTerminalReceiptChecked: 2, assistantTerminalReceiptMatched: 1,
       callJoinReferenceMissing: 1, callJoinReferenceUnselected: 2, callJoinReferenceConflict: 3,
       callJoinResultMissing: 4, callJoinResultIdentity: 5, callJoinDescriptorUnsupported: 400,
@@ -10142,7 +10162,8 @@ describe('extension observation journal', () => {
     expect(legacy?.shellScan?.rejects).not.toHaveProperty('assistantTerminalReceiptChecked');
     expect(legacy?.shellScan?.rejects).not.toHaveProperty('assistantTerminalReceiptMatched');
     for (const key of ['userProjected', 'callJoinReferenceMissing', 'callJoinReferenceUnselected', 'callJoinReferenceConflict',
-      'callJoinResultMissing', 'callJoinResultIdentity', 'callJoinDescriptorUnsupported', 'callIdentityRecovered', 'callIdentityPriorPair', 'callIdentityUserUnproved', 'callIdentityNativeUnproved', 'callIdentityScopeUnproved', 'callIdentityParentUnproved', 'callIdentitySelectedWithheld']) {
+      'callJoinResultMissing', 'callJoinResultIdentity', 'callJoinDescriptorUnsupported', 'callIdentityRecovered', 'callIdentityPriorPair', 'callIdentityUserUnproved', 'callIdentityNativeUnproved', 'callIdentityScopeUnproved', 'callIdentityParentUnproved', 'callIdentitySelectedWithheld',
+      'identityReasonCurrentQuestionMissing', 'identityReasonCurrentQuestionUnselected', 'identityReasonCurrentQuestionConflict', 'identityReasonNativeInvocationMissing', 'identityReasonNativeInvocationMismatch', 'identityReasonRequestIdMissing', 'identityReasonDecodedPathMissing', 'identityReasonDecodedPathForeign', 'identityReasonServerMissing', 'identityReasonServerMismatch', 'identityReasonToolMismatch', 'identityReasonWorkingTurnMissing', 'identityReasonWorkingTurnMismatch', 'identityReasonTurnExchangeMissing', 'identityReasonTurnExchangeMismatch', 'identityReasonNativeAncestryUnproved', 'identityReasonPriorRequestIdMissing', 'identityReasonPriorRequestIdMismatch', 'identityReasonPriorResultResourceIncomplete', 'identityReasonPriorToolScopeMismatch']) {
       const inherited = Object.assign(Object.create({ [key]: 400 }), {
         fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0 });
       expect((await project(inherited))?.shellScan?.rejects).not.toHaveProperty(key);

@@ -86,6 +86,26 @@ function shellScanDiagnostic(raw) {
     'callIdentityRecovered', 'callIdentityPriorPair', 'callIdentityUserUnproved',
     'callIdentityNativeUnproved', 'callIdentityScopeUnproved', 'callIdentityParentUnproved',
     'callIdentitySelectedWithheld',
+    'identityReasonCurrentQuestionMissing',
+    'identityReasonCurrentQuestionUnselected',
+    'identityReasonCurrentQuestionConflict',
+    'identityReasonNativeInvocationMissing',
+    'identityReasonNativeInvocationMismatch',
+    'identityReasonRequestIdMissing',
+    'identityReasonDecodedPathMissing',
+    'identityReasonDecodedPathForeign',
+    'identityReasonServerMissing',
+    'identityReasonServerMismatch',
+    'identityReasonToolMismatch',
+    'identityReasonWorkingTurnMissing',
+    'identityReasonWorkingTurnMismatch',
+    'identityReasonTurnExchangeMissing',
+    'identityReasonTurnExchangeMismatch',
+    'identityReasonNativeAncestryUnproved',
+    'identityReasonPriorRequestIdMissing',
+    'identityReasonPriorRequestIdMismatch',
+    'identityReasonPriorResultResourceIncomplete',
+    'identityReasonPriorToolScopeMismatch',
     'assistantTerminalReceiptChecked', 'assistantTerminalReceiptMatched',
     'callCompletedFalse', 'callCompletedUndefined', 'callCompletedNull', 'callCompletedMalformed', 'callStatusVeto',
     'callVetoStatusAbsent', 'callVetoStatusPending', 'callVetoStatusError', 'callVetoStatusDone',
@@ -10473,7 +10493,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 105;
+const PAGE_RECORDER_VERSION = 106;
 
 let deferredRecoveryWork = null;
 

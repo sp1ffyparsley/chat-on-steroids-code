@@ -57,7 +57,8 @@ const CALL_JOIN_KEYS = ['callJoinReferenceMissing', 'callJoinReferenceUnselected
   'callJoinResultMissing', 'callJoinResultIdentity', 'callJoinDescriptorUnsupported',
   'callIdentityRecovered', 'callIdentityPriorPair', 'callIdentityUserUnproved',
   'callIdentityNativeUnproved', 'callIdentityScopeUnproved', 'callIdentityParentUnproved',
-  'callIdentitySelectedWithheld'] as const;
+  'callIdentitySelectedWithheld',
+  'identityReasonCurrentQuestionMissing', 'identityReasonCurrentQuestionUnselected', 'identityReasonCurrentQuestionConflict', 'identityReasonNativeInvocationMissing', 'identityReasonNativeInvocationMismatch', 'identityReasonRequestIdMissing', 'identityReasonDecodedPathMissing', 'identityReasonDecodedPathForeign', 'identityReasonServerMissing', 'identityReasonServerMismatch', 'identityReasonToolMismatch', 'identityReasonWorkingTurnMissing', 'identityReasonWorkingTurnMismatch', 'identityReasonTurnExchangeMissing', 'identityReasonTurnExchangeMismatch', 'identityReasonNativeAncestryUnproved', 'identityReasonPriorRequestIdMissing', 'identityReasonPriorRequestIdMismatch', 'identityReasonPriorResultResourceIncomplete', 'identityReasonPriorToolScopeMismatch'] as const;
 const EMPTY_CALL_JOINS = Object.fromEntries(CALL_JOIN_KEYS.map(key => [key, 0]));
 const EMPTY_VETO_RECEIPT_CHECKS = { callVetoReceiptChecked: 0, callVetoReceiptMatched: 0 };
 const EMPTY_ASSISTANT_TERMINAL_RECEIPTS = { assistantTerminalReceiptChecked: 0, assistantTerminalReceiptMatched: 0 };
@@ -1954,6 +1955,8 @@ describe('alternate shell turn/message provenance', () => {
       } });
     try {
       expect(page.fiber.turns[0].calls[0].identityRefusalReasons).toContain(expectedReason);
+      const reasonKey = 'identityReason' + expectedReason[0]!.toUpperCase() + expectedReason.slice(1);
+      expect(page.fiber.shellScan.rejects[reasonKey]).toBe(1);
       const trace = diagnosticLogs.find(line => line.includes('native result-reference recovery diagnostic'))!;
       expect(trace).toContain('version=4');
       expect(trace).toContain('identityRefusals=1');

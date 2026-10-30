@@ -2206,6 +2206,30 @@
       priorRequestIdMissing: 0, priorRequestIdMismatch: 0, priorResultResourceIncomplete: 0,
       priorToolScopeMismatch: 0
     };
+    // Current-scan fixed reasons are diagnostic only, never original-parent completion authority.
+    const IDENTITY_REFUSAL_DIAGNOSTIC_KEYS = {
+      "currentQuestionMissing": "identityReasonCurrentQuestionMissing",
+      "currentQuestionUnselected": "identityReasonCurrentQuestionUnselected",
+      "currentQuestionConflict": "identityReasonCurrentQuestionConflict",
+      "nativeInvocationMissing": "identityReasonNativeInvocationMissing",
+      "nativeInvocationMismatch": "identityReasonNativeInvocationMismatch",
+      "requestIdMissing": "identityReasonRequestIdMissing",
+      "decodedPathMissing": "identityReasonDecodedPathMissing",
+      "decodedPathForeign": "identityReasonDecodedPathForeign",
+      "serverMissing": "identityReasonServerMissing",
+      "serverMismatch": "identityReasonServerMismatch",
+      "toolMismatch": "identityReasonToolMismatch",
+      "workingTurnMissing": "identityReasonWorkingTurnMissing",
+      "workingTurnMismatch": "identityReasonWorkingTurnMismatch",
+      "turnExchangeMissing": "identityReasonTurnExchangeMissing",
+      "turnExchangeMismatch": "identityReasonTurnExchangeMismatch",
+      "nativeAncestryUnproved": "identityReasonNativeAncestryUnproved",
+      "priorRequestIdMissing": "identityReasonPriorRequestIdMissing",
+      "priorRequestIdMismatch": "identityReasonPriorRequestIdMismatch",
+      "priorResultResourceIncomplete": "identityReasonPriorResultResourceIncomplete",
+      "priorToolScopeMismatch": "identityReasonPriorToolScopeMismatch"
+    };
+
     const identityRefusalByCall = new Map();
     let identityRefusalCalls = 0;
     const recordIdentityRefusal = (call, reasons) => {
@@ -2219,6 +2243,7 @@
         if (!own.call(identityRefusalReasons, reason) || seen.has(reason)) continue;
         seen.add(reason);
         identityRefusalReasons[reason] = Math.min(MAX_CALLS, identityRefusalReasons[reason] + 1);
+        shellDiagnostic(rejects, IDENTITY_REFUSAL_DIAGNOSTIC_KEYS[reason]);
       }
       call.identityRefusalReasons = [...seen];
     };
@@ -3218,6 +3243,26 @@
         callIdentityUserUnproved: 0, callIdentityNativeUnproved: 0,
         callIdentityScopeUnproved: 0, callIdentityParentUnproved: 0,
         callIdentitySelectedWithheld: 0,
+        identityReasonCurrentQuestionMissing: 0,
+        identityReasonCurrentQuestionUnselected: 0,
+        identityReasonCurrentQuestionConflict: 0,
+        identityReasonNativeInvocationMissing: 0,
+        identityReasonNativeInvocationMismatch: 0,
+        identityReasonRequestIdMissing: 0,
+        identityReasonDecodedPathMissing: 0,
+        identityReasonDecodedPathForeign: 0,
+        identityReasonServerMissing: 0,
+        identityReasonServerMismatch: 0,
+        identityReasonToolMismatch: 0,
+        identityReasonWorkingTurnMissing: 0,
+        identityReasonWorkingTurnMismatch: 0,
+        identityReasonTurnExchangeMissing: 0,
+        identityReasonTurnExchangeMismatch: 0,
+        identityReasonNativeAncestryUnproved: 0,
+        identityReasonPriorRequestIdMissing: 0,
+        identityReasonPriorRequestIdMismatch: 0,
+        identityReasonPriorResultResourceIncomplete: 0,
+        identityReasonPriorToolScopeMismatch: 0,
         assistantTerminalReceiptChecked: 0, assistantTerminalReceiptMatched: 0,
         callCompletedFalse: 0, callCompletedUndefined: 0, callCompletedNull: 0, callCompletedMalformed: 0, callStatusVeto: 0,
         callVetoStatusAbsent: 0, callVetoStatusPending: 0, callVetoStatusError: 0, callVetoStatusDone: 0,

@@ -36138,3 +36138,55 @@ describe('helper HTTP refusal diagnostics', () => {
     } finally { await writeDurableNow('session-input', []); input.resetInputForTests(); }
   });
 });
+
+
+describe('diagnostic-only original scope reasons', () => {
+  it('keeps fixed current-scan identity reasons in provider UI when no current turn matches', async () => {
+    await pair();
+    resetCoreBrowserEvidenceForTests();
+    const conversationId = '78787878-1111-4222-8333-444444444445';
+    const created = await request('POST', '/events', { body: { conversationId, events: [{
+      kind: 'user_message', time: Date.now(), text: 'Original user turn.', messageId: 'provider-user-message'
+    }] } });
+    const sessionId = created.body.sessionId as string;
+    const reasons = {
+      identityReasonCurrentQuestionMissing: 0,
+      identityReasonCurrentQuestionUnselected: 0,
+      identityReasonCurrentQuestionConflict: 0,
+      identityReasonNativeInvocationMissing: 0,
+      identityReasonNativeInvocationMismatch: 0,
+      identityReasonRequestIdMissing: 0,
+      identityReasonDecodedPathMissing: 0,
+      identityReasonDecodedPathForeign: 0,
+      identityReasonServerMissing: 0,
+      identityReasonServerMismatch: 0,
+      identityReasonToolMismatch: 0,
+      identityReasonWorkingTurnMissing: 0,
+      identityReasonWorkingTurnMismatch: 46,
+      identityReasonTurnExchangeMissing: 0,
+      identityReasonTurnExchangeMismatch: 0,
+      identityReasonNativeAncestryUnproved: 0,
+      identityReasonPriorRequestIdMissing: 0,
+      identityReasonPriorRequestIdMismatch: 0,
+      identityReasonPriorResultResourceIncomplete: 0,
+      identityReasonPriorToolScopeMismatch: 0
+    };
+    const diagnostic = {
+      shell: 'alternate', shellDiscovery: 'compatible', observedAt: Date.now(),
+      documentId: 'diagnostic-document', navigationEpoch: 7, requestIds: [],
+      turnId: 'provider-turn-not-current',
+      shellScan: { selectorMatches: 1, mapped: 1, rejects: {
+        fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0, ...reasons
+      } }
+    };
+    await request('GET', `/activity?conversationId=${conversationId}&coreDiagnostic=${encodeURIComponent(JSON.stringify(diagnostic))}`);
+    const providerUI = (await sessionControlsFor(sessionId)).nativeEvidence?.providerUI;
+    expect(providerUI).toMatchObject({
+      currentTurnMatched: false,
+      rejects: { identityReasonWorkingTurnMismatch: 46 },
+      identityRefusalSummary: null
+    });
+    expect(JSON.stringify(providerUI)).not.toContain('provider-user-message');
+    resetCoreBrowserEvidenceForTests();
+  });
+});

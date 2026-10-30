@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 105;
+  const RECORDER_VERSION = 106;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -4548,6 +4548,26 @@
       'callIdentityRecovered', 'callIdentityPriorPair', 'callIdentityUserUnproved',
       'callIdentityNativeUnproved', 'callIdentityScopeUnproved', 'callIdentityParentUnproved',
       'callIdentitySelectedWithheld',
+      'identityReasonCurrentQuestionMissing',
+      'identityReasonCurrentQuestionUnselected',
+      'identityReasonCurrentQuestionConflict',
+      'identityReasonNativeInvocationMissing',
+      'identityReasonNativeInvocationMismatch',
+      'identityReasonRequestIdMissing',
+      'identityReasonDecodedPathMissing',
+      'identityReasonDecodedPathForeign',
+      'identityReasonServerMissing',
+      'identityReasonServerMismatch',
+      'identityReasonToolMismatch',
+      'identityReasonWorkingTurnMissing',
+      'identityReasonWorkingTurnMismatch',
+      'identityReasonTurnExchangeMissing',
+      'identityReasonTurnExchangeMismatch',
+      'identityReasonNativeAncestryUnproved',
+      'identityReasonPriorRequestIdMissing',
+      'identityReasonPriorRequestIdMismatch',
+      'identityReasonPriorResultResourceIncomplete',
+      'identityReasonPriorToolScopeMismatch',
       'assistantTerminalReceiptChecked', 'assistantTerminalReceiptMatched',
       'callCompletedFalse', 'callCompletedUndefined', 'callCompletedNull', 'callCompletedMalformed', 'callStatusVeto',
       'callVetoStatusAbsent', 'callVetoStatusPending', 'callVetoStatusError', 'callVetoStatusDone',
