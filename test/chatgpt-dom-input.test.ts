@@ -2691,6 +2691,78 @@ describe('transport failures in Portuguese', () => {
 });
 
 describe('native image readiness', () => {
+  function fileTile(removal = 'Datei entfernen', name = 'notes.zip') {
+    const host = document.createElement('div'); host.setAttribute('data-composer-attachments', '');
+    host.innerHTML = `<span><span><span>${name}</span><button type="button" aria-label="${name}"></button></span><button type="button" aria-label="${removal}"></button></span>`;
+    const open = host.querySelector('button')!, remove = host.querySelectorAll('button')[1]!;
+    return { host, open, remove };
+  }
+
+  it.each(['notes.zip entfernen', 'Datei entfernen', 'Quitar', '削除'])(
+    'recognizes an owned two-button file tile independently of remove wording (%s)', async removal => {
+      const input = upload(); input.id = 'upload-files'; input.accept = '';
+      const { host, open, remove } = fileTile(removal);
+      const openClick = vi.fn(), sendClick = vi.fn();
+      open.addEventListener('click', openClick); button.addEventListener('click', sendClick);
+      const removeClick = vi.fn(() => host.remove()); remove.addEventListener('click', removeClick);
+      document.execCommand = command => { if (command === 'delete') box.replaceChildren(); return true; };
+      const draft = api.captureComposerDraft('Exact app prompt');
+      input.addEventListener('change', () => {
+        host.setAttribute('aria-busy', 'true'); document.querySelector('form')!.append(host);
+        button.setAttribute('aria-disabled', 'true');
+      });
+      const file = new dom.window.File(['exact bytes'], 'notes.zip', { type: 'application/zip' });
+      const uploaded = api.uploadImages([], () => true, draft, [file]);
+      let ready = false; void uploaded.then(value => { ready = value; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(ready).toBe(false);
+      expect(api.hasComposerAttachments()).toBe(true);
+      host.removeAttribute('aria-busy');
+      await vi.advanceTimersByTimeAsync(0); expect(ready).toBe(false);
+      button.setAttribute('aria-disabled', 'false');
+      await vi.advanceTimersByTimeAsync(600000);
+      expect(await uploaded).toBe(true);
+      expect(draft.current()).toBe(true);
+      expect(await draft.clear()).toBe(true);
+      expect(removeClick).toHaveBeenCalledOnce();
+      expect(openClick).not.toHaveBeenCalled(); expect(sendClick).not.toHaveBeenCalled();
+      expect(api.hasComposerAttachments()).toBe(false); draft.dispose();
+    });
+
+  it.each(['notes.zip', ' notes.zip ', '   ', '', 'extra action', 'wrong visible name', 'outside attachment area'])(
+    'refuses an ambiguous two-button file tile (%s)', variant => {
+      const { host, open, remove } = fileTile(variant);
+      if (variant === 'extra action') host.querySelector('span')!.append(document.createElement('button'));
+      if (variant === 'wrong visible name') host.querySelector('span span span')!.textContent = 'other.zip';
+      if (variant === 'outside attachment area') host.removeAttribute('data-composer-attachments');
+      document.querySelector('form')!.append(host);
+      const click = vi.fn(); open.addEventListener('click', click); remove.addEventListener('click', click);
+      expect(api.hasComposerAttachments()).toBe(false); expect(click).not.toHaveBeenCalled();
+    });
+
+  it.each(['wrong requested name', 'outside composer', 'replacement', 'extra file', 'cancel'])(
+    'does not acknowledge a two-button upload after %s changes its exact ownership', async changed => {
+      const input = upload(); input.id = 'upload-files'; input.accept = '';
+      const { host } = fileTile();
+      const draft = api.captureComposerDraft('Exact app prompt');
+      let current = true;
+      input.addEventListener('change', () => {
+        (changed === 'outside composer' ? document.body : document.querySelector('form')!).append(host);
+        button.setAttribute('aria-disabled', 'true');
+      });
+      const file = new dom.window.File(['exact bytes'], changed === 'wrong requested name' ? 'other.zip' : 'notes.zip',
+        { type: 'application/zip' });
+      const uploaded = api.uploadImages([], () => current, draft, [file]);
+      await vi.advanceTimersByTimeAsync(0);
+      if (changed === 'replacement') host.replaceWith(host.cloneNode(true));
+      if (changed === 'extra file') host.after(fileTile('Entfernen', 'private.zip').host);
+      if (changed === 'cancel') current = false;
+      button.setAttribute('aria-disabled', 'false');
+      await vi.advanceTimersByTimeAsync(600000);
+      expect(await uploaded).toBe(false);
+      expect(box.textContent).toBe('Exact app prompt'); draft.dispose();
+    });
+
   it.each(['rename', 'replacement', 'extra file', 'cancel'])('retains exact image upload nodes across %s while processing', async change => {
     const input = upload();
     const tile = document.createElement('button');

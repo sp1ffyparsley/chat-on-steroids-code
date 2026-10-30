@@ -2,7 +2,15 @@
 
 This is the custom Electron application and Chrome companion source exported for code review. It has clean public history and excludes private account stores, saved prompts, credentials, runtime logs and deployment artifacts. This source mirror is separate from upstream releases and supplies no public installer.
 
-## Current checkpoint — October 30, 2026
+## Latest status — October 30, 2026, 22:05 UTC
+
+Observer/background112 source adds upstreamPR1944 attachment-label compatibility while retaining exact upload ownership/readiness. Four failure-first cases reproduced; private controlled affected suites passed2092checks and installer checks33. New112binary qualification is IN PROGRESS, not installed or publicly released.
+
+Private111 is actually installed and accepted: sourcebfff17f54b91290976642a3c7ed23c2733722b26/treec8888b5f7034f09e84f7a284b99bf2d0f86081e5/receiptb92eb45ad48c8525be786ffabd7678d6532396d2. Strict96preliminary+12817MainPASS/62existing skips and33postpin checks passed. CanonicalNSIS0 plus independent291installed-program and117869protected-file verification preceded seven normal successors. Maintenance pauses remain while the next release is prepared.
+
+Private hashes are provenance, NOT public refs. Use this mirror's own immutable commit for source links. Executing browser cohorts, original request/result joins and sustained useful automatic next turns remain unverified. Distinguish native helper Send, collected archive, decision disposition and executor Send: publication-unacknowledged alone does not prove HTTP reached Main. Never bypass native model/receipt/reload guards.
+
+## Historical checkpoint — before accepted111
 
 - Public URLs must use this mirror's OWN immutable commit SHA. Private qualification hashes below are provenance, not public Git refs. Source follow-up observer/background **111** (installed remains109), MAIN Fiber reply schema15 and bridge protocol16 are separate version spaces; the custom package label remains2.1.39.
 - **Qualified and installed private109:** logical source63038be0bd7ade89ed012b52f80d1b43857913cc, treed414fbb65fe7bf621274a0cd0503ba92c064e41e, receipt-only pinb6561d439adca9695ceb840d014f7d62dd57ff0e. Canonical qualification passed96preliminary and12,771Main checks/62existing skips (968.40s), followed by33post-pin checks and exact-package readiness. The unchanged qualified package completed canonical installation/NSIS0 at2026-10-30T12:47:09Z. All291installed program files/571,526,914bytes matched (tree5154db54df53ba1922aaa510dcc1d07503d8eb4fb85af0a375bbd1c30b185489); the290-file payload matches the qualified installer and unpacked tree exactly. These supplied private results do not qualify a binary rebuilt from sanitized public code.

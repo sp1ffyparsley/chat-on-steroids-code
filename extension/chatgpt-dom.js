@@ -3785,6 +3785,21 @@ var CLF_DOM = (() => {
 
   /** Native ChatGPT photo input, observed as #upload-photos. Sending waits for every tile. */
   function composerFileName(button) {
+    // Current file tiles have a filename-labelled open button and a translated
+    // remove control. Count only that exact second button, independently of wording (#1944).
+    const attachmentHost = button.closest('[data-composer-attachments]');
+    const tileParent = button.parentElement;
+    if (attachmentHost && tileParent && tileParent !== attachmentHost) {
+      const actions = [...tileParent.querySelectorAll('button')];
+      if (actions.length === 2 && actions[1] === button) {
+        const open = actions[0], name = open.getAttribute('aria-label');
+        const removal = (button.getAttribute('aria-label') || '').trim();
+        const labelled = [...tileParent.querySelectorAll('span')].some(node =>
+          !node.children.length && node.textContent === name);
+        if (name && removal && removal !== name.trim() && labelled &&
+            open.closest('[data-composer-attachments]') === attachmentHost) return name;
+      }
+    }
     const group = button.closest('[role="group"][aria-label]');
     if (group?.querySelector('[data-default-action="true"] button')) {
       const actions = [...group.querySelectorAll('button')].filter(node => !node.closest('[data-default-action="true"]'));
