@@ -17298,6 +17298,16 @@ describe('the activity feed', () => {
       identityReasonPriorRequestIdMismatch: 18,
       identityReasonPriorResultResourceIncomplete: 19,
       identityReasonPriorToolScopeMismatch: 20,
+      identityReasonNativeScopeTurnIncomplete: 21,
+      identityReasonNativeScopePathUnproved: 22,
+      identityReasonNativeScopeFinalCount: 23,
+      identityReasonNativeScopeFinalPathMismatch: 24,
+      identityReasonNativeScopeFinalReceiptUnproved: 25,
+      identityReasonNativeScopeFinalNamespaceMissing: 26,
+      identityReasonNativeScopeNodeConflict: 27,
+      identityReasonNativeScopeCacheConflict: 28,
+      identityReasonNativeScopeBranchConflict: 29,
+      identityReasonNativeScopeUnsupported: 30,
       assistantTerminalReceiptChecked: 2, assistantTerminalReceiptMatched: 1,
       callCompletedFalse: 1, callCompletedUndefined: 2, callCompletedNull: 3,
       callCompletedMalformed: 4, callStatusVeto: 5, callVetoStatusAbsent: 6, callVetoStatusPending: 7,
@@ -17336,7 +17346,7 @@ describe('the activity feed', () => {
     for (const key of ['userProjected', 'callVetoReceiptChecked', 'callVetoReceiptMatched',
       'callJoinReferenceMissing', 'callJoinReferenceUnselected', 'callJoinReferenceConflict',
       'callJoinResultMissing', 'callJoinResultIdentity', 'callJoinDescriptorUnsupported', 'callIdentityRecovered', 'callIdentityPriorPair', 'callIdentityUserUnproved', 'callIdentityNativeUnproved', 'callIdentityScopeUnproved', 'callIdentityParentUnproved', 'callIdentitySelectedWithheld',
-      'identityReasonCurrentQuestionMissing', 'identityReasonCurrentQuestionUnselected', 'identityReasonCurrentQuestionConflict', 'identityReasonNativeInvocationMissing', 'identityReasonNativeInvocationMismatch', 'identityReasonRequestIdMissing', 'identityReasonDecodedPathMissing', 'identityReasonDecodedPathForeign', 'identityReasonServerMissing', 'identityReasonServerMismatch', 'identityReasonToolMismatch', 'identityReasonWorkingTurnMissing', 'identityReasonWorkingTurnMismatch', 'identityReasonTurnExchangeMissing', 'identityReasonTurnExchangeMismatch', 'identityReasonNativeAncestryUnproved', 'identityReasonPriorRequestIdMissing', 'identityReasonPriorRequestIdMismatch', 'identityReasonPriorResultResourceIncomplete', 'identityReasonPriorToolScopeMismatch',
+      'identityReasonCurrentQuestionMissing', 'identityReasonCurrentQuestionUnselected', 'identityReasonCurrentQuestionConflict', 'identityReasonNativeInvocationMissing', 'identityReasonNativeInvocationMismatch', 'identityReasonRequestIdMissing', 'identityReasonDecodedPathMissing', 'identityReasonDecodedPathForeign', 'identityReasonServerMissing', 'identityReasonServerMismatch', 'identityReasonToolMismatch', 'identityReasonWorkingTurnMissing', 'identityReasonWorkingTurnMismatch', 'identityReasonTurnExchangeMissing', 'identityReasonTurnExchangeMismatch', 'identityReasonNativeAncestryUnproved', 'identityReasonPriorRequestIdMissing', 'identityReasonPriorRequestIdMismatch', 'identityReasonPriorResultResourceIncomplete', 'identityReasonPriorToolScopeMismatch', 'identityReasonNativeScopeTurnIncomplete', 'identityReasonNativeScopePathUnproved', 'identityReasonNativeScopeFinalCount', 'identityReasonNativeScopeFinalPathMismatch', 'identityReasonNativeScopeFinalReceiptUnproved', 'identityReasonNativeScopeFinalNamespaceMissing', 'identityReasonNativeScopeNodeConflict', 'identityReasonNativeScopeCacheConflict', 'identityReasonNativeScopeBranchConflict', 'identityReasonNativeScopeUnsupported',
       'assistantTerminalReceiptChecked', 'assistantTerminalReceiptMatched']) {
       const inherited = Object.assign(Object.create({ [key]: 400 }), {
         fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0 });
@@ -25998,7 +26008,7 @@ describe('ordinary input native terminal association', () => {
       await setup();
       const turns = pair();
       Object.assign(turns[1]!, { calls: [{ messageId: 'native-current-refusal-parent', tool: 'read',
-        answered: false, identityRefusalReasons: ['workingTurnMismatch'] }] });
+        answered: false, identityRefusalReasons: ['workingTurnMismatch', 'nativeScopeFinalNamespaceMissing'] }] });
       let owner: Record<string, unknown> | null = null;
       if (state === 'busy') (live!.window as any).CLF_DOM.generating = () => true;
       if (state === 'question-invalid') turns[0]!.messages[0]!.stable = false;
@@ -26018,7 +26028,7 @@ describe('ordinary input native terminal association', () => {
       const proof = live!.sent.filter(message => message.type === 'activity').at(-1)?.coreDiagnostic?.ordinaryFinal;
       expect(proof).toMatchObject({ calls: 1, openCalls: 1,
         coreCallMessageIds: ['native-current-refusal-parent'], identityRefusals: [
-          { messageId: 'native-current-refusal-parent', reasons: ['workingTurnMismatch'] }] });
+          { messageId: 'native-current-refusal-parent', reasons: ['workingTurnMismatch', 'nativeScopeFinalNamespaceMissing'] }] });
       expect(proof?.settledFinalMessageId).toBeUndefined();
       expect(proof?.sourceUserMessageId).toBeUndefined();
       if (state === 'local-owner') expect(proof?.activeTurnMapped).toBe(true);
@@ -26030,7 +26040,7 @@ describe('ordinary input native terminal association', () => {
       await setup(); let getterReads = 0;
       const turns = pair();
       const call: any = { messageId: 'native-malformed-refusal-parent', tool: 'read', answered: false,
-        identityRefusalReasons: ['workingTurnMismatch'] };
+        identityRefusalReasons: ['workingTurnMismatch', 'nativeScopeFinalNamespaceMissing'] };
       if (variant === 'unknown-reason') call.identityRefusalReasons = ['PRIVATE_UNKNOWN_REASON'];
       if (variant === 'accessor') Object.defineProperty(call, 'identityRefusalReasons', {
         get() { getterReads++; throw new Error('PRIVATE_ACCESSOR'); } });
@@ -26053,7 +26063,7 @@ describe('ordinary input native terminal association', () => {
       await setup();
       const turns = pair(); let getterReads = 0;
       const call: any = { messageId: 'native-refusal-parent', tool: 'read', answered: false,
-        identityRefusalReasons: ['workingTurnMismatch'] };
+        identityRefusalReasons: ['workingTurnMismatch', 'nativeScopeFinalNamespaceMissing'] };
       if (variant === 'unknown') call.identityRefusalReasons = ['PRIVATE_DIAGNOSTIC_PAYLOAD'];
       if (variant === 'duplicate') call.identityRefusalReasons.push('workingTurnMismatch');
       if (variant === 'accessor') Object.defineProperty(call, 'identityRefusalReasons', {
@@ -26067,7 +26077,7 @@ describe('ordinary input native terminal association', () => {
       expect(proof).toMatchObject({ reason: 'open-call', calls: 1, openCalls: 1,
         coreCallMessageIds: ['native-refusal-parent'] });
       if (variant === 'valid') expect(proof?.identityRefusals).toEqual([
-        { messageId: 'native-refusal-parent', reasons: ['workingTurnMismatch'] }]);
+        { messageId: 'native-refusal-parent', reasons: ['workingTurnMismatch', 'nativeScopeFinalNamespaceMissing'] }]);
       else expect(proof?.identityRefusals).toBeUndefined();
       expect(getterReads).toBe(0);
       expect(JSON.stringify(proof)).not.toContain('PRIVATE_');

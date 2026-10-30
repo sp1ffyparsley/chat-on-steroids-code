@@ -2156,25 +2156,31 @@
     // the entire mounted selected branch back to this typed native user. This
     // recovers request identity only; every result/Code Mode receipt is still
     // checked separately below before a call can become answered.
+    let mountedNativeScopeRefusal = null;
     const mountedNativeScope = (() => {
-      if (!shell.calls.length || !live || !typedUserId || entry.turn.status !== 'complete' || !currentPath.length ||
-          currentPath[0] !== typedUserId || !currentPath.every(id => selected.has(id))) return null;
+      // No independent mounted anchor was attempted without these prerequisites.
+      // A diagnostic failure never changes the namespace or any acceptance predicate.
+      if (!shell.calls.length || !live || !typedUserId) return null;
+      const refuse = reason => { mountedNativeScopeRefusal = reason; return null; };
+      if (entry.turn.status !== 'complete') return refuse('nativeScopeTurnIncomplete');
+      if (!currentPath.length || currentPath[0] !== typedUserId || !currentPath.every(id => selected.has(id)))
+        return refuse('nativeScopePathUnproved');
       try {
         const finals = entry.turn.items.filter(item => item?.type === 'assistant-message' && item.phase === 'final_answer');
-        if (finals.length !== 1) return null;
+        if (finals.length !== 1) return refuse('nativeScopeFinalCount');
         const finalId = str(finals[0].messageId);
-        if (!finalId || currentPath.at(-1) !== finalId) return null;
+        if (!finalId || currentPath.at(-1) !== finalId) return refuse('nativeScopeFinalPathMismatch');
         const terminal = shellProviderTerminalAt(mapping, finalId);
-        if (!terminal || shellItemText(finals[0]) !== terminal.text) return null;
+        if (!terminal || shellItemText(finals[0]) !== terminal.text) return refuse('nativeScopeFinalReceiptUnproved');
         const finalMeta = nativeField(messageAt(finalId), 'metadata');
         const working = str(nativeField(finalMeta, 'working_turn_id'));
         const exchange = str(nativeField(finalMeta, 'turn_exchange_id'));
-        if (!working || !exchange) return null;
+        if (!working || !exchange) return refuse('nativeScopeFinalNamespaceMissing');
         for (let at = 0; at < currentPath.length; at++) {
           const id = currentPath[at], node = nativeField(mapping, id), message = nativeField(node, 'message');
-          if (nativeField(node, 'id') !== id || nativeField(message, 'id') !== id) return null;
+          if (nativeField(node, 'id') !== id || nativeField(message, 'id') !== id) return refuse('nativeScopeNodeConflict');
           const role = nativeField(nativeField(message, 'author'), 'role');
-          if (at === 0) { if (role !== 'user') return null; continue; }
+          if (at === 0) { if (role !== 'user') return refuse('nativeScopeNodeConflict'); continue; }
           const metadata = nativeField(message, 'metadata');
           const cachedNode = nativeField(nativeField(data, 'mapping'), id);
           if (cachedNode && cachedNode !== node) {
@@ -2182,16 +2188,16 @@
             if (nativeField(cachedNode, 'id') !== id || nativeField(cachedMessage, 'id') !== id ||
                 nativeField(cachedNode, 'parent') !== nativeField(node, 'parent') ||
                 ['parent_id', 'working_turn_id', 'turn_exchange_id', 'request_id'].some(key =>
-                  nativeField(cachedMeta, key) !== nativeField(metadata, key))) return null;
+                  nativeField(cachedMeta, key) !== nativeField(metadata, key))) return refuse('nativeScopeCacheConflict');
           }
           if ((role !== 'assistant' && role !== 'tool') ||
               nativeField(node, 'parent') !== currentPath[at - 1] ||
               nativeField(metadata, 'parent_id') !== currentPath[at - 1] ||
               str(nativeField(metadata, 'working_turn_id')) !== working ||
-              str(nativeField(metadata, 'turn_exchange_id')) !== exchange) return null;
+              str(nativeField(metadata, 'turn_exchange_id')) !== exchange) return refuse('nativeScopeBranchConflict');
         }
         return { working, exchange };
-      } catch { return null; }
+      } catch { return refuse('nativeScopeUnsupported'); }
     })();
     const expectedWorkingTurn = mountedNativeScope?.working || shell.turnId;
     const expectedTurnExchange = mountedNativeScope?.exchange || typedUserId;
@@ -2215,7 +2221,11 @@
       toolMismatch: 0, workingTurnMissing: 0, workingTurnMismatch: 0,
       turnExchangeMissing: 0, turnExchangeMismatch: 0, nativeAncestryUnproved: 0,
       priorRequestIdMissing: 0, priorRequestIdMismatch: 0, priorResultResourceIncomplete: 0,
-      priorToolScopeMismatch: 0
+      priorToolScopeMismatch: 0,
+      nativeScopeTurnIncomplete: 0, nativeScopePathUnproved: 0, nativeScopeFinalCount: 0,
+      nativeScopeFinalPathMismatch: 0, nativeScopeFinalReceiptUnproved: 0,
+      nativeScopeFinalNamespaceMissing: 0, nativeScopeNodeConflict: 0,
+      nativeScopeCacheConflict: 0, nativeScopeBranchConflict: 0, nativeScopeUnsupported: 0
     };
     // Current-scan fixed reasons are diagnostic only, never original-parent completion authority.
     const IDENTITY_REFUSAL_DIAGNOSTIC_KEYS = {
@@ -2238,7 +2248,17 @@
       "priorRequestIdMissing": "identityReasonPriorRequestIdMissing",
       "priorRequestIdMismatch": "identityReasonPriorRequestIdMismatch",
       "priorResultResourceIncomplete": "identityReasonPriorResultResourceIncomplete",
-      "priorToolScopeMismatch": "identityReasonPriorToolScopeMismatch"
+      "priorToolScopeMismatch": "identityReasonPriorToolScopeMismatch",
+      "nativeScopeTurnIncomplete": "identityReasonNativeScopeTurnIncomplete",
+      "nativeScopePathUnproved": "identityReasonNativeScopePathUnproved",
+      "nativeScopeFinalCount": "identityReasonNativeScopeFinalCount",
+      "nativeScopeFinalPathMismatch": "identityReasonNativeScopeFinalPathMismatch",
+      "nativeScopeFinalReceiptUnproved": "identityReasonNativeScopeFinalReceiptUnproved",
+      "nativeScopeFinalNamespaceMissing": "identityReasonNativeScopeFinalNamespaceMissing",
+      "nativeScopeNodeConflict": "identityReasonNativeScopeNodeConflict",
+      "nativeScopeCacheConflict": "identityReasonNativeScopeCacheConflict",
+      "nativeScopeBranchConflict": "identityReasonNativeScopeBranchConflict",
+      "nativeScopeUnsupported": "identityReasonNativeScopeUnsupported"
     };
 
     const identityRefusalByCall = new Map();
@@ -2261,7 +2281,11 @@
     const unreferencedInvocation = call => {
       const refuse = (reason, details = ['nativeAncestryUnproved']) => {
         shellDiagnostic(rejects, reason);
-        recordIdentityRefusal(call, details);
+        // Explain the first attempted anchor failure only for a namespace mismatch
+        // that already refused this call. Unattempted/accepted fallback stays distinct.
+        recordIdentityRefusal(call, mountedNativeScopeRefusal && details.some(code =>
+          code === 'workingTurnMismatch' || code === 'turnExchangeMismatch')
+          ? [...details, mountedNativeScopeRefusal] : details);
         return false;
       };
       if (!typedUserId || !selected.has(typedUserId)) return refuse('callIdentityUserUnproved', [
@@ -3271,6 +3295,16 @@
         identityReasonPriorRequestIdMismatch: 0,
         identityReasonPriorResultResourceIncomplete: 0,
         identityReasonPriorToolScopeMismatch: 0,
+        identityReasonNativeScopeTurnIncomplete: 0,
+        identityReasonNativeScopePathUnproved: 0,
+        identityReasonNativeScopeFinalCount: 0,
+        identityReasonNativeScopeFinalPathMismatch: 0,
+        identityReasonNativeScopeFinalReceiptUnproved: 0,
+        identityReasonNativeScopeFinalNamespaceMissing: 0,
+        identityReasonNativeScopeNodeConflict: 0,
+        identityReasonNativeScopeCacheConflict: 0,
+        identityReasonNativeScopeBranchConflict: 0,
+        identityReasonNativeScopeUnsupported: 0,
         assistantTerminalReceiptChecked: 0, assistantTerminalReceiptMatched: 0,
         callCompletedFalse: 0, callCompletedUndefined: 0, callCompletedNull: 0, callCompletedMalformed: 0, callStatusVeto: 0,
         callVetoStatusAbsent: 0, callVetoStatusPending: 0, callVetoStatusError: 0, callVetoStatusDone: 0,

@@ -17,7 +17,17 @@ export const CORE_NATIVE_IDENTITY_REFUSAL_KEYS = Object.freeze([
   'decodedPathMissing', 'decodedPathForeign', 'serverMissing', 'serverMismatch',
   'toolMismatch', 'workingTurnMissing', 'workingTurnMismatch', 'turnExchangeMissing',
   'turnExchangeMismatch', 'nativeAncestryUnproved', 'priorRequestIdMissing',
-  'priorRequestIdMismatch', 'priorResultResourceIncomplete', 'priorToolScopeMismatch'
+  'priorRequestIdMismatch', 'priorResultResourceIncomplete', 'priorToolScopeMismatch',
+  'nativeScopeTurnIncomplete',
+  'nativeScopePathUnproved',
+  'nativeScopeFinalCount',
+  'nativeScopeFinalPathMismatch',
+  'nativeScopeFinalReceiptUnproved',
+  'nativeScopeFinalNamespaceMissing',
+  'nativeScopeNodeConflict',
+  'nativeScopeCacheConflict',
+  'nativeScopeBranchConflict',
+  'nativeScopeUnsupported'
 ] as const);
 export type CoreNativeIdentityRefusalKey = typeof CORE_NATIVE_IDENTITY_REFUSAL_KEYS[number];
 interface NativeIdentityRefusal { messageId: string; reasons: CoreNativeIdentityRefusalKey[] }
@@ -60,6 +70,16 @@ export const CORE_SHELL_CALL_REJECTION_KEYS = Object.freeze([
   'identityReasonPriorRequestIdMismatch',
   'identityReasonPriorResultResourceIncomplete',
   'identityReasonPriorToolScopeMismatch',
+  'identityReasonNativeScopeTurnIncomplete',
+  'identityReasonNativeScopePathUnproved',
+  'identityReasonNativeScopeFinalCount',
+  'identityReasonNativeScopeFinalPathMismatch',
+  'identityReasonNativeScopeFinalReceiptUnproved',
+  'identityReasonNativeScopeFinalNamespaceMissing',
+  'identityReasonNativeScopeNodeConflict',
+  'identityReasonNativeScopeCacheConflict',
+  'identityReasonNativeScopeBranchConflict',
+  'identityReasonNativeScopeUnsupported',
   'assistantTerminalReceiptChecked', 'assistantTerminalReceiptMatched',
   'callCompletedFalse', 'callCompletedUndefined', 'callCompletedNull', 'callCompletedMalformed', 'callStatusVeto',
   'callVetoStatusAbsent', 'callVetoStatusPending', 'callVetoStatusError', 'callVetoStatusDone',

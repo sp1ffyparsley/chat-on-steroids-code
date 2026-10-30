@@ -106,6 +106,16 @@ function shellScanDiagnostic(raw) {
     'identityReasonPriorRequestIdMismatch',
     'identityReasonPriorResultResourceIncomplete',
     'identityReasonPriorToolScopeMismatch',
+    'identityReasonNativeScopeTurnIncomplete',
+    'identityReasonNativeScopePathUnproved',
+    'identityReasonNativeScopeFinalCount',
+    'identityReasonNativeScopeFinalPathMismatch',
+    'identityReasonNativeScopeFinalReceiptUnproved',
+    'identityReasonNativeScopeFinalNamespaceMissing',
+    'identityReasonNativeScopeNodeConflict',
+    'identityReasonNativeScopeCacheConflict',
+    'identityReasonNativeScopeBranchConflict',
+    'identityReasonNativeScopeUnsupported',
     'assistantTerminalReceiptChecked', 'assistantTerminalReceiptMatched',
     'callCompletedFalse', 'callCompletedUndefined', 'callCompletedNull', 'callCompletedMalformed', 'callStatusVeto',
     'callVetoStatusAbsent', 'callVetoStatusPending', 'callVetoStatusError', 'callVetoStatusDone',
@@ -144,7 +154,17 @@ const NATIVE_IDENTITY_REFUSAL_KEYS = new Set([
   'decodedPathMissing', 'decodedPathForeign', 'serverMissing', 'serverMismatch',
   'toolMismatch', 'workingTurnMissing', 'workingTurnMismatch', 'turnExchangeMissing',
   'turnExchangeMismatch', 'nativeAncestryUnproved', 'priorRequestIdMissing',
-  'priorRequestIdMismatch', 'priorResultResourceIncomplete', 'priorToolScopeMismatch'
+  'priorRequestIdMismatch', 'priorResultResourceIncomplete', 'priorToolScopeMismatch',
+  'nativeScopeTurnIncomplete',
+  'nativeScopePathUnproved',
+  'nativeScopeFinalCount',
+  'nativeScopeFinalPathMismatch',
+  'nativeScopeFinalReceiptUnproved',
+  'nativeScopeFinalNamespaceMissing',
+  'nativeScopeNodeConflict',
+  'nativeScopeCacheConflict',
+  'nativeScopeBranchConflict',
+  'nativeScopeUnsupported'
 ]);
 /** Optional diagnostic codes stay attached to the worker-authenticated native parent inventory. */
 function identityRefusalsDiagnostic(raw, parents) {
@@ -10493,7 +10513,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 109;
+const PAGE_RECORDER_VERSION = 110;
 
 let deferredRecoveryWork = null;
 

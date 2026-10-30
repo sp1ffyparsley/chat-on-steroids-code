@@ -249,6 +249,19 @@ describe('runCommand', () => {
     expect(transportDiagnostic).not.toContain('private-custody-marker');
   });
 
+  it.runIf(IS_WINDOWS)('requests explicit job breakaway in the one Windows broker Create', async () => {
+    let calls = 0;
+    await expect(launchIndependentWindowsCommand(node, [], cwd, 'visible', async (script) => {
+      calls++;
+      expect(script).toMatch(/Win32_ProcessStartup[^}]+CreateFlags\s*=\s*\[uint32\]16777216/);
+      expect(script.match(/Invoke-CimMethod -ClassName Win32_Process -MethodName Create/g)).toHaveLength(1);
+      expect(script).toContain('ProcessStartupInformation=$startup');
+      return { stdout: 'CLF_WINDOWS_LAUNCH_RECEIPT={"returnValue":0,"processId":4321}\r\n',
+        stderr: '', exitCode: 0, truncated: false, timedOut: false, durationMs: 1 };
+    })).resolves.toEqual({ pid: 4321 });
+    expect(calls).toBe(1);
+  });
+
   it.runIf(IS_WINDOWS)('allows a slow Windows broker one bounded startup window without replaying Create', async () => {
     let calls = 0;
     const result = await launchIndependentWindowsCommand(node, [], cwd, 'visible', async (_script, _cwd, timeoutMs) => {

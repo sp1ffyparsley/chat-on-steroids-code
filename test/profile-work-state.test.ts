@@ -430,13 +430,14 @@ describe('inactive profile worker summaries', () => {
     expect(launch).not.toHaveBeenCalled();
   });
 
-  it('focuses a newly added prepared canonical sibling from an older isolated account without bootstrapping it again', async () => {
+  it.each(['win32', 'darwin'] as const)('focuses a prepared canonical sibling through its %s lifetime owner without bootstrapping again', async (platform) => {
     const work = await createLocalInstanceProfile('Work', 'Profile 2');
     const workRoot = await prepareIsolatedInstanceRuntimeConfig(work.id);
     const newer = await createLocalInstanceProfile('Garry', 'Profile 5');
     const newerRoot = await prepareIsolatedInstanceRuntimeConfig(newer.id);
     const peerBefore = await fs.readFile(path.join(newerRoot, 'config.json'), 'utf8');
     const launch = vi.spyOn(managedExec, 'launchCommand').mockResolvedValue({ pid: 1234 });
+    const windowsLaunch = vi.spyOn(managedExec, 'launchIndependentWindowsCommand').mockResolvedValue({ pid: 1234 });
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true,
       json: async () => ({ app: 'chat-on-steroids', instanceId: newer.id, paired: true })
     })));
@@ -445,15 +446,25 @@ describe('inactive profile worker summaries', () => {
     process.argv.push(`--cos-instance-runtime=${work.id}`);
     expect(getConfig().instances!.profiles.some(row => row.id === newer.id)).toBe(false);
 
-    await expect(launchManagedInstanceRuntime(newer.id)).resolves.toEqual({
-      profileId: newer.id, port: newer.bridge.port, reused: true
-    });
-    expect(launch).toHaveBeenCalledExactlyOnceWith(process.execPath,
-      [`--cos-instance-runtime=${newer.id}`], path.dirname(process.execPath));
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    try {
+      Object.defineProperty(process, 'platform', { ...descriptor, value: platform });
+      await expect(launchManagedInstanceRuntime(newer.id)).resolves.toEqual({
+        profileId: newer.id, port: newer.bridge.port, reused: true
+      });
+    } finally { Object.defineProperty(process, 'platform', descriptor); }
+    const args = [process.execPath, [`--cos-instance-runtime=${newer.id}`], path.dirname(process.execPath)];
+    if (platform === 'win32') {
+      expect(windowsLaunch).toHaveBeenCalledExactlyOnceWith(...args, 'visible');
+      expect(launch).not.toHaveBeenCalled();
+    } else {
+      expect(launch).toHaveBeenCalledExactlyOnceWith(...args);
+      expect(windowsLaunch).not.toHaveBeenCalled();
+    }
     expect(await fs.readFile(path.join(newerRoot, 'config.json'), 'utf8')).toBe(peerBefore);
   });
 
-  it('starts a stopped prepared canonical sibling without creating or changing its private config', async () => {
+  it.each(['win32', 'darwin'] as const)('starts a stopped prepared canonical sibling through its %s lifetime owner without changing private config', async (platform) => {
     const work = await createLocalInstanceProfile('Work', 'Profile 2');
     const workRoot = await prepareIsolatedInstanceRuntimeConfig(work.id);
     const peer = await createLocalInstanceProfile('Peer', 'Profile 5');
@@ -463,10 +474,12 @@ describe('inactive profile worker summaries', () => {
     const peerRoot = await prepareIsolatedInstanceRuntimeConfig(peer.id);
     const peerBefore = await fs.readFile(path.join(peerRoot, 'config.json'), 'utf8');
     let started = false;
-    const launch = vi.spyOn(managedExec, 'launchCommand').mockImplementation(async () => {
+    const startedResult = async () => {
       started = true;
       return { pid: 1234 };
-    });
+    };
+    const launch = vi.spyOn(managedExec, 'launchCommand').mockImplementation(startedResult);
+    const windowsLaunch = vi.spyOn(managedExec, 'launchIndependentWindowsCommand').mockImplementation(startedResult);
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: started,
       json: async () => ({ app: 'chat-on-steroids', instanceId: peer.id, paired: true })
     })));
@@ -474,10 +487,21 @@ describe('inactive profile worker summaries', () => {
     await loadConfig();
     process.argv.push(`--cos-instance-runtime=${work.id}`);
 
-    await expect(launchManagedInstanceRuntime(peer.id)).resolves.toEqual({
-      profileId: peer.id, port: holder.port, reused: false
-    });
-    expect(launch).toHaveBeenCalledTimes(1);
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    try {
+      Object.defineProperty(process, 'platform', { ...descriptor, value: platform });
+      await expect(launchManagedInstanceRuntime(peer.id)).resolves.toEqual({
+        profileId: peer.id, port: holder.port, reused: false
+      });
+    } finally { Object.defineProperty(process, 'platform', descriptor); }
+    const args = [process.execPath, [`--cos-instance-runtime=${peer.id}`], path.dirname(process.execPath)];
+    if (platform === 'win32') {
+      expect(windowsLaunch).toHaveBeenCalledExactlyOnceWith(...args, 'visible');
+      expect(launch).not.toHaveBeenCalled();
+    } else {
+      expect(launch).toHaveBeenCalledExactlyOnceWith(...args);
+      expect(windowsLaunch).not.toHaveBeenCalled();
+    }
     expect(await fs.readFile(path.join(peerRoot, 'config.json'), 'utf8')).toBe(peerBefore);
   });
 
@@ -506,6 +530,7 @@ describe('inactive profile worker summaries', () => {
     const workRoot = await prepareIsolatedInstanceRuntimeConfig(work.id);
     const primary = JSON.parse(await fs.readFile(path.join(dir, 'config.json'), 'utf8'));
     const launch = vi.spyOn(managedExec, 'launchCommand').mockResolvedValue({ pid: 1234 });
+    const windowsLaunch = vi.spyOn(managedExec, 'launchIndependentWindowsCommand').mockResolvedValue({ pid: 1234 });
     vi.stubGlobal('fetch', vi.fn(async () => {
       primary.instances.profiles.find((row: { id: string }) => row.id === peer.id).enabled = false;
       await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify(primary), 'utf8');
@@ -517,7 +542,37 @@ describe('inactive profile worker summaries', () => {
 
     await expect(launchManagedInstanceRuntime(peer.id)).rejects.toThrow('enabled account');
     expect(launch).not.toHaveBeenCalled();
+    expect(windowsLaunch).not.toHaveBeenCalled();
     expect(getConfig().instances!.profiles.find(row => row.id === peer.id)?.enabled).toBe(true);
+  });
+
+  it.each([true, false])('does not retry or use a child fallback after Windows broker refusal (running=%s)', async (running) => {
+    const work = await createLocalInstanceProfile('Work', 'Profile 2');
+    const workRoot = await prepareIsolatedInstanceRuntimeConfig(work.id);
+    const peer = await createLocalInstanceProfile('Peer', 'Profile 5');
+    const holder = await listenOnSupportedPort();
+    await closeServer(holder.server);
+    await setLocalInstanceBridgePort(peer.id, holder.port);
+    const peerRoot = await prepareIsolatedInstanceRuntimeConfig(peer.id);
+    const peerBefore = await fs.readFile(path.join(peerRoot, 'config.json'), 'utf8');
+    const launch = vi.spyOn(managedExec, 'launchCommand').mockResolvedValue({ pid: 1234 });
+    const windowsLaunch = vi.spyOn(managedExec, 'launchIndependentWindowsCommand')
+      .mockRejectedValue(new Error('Windows OS-broker refused breakaway'));
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: running,
+      json: async () => ({ app: 'chat-on-steroids', instanceId: peer.id, paired: true })
+    })));
+    initConfigPath(workRoot, dir);
+    await loadConfig();
+    process.argv.push(`--cos-instance-runtime=${work.id}`);
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    try {
+      Object.defineProperty(process, 'platform', { ...descriptor, value: 'win32' });
+      await expect(launchManagedInstanceRuntime(peer.id)).rejects.toThrow('refused breakaway');
+    } finally { Object.defineProperty(process, 'platform', descriptor); }
+    expect(windowsLaunch).toHaveBeenCalledExactlyOnceWith(process.execPath,
+      [`--cos-instance-runtime=${peer.id}`], path.dirname(process.execPath), 'visible');
+    expect(launch).not.toHaveBeenCalled();
+    expect(await fs.readFile(path.join(peerRoot, 'config.json'), 'utf8')).toBe(peerBefore);
   });
 
   it('refuses a canonical foreign-device peer before browser work', async () => {

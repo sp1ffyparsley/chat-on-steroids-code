@@ -132,15 +132,15 @@ $script:InstalledUpgradeBaseline = [pscustomobject]@{
   Version = '2.1.39'
   SafeCloseForUpdate = $true
   FileCount = 291
-  TotalBytes = 571522856
-  TreeSha256 = 'b811a7b174ec3bdfdcd9aa4c44ba326dc2b4b124d17437512723357e1462ff48'
+  TotalBytes = 571526914
+  TreeSha256 = '5154db54df53ba1922aaa510dcc1d07503d8eb4fb85af0a375bbd1c30b185489'
   FileVersion = '2.1.39'
   ProductVersion = '2.1.39.0'
-  ExeSha256 = '6fd50bfe337e3e0b2e1eea06d3fe4e8151e16889a2b315d9a5db529b0e94d58a'
-  AppAsarSha256 = 'be39723635919b2445e6d881dab09d3cffd7e80a72943772a19fa9f68dbff510'
+  ExeSha256 = 'c09295bff4a0984a07011e015890b7267dab61849a0fdcf1c139e12403537789'
+  AppAsarSha256 = 'ede6ccda278ae57d1ccd5ff52c899cf69188e7730da836929f7bb5f63b447a45'
   ExtensionVersion = '2.1.39'
-  ExtensionBackgroundSha256 = '2cda046a623971334112ab1907dd8d1c193bc722911ddf403a961dd4462559eb'
-  SourceProvenanceSha256 = 'ad31c6ecd730926241da4bd19050c827cfefd04ed5abaf542e066a01d1a31bda'
+  ExtensionBackgroundSha256 = '0832c268082f83e8f385841a3bd02a48a8aaf276d4ebb7819dba84c1651382e4'
+  SourceProvenanceSha256 = 'cc0e74f47fb8260ad4a2ac84fbb72ad20e5d9bf08ed201c2fca86f13d7a46105'
   CustomBuildText = 'Chat On Steroids local custom build. Update through scripts/update-custom.ps1 and reinstall from this checkout.'
 }
 
@@ -3345,7 +3345,8 @@ function Start-IndependentInstalledApp {
   param([Parameter(Mandatory)][string]$Executable, [string[]]$Arguments = @(), [switch]$ReceiptOnly)
   # Production lifetime must belong to Windows, not the terminal/agent's kill-on-close
   # process tree. Start-Process and Node detached/unref do not escape a Windows Job.
-  # WMI creates the process through the local OS provider; no service/task is installed.
+  # WMI creates the process through the local OS provider; explicitly leave its job too.
+  # A provider parent alone is not proof of lifetime isolation. No service/task is installed.
   if (-not [IO.Path]::IsPathRooted($Executable) -or
       -not (Test-Path -LiteralPath $Executable -PathType Leaf)) {
     throw "Independent app launch requires an existing absolute executable: $Executable"
@@ -3355,7 +3356,7 @@ function Start-IndependentInstalledApp {
     # CommandLineToArgvW/CRT quoting: double backslashes before quotes and closing quote.
     '"' + ([regex]::Replace([regex]::Replace($value, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1')) + '"'
   }
-  $startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }
+  $startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0; CreateFlags = [uint32]16777216 }
   $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
     CommandLine = ($quoted -join ' ')
     CurrentDirectory = [IO.Path]::GetDirectoryName($Executable)

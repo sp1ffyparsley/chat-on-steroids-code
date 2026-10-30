@@ -531,9 +531,9 @@ function safeIndependentWindowsLaunchDiagnostic(value: unknown): string {
 /**
  * Starts an external Windows program through the local Win32_Process provider.
  *
- * The provider, rather than this Electron/terminal process, owns the new process lifetime.
- * This is the same boundary used by qualified install/rollback because Node detached/unref
- * and PowerShell Start-Process both remain inside an inherited Windows Job. ReturnValue=0
+ * The provider creates the process with explicit job breakaway: WMI alone can still put a
+ * child in the provider's job. Node detached/unref and PowerShell Start-Process also do not
+ * request this Windows lifetime boundary. A refusal never falls back to a child launch. ReturnValue=0
  * plus a PID proves only that Windows accepted Create; it is not process-live, browser-ready,
  * navigation, or message-delivery evidence.
  */
@@ -567,7 +567,8 @@ export async function launchIndependentWindowsCommand(
     `$ErrorActionPreference='Stop'`,
     `$commandLine=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${commandLineBase64}'))`,
     `$currentDirectory=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${cwdBase64}'))`,
-    `$startup=New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]${showWindow} }`,
+    // CREATE_BREAKAWAY_FROM_JOB; a provider job that forbids breakaway must fail closed.
+    `$startup=New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]${showWindow}; CreateFlags = [uint32]16777216 }`,
     `$created=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine=$commandLine; CurrentDirectory=$currentDirectory; ProcessStartupInformation=$startup }`,
     `$returnValue=if($null -eq $created.ReturnValue){-1}else{[int]$created.ReturnValue}`,
     `$processId=if($null -eq $created.ProcessId){0}else{[int64]$created.ProcessId}`,

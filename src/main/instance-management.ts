@@ -28,7 +28,7 @@ import {
 import { bridgeStatus } from './bridge.js';
 import { connect, disconnect, getStatus } from './connection.js';
 import { openInPreferredBrowser } from './browser.js';
-import { findWindowsPowerShell, launchCommand } from './exec.js';
+import { findWindowsPowerShell, launchCommand, launchIndependentWindowsCommand } from './exec.js';
 import { assertCanonicalAccountRouting, isolatedProcessArgument } from './instance-process.js';
 import { logEvent } from './logger.js';
 import { TUNNEL_ID_PATTERN } from './tunnel/index.js';
@@ -728,7 +728,7 @@ export async function launchManagedInstanceRuntime(id: string): Promise<{ profil
     // A second invocation of this exact account reaches its own Electron singleton and asks
     // that existing window to focus; it cannot create a second set of account owners.
     profile = await recheckManagedLaunchProfile(profile);
-    await launchCommand(process.execPath, profile.state.mode === 'isolated' ? [isolatedProcessArgument(id)] : [], path.dirname(process.execPath));
+    await launchManagedAccountProcess(profile);
     logEvent('profile.runtime.focused', `Focused account ${id} port=${profile.bridge.port}`);
     return { profileId: id, port: profile.bridge.port, reused: true };
   }
@@ -749,7 +749,7 @@ export async function launchManagedInstanceRuntime(id: string): Promise<{ profil
     }
   }
   profile = await recheckManagedLaunchProfile(profile);
-  const launched = await launchCommand(process.execPath, profile.state.mode === 'isolated' ? [isolatedProcessArgument(id)] : [], path.dirname(process.execPath));
+  const launched = await launchManagedAccountProcess(profile);
   logEvent('profile.runtime.launched', `Started account ${id} pid=${launched.pid} port=${profile.bridge.port}`);
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
@@ -759,6 +759,15 @@ export async function launchManagedInstanceRuntime(id: string): Promise<{ profil
     if (observed) throw new Error(`Bridge port ${profile.bridge.port} belongs to ${observed}, not ${id}.`);
   }
   throw new Error(`Account ${id} did not start its bridge on 127.0.0.1:${profile.bridge.port} within 20 seconds. Check its account-specific app.log; this account's chats were not stopped.`);
+}
+
+/** Sibling accounts must not inherit this account's Windows job lifetime. */
+function launchManagedAccountProcess(profile: InstanceProfile): Promise<{ pid: number }> {
+  const args = profile.state.mode === 'isolated' ? [isolatedProcessArgument(profile.id)] : [];
+  const cwd = path.dirname(process.execPath);
+  return process.platform === 'win32'
+    ? launchIndependentWindowsCommand(process.execPath, args, cwd, 'visible')
+    : launchCommand(process.execPath, args, cwd);
 }
 
 /** Catalog refresh/port/config probes cannot lend stale authority to the irreversible OS launch. */

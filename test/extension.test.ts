@@ -9682,7 +9682,7 @@ describe('extension observation journal', () => {
       await worker.registerTab(73, documentId);
       await worker.send({ type: 'bind', conversationId }, 73, documentId);
       const identityRefusals: any[] = [
-        { messageId: 'native-diagnostic-a', reasons: ['workingTurnMismatch'] },
+        { messageId: 'native-diagnostic-a', reasons: ['workingTurnMismatch', 'nativeScopeFinalNamespaceMissing'] },
         { messageId: 'native-diagnostic-b', reasons: ['turnExchangeMissing'] }];
       if (variant === 'unknown') identityRefusals[0].reasons = ['PRIVATE_UNKNOWN_REASON'];
       if (variant === 'foreign-parent') identityRefusals[0].messageId = 'foreign-parent';
@@ -10131,6 +10131,16 @@ describe('extension observation journal', () => {
       identityReasonPriorRequestIdMismatch: 18,
       identityReasonPriorResultResourceIncomplete: 19,
       identityReasonPriorToolScopeMismatch: 20,
+      identityReasonNativeScopeTurnIncomplete: 21,
+      identityReasonNativeScopePathUnproved: 22,
+      identityReasonNativeScopeFinalCount: 23,
+      identityReasonNativeScopeFinalPathMismatch: 24,
+      identityReasonNativeScopeFinalReceiptUnproved: 25,
+      identityReasonNativeScopeFinalNamespaceMissing: 26,
+      identityReasonNativeScopeNodeConflict: 27,
+      identityReasonNativeScopeCacheConflict: 28,
+      identityReasonNativeScopeBranchConflict: 29,
+      identityReasonNativeScopeUnsupported: 30,
       assistantTerminalReceiptChecked: 2, assistantTerminalReceiptMatched: 1,
       callJoinReferenceMissing: 1, callJoinReferenceUnselected: 2, callJoinReferenceConflict: 3,
       callJoinResultMissing: 4, callJoinResultIdentity: 5, callJoinDescriptorUnsupported: 400,
@@ -10163,7 +10173,7 @@ describe('extension observation journal', () => {
     expect(legacy?.shellScan?.rejects).not.toHaveProperty('assistantTerminalReceiptMatched');
     for (const key of ['userProjected', 'callJoinReferenceMissing', 'callJoinReferenceUnselected', 'callJoinReferenceConflict',
       'callJoinResultMissing', 'callJoinResultIdentity', 'callJoinDescriptorUnsupported', 'callIdentityRecovered', 'callIdentityPriorPair', 'callIdentityUserUnproved', 'callIdentityNativeUnproved', 'callIdentityScopeUnproved', 'callIdentityParentUnproved', 'callIdentitySelectedWithheld',
-      'identityReasonCurrentQuestionMissing', 'identityReasonCurrentQuestionUnselected', 'identityReasonCurrentQuestionConflict', 'identityReasonNativeInvocationMissing', 'identityReasonNativeInvocationMismatch', 'identityReasonRequestIdMissing', 'identityReasonDecodedPathMissing', 'identityReasonDecodedPathForeign', 'identityReasonServerMissing', 'identityReasonServerMismatch', 'identityReasonToolMismatch', 'identityReasonWorkingTurnMissing', 'identityReasonWorkingTurnMismatch', 'identityReasonTurnExchangeMissing', 'identityReasonTurnExchangeMismatch', 'identityReasonNativeAncestryUnproved', 'identityReasonPriorRequestIdMissing', 'identityReasonPriorRequestIdMismatch', 'identityReasonPriorResultResourceIncomplete', 'identityReasonPriorToolScopeMismatch']) {
+      'identityReasonCurrentQuestionMissing', 'identityReasonCurrentQuestionUnselected', 'identityReasonCurrentQuestionConflict', 'identityReasonNativeInvocationMissing', 'identityReasonNativeInvocationMismatch', 'identityReasonRequestIdMissing', 'identityReasonDecodedPathMissing', 'identityReasonDecodedPathForeign', 'identityReasonServerMissing', 'identityReasonServerMismatch', 'identityReasonToolMismatch', 'identityReasonWorkingTurnMissing', 'identityReasonWorkingTurnMismatch', 'identityReasonTurnExchangeMissing', 'identityReasonTurnExchangeMismatch', 'identityReasonNativeAncestryUnproved', 'identityReasonPriorRequestIdMissing', 'identityReasonPriorRequestIdMismatch', 'identityReasonPriorResultResourceIncomplete', 'identityReasonPriorToolScopeMismatch', 'identityReasonNativeScopeTurnIncomplete', 'identityReasonNativeScopePathUnproved', 'identityReasonNativeScopeFinalCount', 'identityReasonNativeScopeFinalPathMismatch', 'identityReasonNativeScopeFinalReceiptUnproved', 'identityReasonNativeScopeFinalNamespaceMissing', 'identityReasonNativeScopeNodeConflict', 'identityReasonNativeScopeCacheConflict', 'identityReasonNativeScopeBranchConflict', 'identityReasonNativeScopeUnsupported']) {
       const inherited = Object.assign(Object.create({ [key]: 400 }), {
         fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0 });
       expect((await project(inherited))?.shellScan?.rejects).not.toHaveProperty(key);

@@ -168,6 +168,31 @@ describe('Core tool-surface incident diagnostics', () => {
     expect((coreBrowserEvidence(TARGET)?.ordinaryFinal as any).identityRefusals[0].reasons).toEqual(['workingTurnMismatch']);
   });
 
+  it.each([
+    'nativeScopeTurnIncomplete', 'nativeScopePathUnproved', 'nativeScopeFinalCount',
+    'nativeScopeFinalPathMismatch', 'nativeScopeFinalReceiptUnproved', 'nativeScopeFinalNamespaceMissing',
+    'nativeScopeNodeConflict', 'nativeScopeCacheConflict', 'nativeScopeBranchConflict', 'nativeScopeUnsupported'
+  ] as const)('preserves a bounded first native anchor stage without granting original identity: %s', stage => {
+    resetCoreBrowserEvidenceForTests();
+    const frame = refusalFrame();
+    frame.ordinaryFinal.identityRefusals[0].reasons.push(stage);
+    expect(noteCoreBrowserEvidence(frame)).toBe(true);
+    const snapshot = coreBrowserEvidence(TARGET);
+    expect(nativeEvidence.nativeIdentityRefusalSummary(snapshot)).toEqual({ calls: 2, reasons: [
+      { code: 'workingTurnMismatch', calls: 2 }, { code: 'turnExchangeMissing', calls: 1 }, { code: stage, calls: 1 }
+    ] });
+    const diagnostic = nativeEvidence.nativeCompletionDiagnostic(TARGET, NOW);
+    expect(diagnostic?.requestIdentity.failureReasons).toContainEqual({ code: stage, calls: 1 });
+    expect(JSON.stringify(diagnostic)).not.toMatch(/private-parent|abababab/);
+    expect(nativeCompletionCandidate(TARGET)).toBeNull();
+    const invalid = refusalFrame(); invalid.observedAt++;
+    invalid.ordinaryFinal.identityRefusals[0].reasons = [stage, 'PRIVATE_UNKNOWN_ANCHOR_REASON'];
+    expect(noteCoreBrowserEvidence(invalid)).toBe(true);
+    expect(nativeEvidence.nativeIdentityRefusalSummary(coreBrowserEvidence(TARGET))).toBeNull();
+    expect(JSON.stringify(coreBrowserEvidence(TARGET))).not.toContain('PRIVATE_UNKNOWN_ANCHOR_REASON');
+    expect(nativeCompletionCandidate(TARGET)).toBeNull();
+  });
+
   it.each(['document', 'epoch', 'question', 'parents'] as const)(
     'does not borrow exact refusal reasons after the retained %s changes', changed => {
       resetCoreBrowserEvidenceForTests();
@@ -1081,6 +1106,16 @@ describe('Core tool-surface incident diagnostics', () => {
       'identityReasonPriorRequestIdMismatch',
       'identityReasonPriorResultResourceIncomplete',
       'identityReasonPriorToolScopeMismatch',
+      'identityReasonNativeScopeTurnIncomplete',
+      'identityReasonNativeScopePathUnproved',
+      'identityReasonNativeScopeFinalCount',
+      'identityReasonNativeScopeFinalPathMismatch',
+      'identityReasonNativeScopeFinalReceiptUnproved',
+      'identityReasonNativeScopeFinalNamespaceMissing',
+      'identityReasonNativeScopeNodeConflict',
+      'identityReasonNativeScopeCacheConflict',
+      'identityReasonNativeScopeBranchConflict',
+      'identityReasonNativeScopeUnsupported',
       'assistantTerminalReceiptChecked', 'assistantTerminalReceiptMatched',
       'callCompletedFalse', 'callCompletedUndefined', 'callCompletedNull', 'callCompletedMalformed', 'callStatusVeto',
       'callVetoStatusAbsent', 'callVetoStatusPending', 'callVetoStatusError', 'callVetoStatusDone',

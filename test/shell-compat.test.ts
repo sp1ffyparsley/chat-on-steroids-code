@@ -58,7 +58,7 @@ const CALL_JOIN_KEYS = ['callJoinReferenceMissing', 'callJoinReferenceUnselected
   'callIdentityRecovered', 'callIdentityPriorPair', 'callIdentityUserUnproved',
   'callIdentityNativeUnproved', 'callIdentityScopeUnproved', 'callIdentityParentUnproved',
   'callIdentitySelectedWithheld',
-  'identityReasonCurrentQuestionMissing', 'identityReasonCurrentQuestionUnselected', 'identityReasonCurrentQuestionConflict', 'identityReasonNativeInvocationMissing', 'identityReasonNativeInvocationMismatch', 'identityReasonRequestIdMissing', 'identityReasonDecodedPathMissing', 'identityReasonDecodedPathForeign', 'identityReasonServerMissing', 'identityReasonServerMismatch', 'identityReasonToolMismatch', 'identityReasonWorkingTurnMissing', 'identityReasonWorkingTurnMismatch', 'identityReasonTurnExchangeMissing', 'identityReasonTurnExchangeMismatch', 'identityReasonNativeAncestryUnproved', 'identityReasonPriorRequestIdMissing', 'identityReasonPriorRequestIdMismatch', 'identityReasonPriorResultResourceIncomplete', 'identityReasonPriorToolScopeMismatch'] as const;
+  'identityReasonCurrentQuestionMissing', 'identityReasonCurrentQuestionUnselected', 'identityReasonCurrentQuestionConflict', 'identityReasonNativeInvocationMissing', 'identityReasonNativeInvocationMismatch', 'identityReasonRequestIdMissing', 'identityReasonDecodedPathMissing', 'identityReasonDecodedPathForeign', 'identityReasonServerMissing', 'identityReasonServerMismatch', 'identityReasonToolMismatch', 'identityReasonWorkingTurnMissing', 'identityReasonWorkingTurnMismatch', 'identityReasonTurnExchangeMissing', 'identityReasonTurnExchangeMismatch', 'identityReasonNativeAncestryUnproved', 'identityReasonPriorRequestIdMissing', 'identityReasonPriorRequestIdMismatch', 'identityReasonPriorResultResourceIncomplete', 'identityReasonPriorToolScopeMismatch', 'identityReasonNativeScopeTurnIncomplete', 'identityReasonNativeScopePathUnproved', 'identityReasonNativeScopeFinalCount', 'identityReasonNativeScopeFinalPathMismatch', 'identityReasonNativeScopeFinalReceiptUnproved', 'identityReasonNativeScopeFinalNamespaceMissing', 'identityReasonNativeScopeNodeConflict', 'identityReasonNativeScopeCacheConflict', 'identityReasonNativeScopeBranchConflict', 'identityReasonNativeScopeUnsupported'] as const;
 const EMPTY_CALL_JOINS = Object.fromEntries(CALL_JOIN_KEYS.map(key => [key, 0]));
 const EMPTY_VETO_RECEIPT_CHECKS = { callVetoReceiptChecked: 0, callVetoReceiptMatched: 0 };
 const EMPTY_ASSISTANT_TERMINAL_RECEIPTS = { assistantTerminalReceiptChecked: 0, assistantTerminalReceiptMatched: 0 };
@@ -1847,6 +1847,84 @@ describe('alternate shell turn/message provenance', () => {
     });
 
   it.each([
+    ['incomplete turn before a bad final', 'nativeScopeTurnIncomplete'],
+    ['unselected path before a bad final', 'nativeScopePathUnproved'],
+    ['duplicate final', 'nativeScopeFinalCount'],
+    ['final off current path', 'nativeScopeFinalPathMismatch'],
+    ['nonterminal final', 'nativeScopeFinalReceiptUnproved'],
+    ['missing final namespace', 'nativeScopeFinalNamespaceMissing'],
+    ['cached branch conflict', 'nativeScopeCacheConflict'],
+    ['branch namespace conflict', 'nativeScopeBranchConflict'],
+    ['namespace accessor', 'nativeScopeFinalNamespaceMissing']
+  ] as const)('reports only the first attempted native scope anchor refusal: %s', async (variant, expectedReason) => {
+    let accessorReads = 0;
+    const diagnosticLogs: string[] = [];
+    const page = await shellHarness({ withCall: true, nativeCallReceipt: true,
+      nativeCallCacheConflict: variant === 'cached branch conflict',
+      callCompleted: false, assistantCompleted: false, diagnosticLogs,
+      nativeCallMutation(mapping, entry) {
+        delete entry.turn.items[1].widgetStateSource;
+        entry.turn.messageIds = [USER, CALL, RESULT, ASSISTANT];
+        for (const id of [CALL, RESULT, ASSISTANT]) Object.assign(mapping[id].message.metadata, {
+          working_turn_id: 'PRIVATE_ANCHOR_WORKING', turn_exchange_id: 'PRIVATE_ANCHOR_EXCHANGE',
+          parent_id: mapping[id].parent
+        });
+        if (variant === 'incomplete turn before a bad final') entry.turn.status = 'in_progress';
+        if (variant === 'unselected path before a bad final') entry.turn.messageIds = [USER, CALL, ASSISTANT];
+        if (variant === 'duplicate final') entry.turn.items.push({ type: 'assistant-message', messageId: RESULT,
+          phase: 'final_answer', content: 'other final', completed: false });
+        if (variant === 'final off current path') entry.turn.items.at(-1).messageId = RESULT;
+        if (['incomplete turn before a bad final', 'unselected path before a bad final', 'nonterminal final'].includes(variant))
+          mapping[ASSISTANT].message.status = 'in_progress';
+        if (variant === 'missing final namespace') delete mapping[ASSISTANT].message.metadata.working_turn_id;
+        if (variant === 'branch namespace conflict') mapping[RESULT].message.metadata.working_turn_id = 'PRIVATE_OTHER_WORKING';
+        if (variant === 'namespace accessor') Object.defineProperty(mapping[ASSISTANT].message.metadata, 'working_turn_id', {
+          get() { accessorReads++; throw new Error('PRIVATE_SCOPE_GETTER'); }
+        });
+      } });
+    try {
+      const call = page.fiber.turns[0].calls[0];
+      expect(call.identityRefusalReasons.filter((code: string) => code.startsWith('nativeScope'))).toEqual([expectedReason]);
+      expect(call.identityRefusalReasons).toEqual(expect.arrayContaining(['workingTurnMismatch', 'turnExchangeMismatch']));
+      const key = 'identityReason' + expectedReason[0]!.toUpperCase() + expectedReason.slice(1);
+      expect(page.fiber.shellScan.rejects[key]).toBe(1);
+      expect(call).toMatchObject({ requestId: null, answered: false });
+      expect(page.fiber.turns[0].requests).not.toContainEqual(expect.objectContaining({ requestId: REQUEST, messageId: CALL }));
+      expect(page.fiber.turns[0].endMessageId).toBeNull();
+      expect(accessorReads).toBe(0);
+      const trace = diagnosticLogs.find(line => line.includes('native result-reference recovery diagnostic'))!;
+      expect(trace).toContain(`${expectedReason}:1`);
+      for (const value of [USER, CALL, RESULT, REQUEST, APP, LINK, 'PRIVATE_ANCHOR_WORKING', 'PRIVATE_ANCHOR_EXCHANGE',
+        'PRIVATE_OTHER_WORKING', 'PRIVATE_SCOPE_GETTER', 'PRIVATE_TOOL_RESULT']) expect(trace).not.toContain(value);
+    } finally { page.dom.window.close(); }
+  });
+
+  it.each(['matching scope', 'foreign path', 'working field missing', 'exchange field missing'] as const)(
+    'does not label an unused native scope anchor as a namespace refusal: %s', async variant => {
+      const page = await shellHarness({ withCall: true, nativeCallReceipt: true,
+        callCompleted: false, assistantCompleted: false,
+        nativeCallMutation(mapping, entry) {
+          delete entry.turn.items[1].widgetStateSource;
+          entry.turn.status = 'in_progress';
+          entry.turn.messageIds = [USER, CALL, RESULT, ASSISTANT];
+          if (variant === 'foreign path') mapping[CALL].message.content.text = JSON.stringify({ path: '/Gmail/private/read' });
+          if (variant === 'working field missing') delete mapping[CALL].message.metadata.working_turn_id;
+          if (variant === 'exchange field missing') delete mapping[CALL].message.metadata.turn_exchange_id;
+        } });
+      try {
+        const call = page.fiber.turns[0].calls[0];
+        expect(call.requestId).toBe(variant === 'matching scope' ? REQUEST : null);
+        expect(call.answered).toBe(false);
+        if (variant === 'working field missing') expect(call.identityRefusalReasons).toContain('workingTurnMissing');
+        if (variant === 'exchange field missing') expect(call.identityRefusalReasons).toContain('turnExchangeMissing');
+        expect(call.identityRefusalReasons.filter((code: string) => code.startsWith('nativeScope'))).toEqual([]);
+        expect(Object.entries(page.fiber.shellScan.rejects).filter(([key, count]) =>
+          key.startsWith('identityReasonNativeScope') && count !== 0)).toEqual([]);
+        expect(page.fiber.turns[0].endMessageId).toBeNull();
+      } finally { page.dom.window.close(); }
+    });
+
+  it.each([
     ['identity only', true, false],
     ['finished exact result', true, true],
     ['cached mapping only', false, false]
@@ -1873,6 +1951,7 @@ describe('alternate shell turn/message provenance', () => {
     try {
       const turn = page.fiber.turns[0];
       expect(turn.calls[0].requestId).toBe(live ? REQUEST : null);
+      expect(turn.calls[0].identityRefusalReasons.filter((code: string) => code.startsWith('nativeScope'))).toEqual([]);
       expect(turn.calls[0].answered).toBe(live && finished);
       expect(turn.requests.some((row: any) => row.requestId === REQUEST && row.messageId === CALL)).toBe(live);
       if (!finished || !live) expect(turn.endMessageId).toBeNull();

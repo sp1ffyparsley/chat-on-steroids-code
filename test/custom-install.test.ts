@@ -329,10 +329,10 @@ describe.runIf(process.platform === 'win32')('custom qualified install integrity
     expect(script).not.toContain('$successor = Start-Process');
     expect(script).not.toContain('$retry = Start-Process');
   });
-  it('preserves quoted arguments and hidden startup through the Windows broker', () => {
+  it('preserves quoted arguments and hidden startup while requesting Windows job breakaway', () => {
     const expected = ['', 'with spaces', 'a"b', 'C:\\path with space\\', '\\\\"quoted', '日本語', '--cos-instance-runtime=profile-example'];
     const encoded = Buffer.from(JSON.stringify(expected)).toString('base64');
-    const code = `[Console]::OutputEncoding = [Text.Encoding]::UTF8; . ${ps(installScript)}; $expected = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json; function Invoke-CimMethod { param($ClassName,$MethodName,$Arguments); if($Arguments.ProcessStartupInformation.ShowWindow -ne 0){throw 'not hidden'}; $script:actual = @(ConvertFrom-WindowsProcessCommandLine $Arguments.CommandLine); return [pscustomobject]@{ReturnValue=0;ProcessId=$PID} }; Start-IndependentInstalledApp -Executable (Get-Process -Id $PID).Path -Arguments @($expected) -ReceiptOnly | Out-Null; Write-Output ('ARGV=' + (ConvertTo-Json -Compress -InputObject @($script:actual | Select-Object -Skip 1)))`;
+    const code = `[Console]::OutputEncoding = [Text.Encoding]::UTF8; . ${ps(installScript)}; $expected = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json; function Invoke-CimMethod { param($ClassName,$MethodName,$Arguments); if($Arguments.ProcessStartupInformation.ShowWindow -ne 0){throw 'not hidden'}; if($Arguments.ProcessStartupInformation.CreateFlags -ne 16777216){throw 'missing explicit job breakaway'}; $script:actual = @(ConvertFrom-WindowsProcessCommandLine $Arguments.CommandLine); return [pscustomobject]@{ReturnValue=0;ProcessId=$PID} }; Start-IndependentInstalledApp -Executable (Get-Process -Id $PID).Path -Arguments @($expected) -ReceiptOnly | Out-Null; Write-Output ('ARGV=' + (ConvertTo-Json -Compress -InputObject @($script:actual | Select-Object -Skip 1)))`;
     const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(code, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true });
     expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout.split(/\r?\n/).find(line => line.startsWith('ARGV='))!.slice(5))).toEqual(expected);
@@ -350,15 +350,15 @@ describe.runIf(process.platform === 'win32')('custom qualified install integrity
       Version: '2.1.39',
       SafeCloseForUpdate: true,
       FileCount: 291,
-      TotalBytes: 571522856,
-      TreeSha256: 'b811a7b174ec3bdfdcd9aa4c44ba326dc2b4b124d17437512723357e1462ff48',
+      TotalBytes: 571526914,
+      TreeSha256: '5154db54df53ba1922aaa510dcc1d07503d8eb4fb85af0a375bbd1c30b185489',
       FileVersion: '2.1.39',
       ProductVersion: '2.1.39.0',
-      ExeSha256: '6fd50bfe337e3e0b2e1eea06d3fe4e8151e16889a2b315d9a5db529b0e94d58a',
-      AppAsarSha256: 'be39723635919b2445e6d881dab09d3cffd7e80a72943772a19fa9f68dbff510',
+      ExeSha256: 'c09295bff4a0984a07011e015890b7267dab61849a0fdcf1c139e12403537789',
+      AppAsarSha256: 'ede6ccda278ae57d1ccd5ff52c899cf69188e7730da836929f7bb5f63b447a45',
       ExtensionVersion: '2.1.39',
-      ExtensionBackgroundSha256: '2cda046a623971334112ab1907dd8d1c193bc722911ddf403a961dd4462559eb',
-      SourceProvenanceSha256: 'ad31c6ecd730926241da4bd19050c827cfefd04ed5abaf542e066a01d1a31bda',
+      ExtensionBackgroundSha256: '0832c268082f83e8f385841a3bd02a48a8aaf276d4ebb7819dba84c1651382e4',
+      SourceProvenanceSha256: 'cc0e74f47fb8260ad4a2ac84fbb72ad20e5d9bf08ed201c2fca86f13d7a46105',
       CustomBuildText: 'Chat On Steroids local custom build. Update through scripts/update-custom.ps1 and reinstall from this checkout.',
     });
   });

@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 109;
+  const RECORDER_VERSION = 110;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -4568,6 +4568,16 @@
       'identityReasonPriorRequestIdMismatch',
       'identityReasonPriorResultResourceIncomplete',
       'identityReasonPriorToolScopeMismatch',
+      'identityReasonNativeScopeTurnIncomplete',
+      'identityReasonNativeScopePathUnproved',
+      'identityReasonNativeScopeFinalCount',
+      'identityReasonNativeScopeFinalPathMismatch',
+      'identityReasonNativeScopeFinalReceiptUnproved',
+      'identityReasonNativeScopeFinalNamespaceMissing',
+      'identityReasonNativeScopeNodeConflict',
+      'identityReasonNativeScopeCacheConflict',
+      'identityReasonNativeScopeBranchConflict',
+      'identityReasonNativeScopeUnsupported',
       'assistantTerminalReceiptChecked', 'assistantTerminalReceiptMatched',
       'callCompletedFalse', 'callCompletedUndefined', 'callCompletedNull', 'callCompletedMalformed', 'callStatusVeto',
       'callVetoStatusAbsent', 'callVetoStatusPending', 'callVetoStatusError', 'callVetoStatusDone',
@@ -4663,7 +4673,17 @@
     'decodedPathMissing', 'decodedPathForeign', 'serverMissing', 'serverMismatch',
     'toolMismatch', 'workingTurnMissing', 'workingTurnMismatch', 'turnExchangeMissing',
     'turnExchangeMismatch', 'nativeAncestryUnproved', 'priorRequestIdMissing',
-    'priorRequestIdMismatch', 'priorResultResourceIncomplete', 'priorToolScopeMismatch'
+    'priorRequestIdMismatch', 'priorResultResourceIncomplete', 'priorToolScopeMismatch',
+    'nativeScopeTurnIncomplete',
+    'nativeScopePathUnproved',
+    'nativeScopeFinalCount',
+    'nativeScopeFinalPathMismatch',
+    'nativeScopeFinalReceiptUnproved',
+    'nativeScopeFinalNamespaceMissing',
+    'nativeScopeNodeConflict',
+    'nativeScopeCacheConflict',
+    'nativeScopeBranchConflict',
+    'nativeScopeUnsupported'
   ]);
   /** Read only fixed diagnostic codes; a malformed optional field cannot change call authority. */
   function readIdentityRefusalReasons(entry) {
