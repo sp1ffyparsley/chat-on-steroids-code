@@ -115,6 +115,12 @@ public static class CosWindowsCapture {
     } finally { operation.Close(); }
   }
 
+  static void ValidateCaptureSize(IntPtr window, int width, int height) {
+    if (width <= 0 || height <= 0 || (long)width * height > MaxPixels)
+      throw new InvalidOperationException("CAPTURE_FAILED: capture dimensions exceed the pixel limit (hwnd=" +
+        window.ToInt64() + ", width=" + width + ", height=" + height + ", maxPixels=" + MaxPixels + ")");
+  }
+
   public static string Capture(long handle, int maxWidth, string file) {
     if (!GraphicsCaptureSession.IsSupported()) throw new NotSupportedException("CAPTURE_FAILED: Windows.Graphics.Capture is unavailable");
     IntPtr window = new IntPtr(handle);
@@ -122,7 +128,7 @@ public static class CosWindowsCapture {
     var clock = Stopwatch.StartNew();
     var item = CreateItem(window);
     int width = item.Size.Width, height = item.Size.Height;
-    if (width <= 0 || height <= 0 || (long)width * height > MaxPixels) throw new InvalidOperationException("CAPTURE_FAILED: capture dimensions exceed the pixel limit");
+    ValidateCaptureSize(window, width, height);
     RECT bounds = CaptureBounds(window, width, height, "item");
     using (var device = CreateDevice())
     using (var pool = Direct3D11CaptureFramePool.CreateFreeThreaded(device, DirectXPixelFormat.B8G8R8A8UIntNormalized, 1, item.Size))
