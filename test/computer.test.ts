@@ -188,12 +188,14 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
   });
 
   it('keeps a recent immutable frame usable across an unrelated observation', async () => {
-    const earlier = await screenshot({ window: fixtureWindow, maxWidth: 320 });
-    const current = await screenshot({ window: fixtureWindow, maxWidth: 320 });
+    // History lifetime is independent of foreground activation. Use real screen frames
+    // around an unrelated owned-window observation; another app may legitimately deny
+    // focus to our non-activating Form on an unattended desktop. Window target/focus
+    // refusal and geometry remain covered by computer-generation.test.ts.
+    const earlier = await screenshot({ maxWidth: 320 });
+    await screenshot({ window: fixtureWindow, maxWidth: 320 });
+    const current = await screenshot({ maxWidth: 320 });
     expect(current.frameId).toBeGreaterThan(earlier.frameId);
-
-    // Another caller taking a picture no longer invalidates this frame. A window-bound
-    // frame is revalidated against its HWND and geometry inside the helper before input.
     await expect(act([{ type: 'move', x: 1, y: 1 }], { frameId: earlier.frameId })).resolves.toBeTruthy();
     await expect(act([{ type: 'move', x: 1, y: 1 }], { frameId: current.frameId })).resolves.toBeTruthy();
     await expect(act([{ type: 'move', x: 1, y: 1 }])).rejects.toThrow(/FRAME_REQUIRED/);
@@ -221,7 +223,10 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
     const order: string[] = [];
     const base = await screenshot({ window: fixtureWindow, maxWidth: 320 });
 
-    const combined = actAndCapture([{ type: 'move', x: 1, y: 1 }], {
+    // The serialization contract concerns the action/capture lock, not whether an
+    // unrelated foreground process permits focus. A native zero-wait exercises the
+    // same action transaction and real capture without requiring focus or pointer input.
+    const combined = actAndCapture([{ type: 'wait', ms: 0 }], {
       frameId: base.frameId,
       capture: { window: fixtureWindow, maxWidth: 320 }
     }).then((result) => {
