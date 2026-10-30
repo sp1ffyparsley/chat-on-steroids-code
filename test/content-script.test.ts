@@ -4074,6 +4074,13 @@ describe('desktop input delivery and helper ownership', () => {
       expect(live.sent.filter(message => message.response)).toHaveLength(2);
     }
     expect(nativeSends).toBe(1);
+    const diagnosticStages = live.sent.filter(message => message.stage?.startsWith('answer:')).map(message => message.stage);
+    if (shape === 'missing terminal / no witness') expect(diagnosticStages).toContain('answer:user-binding');
+    if (shape === 'missing terminal / foreign Fiber' || shape === 'missing terminal / open call')
+      expect(diagnosticStages).toContain('answer:native-scope');
+    // Refusal observations are bounded fixed codes, never raw answer text or authority.
+    expect(new Set(diagnosticStages).size).toBe(diagnosticStages.length);
+    expect(JSON.stringify(diagnosticStages)).not.toContain(canonical);
   });
 
   it('accepts a collapsed temporary helper final only after its exact tool residue is idle', async () => {

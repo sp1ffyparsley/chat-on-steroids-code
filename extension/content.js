@@ -15685,9 +15685,19 @@
       decision.temporaryProviderConversationConflict !== true && !!decision.temporaryProviderConversation &&
       native.conversationConflict !== true && native.conversationId === decision.temporaryProviderConversation &&
       !(native.calls || []).some(call => call.answered !== true);
-    if ((!recordedUser && !witnessedDroppedUser) || assistant?.role !== 'assistant' ||
-        !assistant.id || !assistant.node?.isConnected || isStale(assistant.node) || pageTurn?.role !== 'assistant' ||
-        !nodes.some(node => node?.contains(assistant.node))) {
+    if (!recordedUser && !witnessedDroppedUser) {
+      // Distinguish a prior exact provider witness refusing current scope from a
+      // never-bound user. Fixed codes only; no waiter revival or completion authority.
+      noteDesktopDecisionCollection(decision, decision.temporaryProviderConversationWitnessed === true
+        ? 'native-scope' : 'user-binding');
+      resetTemporaryDecisionDomCandidate(decision); return;
+    }
+    if (assistant?.role !== 'assistant' || !assistant.id || !assistant.node?.isConnected || isStale(assistant.node)) {
+      noteDesktopDecisionCollection(decision, 'assistant-missing');
+      resetTemporaryDecisionDomCandidate(decision); return;
+    }
+    if (pageTurn?.role !== 'assistant' || !nodes.some(node => node?.contains(assistant.node))) {
+      noteDesktopDecisionCollection(decision, 'assistant-scope');
       resetTemporaryDecisionDomCandidate(decision); return;
     }
     // A recoverable provider card is not an assistant answer. In particular ChatGPT can expose
