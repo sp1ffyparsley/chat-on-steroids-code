@@ -1786,6 +1786,67 @@ describe('alternate shell turn/message provenance', () => {
 
 
   it.each([
+    ['identity only', true, false], ['finished exact result', true, true], ['cached mapping only', false, false]
+  ] as const)('joins the virtualized native namespace only through an independently mounted branch: %s', async (_label, live, finished) => {
+    const page = await shellHarness({ withCall: true, withoutUserSlot: true, nativeCallReceipt: true,
+      nativeCallLive: live, callCompleted: false, assistantCompleted: false,
+      nativeCallMutation(mapping, entry) {
+        entry.turn.items.shift();
+        delete entry.turn.items[0].widgetStateSource;
+        entry.turn.messageIds = [USER, CALL, RESULT, ASSISTANT];
+        for (const id of [CALL, RESULT, ASSISTANT]) Object.assign(mapping[id].message.metadata, {
+          working_turn_id: 'native-virtual-working', turn_exchange_id: 'native-virtual-exchange',
+          parent_id: mapping[id].parent
+        });
+        if (finished) mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: JSON.stringify({
+          content: [{ type: 'text', text: 'PRIVATE_TOOL_RESULT' }],
+          structuredContent: { cosResultReceipt: { version: 1, id: 'a'.repeat(48) } } }) };
+        else { mapping[CALL].message.status = 'in_progress'; mapping[RESULT].message.status = 'in_progress'; }
+      } });
+    try {
+      const turn = page.fiber.turns[0];
+      expect(turn.messages.filter((message: any) => message.role === 'user')).toEqual([]);
+      expect(turn.calls[0].requestId).toBe(live ? REQUEST : null);
+      expect(turn.calls[0].answered, JSON.stringify(page.fiber.shellScan.rejects)).toBe(live && finished);
+      expect(turn.requests.some((row: any) => row.requestId === REQUEST && row.messageId === CALL)).toBe(live);
+      if (!live || !finished) expect(turn.endMessageId).toBeNull();
+      for (const value of ['PRIVATE_TOOL_RESULT', 'hello shell', 'native-virtual-working', 'native-virtual-exchange'])
+        expect(JSON.stringify(page.fiber)).not.toContain(value);
+    } finally { page.dom.window.close(); }
+  });
+
+  it.each(['two native users', 'user unselected', 'foreign final scope', 'unselected result', 'cache conflict', 'user accessor'] as const)(
+    'refuses the virtualized native namespace with %s', async variant => {
+      let accessorReads = 0;
+      const page = await shellHarness({ withCall: true, withoutUserSlot: true, nativeCallReceipt: true,
+        nativeCallCacheConflict: variant === 'cache conflict', callCompleted: false, assistantCompleted: false,
+        nativeCallMutation(mapping, entry) {
+          entry.turn.items.shift(); delete entry.turn.items[0].widgetStateSource;
+          entry.turn.messageIds = [USER, CALL, RESULT, ASSISTANT];
+          for (const id of [CALL, RESULT, ASSISTANT]) Object.assign(mapping[id].message.metadata, {
+            working_turn_id: 'native-virtual-working', turn_exchange_id: 'native-virtual-exchange', parent_id: mapping[id].parent
+          });
+          if (variant === 'two native users') {
+            mapping[REFERENCE_SOURCE] = { id: REFERENCE_SOURCE, message: { id: REFERENCE_SOURCE, author: { role: 'user' } } };
+            entry.turn.messageIds.push(REFERENCE_SOURCE);
+          }
+          if (variant === 'user unselected') entry.turn.messageIds = [CALL, RESULT, ASSISTANT];
+          if (variant === 'foreign final scope') mapping[ASSISTANT].message.metadata.turn_exchange_id = 'foreign';
+          if (variant === 'unselected result') entry.turn.messageIds = [USER, CALL, ASSISTANT];
+          if (variant === 'user accessor') Object.defineProperty(mapping[USER].message.author, 'role', {
+            get() { accessorReads++; throw new Error('PRIVATE_NATIVE_GETTER'); }
+          });
+        } });
+      try {
+        expect(page.fiber.turns[0].calls[0]).toMatchObject({ requestId: null, answered: false });
+        expect(page.fiber.turns[0].requests.some((row: any) => row.requestId === REQUEST && row.messageId === CALL)).toBe(false);
+        expect(page.fiber.turns[0].endMessageId).toBeNull();
+        expect(accessorReads).toBe(0);
+        expect(JSON.stringify(page.fiber)).not.toContain('PRIVATE_TOOL_RESULT');
+      } finally { page.dom.window.close(); }
+    });
+
+  it.each([
     ['identity only', true, false],
     ['finished exact result', true, true],
     ['cached mapping only', false, false]

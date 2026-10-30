@@ -19958,7 +19958,7 @@ describe('delivering a bootstrap', () => {
     }
   });
 
-  it.each(['owned', 'foreign-owner', 'unknown-code'] as const)('records a native-Sent helper collection stage without changing custody (%s)', async variant => {
+  it.each(['owned', 'route-reack-refused', 'foreign-owner', 'unknown-code'] as const)('records a native-Sent helper collection stage without changing custody (%s)', async variant => {
     await pair();
     const input = await import('../src/main/session/input.js');
     const controller = new AbortController();
@@ -19978,8 +19978,8 @@ describe('delivering a bootstrap', () => {
       expect(before.find(item => item.id === row!.id)?.state).toBe('decision');
       const result = await request('POST', '/input/stage', { body: { id: row!.id,
         owner: variant === 'foreign-owner' ? 'other-page' : owner,
-        stage: variant === 'unknown-code' ? 'answer:private-provider-text' : 'answer:terminal-missing' } });
-      expect(result.status).toBe(variant === 'owned' ? 200 : 409);
+        stage: variant === 'unknown-code' ? 'answer:private-provider-text' : variant === 'route-reack-refused' ? 'answer:route-reack-refused' : 'answer:terminal-missing' } });
+      expect(result.status).toBe(variant === 'owned' || variant === 'route-reack-refused' ? 200 : 409);
       expect(await input.listInputs()).toEqual(before);
       expect((await request('GET', '/status')).body.inputs).not.toContainEqual(expect.objectContaining({ sourceHelperId: row!.id }));
     } finally { controller.abort(); await finished; }

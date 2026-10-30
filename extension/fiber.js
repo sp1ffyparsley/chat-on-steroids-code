@@ -1889,11 +1889,30 @@
     return { conversationId: found, conflict: false };
   }
 
+  /** Exact selected native user identity when its typed/rendered widget is virtualized.
+   * No text or completion is recovered here; the mounted entry, native branch and
+   * independent cache/current-final proofs remain responsible for that authority. */
+  function shellSelectedUserId(entry, mapping) {
+    const users = entry.turn.items.filter(item => item?.type === 'user-message');
+    if (users.length === 1) return str(users[0].messageId) || str(users[0].serverMessageId);
+    const ids = entry.turn.messageIds;
+    if (users.length !== 0 || !Array.isArray(ids) || ids.length > MAX_ROWS) return null;
+    const value = (object, key) => object && typeof object === 'object'
+      ? Object.getOwnPropertyDescriptor(object, key)?.value : undefined;
+    let found = null;
+    for (const id of ids) {
+      if (!str(id)) continue;
+      const node = value(mapping, id), message = value(node, 'message');
+      if (value(node, 'id') !== id || value(message, 'id') !== id ||
+          value(value(message, 'author'), 'role') !== 'user') continue;
+      if (found) return null;
+      found = id;
+    }
+    return found;
+  }
+
   /** The shell's current mounted mapping, fenced by this exact entry/turn/user object. */
   function shellLiveMapping(fiber, entry) {
-    const user = entry.turn.items.find(item => item?.type === 'user-message');
-    const userId = str(user?.messageId) || str(user?.serverMessageId);
-    if (!userId) return null;
     const snapshots = new Map();
     const inspected = new WeakSet();
     const value = (object, key) => object && typeof object === 'object'
@@ -1906,6 +1925,8 @@
       const mapping = value(conversation, 'mapping');
       if (!mapping || !Array.isArray(turns) || turns.length > 4096 ||
           turns.filter(turn => turn?.id === entry.id && turn.turn === entry.turn).length !== 1) return;
+      const userId = shellSelectedUserId(entry, mapping);
+      if (!userId) return;
       const node = value(mapping, userId), message = value(node, 'message');
       if (value(node, 'id') !== userId || value(message, 'id') !== userId || message.author?.role !== 'user') return;
       const prior = snapshots.get(mapping);
@@ -1933,6 +1954,8 @@
   function shellCurrentPath(snapshot, entry) {
     if (snapshot?.renderedTurns.at(-1)?.turn !== entry.turn) return [];
     const mapping = snapshot.renderedConversation.mapping, ids = [], seen = new Set();
+    const userId = shellSelectedUserId(entry, mapping);
+    if (!userId) return [];
     let id = snapshot.renderedConversation.current_node;
     for (let at = 0; at < MAX_NATIVE_PATH_NODES && typeof id === 'string' && id.length <= MAX_TEXT && !seen.has(id); at++) {
       const node = Object.getOwnPropertyDescriptor(mapping, id)?.value, message = node?.message;
@@ -1940,8 +1963,7 @@
       seen.add(id);
       ids.push(id);
       if (message.author?.role === 'user') {
-        const user = entry.turn.items.find(item => item?.type === 'user-message');
-        return id === (user?.messageId || user?.serverMessageId) && entry.turn.messageIds.every(value => seen.has(value))
+        return id === userId && entry.turn.messageIds.every(value => seen.has(value))
           ? ids.reverse() : [];
       }
       id = node.parent;
@@ -2125,18 +2147,7 @@
     // still has to reach this very user before its request id is published.
     const selectedNativeUser = () => {
       if (typedUsers.length !== 0 || !conversation.conversationId || matches.length !== 1) return null;
-      try {
-        let found = null;
-        for (const id of ids) {
-          if (!str(id)) continue;
-          const node = nativeField(mapping, id), message = nativeField(node, 'message');
-          if (nativeField(node, 'id') !== id || nativeField(message, 'id') !== id ||
-              nativeField(nativeField(message, 'author'), 'role') !== 'user') continue;
-          if (found) return null;
-          found = id;
-        }
-        return found;
-      } catch { return null; }
+      try { return shellSelectedUserId(entry, mapping); } catch { return null; }
     };
     const typedUserId = typedUsers.length === 1
       ? str(typedUsers[0].messageId) || str(typedUsers[0].serverMessageId) : selectedNativeUser();
@@ -3420,6 +3431,10 @@
     }
     return { id: model, effort };
   }
+  // Upstream #1905: bounded account-wide picker, preserving native unreadable lane order.
+  const PICKER_MAX_VERSIONS = 48, PICKER_MAX_CHOICES = 48;
+  const nativeLanes = lanes => lanes.length <= PICKER_MAX_CHOICES && lanes.every(Number.isInteger) &&
+    new Set(lanes).size === lanes.length ? { lanes } : {};
   function readPickerSnapshot(node) {
     let fiber = node && fiberOf(node);
     for (let up = 0; fiber && up < MAX_CLIMB; up++, fiber = fiber.return) {
@@ -3429,10 +3444,10 @@
       const props = owner?.composerIntelligencePickerState ? owner : owner?.dropdownContent?.props;
       const state = props?.composerIntelligencePickerState, data = props?.modelsData;
       if (!state || !Array.isArray(data?.versions)) continue;
-      if (data.versions.length > 20 || !Array.isArray(state.bucketSelections) || state.bucketSelections.length > 12) return null;
+      if (data.versions.length > PICKER_MAX_VERSIONS || !Array.isArray(state.bucketSelections) || state.bucketSelections.length > PICKER_MAX_CHOICES) return null;
       const id = value => typeof value === 'string' && /^[a-zA-Z0-9._-]{1,80}$/.test(value) ? value : null;
       // Native version groups may have spaces; execution slugs retain their strict contract.
-      const groupId = value => typeof value === 'string' && /^[a-zA-Z0-9._ -]{1,80}$/.test(value) && value.trim() === value && value.trim() ? value : null;
+      const groupId = value => typeof value === 'string' && /^[\p{L}\p{N}._: -]{1,80}$/u.test(value) && value.trim() === value && value.trim() ? value : null;
       const label = value => typeof value === 'string' && value.trim().length > 0 && value.length <= 80 ? value.trim() : null;
       const namedEffort = value => ({ instant:'none', minimal:'minimal', low:'low', medium:'medium', high:'high',
         'extra high':'xhigh', max:'max', ultra:'ultra', pro:'pro' })[String(value || '').trim().toLowerCase()] || null;
@@ -3484,16 +3499,16 @@
           label: name, effort: effortOf(choice),
           familyId, familyLabel: modelLabel(family?.displayTextForIntelligence) || modelLabel(choice.modelConfig?.title) || name,
           available, ...(retryAt ? { retryAt } : {}) };
-      });
-      const versions = data.versions.filter(version => version.enabled === true).map(version => ({ id: groupId(version.id), label: label(version.displayTextForIntelligence) }));
-      if (!versions.length || versions.some(v => !v.id || !v.label) || choices.some(c => !Number.isInteger(c.bucket) || !c.id || !c.label || !c.effort) ||
+      }).filter(c => Number.isInteger(c.bucket) && c.id && c.label && c.effort);
+      const versions = data.versions.filter(version => version.enabled === true).map(version => ({ id: groupId(version.id), label: label(version.displayTextForIntelligence) })).filter(v => v.id && v.label);
+      if (!versions.length || !choices.length ||
           new Set(versions.map(v => v.id)).size !== versions.length || new Set(choices.map(c => c.bucket)).size !== choices.length) return null;
       const version = groupId(state.selectedVersionEntry?.id), currentBucket = state.currentBucket;
       if (!versions.some(v => v.id === version) || !choices.some(c => c.bucket === currentBucket)) return null;
       const selected = state.currentSelection;
       const chosen = choices.find(c => c.bucket === currentBucket);
       if (selected?.modelSlug !== chosen.id || effortOf(selected) !== chosen.effort) return null;
-      return { version, currentBucket, versions, choices };
+      return { version, currentBucket, versions, choices, ...nativeLanes(state.bucketSelections.map(c => c?.bucket)) };
     }
     return null;
   }
@@ -3504,9 +3519,9 @@
       const p = fiber.memoizedProps;
       if (!Array.isArray(p?.powerSelections)) continue;
       const selected = p.selectedPowerSelection ?? p.selectedLabelCandidate, options = p.modelListConfig?.options;
-      if (!selected || !Array.isArray(options) || options.length > 20 || p.powerSelections.length > 12) return null;
+      if (!selected || !Array.isArray(options) || options.length > PICKER_MAX_VERSIONS || p.powerSelections.length > PICKER_MAX_CHOICES) return null;
       const id = value => typeof value === 'string' && /^[a-zA-Z0-9._-]{1,80}$/.test(value) ? value : null;
-      const group = value => typeof value === 'string' && /^[\p{L}\p{N}._ -]{1,80}$/u.test(value) && value.trim() === value ? value : null;
+      const group = value => typeof value === 'string' && /^[\p{L}\p{N}._: -]{1,80}$/u.test(value) && value.trim() === value ? value : null;
       const label = value => typeof value === 'string' && value.trim() && value.length <= 80 ? value.trim() : null;
       const effort = value => ({ none:'none', instant:'none', minimal:'minimal', min:'low', low:'low', standard:'medium', medium:'medium', extended:'high', high:'high', xhigh:'xhigh', 'extra high':'xhigh', max:'xhigh', ultra:'ultra', pro:'pro' })[value] || null;
       // The lane's visible label is its product identity. The new picker can expose `medium` for
@@ -3521,7 +3536,7 @@
       if (current.length !== 1) return null;
       const version = group(current[0].id);
       const versionLabel = label(current[0].label);
-      const versions = options.filter(option => option && option.disabled !== true).map(option => ({ id: group(option.id), label: label(option.label) }));
+      const versions = options.filter(option => option && option.disabled !== true).map(option => ({ id: group(option.id), label: label(option.label) })).filter(v => v.id && v.label);
       const modelName = value => { const name = label(value); return name && /^\d/.test(name) ? `GPT-${name}` : name; };
       const choices = p.powerSelections.map(choice => {
         const model = id(choice?.model), identity = shellModelIdentity(model, version);
@@ -3536,9 +3551,8 @@
           available: p.modelSelectionDisabled !== true && choice?.disabled !== true &&
             (!choice?.availability || choice.availability.status === 'available') && !p.modelSwitcherDenialsBySlug?.[choice?.model]
         };
-      });
-      if (!version || !versions.length || versions.some(item => !item.id || !item.label) || !choices.length ||
-          choices.some(choice => !Number.isInteger(choice.bucket) || !choice.id || !choice.label || !choice.effort) ||
+      }).filter(c => Number.isInteger(c.bucket) && c.id && c.label && c.effort);
+      if (!version || !versions.length || !choices.length ||
           new Set(versions.map(item => item.id)).size !== versions.length || new Set(choices.map(choice => choice.bucket)).size !== choices.length ||
           !versions.some(item => item.id === version)) return null;
       // Upstream #1194: native Instant/Thinking slugs share a family only when their
@@ -3553,10 +3567,10 @@
         if (!id(shared) || !/\d/.test(shared)) continue;
         for (const lane of lanes) lane.familyId = shared;
       }
-      const matches = p.powerSelections.map((choice, index) => ({ choice, index })).filter(({ choice }) =>
-        id(choice?.model) === id(selected.model) && effortOf(choice) === effortOf(selected));
-      if (matches.length !== 1 || (selected.powerSettingIndex !== undefined && selected.powerSettingIndex !== choices[matches[0].index].bucket)) return null;
-      return { version, currentBucket: choices[matches[0].index].bucket, versions, choices };
+      const identity = shellModelIdentity(id(selected.model), version);
+      const matches = choices.filter(choice => choice.id === identity && choice.effort === effortOf(selected));
+      if (matches.length !== 1 || (selected.powerSettingIndex !== undefined && selected.powerSettingIndex !== matches[0].bucket)) return null;
+      return { version, currentBucket: matches[0].bucket, versions, choices, ...nativeLanes(p.powerSelections.map(c => c?.powerSettingIndex)) };
     }
     return null;
   }

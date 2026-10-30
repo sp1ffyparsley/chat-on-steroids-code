@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 106;
+  const RECORDER_VERSION = 109;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -15331,7 +15331,7 @@
   const DESKTOP_DECISION_COLLECTION_STAGES = new Set([
     'waiting-tools', 'stopped', 'user-binding', 'assistant-missing', 'assistant-scope',
     'terminal-missing', 'native-scope', 'user-fiber-scope', 'empty-answer', 'envelope-invalid',
-    'dom-settling', 'publication-start', 'publication-accepted', 'publication-unacknowledged'
+    'dom-settling', 'route-reack-refused', 'publication-start', 'publication-accepted', 'publication-unacknowledged'
   ]);
   /** One fixed-code observation per gate for this exact delivered helper; no result/Send authority. */
   function noteDesktopDecisionCollection(decision, code) {
@@ -15359,7 +15359,11 @@
       console.warn('[Chat On Steroids] Helper result acknowledgement missing; retaining the exact result for bounded owner retry.', decision.id);
     };
     void Promise.resolve(reacknowledgeHelperRoute(decision, decision.temporaryProviderConversation)).then(routeReady => {
-      if (routeReady === false || desktopDecision !== decision || decision.accepted ||
+      if (routeReady === false) {
+        noteDesktopDecisionCollection(decision, 'route-reack-refused');
+        return null;
+      }
+      if (desktopDecision !== decision || decision.accepted ||
           !decision.onTarget() || decision.response !== response) return null;
       return ask({ type: 'desktop_input', id: decision.id, owner: decision.owner,
         lifetime: decision.temporary ? 'temporary-planner' : undefined, response });

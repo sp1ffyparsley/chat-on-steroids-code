@@ -4045,6 +4045,9 @@ describe('desktop input delivery and helper ownership', () => {
         id: inputId, owner: 'input-owner', conversationId: routed,
         messageId: 'm-temp-user', lifetime: 'temporary-planner' }))
     ]);
+    const routeRefusals = live.sent.filter(message => message.stage === 'answer:route-reack-refused');
+    expect(routeRefusals).toHaveLength(shape === 'rejected' ? 1 : 0);
+    expect(JSON.stringify(routeRefusals.map(message => message.stage))).not.toContain(canonical);
     // A refusal spends only the existing initial+3 publication retries; all are
     // the same idempotent receipt enrichment, with zero additional native Sends.
     expect(nativeSends).toBe(1);

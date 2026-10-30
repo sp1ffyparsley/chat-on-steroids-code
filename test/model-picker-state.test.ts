@@ -1164,3 +1164,36 @@ it('hotfix: duplicate version primary labels remain ambiguous even with differen
   expect(failure).toHaveBeenCalledWith('model_unconfirmed');
   expect(f.state.selectedVersionEntry.id).toBe('latest'); expect(f.state.currentBucket).toBe(2);
 });
+
+// Upstream v2.1.48 #1905: one unreadable lane must not invalidate a readable exact pair.
+it('confirms the requested picker pair beside colon version groups and unfamiliar lanes', async () => {
+  const f = fixture();
+  f.props.modelsData.versions.push({ id: 'gpt-6-pro:', displayTextForIntelligence: 'Pro', enabled: true });
+  const lanes = f.selections[0] as any[];
+  lanes.push({ bucket: 4, modelSlug: 'gpt-6-work', thinkingEffort: 'auto', availability: { status: 'available' },
+    category: { modelLane: 'thinking', shortLabel: 'Work' } });
+  for (let i = 0; i < 10; i++) lanes.push({ bucket: 20 + i, modelSlug: 'other-' + i, thinkingEffort: 'standard',
+    availability: { status: 'available' }, category: { modelLane: 'thinking', shortLabel: 'Other ' + i } });
+  expect(await f.api.selectModelSettings('gpt-5-6-thinking', 'high')).toBe(true);
+});
+it('crosses unreadable native picker lanes without selecting or substituting them', async () => {
+  const f = fixture(), lanes = f.selections[0] as any[];
+  lanes.splice(1, 0, { bucket: 5, modelSlug: 'gpt-5-6-thinking', thinkingEffort: 'auto',
+    availability: { status: 'available' }, category: { modelLane: 'thinking', shortLabel: '5.6 Sol' } });
+  Object.assign(f.state, { currentBucket: 1, currentSelection: lanes[0] });
+  expect(await f.api.selectModelSettings('gpt-5-6-thinking', 'high')).toBe(true);
+  expect(f.state.currentBucket).toBe(2);
+  expect(await f.api.selectModelSettings('gpt-5-6-thinking', 'medium')).toBe(true);
+  expect(f.state.currentBucket).toBe(1);
+});
+it('accepts exactly48 picker entries and refuses49 without an invented model', async () => {
+  for (const count of [48, 49]) for (const part of ['versions', 'lanes']) {
+    const f = fixture(), versions = f.props.modelsData.versions, lanes = f.selections[0] as any[];
+    while (part === 'versions' && versions.length < count) versions.push({ id: 'extra-' + versions.length,
+      displayTextForIntelligence: 'Extra ' + versions.length, enabled: true });
+    while (part === 'lanes' && lanes.length < count) lanes.push({ bucket: 100 + lanes.length,
+      modelSlug: 'other-' + lanes.length, thinkingEffort: 'standard', availability: { status: 'available' },
+      category: { modelLane: 'thinking', shortLabel: 'Other ' + lanes.length } });
+    expect(await f.api.selectModelSettings('gpt-5-6-thinking', 'high'), count + ' ' + part).toBe(count === 48);
+  }
+});
