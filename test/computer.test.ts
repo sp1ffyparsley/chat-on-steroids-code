@@ -269,7 +269,9 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
   });
 
   it('resolves a captureAfter crop against the frame that was current before the actions', async () => {
-    const base = await screenshot({ window: fixtureWindow, maxWidth: 320 });
+    // This asserts retained frame/crop coordinates, independent of an externally moved window.
+    // Real window bounds/currentness refusal remains covered by native generation tests.
+    const base = await screenshot({ maxWidth: 320 });
     const width = Math.min(64, base.width);
     const height = Math.min(48, base.height);
     const result = await actAndCapture([{ type: 'wait', ms: 0 }], {
@@ -282,8 +284,8 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
   });
 
   it('requires a retained screenshot identity for captureAfter crops', async () => {
-    const earlier = await screenshot({ window: fixtureWindow, maxWidth: 320 });
-    const current = await screenshot({ window: fixtureWindow, maxWidth: 320 });
+    const earlier = await screenshot({ maxWidth: 320 });
+    const current = await screenshot({ maxWidth: 320 });
     const crop = { x: 0, y: 0, width: Math.min(32, current.width), height: Math.min(24, current.height) };
 
     await expect(actAndCapture([{ type: 'wait', ms: 0 }], { capture: { crop } })).rejects.toThrow(/FRAME_REQUIRED/);
@@ -291,7 +293,7 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
       actAndCapture([{ type: 'wait', ms: 0 }], { frameId: earlier.frameId, capture: { crop } })
     ).resolves.toBeTruthy();
 
-    for (let index = 0; index < 16; index++) await screenshot({ window: fixtureWindow, maxWidth: 320 });
+    for (let index = 0; index < 16; index++) await screenshot({ maxWidth: 320 });
     await expect(
       actAndCapture([{ type: 'wait', ms: 0 }], { frameId: earlier.frameId, capture: { crop } })
     ).rejects.toThrow(/STALE_FRAME/);

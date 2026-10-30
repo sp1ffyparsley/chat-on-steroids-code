@@ -5963,6 +5963,26 @@ it('materializes remaining plan stages once after exact delivery, across restart
   expect(await pendingBrowserInputs()).toEqual([]);
 });
 
+it('refuses orphaned progress without reading or changing a cold unreadable outbox', async () => {
+  const { publishBrowserDecision } = await import('../src/main/session/input.js');
+  await writeDurableNow('session-input', []);
+  await flushDurable();
+  resetInputForTests();
+  const file = path.join(directory, 'state', 'session-input.json');
+  const before = await fs.readFile(file, 'utf8');
+  const malformed = '{ interrupted durable write';
+  try {
+    await fs.writeFile(file, malformed, 'utf8');
+    expect(await publishBrowserDecision('no-live-waiter', 'old-page', null, 'presentation only')).toBe(false);
+    // Real queue admission still refuses this same malformed durable source.
+    await expect(listInputs()).rejects.toThrow();
+    expect(await fs.readFile(file, 'utf8')).toBe(malformed);
+  } finally {
+    await fs.writeFile(file, before, 'utf8');
+    resetInputForTests();
+  }
+});
+
 it('publishes browser decision partials only to the current exact waiter without completing it', async () => {
   const { publishBrowserDecision } = await import('../src/main/session/input.js');
   const abort = new AbortController(), publish = vi.fn();

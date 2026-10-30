@@ -4040,7 +4040,9 @@ export function rejectedBrowserDecision(entry: InputEntry): boolean {
 }
 /** Presentation only, fenced by the same exact decision claim as its eventual answer. */
 export async function publishBrowserDecision(id: string, owner: string, conversationId: string | null, text: string): Promise<boolean> {
-  if (text.length > 8000) return false;
+  // Presentation has no reason to load/expire the durable queue after its waiter is gone.
+  // Resolve the current waiter again after load() below; a pre-await callback can be stale.
+  if (text.length > 8000 || !decisionWaiters.has(id)) return false;
   const entry = (await load()).find(row => row.id === id && row.owner === owner && row.purpose === 'decision' &&
     row.conversationId === conversationId && ['browser', 'decision'].includes(row.state));
   const waiter = decisionWaiters.get(id);
