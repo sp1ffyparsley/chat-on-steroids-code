@@ -2,13 +2,17 @@
 
 This is the custom Electron application and Chrome companion source exported for code review. It has clean public history and excludes private account stores, saved prompts, credentials, runtime logs and deployment artifacts. This source mirror is separate from upstream releases and supplies no public installer.
 
-## Latest status — October 30, 2026, 22:05 UTC
+## Latest status — October 30, 2026, 23:35 UTC
 
-Observer/background112 source adds upstreamPR1944 attachment-label compatibility while retaining exact upload ownership/readiness. Four failure-first cases reproduced; private controlled affected suites passed2092checks and installer checks33. New112binary qualification is IN PROGRESS, not installed or publicly released.
+Observer/background112 is qualified and installed in the private deployment. Logical source b0e752ed8eb3517a332e28f21d4b1035c95dfd86, tree5577b316bc4b1bf434f32fa0e2069a5b0d812453 and receipt-only pin52e52faf6e2475606a49361e5724d67b63bf0439 are private provenance, not public Git refs. Use this mirror's own immutable commit for source links; no public installer is supplied.
 
-Private111 is actually installed and accepted: sourcebfff17f54b91290976642a3c7ed23c2733722b26/treec8888b5f7034f09e84f7a284b99bf2d0f86081e5/receiptb92eb45ad48c8525be786ffabd7678d6532396d2. Strict96preliminary+12817MainPASS/62existing skips and33postpin checks passed. CanonicalNSIS0 plus independent291installed-program and117869protected-file verification preceded seven normal successors. Maintenance pauses remain while the next release is prepared.
+Selected upstream PR1944 fixes composer attachment filename extraction for the newer two-button tile. Exact upload ownership, readiness and cleanup gates remain. Four failure-first cases reproduced; the controlled affected DOM/content suites passed2092checks. Canonical qualification passed96preliminary+12833Main checks/62existing skips, followed by33post-pin checks and exact-package readiness. A native test fixture now uses two real screen frames for semantic-reference eviction; production zero-size window capture remains unproved.
 
-Private hashes are provenance, NOT public refs. Use this mirror's own immutable commit for source links. Executing browser cohorts, original request/result joins and sustained useful automatic next turns remain unverified. Distinguish native helper Send, collected archive, decision disposition and executor Send: publication-unacknowledged alone does not prove HTTP reached Main. Never bypass native model/receipt/reload guards.
+Canonical installation completed2026-10-30T23:16:48Z/NSIS0 after seven normal lifecycle exits. Independent verification matched117868protected files/5705125874bytes before successors, and all291installed program files/571533832bytes/tree29ad8f15f471875cf7e056c23a559d50175f95e963d1d3e45ba9093d36f85c6c. Critical configuration/encrypted stores and queues matched before and after seven successors. Five intended profiles were restored through revision-bound Settings Save; held/default profiles stayed paused. No forced close or raw-store edit was used.
+
+Runtime: six requests admitted, four have native Send acknowledgments and two remain unoffered because cached Core tool descriptions do not match the current schema. Preserve those exact queued requests. Real Core execution is observed, including newly rendered audio files independently hash-checked. New cleanup allocation gain, complete useful helper/executor successors, the executing browser112 cohort and all-profile sustained autonomy remain unverified. Never invent schema/Send/result acknowledgment to unblock work.
+
+Publication-unacknowledged alone does not prove HTTP reached Main. Native helper Send, response extraction, durable archive, decision disposition and executor Send remain separate evidence boundaries. Historical checkpoints below are not current release status.
 
 ## Historical checkpoint — before accepted111
 
