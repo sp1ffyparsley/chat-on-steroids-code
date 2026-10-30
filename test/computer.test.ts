@@ -202,8 +202,10 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
   });
 
   it('refuses a frame after the bounded immutable history evicts it', async () => {
-    const old = await screenshot({ window: fixtureWindow, maxWidth: 320 });
-    for (let index = 0; index < 16; index++) await screenshot({ window: fixtureWindow, maxWidth: 320 });
+    // Eviction concerns the shared frame history, independently of window geometry
+    // or compositor availability. Keep all 17 observations real, as in the retained-frame case.
+    const old = await screenshot({ maxWidth: 320 });
+    for (let index = 0; index < 16; index++) await screenshot({ maxWidth: 320 });
     await expect(act([{ type: 'move', x: 1, y: 1 }], { frameId: old.frameId })).rejects.toThrow(/STALE_FRAME/);
   });
 

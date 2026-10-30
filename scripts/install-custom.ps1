@@ -3255,30 +3255,14 @@ function Invoke-StrictCandidateBuild {
     if (-not $PackageRunner) {
       $PackageRunner = {
         param([string]$Snapshot)
-        $node = Get-TrustedHostToolPath -Name node
-        $git = Get-TrustedHostToolPath -Name git
-        $tar = Get-TrustedHostToolPath -Name tar
-        $cmd = Get-TrustedHostToolPath -Name cmd
-        $savedPath = $env:PATH
-        $savedComSpec = $env:ComSpec
-        $savedNodeEnv = @{}
-        $nodeEnvKeys = @([Environment]::GetEnvironmentVariables('Process').Keys | ForEach-Object { [string]$_ } | Where-Object { $_ -match '^(?i:NODE_OPTIONS|NODE_PATH)$' })
-        try {
-          foreach ($key in $nodeEnvKeys) {
-            $savedNodeEnv[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
-            [Environment]::SetEnvironmentVariable($key, $null, 'Process')
-          }
-          $env:PATH = (@((Split-Path -Parent $node), (Split-Path -Parent $git), (Split-Path -Parent $tar)) | Select-Object -Unique) -join ';'
-          $env:ComSpec = $cmd
-          & $node (Join-Path $Snapshot 'scripts\package.mjs') --strict --platform win32 --arch x64 | Out-Host
-          if ($LASTEXITCODE -ne 0) { throw "Strict package owner exited with code $LASTEXITCODE" }
-        } finally {
-          $env:PATH = $savedPath
-          $env:ComSpec = $savedComSpec
-          foreach ($key in $nodeEnvKeys) { [Environment]::SetEnvironmentVariable($key, [string]$savedNodeEnv[$key], 'Process') }
-        }
+        # Reuse the trusted environment owner and retain native stderr in the same
+        # transcript as stdout; the child exit code still decides qualification.
+        $result = Invoke-TrustedNodeCaptured -Arguments @((Join-Path $Snapshot 'scripts\package.mjs'), '--strict', '--platform', 'win32', '--arch', 'x64')
+        foreach ($line in $result.Output) { Write-Host ([string]$line) }
+        if ($result.ExitCode -ne 0) { throw "Strict package owner exited with code $($result.ExitCode)" }
       }
     }
+
     $null = & $PackageRunner $snapshotRoot
 
     $snapshotRelease = Join-Path $snapshotRoot 'release'

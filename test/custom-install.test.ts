@@ -446,7 +446,7 @@ Write-Output 'EXACT_PREDECESSOR_AND_CAPABILITY_GATES'
     expect(script).not.toMatch(/\$SkipVerify\b/);
     expect(script).not.toContain('[scriptblock]$CandidatePayloadReader');
     expect(script).toContain('function Invoke-StrictCandidateBuild');
-    expect(script).toContain("--strict --platform win32 --arch x64");
+    expect(script).toContain("Invoke-TrustedNodeCaptured -Arguments @((Join-Path $Snapshot 'scripts\\package.mjs'), '--strict', '--platform', 'win32', '--arch', 'x64')");
     expect(script).not.toContain("Invoke-Checked npm @('run', 'dist:x64')");
     expect(script).toContain("if ($QualifiedPrebuilt) {");
     expect(script).toContain('function Assert-CustomInstallOperationAvailable');
@@ -2331,7 +2331,9 @@ Invoke-FixtureGit -GitArgs @('config','user.name','Strict Build Test') | Out-Nul
 Invoke-FixtureGit -GitArgs @('config','user.email','strict-build@example.invalid') | Out-Null
 [IO.File]::WriteAllText((Join-Path $repo '.gitignore'),'node_modules/',[Text.UTF8Encoding]::new($false))
 [IO.File]::WriteAllText((Join-Path $repo 'source.txt'),'reviewed source',[Text.UTF8Encoding]::new($false))
-Invoke-FixtureGit -GitArgs @('add','.gitignore','source.txt') | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $repo 'scripts') | Out-Null
+[IO.File]::WriteAllText((Join-Path $repo 'scripts\\package.mjs'),'console.log("strict-owner-stdout"); console.error("strict-owner-stderr"); process.exit(41);',[Text.UTF8Encoding]::new($false))
+Invoke-FixtureGit -GitArgs @('add','.gitignore','source.txt','scripts/package.mjs') | Out-Null
 Invoke-FixtureGit -GitArgs @('commit','--quiet','-m','reviewed source') | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $repo 'node_modules') | Out-Null
 [IO.File]::WriteAllText((Join-Path $repo 'node_modules\\poison.txt'),'mutable live dependency poison',[Text.UTF8Encoding]::new($false))
@@ -2376,13 +2378,25 @@ try{
   $env:PATH='Z:\\hostile-path-that-does-not-exist'
   $env:NODE_OPTIONS='--require Z:\\hostile-preload.js'
   $env:NODE_PATH='Z:\\hostile-node-path'
-  $nodeResult=Invoke-TrustedNodeCaptured -Arguments @('-e',"process.stdout.write('trusted-node-ok')")
-  if($nodeResult.ExitCode -ne 0 -or (($nodeResult.Output|ForEach-Object{[string]$_}) -join '') -cne 'trusted-node-ok'){throw 'trusted Node wrapper accepted caller loader/tool redirects'}
+  $nodeResult=Invoke-TrustedNodeCaptured -Arguments @('-e',"process.stdout.write('trusted-node-ok'); process.stderr.write('trusted-node-warning')")
+  $nodeOutput=($nodeResult.Output|ForEach-Object{[string]$_}) -join ''
+  if($nodeResult.ExitCode -ne 0 -or -not $nodeOutput.Contains('trusted-node-ok') -or -not $nodeOutput.Contains('trusted-node-warning')){throw 'trusted Node wrapper lost diagnostic output or accepted caller loader/tool redirects'}
 }finally{$env:PATH=$oldPath;$env:NODE_OPTIONS=$oldNodeOptions;$env:NODE_PATH=$oldNodePath}
 
 # Package/dependency or compile failure cannot reach publication.
 $script:publishCount=0
 $failPublisher={param($From,$To,$Gate) $script:publishCount++; & $Gate}
+# Exercise the real default Node owner: stderr detail belongs in its transcript,
+# and a diagnostic write cannot replace the child's authoritative exit code.
+$transcriptPath=Join-Path $root 'default-owner-transcript.log'
+Start-Transcript -LiteralPath $transcriptPath | Out-Null
+try {
+  Expect-Failure { Invoke-StrictCandidateBuild -RepoRoot $repo -ReleaseDirectory $release -ReviewedSource $reviewed -CandidateVerifier $verifier -Publisher $failPublisher | Out-Null } 'Strict package owner exited with code 41'
+} finally { Stop-Transcript | Out-Null }
+$capturedOwner=[IO.File]::ReadAllText($transcriptPath)
+if(-not $capturedOwner.Contains('strict-owner-stdout') -or -not $capturedOwner.Contains('strict-owner-stderr')){throw 'strict owner lost stdout/stderr failure detail'}
+if($script:publishCount -ne 0 -or [IO.File]::ReadAllText((Join-Path $release 'sentinel.txt')) -cne 'old-release-sentinel'){throw 'native child failure reached release publication'}
+
 Expect-Failure { Invoke-StrictCandidateBuild -RepoRoot $repo -ReleaseDirectory $release -ReviewedSource $reviewed -PackageRunner {param($Snapshot) throw 'fixture offline dependency failure'} -CandidateVerifier $verifier -Publisher $failPublisher | Out-Null } 'fixture offline dependency failure'
 if($script:publishCount -ne 0 -or [IO.File]::ReadAllText((Join-Path $release 'sentinel.txt')) -cne 'old-release-sentinel'){throw 'package failure reached release publication'}
 
