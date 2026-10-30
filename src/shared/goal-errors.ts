@@ -13,8 +13,8 @@ export function isAutomaticDecisionHoldCode(value: unknown): value is AutomaticD
 }
 /** Exact control value and bounded opening claims only; this is not a permission grant detector. */
 export function automaticDecisionHold(reply: string): AutomaticDecisionHoldCode | null {
-  if (reply.startsWith(GOAL_EXTERNAL_HOLD_REPLY)) return 'goal_external_hold';
-  const opening = reply.replace(/^(?:#{1,6}\s+)?(?:\*\*|__)?/u, '');
+  const opening = reply.trimStart().replace(/^(?:#{1,6}\s+)?(?:\*\*|__)?/u, '').trimStart();
+  if (opening.startsWith(GOAL_EXTERNAL_HOLD_REPLY)) return 'goal_external_hold';
   return /^(?:I|we)\s+(?:hereby\s+)?(?:authori[sz]e|approve|grant|consent|give permission)\b/iu.test(opening)
     ? 'goal_generated_authority_claim' : null;
 }

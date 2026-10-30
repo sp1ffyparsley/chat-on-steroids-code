@@ -4793,14 +4793,14 @@ function normalizeGoalDecision(raw: string, legacy: boolean, mode: GoalMode = 'g
   if ((object.action !== 'stop' && object.action !== 'continue') || typeof object.reply !== 'string') {
     return { action: 'invalid', error: 'invalid_goal_decision_schema' };
   }
+  const cleaned = cleanGoalReply(object.reply);
+  const hold = automaticDecisionHold(cleaned.text);
+  if (hold) return { action: 'invalid', error: hold };
   if (object.action === 'stop') return { action: 'stop' };
   // A whole sentinel is never an instruction. In a structured Loop continuation,
   // however, a literal reference such as "Fix the NO_REPLY parser" is task data,
   // not a stop decision. Keep legacy scratchpad and finite Goal handling unchanged.
   if (NO_REPLY.test(object.reply) || (mode !== 'loop' && NO_REPLY_TOKEN.test(object.reply))) return { action: 'stop' };
-  const cleaned = cleanGoalReply(object.reply);
-  const hold = automaticDecisionHold(cleaned.text);
-  if (hold) return { action: 'invalid', error: hold };
   if (!cleaned.text) return { action: 'invalid', error: cleaned.hadControl ? 'control_tokens_only' : 'empty_reply' };
   if (cleaned.text.includes('<|') || cleaned.text.includes('|>') || UNSAFE_REASONING_TAG.test(cleaned.text)) {
     return { action: 'invalid', error: 'unsafe_control_tokens' };

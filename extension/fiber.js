@@ -2343,12 +2343,9 @@
             if (!isPreviousInvocation && previousToolResult !== null && role === 'assistant' &&
                 recipient === 'api_tool.call_tool' && selected.has(id) && priorCall) {
               const previousScopeReasons = [];
-              if (!previousPath) previousScopeReasons.push('decodedPathMissing');
-              else if (!ourPath(previousPath)) previousScopeReasons.push('decodedPathForeign');
-              if (!priorServer) previousScopeReasons.push('serverMissing');
-              if (previousPath && priorServer && !previousServerMatches)
-                previousScopeReasons.push('serverMismatch');
-              if (previousPath && toolName(previousPath) !== priorCall.tool) previousScopeReasons.push('toolMismatch');
+              if (!previousPath || !ourPath(previousPath) || !priorServer ||
+                  !previousServerMatches || toolName(previousPath) !== priorCall.tool)
+                previousScopeReasons.push('priorToolScopeMismatch');
               if (previousToolResult.resourceApp && (!priorServer ||
                   ownServerName(previousToolResult.resourceApp) !== priorServer))
                 previousScopeReasons.push('priorToolScopeMismatch');

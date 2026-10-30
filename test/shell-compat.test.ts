@@ -1926,6 +1926,40 @@ describe('alternate shell turn/message provenance', () => {
   });
 
 
+  it.each(['server', 'tool'] as const)('separates a selected %s mismatch from the same mismatch in an ancestor', async mismatch => {
+    const nextId = 'call_after_refused_scope';
+    const page = await shellHarness({ withCall: true, nativeCallReceipt: true,
+      callCompleted: false, assistantCompleted: false,
+      nativeCallMutation(mapping, entry) {
+        delete entry.turn.items.find((item: any) => item.callId === CALL).widgetStateSource;
+        entry.turn.items.splice(2, 0, { type: 'mcp-tool-call', callId: nextId,
+          completed: false, invocation: { server: APP, tool: 'read' } });
+        mapping[nextId] = { id: nextId, parent: RESULT, message: { id: nextId,
+          author: { role: 'assistant' }, recipient: 'api_tool.call_tool',
+          content: { text: JSON.stringify({ path: '/' + APP + '/' + LINK + '/read' }) },
+          metadata: { request_id: REQUEST, parent_id: RESULT } } };
+        mapping[ASSISTANT].parent = nextId;
+        entry.turn.messageIds = [USER, CALL, RESULT, nextId, ASSISTANT];
+        for (const [id, row] of Object.entries(mapping) as [string, any][]) if (id !== USER)
+          Object.assign(row.message.metadata, { working_turn_id: 'native-working-generation',
+            turn_exchange_id: 'native-exchange-generation', parent_id: row.parent });
+        mapping[CALL].message.content.text = JSON.stringify({ path: mismatch === 'server'
+          ? '/Luna Forge X7 Plugins/' + LINK + '/read' : '/' + APP + '/' + LINK + '/write' });
+        mapping[CALL].message.status = 'in_progress';
+        mapping[RESULT].message.status = 'in_progress';
+      } });
+    try {
+      const calls = page.fiber.turns[0].calls;
+      const selectedReason = mismatch === 'server' ? 'serverMismatch' : 'toolMismatch';
+      expect(calls[0].identityRefusalReasons).toContain(selectedReason);
+      expect(calls[1].identityRefusalReasons).toContain('priorToolScopeMismatch');
+      expect(calls[1].identityRefusalReasons).not.toContain(selectedReason);
+      expect(calls.every((call: any) => call.requestId === null && call.answered === false)).toBe(true);
+      expect(page.fiber.turns[0].endMessageId).toBeNull();
+      expect(JSON.stringify(page.fiber)).not.toContain('PRIVATE_TOOL_RESULT');
+    } finally { page.dom.window.close(); }
+  });
+
   it.each(['prior pair', 'Code Mode', 'off-branch sibling', 'cached scope conflict'] as const)(
     'keeps native scope namespace request joins on their exact selected branch: %s', async variant => {
       const secondId = 'call_native_scope_second', secondRequest = 'wfr_native_scope_second';
