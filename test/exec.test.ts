@@ -2,7 +2,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { pathEntries } from '../src/main/env.js';
+import { envValue, pathEntries } from '../src/main/env.js';
 import {
   DEFAULT_TIMEOUT_MS,
   ExecError,
@@ -356,6 +356,49 @@ describe('runCommand', () => {
  * live incident, because it asks the real `childEnv()` about the real inherited path.
  */
 describe('the environment prepared for a child process', () => {
+
+  it.runIf(IS_WINDOWS)('defaults captured Python stdio to UTF-8 without changing the parent or filesystem encoding', () => {
+    const held = process.env.PYTHONIOENCODING;
+    delete process.env.PYTHONIOENCODING;
+    try {
+      const env = childEnv();
+      expect(envValue(env, 'PYTHONIOENCODING')).toBe('utf-8');
+      expect(process.env.PYTHONIOENCODING).toBeUndefined();
+      expect(envValue(env, 'PYTHONUTF8')).toBe(envValue(process.env, 'PYTHONUTF8'));
+      expect(Object.keys(env).filter(key => key.toLowerCase() === 'pythonioencoding')).toHaveLength(1);
+    } finally {
+      if (held === undefined) delete process.env.PYTHONIOENCODING;
+      else process.env.PYTHONIOENCODING = held;
+    }
+  });
+
+  it('preserves an inherited Python stdio encoding and lets an explicit override win', () => {
+    const held = process.env.PYTHONIOENCODING;
+    process.env.PYTHONIOENCODING = 'cp1252';
+    try {
+      expect(envValue(childEnv(), 'PYTHONIOENCODING')).toBe('cp1252');
+      const overrideKey = IS_WINDOWS ? 'pYtHoNiOeNcOdInG' : 'PYTHONIOENCODING';
+      const overridden = childEnv({ [overrideKey]: 'utf-16' });
+      expect(envValue(overridden, 'PYTHONIOENCODING')).toBe('utf-16');
+      if (IS_WINDOWS) expect(Object.keys(overridden).filter(key => key.toLowerCase() === 'pythonioencoding')).toHaveLength(1);
+      expect(process.env.PYTHONIOENCODING).toBe('cp1252');
+    } finally {
+      if (held === undefined) delete process.env.PYTHONIOENCODING;
+      else process.env.PYTHONIOENCODING = held;
+    }
+  });
+
+  it('preserves an explicit empty Python stdio override rather than silently choosing a codec', () => {
+    expect(envValue(childEnv({ PYTHONIOENCODING: '' }), 'PYTHONIOENCODING')).toBe('');
+  });
+
+  it.runIf(!IS_WINDOWS)('does not introduce a Python stdio default on POSIX', () => {
+    const held = process.env.PYTHONIOENCODING;
+    delete process.env.PYTHONIOENCODING;
+    try { expect(envValue(childEnv(), 'PYTHONIOENCODING')).toBeUndefined(); }
+    finally { if (held !== undefined) process.env.PYTHONIOENCODING = held; }
+  });
+
   it('hands over one path variable that still contains the inherited directories', () => {
     const env = childEnv();
     const keys = Object.keys(env).filter((key) => key.toLowerCase() === 'path');

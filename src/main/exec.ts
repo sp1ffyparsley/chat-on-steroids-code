@@ -20,7 +20,8 @@ import {
   envValue,
   normalizeEnvironment,
   pathEntries,
-  prependPath
+  prependPath,
+  setEnvValue
 } from './env.js';
 import { locateRipgrep } from './ripgrep.js';
 
@@ -102,6 +103,12 @@ function validateEnvironment(overrides: CommandEnvironment | undefined): void {
 export function childEnv(overrides?: CommandEnvironment): NodeJS.ProcessEnv {
   validateEnvironment(overrides);
   const env = normalizeEnvironment(process.env);
+  // Python chooses the Windows ANSI codec for redirected stdout independently of
+  // PowerShell's console encoding. Match our UTF-8 capture pipe without changing
+  // filesystem/locale mode; inherited and per-command codec choices still win.
+  if (process.platform === 'win32' && envValue(env, 'PYTHONIOENCODING') === undefined) {
+    setEnvValue(env, 'PYTHONIOENCODING', 'utf-8');
+  }
   const ripgrep = locateRipgrep();
   if (ripgrep) prependPath(env, path.dirname(ripgrep));
   // Windows environment keys are case-insensitive. Remove every inherited spelling of
