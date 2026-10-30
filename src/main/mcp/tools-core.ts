@@ -262,7 +262,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
   const { ctx, caps, exposedCaps } = reg;
   if (exposedCaps.read || exposedCaps.browse || exposedCaps.metadata || exposedCaps.command) reg.register('settings_read', toolDeclaration('settings_read', () => ({
     title: 'Inspect account settings',
-    description: 'Read preferences/schema/revision/status. instanceId is this Core caller; sharedPreferences.owner governs shared edits. Profile/paths omitted.',
+    description: 'Read preferences/schema/revision/status. instanceId=Core caller; sharedPreferences.owner=shared edit owner. Core files/commands need no CoS window.',
     inputSchema: z.object({}).strict(),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   })), async () => guard('settings_read', async () => {
@@ -275,7 +275,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
   }));
   if (exposedCaps.command) reg.register('settings_update', toolDeclaration('settings_update', () => ({
     title: 'Update account settings',
-    description: 'Save permitted preferences through Settings Save with instanceId/revision from settings_read. Permission, privacy, connection, holds, models and prompt edits use local background controls. Requires command permission and writable mode.',
+    description: 'Save permitted preferences with settings_read instanceId/revision via Settings Save. Local controls own permissions, privacy, connection, holds, models and prompts. Requires command permission and writable mode.',
     inputSchema: agentSettingsUpdateSchema,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
   })), async input => guard('settings_update', async () => {

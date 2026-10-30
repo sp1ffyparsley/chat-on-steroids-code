@@ -112,7 +112,6 @@ function coreInstructions(ctx: ToolContext, platform: NodeJS.Platform, includeUs
     ...(ctx.readOnly ? ['The local tools are read-only.'] : []),
     ...(agentTools ? ['Fresh Prime and worker openings carry one role-specific hidden Core preflight before these connector instructions. Follow that opening preflight when present; do not combine Prime and Worker preflights. Browser context or an unlisted Windows path is not proof that a workspace is unavailable; report exact Core path, permission, identity or connector errors returned by Core.'] : []),
     'Report exact tool errors; identity/session/output failures do not prove Read-only mode. Never rerun completed work to recover output.',
-    'Authorized Core files/commands need no CoS window. UI input needs a fresh exact target.',
     'Use approved virtual/native paths, including intermediate folders. Relative paths use this chat’s project; switching projects needs a full path.',
     'Reverse engineering: identify exact binary/build and hashes; distinguish original source, recovered code and decompiler output. Reuse REA/Universal Extension Analyzer; fidelity needs experimental/native proof.',
     'UI/design parity needs the selected or read design Skill body, contracts, reference screenshots, real interactions, viewport checks and observed before/after evidence. Report missing evidence and preserve the user’s design intent; names/catalog/open apps alone prove no use, fidelity or acceptance.',
