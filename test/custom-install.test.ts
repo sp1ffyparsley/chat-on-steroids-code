@@ -28,7 +28,6 @@ function ps(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
 
-
 describe.runIf(process.platform === 'win32')('installed program file-lock preflight', () => {
   const shells = ['powershell.exe', ...(spawnSync('pwsh.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { windowsHide: true }).status === 0 ? ['pwsh.exe'] : [])];
   it.each(shells)('refuses held files and unknown census before the installer runner in %s', shell => {
@@ -351,15 +350,15 @@ describe.runIf(process.platform === 'win32')('custom qualified install integrity
       Version: '2.1.39',
       SafeCloseForUpdate: true,
       FileCount: 291,
-      TotalBytes: 571510692,
-      TreeSha256: '98b71f4b5b2ae48173b1df1b97edcc60b690be785c1b38b1062b63ee08cec130',
+      TotalBytes: 571511224,
+      TreeSha256: 'cab8dfbfb7f5b2cd9018003bbfaca2c65e197211a27989beea620e943725b395',
       FileVersion: '2.1.39',
       ProductVersion: '2.1.39.0',
       ExeSha256: 'ee27769bbc18874067b8f5090689471f5e7c15b34d6fcd16459c24d49d4de7ed',
       AppAsarSha256: '105f194555778a57445a5ab16ca82c745ae383312c699206a1d842acc06cd6c8',
       ExtensionVersion: '2.1.39',
-      ExtensionBackgroundSha256: 'd6c6c4a0be9d275727f5a8d46597df4f76c24b1ea538b6cb00523047b3766b65',
-      SourceProvenanceSha256: 'bc5c3a82ab221c58e46c300d960f830706b3170b01274219540eb2e7293e399f',
+      ExtensionBackgroundSha256: '5fb1e7c2967f1b59e9b4f3a8a14da90923d7050043dd9124acda78a9a2682272',
+      SourceProvenanceSha256: 'b7080b09045052a4842916dbe1824fca36b328fd51c5245f76b274b43d87fc5d',
       CustomBuildText: 'Chat On Steroids local custom build. Update through scripts/update-custom.ps1 and reinstall from this checkout.',
     });
   });

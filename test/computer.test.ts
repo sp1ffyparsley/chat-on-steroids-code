@@ -1,4 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import {
   act,
   actAndCapture,
@@ -10,36 +15,75 @@ import {
   screenshot,
   waitForWindow
 } from '../src/main/computer/index.js';
-import { IS_WINDOWS } from './helpers.js';
-import { isBrowserProcess } from '../src/main/computer/browser-chords.js';
+import { IS_WINDOWS, makeTempDir, removeTempDir } from './helpers.js';
 
 describe.runIf(IS_WINDOWS)('desktop helper', () => {
-  // A hosted runner can have no visible desktop window at all, and getWindowState is right
-  // to answer that with WINDOW_NOT_FOUND — that is the production semantic, not a bug to
-  // work around here. The tests below are about what a window state *says* once there is a
-  // window, so they find one first and skip when the desktop has none, the way the window
-  // tests above already do. Naming the window also removes a race the foreground introduces:
-  // between probing and asking, whatever happened to be in front may no longer be.
-  const visibleWindow = async (): Promise<number | null> => {
-    const active = (await activeWindow()).window;
-    if (active) return active.id;
+  // Real UIA/capture contracts need a real window, but arbitrary user windows can
+  // be transient or hang their accessibility provider. Own one small native Form
+  // for every target-sensitive assertion; never probe browser/Codex UI as a fixture.
+  let fixtureWindow = 0, fixtureDirectory = '';
+  let fixtureProcess: ChildProcessWithoutNullStreams | null = null;
+  let fixtureExit: Promise<void> | null = null;
+  beforeAll(async () => {
+    fixtureDirectory = await makeTempDir('cos-native-contract-');
+    const title = 'CoS native contract ' + randomUUID();
+    const closeFile = path.join(fixtureDirectory, 'close');
+    const psQuote = (value: string) => "'" + value.replaceAll("'", "''") + "'";
+    const script = [
+      "$ErrorActionPreference='Stop'",
+      'Add-Type -AssemblyName System.Windows.Forms,System.Drawing',
+      'Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition ' + psQuote(
+        'public sealed class CosContractForm : System.Windows.Forms.Form { protected override bool ShowWithoutActivation { get { return true; } } }'),
+      '$form=New-Object CosContractForm', '$form.Text=' + psQuote(title),
+      '$form.ShowInTaskbar=$false', "$form.StartPosition='Manual'",
+      '$form.Location=New-Object System.Drawing.Point(8,8)',
+      '$form.ClientSize=New-Object System.Drawing.Size(320,180)',
+      '$button=New-Object System.Windows.Forms.Button',
+      "$button.Text='Fixture action'; $button.AccessibleName='CoS fixture button'",
+      '$button.Location=New-Object System.Drawing.Point(24,36)',
+      '$button.Size=New-Object System.Drawing.Size(160,48)', '$form.Controls.Add($button)',
+      '$timer=New-Object System.Windows.Forms.Timer; $timer.Interval=100',
+      '$timer.Add_Tick({ if(Test-Path -LiteralPath ' + psQuote(closeFile) + '){ $form.Close() } })',
+      "$form.Add_Shown({ [Console]::WriteLine('READY'); $timer.Start() })",
+      'try { [System.Windows.Forms.Application]::Run($form) } finally { $timer.Dispose(); $form.Dispose() }'
+    ].join('\n');
+    const executable = path.join(process.env['SystemRoot'] || 'C:/Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe');
+    fixtureProcess = spawn(executable, ['-NoProfile', '-NonInteractive', '-STA', '-EncodedCommand',
+      Buffer.from(script, 'utf16le').toString('base64')], { windowsHide: true, stdio: 'pipe' });
+    const child = fixtureProcess;
+    fixtureExit = new Promise(resolve => child.once('exit', () => resolve()));
+    await new Promise<void>((resolve, reject) => {
+      let output = '', error = '';
+      const timeout = setTimeout(() => reject(new Error('Owned native fixture did not become ready: ' + error)), 15_000);
+      child.stderr.on('data', chunk => { error = (error + String(chunk)).slice(-2000); });
+      child.stdout.on('data', chunk => {
+        output = (output + String(chunk)).slice(-2000);
+        if (output.includes('READY')) { clearTimeout(timeout); resolve(); }
+      });
+      child.once('error', failure => { clearTimeout(timeout); reject(failure); });
+      child.once('exit', code => { clearTimeout(timeout); reject(new Error('Owned native fixture exited before ready: ' + code + ' ' + error)); });
+    });
     const { windows } = await listWindows();
-    return windows.find((w) => w.state !== 'minimized')?.id ?? null;
-  };
-
-  const capturableWindow = async (exclude?: number): Promise<Awaited<ReturnType<typeof screenshot>> | null> => {
-    const { windows } = await listWindows();
-    // A desktop can expose many provider-owned surfaces which are visible to Win32 but refuse
-    // WGC. Keep this live-environment probe bounded; the deterministic backend contract is
-    // covered separately and CI must not spend three seconds on an unbounded window inventory.
-    for (const window of windows.filter(window => window.id !== exclude && window.state !== 'minimized').slice(0, 6)) {
-      try { return await screenshot({ window: window.id, maxWidth: 320 }); }
-      catch (error) {
-        if (!/CAPTURE_FAILED:/.test(error instanceof Error ? error.message : String(error))) throw error;
-      }
+    const target = windows.find(window => window.title === title && window.processId === child.pid);
+    if (!target) throw new Error('Owned native fixture was not present in the real window inventory');
+    fixtureWindow = target.id;
+  });
+  afterAll(async () => {
+    if (fixtureDirectory) await fs.writeFile(path.join(fixtureDirectory, 'close'), 'close owned fixture');
+    if (fixtureProcess && fixtureExit) {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const closed = await Promise.race([fixtureExit.then(() => true),
+        new Promise<false>(resolve => { timeout = setTimeout(() => resolve(false), 10_000); })]);
+      clearTimeout(timeout);
+      if (!closed) { fixtureProcess.kill(); await fixtureExit; } // This test's own Form process only.
     }
-    return null;
-  };
+    if (fixtureDirectory && path.isAbsolute(fixtureDirectory) &&
+        path.dirname(fixtureDirectory) === await fs.realpath(tmpdir()) &&
+        path.basename(fixtureDirectory).startsWith('cos-native-contract-')) await removeTempDir(fixtureDirectory);
+  });
+  const visibleWindow = async (): Promise<number> => fixtureWindow;
+  const capturableWindow = async (exclude?: number): Promise<Awaited<ReturnType<typeof screenshot>> | null> =>
+    fixtureWindow === exclude ? null : screenshot({ window: fixtureWindow, maxWidth: 320 });
 
   it('starts once and serves repeated window queries', async () => {
     const first = await listWindows();
@@ -88,7 +132,7 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
   });
 
   it('crops using coordinates from the most recent returned frame', async () => {
-    const base = await screenshot({ maxWidth: 320 });
+    const base = await screenshot({ window: fixtureWindow, maxWidth: 320 });
     const width = Math.min(100, base.width);
     const height = Math.min(80, base.height);
     const crop = await screenshot({ crop: { x: 0, y: 0, width, height } });
@@ -100,7 +144,7 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
 
   it('waits for an existing visible window without a fixed sleep', async () => {
     const { windows } = await listWindows();
-    const candidate = windows[0];
+    const candidate = windows.find(window => window.id === fixtureWindow);
     if (!candidate) return;
     const found = await waitForWindow({ process: candidate.process, timeoutMs: 1000 });
     expect(found.process.toLowerCase()).toContain(candidate.process.toLowerCase());
@@ -112,7 +156,7 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
     // Live desktops contain short-lived notifications, installer surfaces, and browser
     // windows that can disappear between enumeration and UIA observation. The deterministic
     // protocol tests cover failure semantics; this probe only needs one still-live provider.
-    for (const window of windows.filter(window => window.state !== 'minimized').slice(0, 6)) {
+    for (const window of windows.filter(window => window.id === fixtureWindow)) {
       try {
         result = await findUi({ window: window.id, role: 'Button', maxResults: 5 });
         break;
@@ -144,8 +188,8 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
   });
 
   it('keeps a recent immutable frame usable across an unrelated observation', async () => {
-    const earlier = await screenshot({ maxWidth: 320 });
-    const current = await screenshot({ maxWidth: 320 });
+    const earlier = await screenshot({ window: fixtureWindow, maxWidth: 320 });
+    const current = await screenshot({ window: fixtureWindow, maxWidth: 320 });
     expect(current.frameId).toBeGreaterThan(earlier.frameId);
 
     // Another caller taking a picture no longer invalidates this frame. A window-bound
@@ -156,14 +200,14 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
   });
 
   it('refuses a frame after the bounded immutable history evicts it', async () => {
-    const old = await screenshot({ maxWidth: 320 });
-    for (let index = 0; index < 16; index++) await screenshot({ maxWidth: 320 });
+    const old = await screenshot({ window: fixtureWindow, maxWidth: 320 });
+    for (let index = 0; index < 16; index++) await screenshot({ window: fixtureWindow, maxWidth: 320 });
     await expect(act([{ type: 'move', x: 1, y: 1 }], { frameId: old.frameId })).rejects.toThrow(/STALE_FRAME/);
   });
 
   it('does not check the frame for semantic refs, which do not use coordinates', async () => {
-    const stale = await screenshot({ maxWidth: 320 });
-    await screenshot({ maxWidth: 320 });
+    const stale = await screenshot({ window: fixtureWindow, maxWidth: 320 });
+    await screenshot({ window: fixtureWindow, maxWidth: 320 });
     // Nothing here should mention the frame: the failure must be about the ref itself.
     await expect(
       act([{ type: 'click_ref', ref: 'g1_e999999_999999' }], { frameId: stale.frameId })
@@ -175,16 +219,16 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
     // released between them, another agent's capture can land in the gap and the "after"
     // picture proves nothing about the action it was supposed to verify.
     const order: string[] = [];
-    const base = await screenshot({ maxWidth: 320 });
+    const base = await screenshot({ window: fixtureWindow, maxWidth: 320 });
 
     const combined = actAndCapture([{ type: 'move', x: 1, y: 1 }], {
       frameId: base.frameId,
-      capture: { maxWidth: 320 }
+      capture: { window: fixtureWindow, maxWidth: 320 }
     }).then((result) => {
       order.push('combined');
       return result;
     });
-    const interloper = screenshot({ maxWidth: 320 }).then((shot) => {
+    const interloper = screenshot({ window: fixtureWindow, maxWidth: 320 }).then((shot) => {
       order.push('interloper');
       return shot;
     });
@@ -220,7 +264,7 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
   });
 
   it('resolves a captureAfter crop against the frame that was current before the actions', async () => {
-    const base = await screenshot({ maxWidth: 320 });
+    const base = await screenshot({ window: fixtureWindow, maxWidth: 320 });
     const width = Math.min(64, base.width);
     const height = Math.min(48, base.height);
     const result = await actAndCapture([{ type: 'wait', ms: 0 }], {
@@ -233,8 +277,8 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
   });
 
   it('requires a retained screenshot identity for captureAfter crops', async () => {
-    const earlier = await screenshot({ maxWidth: 320 });
-    const current = await screenshot({ maxWidth: 320 });
+    const earlier = await screenshot({ window: fixtureWindow, maxWidth: 320 });
+    const current = await screenshot({ window: fixtureWindow, maxWidth: 320 });
     const crop = { x: 0, y: 0, width: Math.min(32, current.width), height: Math.min(24, current.height) };
 
     await expect(actAndCapture([{ type: 'wait', ms: 0 }], { capture: { crop } })).rejects.toThrow(/FRAME_REQUIRED/);
@@ -242,32 +286,23 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
       actAndCapture([{ type: 'wait', ms: 0 }], { frameId: earlier.frameId, capture: { crop } })
     ).resolves.toBeTruthy();
 
-    for (let index = 0; index < 16; index++) await screenshot({ maxWidth: 320 });
+    for (let index = 0; index < 16; index++) await screenshot({ window: fixtureWindow, maxWidth: 320 });
     await expect(
       actAndCapture([{ type: 'wait', ms: 0 }], { frameId: earlier.frameId, capture: { crop } })
     ).rejects.toThrow(/STALE_FRAME/);
   });
 
-  it('pairs window state element centres with the screenshot it returned', async (context) => {
+  it('pairs window state element centres with the screenshot it returned', async () => {
     // A competing capture is fired while get_window_state is mid-acquisition. The state
     // it returns must describe one moment: centres computed against its own screenshot,
     // never against the frame the interloper installed.
-    // The foreground can be a transient/occluded provider window that WGC refuses. That is
-    // not a coordinate-mapping failure: try a bounded set of visible windows, just as the
-    // other live-desktop tests do, and assert the same contract once pixels exist.
     let checked = 0;
     const { windows } = await listWindows();
-    // This live check proves frame/element pairing, not browser-provider
-    // availability. Prefer native windows before potentially blocked browser
-    // UIA roots, retaining the same six-candidate bound and every independent
-    // coordinate assertion. Browser root/ref ownership has its own test suite.
-    const candidates = windows.filter(window => window.state !== 'minimized')
-      .sort((left, right) => Number(isBrowserProcess(left.process)) - Number(isBrowserProcess(right.process)))
-      .slice(0, 6);
+    const candidates = windows.filter(window => window.id === fixtureWindow);
     for (const candidate of candidates) {
       try {
         const statePromise = getWindowState({ window: candidate.id, includeScreenshot: true, maxWidth: 640, maxElements: 12 });
-        const interloper = screenshot({ maxWidth: 320 });
+        const interloper = screenshot({ window: fixtureWindow, maxWidth: 320 });
         const [state, other] = await Promise.all([statePromise, interloper]);
         expect(state.screenshot).not.toBeNull();
         const shot = state.screenshot!;
@@ -305,9 +340,7 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
         if (!/CAPTURE_FAILED:|WINDOW_NOT_FOUND:/.test(error instanceof Error ? error.message : String(error))) throw error;
       }
     }
-    // No independently eligible element in this bounded desktop sample is unavailable live
-    // evidence, not proof that mappings work. Deterministic mapping tests cover this contract.
-    if (checked === 0) return context.skip('No independently mappable control in six visible-window candidates.');
+    // The owned Form has a real button; missing eligible controls is a failure, never a skip.
     expect(checked).toBeGreaterThan(0);
   });
 

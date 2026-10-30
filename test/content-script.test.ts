@@ -3986,12 +3986,18 @@ describe('desktop input delivery and helper ownership', () => {
   it.each(['alone', 'stripped route after exact witness', 'stripped route / foreign navigation',
     'second answer', 'different route', 'same route / foreign Fiber', 'null Fiber identity',
     'missing terminal with dropped user', 'missing terminal / foreign Fiber', 'missing terminal / no witness',
-    'missing terminal / second answer', 'missing terminal / open call', 'missing terminal / lost answer ACK'] as const)('completes a temporary planner whose page drops the user message after answering (%s)', async shape => {
+    'missing terminal / second answer', 'missing terminal / open call', 'missing terminal / lost answer ACK',
+    'root route / terminal dropped user', 'root route / missing terminal dropped user',
+    'root route / foreign Fiber', 'root route / null Fiber', 'root route / later c navigation',
+    'root route / STOP'] as const)('completes a temporary planner whose page drops the user message after answering (%s)', async shape => {
     // Live provider regression: after the confirmed helper Send, ChatGPT completed the answer
     // and redrew the exchange without its user row in either DOM or page model. Only the exact
     // one-answer temporary helper shape is attributable to that receipt.
-    const canonical = '{"action":"continue","reply":"answer without its user row"}';
+    const canonical = shape === 'root route / STOP' ? '{"action":"stop","reply":""}'
+      : '{"action":"continue","reply":"answer without its user row"}';
     const routed = 'f0f00021-2222-4222-8222-222222222222';
+    const rootRoute = shape.startsWith('root route /');
+    const providerIdentity = rootRoute ? 'WEB:exact-temporary-provider-thread' : routed;
     let answerPosts = 0;
     let nativeSends = 0;
     live = await harness(`https://chatgpt.com/?temporary-chat=true&cos-input=${inputId}`, {
@@ -4013,12 +4019,12 @@ describe('desktop input delivery and helper ownership', () => {
 
     expect(await live.runtimeMessage({ type: 'clf-desktop-input', id: inputId, conversationId: null }))
       .toEqual({ ok: true });
-    live.dom.reconfigure({ url: `https://chatgpt.com/c/${routed}?temporary-chat=true` });
+    if (!rootRoute) live.dom.reconfigure({ url: `https://chatgpt.com/c/${routed}?temporary-chat=true` });
     live.hook.observe();
     await settle();
     const userSection = live.document.querySelector('[data-turn-id="dropped-user"]') as HTMLElement;
     await bindFiberTurns([{ section: userSection, turn: {
-      turnId: 'dropped-user', conversationId: shape === 'null Fiber identity' || shape === 'missing terminal / no witness' ? null : routed,
+      turnId: 'dropped-user', conversationId: shape === 'null Fiber identity' || shape === 'missing terminal / no witness' || shape === 'root route / null Fiber' ? null : providerIdentity,
       messages: [{ role: 'user', messageId: 'm-dropped-user', rawMessageId: 'm-dropped-user', rawText: text }]
     } }]);
     userSection.remove();
@@ -4029,7 +4035,7 @@ describe('desktop input delivery and helper ownership', () => {
       live.dom.reconfigure({ url: `https://chatgpt.com/c/${shape === 'stripped route / foreign navigation'
         ? 'f0f00022-2222-4222-8222-222222222222' : routed}` });
     }
-    if (shape === 'different route') {
+    if (shape === 'different route' || shape === 'root route / later c navigation') {
       live.dom.reconfigure({ url: 'https://chatgpt.com/c/f0f00022-2222-4222-8222-222222222222?temporary-chat=true' });
     }
     if (shape === 'second answer' || shape === 'missing terminal / second answer') {
@@ -4041,16 +4047,16 @@ describe('desktop input delivery and helper ownership', () => {
       .find((item: any) => item.id === 'dropped-final'), 'completed', 'dropped-final');
     await bindFiberTurns([{ section, turn: {
       turnId: 'dropped-final',
-      conversationId: shape === 'same route / foreign Fiber' || shape === 'missing terminal / foreign Fiber'
+      conversationId: shape === 'same route / foreign Fiber' || shape === 'missing terminal / foreign Fiber' || shape === 'root route / foreign Fiber'
         ? 'f0f00023-2222-4222-8222-222222222222'
-        : shape === 'null Fiber identity' ? null : routed,
-      endMessageId: shape.startsWith('missing terminal') ? undefined : 'dropped-message',
+        : shape === 'null Fiber identity' || shape === 'root route / null Fiber' ? null : providerIdentity,
+      endMessageId: shape.startsWith('missing terminal') || shape === 'root route / missing terminal dropped user' ? undefined : 'dropped-message',
       calls: shape === 'missing terminal / open call' ? [{ tool: 'exec_command', messageId: 'unanswered', answered: false }] : [],
       messages: [{ role: 'assistant', messageId: 'dropped-message', rawMessageId: 'dropped-message', rawText: canonical }]
     } }]);
     await settle();
 
-    if (shape.startsWith('missing terminal')) {
+    if (shape.startsWith('missing terminal') || shape === 'root route / missing terminal dropped user') {
       // The native answer has finished, but Fiber has no endMessageId. DOM recovery
       // requires the same completed strict envelope to remain stable for 2.5 seconds.
       await settleTurn(live);
@@ -4060,7 +4066,8 @@ describe('desktop input delivery and helper ownership', () => {
 
     expect(live.sent.filter(message => message.response)).toEqual(shape === 'missing terminal / lost answer ACK'
       ? [expect.objectContaining({ id: inputId, response: canonical }), expect.objectContaining({ id: inputId, response: canonical })]
-      : shape === 'alone' || shape === 'stripped route after exact witness' || shape === 'missing terminal with dropped user'
+      : shape === 'alone' || shape === 'stripped route after exact witness' || shape === 'missing terminal with dropped user' ||
+        shape === 'root route / terminal dropped user' || shape === 'root route / missing terminal dropped user' || shape === 'root route / STOP'
       ? [expect.objectContaining({ response: canonical })]
       : []);
     if (shape === 'missing terminal / lost answer ACK') {

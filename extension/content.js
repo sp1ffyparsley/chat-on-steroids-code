@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 103;
+  const RECORDER_VERSION = 104;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -15641,10 +15641,22 @@
     const providerConversation = typeof user.conversationId === 'string' && user.conversationId
       ? user.conversationId
       : null;
-    // A null/local placeholder is not a provider conversation identity. The exact user row
-    // must already agree with the concrete `/c` route witnessed by onTarget() before its later
-    // disappearance can be recovered; two unrelated null-identity branches are not a join.
-    if (!providerConversation || providerConversation !== decision.temporaryProviderRoute) return false;
+    // A Temporary Chat can retain its root URL while Fiber already carries a concrete
+    // WEB: provider thread. The exact native-ACKed user joins that thread now; a null
+    // URL is not a wildcard for a later assistant or a later /c navigation. Preserve
+    // concrete route agreement whenever a route exists, and retain the one concrete
+    // provider witness below before React can virtualize the accepted user row.
+    const currentRoute = CLF_DOM.conversationId();
+    const acceptedRoute = decision.temporaryProviderRoute || decision.conversationId;
+    if (!providerConversation || currentRoute !== acceptedRoute ||
+        (currentRoute ? providerConversation !== currentRoute : !temporaryPlannerPage())) return false;
+    // Without a URL identity, every currently mounted assistant must agree with
+    // this exact user in the same scan. A foreign Fiber branch cannot seed a
+    // witness merely by repeating the acknowledged user UUID and text.
+    if (!currentRoute && pageTurns.filter(candidate => candidate.role === 'assistant').some(candidate => {
+      const assistant = stampedFiberTurn(candidate, [...fiberTurns.values()], fiberScanToken);
+      return !assistant || assistant.conversationConflict || assistant.conversationId !== providerConversation;
+    })) return false;
     if (decision.temporaryProviderConversationWitnessed) {
       if (decision.temporaryProviderConversation !== providerConversation) {
         decision.temporaryProviderConversationConflict = true;
