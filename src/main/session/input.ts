@@ -22,7 +22,7 @@ import { getSession, findSessionByConversation, createSession, conversationWasSu
 import { assignSessionProject, getProject, projectWorkspace, getSessionProject } from '../projects.js';
 import { isChatBlocked } from './blocked-chats.js';
 import { wakeBrowserWork } from '../browser-wake.js';
-import { logInfo, logWarn } from '../logger.js';
+import { logEvent, logInfo, logWarn } from '../logger.js';
 import { noteChatOrigin } from './recorder.js';
 import { isAstraModel, isProModel } from '../../shared/chat-models.js';
 import { inFlightToolCalls } from '../mcp/call-context.js';
@@ -3297,6 +3297,7 @@ export function offerToolInput(sessionId: string | null | undefined, conversatio
 }
 
 export function resetInputForTests(): void {
+  browserDecisionRefusalLast.clear();
   if (inputSerialOwner) inputSerialOwner.live = false;
   inputSerialOwner = null;
   retainedExecutionResumes.clear();
@@ -4013,6 +4014,25 @@ export class BrowserDecisionProtocolRejection extends Error {
     this.name = 'BrowserDecisionProtocolRejection';
   }
 }
+/** Fixed, coalesced diagnostics for the existing helper answer publication boundary.
+ * Values supplied by a browser, exception, prompt or response never enter this event. */
+type BrowserDecisionRefusalCode = 'response_invalid' | 'row_missing' | 'owner_mismatch' |
+  'route_mismatch' | 'waiter_missing' | 'waiter_changed' | 'forward_refused' |
+  'automation_paused' | 'handoff_source_mismatch' | 'source_not_current' |
+  'handoff_destination_blocked' | 'continuation_custody_refused' | 'archive_failed' |
+  'http_input_not_owned' | 'http_route_invalid' | 'http_input_not_pending' | 'http_response_invalid';
+const browserDecisionRefusalLast = new Map<string, number>();
+export function noteBrowserDecisionRefusal(code: BrowserDecisionRefusalCode): void {
+  const now = Date.now(), previous = browserDecisionRefusalLast.get(code) ?? 0;
+  if (previous > 0 && now >= previous && now - previous < 60_000) return;
+  browserDecisionRefusalLast.set(code, now);
+  if (browserDecisionRefusalLast.size > 32) {
+    const oldest = [...browserDecisionRefusalLast.entries()].sort((a, b) => a[1] - b[1])[0];
+    if (oldest) browserDecisionRefusalLast.delete(oldest[0]);
+  }
+  const hold = browserDecisionHoldError() === 'goal_browser_automation_paused' ? 'automation_paused' : 'none';
+  logEvent(`browser.helper.refusal.${code.replace(/_/g, '.')}`, `browser helper refusal code=${code} hold=${hold}`);
+}
 export function rejectedBrowserDecision(entry: InputEntry): boolean {
   return entry.purpose === 'decision' && entry.lifetime === 'temporary-planner' &&
     entry.state === 'failed' && entry.goalDecisionRejection !== undefined && entry.error === entry.goalDecisionRejection;
@@ -4327,7 +4347,9 @@ export async function browserDecisionOutputSaved(id: string, owner: string, conv
 export function completeBrowserDecision(id: string, owner: string, response: string, conversationId?: string | null,
   allowMissingWaiter = false): Promise<boolean> {
   return serial(async () => {
-    if (!response.trim() || response.length > MAX_BROWSER_DECISION_RESPONSE_CHARS) return false;
+    if (!response.trim() || response.length > MAX_BROWSER_DECISION_RESPONSE_CHARS) {
+      noteBrowserDecisionRefusal('response_invalid'); return false;
+    }
     const current = await load();
     // A superseded or exactly expired decision can never instruct an executor again,
     // but its native-sent helper still owns an answer worth preserving before retirement.
@@ -4373,11 +4395,18 @@ export function completeBrowserDecision(id: string, owner: string, response: str
       }
       return settled.lifetime === 'temporary-planner';
     }
-    if (!decisionWaiters.has(id) && !allowMissingWaiter) return false;
+    const capturedWaiter = decisionWaiters.get(id);
+    if (!capturedWaiter && !allowMissingWaiter) {
+      noteBrowserDecisionRefusal('waiter_missing'); return false;
+    }
     const row = current.find((entry) => entry.id === id && entry.owner === owner && entry.purpose === 'decision' && ['browser', 'decision'].includes(entry.state));
-    if (!row) return false;
-    if (conversationId && row.conversationId && conversationId !== row.conversationId) return false;
-    const waiter = decisionWaiters.get(id);
+    if (!row) {
+      noteBrowserDecisionRefusal(current.some(entry => entry.id === id) ? 'owner_mismatch' : 'row_missing'); return false;
+    }
+    if (conversationId && row.conversationId && conversationId !== row.conversationId) {
+      noteBrowserDecisionRefusal('route_mismatch'); return false;
+    }
+    const waiter = capturedWaiter;
     // Recorder fallback may begin without a waiter; it may never outlive or
     // take over an acceptance owner captured at entry.
     const waiterCurrent = () => waiter ? decisionWaiters.get(id) === waiter
@@ -4385,7 +4414,9 @@ export function completeBrowserDecision(id: string, owner: string, response: str
     const collecting = liveDeliveredBrowserDecision(row);
     // Native ACK is the sole owner that may bind a route-less Temporary Chat.
     // Its later answer cannot silently replace that already-confirmed route.
-    if (collecting && row.conversationId !== (conversationId ?? null)) return false;
+    if (collecting && row.conversationId !== (conversationId ?? null)) {
+      noteBrowserDecisionRefusal('route_mismatch'); return false;
+    }
     const forward = await deliveryHooks?.settledTurnForwardReadiness?.(row, current,
       collecting ? 'collect' : undefined);
     // Forward permission cannot discard a positively native-Sent answer. Only its
@@ -4393,14 +4424,20 @@ export function completeBrowserDecision(id: string, owner: string, response: str
     // validation still runs, and a refused proof can never commit STOP or a child.
     const collectForwardRefused = forward === false && collecting && !!waiter &&
       row.conversationId === (conversationId ?? null) && decisionWaiters.get(id) === waiter;
-    if (forward === false && !collectForwardRefused) return false;
-    if (collecting && decisionWaiters.get(id) !== waiter) return false;
+    if (forward === false && !collectForwardRefused) {
+      noteBrowserDecisionRefusal(browserDecisionHoldError() === 'goal_browser_automation_paused' ? 'automation_paused' : 'forward_refused'); return false;
+    }
+    if (collecting && decisionWaiters.get(id) !== waiter) {
+      noteBrowserDecisionRefusal('waiter_changed'); return false;
+    }
     const rejectCollectedDecision = async (error: BrowserDecisionProtocolRejection,
       savedOutput?: InputEntry['decisionOutput'], forwardRefused = false): Promise<boolean> => {
       if (!waiter || row.lifetime !== 'temporary-planner') throw error;
       // Failed decision != failed prompt Send. Reuse the exact archive even if
       // its write yielded to a new readiness veto; no accepted STOP/child is saved.
-      const decisionOutput = savedOutput ?? await saveDecisionOutput(row, response, conversationId);
+      let decisionOutput = savedOutput;
+      try { decisionOutput ??= await saveDecisionOutput(row, response, conversationId); }
+      catch (error) { noteBrowserDecisionRefusal('archive_failed'); throw error; }
       await commit(current.map(entry => entry === row ? { ...entry, decisionOutput,
         conversationId: conversationId ?? row.conversationId, state: 'failed',
         error: error.code, goalDecisionRejection: error.code, response
@@ -4443,13 +4480,18 @@ export function completeBrowserDecision(id: string, owner: string, response: str
       if (row.lifetime !== 'temporary-planner' ||
           row.decisionSourceSessionId !== handoff.sessionId ||
           row.decisionSourceTurnId !== handoff.sourceTurnId ||
-          (!isStop && !handoff.text.trim()))
+          (!isStop && !handoff.text.trim())) {
+        noteBrowserDecisionRefusal('handoff_source_mismatch');
         return false;
+      }
       // A blocked destination refuses the handoff, not preservation of the exact
       // native-Sent helper answer. Legacy/unacknowledged rows gain no archive path.
-      if (isChatBlocked(handoff.conversationId)) return collecting
-        ? rejectCollectedDecision(new BrowserDecisionProtocolRejection('native_completion_unverified'), undefined, true)
-        : false;
+      if (isChatBlocked(handoff.conversationId)) {
+        noteBrowserDecisionRefusal('handoff_destination_blocked');
+        return collecting
+          ? rejectCollectedDecision(new BrowserDecisionProtocolRejection('native_completion_unverified'), undefined, true)
+          : false;
+      }
       const session = await getSession(handoff.sessionId);
       const owed = goalPendingReplyFor(handoff.conversationId);
       const [sourceEnd] = await readRecentEvents(handoff.sessionId, 1, {
@@ -4475,9 +4517,12 @@ export function completeBrowserDecision(id: string, owner: string, response: str
           owed?.turnId !== handoff.sourceTurnId ||
           (handoff.sourceAcceptedAt !== undefined && owed?.acceptedAt !== handoff.sourceAcceptedAt) ||
           !goalArmedFor(handoff.conversationId) ||
-          decisionWaiters.get(id) !== waiter) return collecting
-        ? rejectCollectedDecision(new BrowserDecisionProtocolRejection('native_completion_unverified'), undefined, true)
-        : false;
+          decisionWaiters.get(id) !== waiter) {
+        noteBrowserDecisionRefusal('source_not_current');
+        return collecting
+          ? rejectCollectedDecision(new BrowserDecisionProtocolRejection('native_completion_unverified'), undefined, true)
+          : false;
+      }
       if (isStop) {
         // A stop sends no message. Save its final disposition in the SAME durable
         // accepted-answer row; Goal's existing ledger reconciles this on completion
@@ -4492,6 +4537,7 @@ export function completeBrowserDecision(id: string, owner: string, response: str
         // This existing outbox is the sole native Send owner for a continuation.
         const custody = recoveryContinuationEligibility(row);
         if (!custody.allowed) {
+          noteBrowserDecisionRefusal('continuation_custody_refused');
           logWarn(`browser continuation blocked source=${id.slice(0, 8)} recovery=${custody.recoveryChainId?.slice(0, 8) ?? 'none'} reason=${custody.reason} phase=${custody.phase ?? 'none'}`);
           return false;
         }
@@ -4519,10 +4565,15 @@ export function completeBrowserDecision(id: string, owner: string, response: str
         logInfo(`browser continuation lifecycle input=${lifecycle.inputId.slice(0, 8)} recovery=${lifecycle.recoveryChainId?.slice(0, 8) ?? 'none'} state=${lifecycle.continuationState} receipt=${lifecycle.receiptState}`);
       }
     }
-    if (forward && !await forward()) return collecting
-      ? rejectCollectedDecision(new BrowserDecisionProtocolRejection('native_completion_unverified'), undefined, true)
-      : false;
-    const decisionOutput = await saveDecisionOutput(row, response, conversationId);
+    if (forward && !await forward()) {
+      noteBrowserDecisionRefusal(browserDecisionHoldError() === 'goal_browser_automation_paused' ? 'automation_paused' : 'forward_refused');
+      return collecting
+        ? rejectCollectedDecision(new BrowserDecisionProtocolRejection('native_completion_unverified'), undefined, true)
+        : false;
+    }
+    let decisionOutput: InputEntry['decisionOutput'];
+    try { decisionOutput = await saveDecisionOutput(row, response, conversationId); }
+    catch (error) { noteBrowserDecisionRefusal('archive_failed'); throw error; }
     if (decisionOutput) next = next.map(entry => entry.id === row.id ? { ...entry, decisionOutput } : entry);
     // Retirement can race the archive rename as well as the outbox commit. Preserve
     // the verified archive receipt in either case, without reviving its waiter/child.
@@ -4536,16 +4587,23 @@ export function completeBrowserDecision(id: string, owner: string, response: str
       logInfo(`browser helper ${id}: archive receipt retained after waiter retirement; no continuation authorized`);
       return false;
     };
-    if (!waiterCurrent()) return cancelRetiredAfterArchive();
-    if (forward && !await forward()) return collecting
-      ? rejectCollectedDecision(new BrowserDecisionProtocolRejection('native_completion_unverified'), decisionOutput, true)
-      : false;
+    if (!waiterCurrent()) {
+      noteBrowserDecisionRefusal('waiter_changed'); return cancelRetiredAfterArchive();
+    }
+    if (forward && !await forward()) {
+      noteBrowserDecisionRefusal(browserDecisionHoldError() === 'goal_browser_automation_paused' ? 'automation_paused' : 'forward_refused');
+      return collecting
+        ? rejectCollectedDecision(new BrowserDecisionProtocolRejection('native_completion_unverified'), decisionOutput, true)
+        : false;
+    }
     await commit(next);
     // The active request may abort during the durable rename itself. A successful
     // write is not permission to resolve its now-retired waiter or leave an
     // undelivered follow-up eligible in this process. Keep the original Send
     // receipt, but close both answer and unclaimed outgoing authority together.
-    if (!waiterCurrent()) return cancelRetiredAfterArchive();
+    if (!waiterCurrent()) {
+      noteBrowserDecisionRefusal('waiter_changed'); return cancelRetiredAfterArchive();
+    }
     const resolvedConversation = conversationId ?? row.conversationId;
     if (waiter && resolvedConversation) waiter.onConversation?.(resolvedConversation);
     waiter?.resolve(response);

@@ -26,7 +26,7 @@ import type {
   RecoveredDiagnosticIncidentInput,
   RecoveredDiagnosticIncidentResult
 } from './diagnostics.js';
-import { publishBrowserDecision, authorizeBrowserInput, noteInputContinuationHold, sessionInputPolicy, collectRecordedBrowserDecision, cancelInput, cancelSessionInputs, enqueueInput, enqueueInterruptedContinue, requestBrowserDecision, setBrowserDecisionAuthentication, suspendPausedBrowserDecisionWaits, liveDeliveredBrowserDecision, failInputsForDeletedConversation, onInputChange, type InputActivity, type InputEntry } from './session/input.js';
+import { noteBrowserDecisionRefusal, publishBrowserDecision, authorizeBrowserInput, noteInputContinuationHold, sessionInputPolicy, collectRecordedBrowserDecision, cancelInput, cancelSessionInputs, enqueueInput, enqueueInterruptedContinue, requestBrowserDecision, setBrowserDecisionAuthentication, suspendPausedBrowserDecisionWaits, liveDeliveredBrowserDecision, failInputsForDeletedConversation, onInputChange, type InputActivity, type InputEntry } from './session/input.js';
 import { pluginRefreshPublications, coreConnectorPresence, pendingPluginRefreshes, claimPluginRefresh, requireManualPluginRefresh, completePluginRefresh, failPluginRefresh, failOperatorPluginRefreshOwner } from './plugin-refresh.js';
 import type { PluginConnectorPresence } from './plugin-refresh.js';
 import { attachBrowserWake, wakeBrowserWork } from './browser-wake.js';
@@ -5848,13 +5848,18 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }
     if (route === '/input/answer' || route === '/input/ack') {
       const entry = (await listInputs()).find((row) => row.id === body.id && row.owner === body.owner);
-      if (!entry) return json(res, 409, { error: 'input_not_owned' }, origin);
+      if (!entry) {
+        if (route === '/input/answer') noteBrowserDecisionRefusal('http_input_not_owned');
+        return json(res, 409, { error: 'input_not_owned' }, origin);
+      }
       const deliveredConversation = conversationId(body.conversationId);
       // Temporary Chat legitimately has no route (null/omitted). An explicit malformed
       // non-null route is different: acknowledging it as null would silently discard
       // late identity evidence, leaving the original delivered receipt unbound.
-      if (entry.lifetime === 'temporary-planner' && body.conversationId != null && !deliveredConversation)
+      if (entry.lifetime === 'temporary-planner' && body.conversationId != null && !deliveredConversation) {
+        if (entry.purpose === 'decision') noteBrowserDecisionRefusal('http_route_invalid');
         return json(res, 400, { error: 'bad_conversation_id' }, origin);
+      }
       // Answer waiters are gone after cancellation, but an exact native Send ACK can
       // arrive late for an authorized temporary helper. Admit that same metadata-only
       // receipt; never revive a cancelled helper decision or issue replacement work.
@@ -5869,6 +5874,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       if ((!deliveredConversation && entry.lifetime !== 'temporary-planner') || (entry.conversationId && entry.conversationId !== deliveredConversation) ||
           (!['browser', 'decision', 'sent', ...((entry.purpose !== 'decision' && route === '/input/ack') || expiredHelperAck || supersededHelperArchive ? ['cancelled'] : [])].includes(entry.state) &&
             !rejectedBrowserDecision(entry))) {
+        if (entry.purpose === 'decision') noteBrowserDecisionRefusal('http_input_not_pending');
         return json(res, 409, { error: 'input_not_pending' }, origin);
       }
       // Only a validated, still-owned route may report a stale pre-Send ACK.
@@ -5893,7 +5899,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         // never inherits Goal/Loop or recovery authority, even after master Off/On.
         await registerGoalDecisionChat(helperConversation, entry.decisionSourceSessionId);
       }
-      if (route === '/input/answer') return json(res, 200, { ok: typeof body.response === 'string' && await completeBrowserDecision(body.id, body.owner, body.response, deliveredConversation) }, origin);
+      if (route === '/input/answer') {
+        if (typeof body.response !== 'string') noteBrowserDecisionRefusal('http_response_invalid');
+        return json(res, 200, { ok: typeof body.response === 'string' && await completeBrowserDecision(body.id, body.owner, body.response, deliveredConversation) }, origin);
+      }
       const acknowledged = await acknowledgeBrowserInput(body.id, body.owner, deliveredConversation, typeof body.messageId === 'string' ? body.messageId : undefined);
       if (acknowledged && deliveredConversation) await collectRecordedBrowserDecision(deliveredConversation);
       if (acknowledged && deliveredConversation && typeof body.messageId === 'string' && body.messageId) {

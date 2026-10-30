@@ -36094,3 +36094,47 @@ it('fresh-copies idle Goal and Loop chats from the first request and objective t
     vi.useRealTimers();
   }
 });
+
+
+describe('helper HTTP refusal diagnostics', () => {
+  it.each([
+    ['missing', 'http_input_not_owned', 409, 'input_not_owned'],
+    ['foreign-owner', 'http_input_not_owned', 409, 'input_not_owned'],
+    ['malformed-route', 'http_route_invalid', 400, 'bad_conversation_id'],
+    ['foreign-route', 'http_input_not_pending', 409, 'input_not_pending'],
+    ['queued', 'http_input_not_pending', 409, 'input_not_pending'],
+    ['invalid-response', 'http_response_invalid', 200, undefined]
+  ] as const)('names %s without changing helper custody or logging private payloads', async (kind, code, status, error) => {
+    await pair();
+    const input = await import('../src/main/session/input.js');
+    const route = 'cafe9991-0000-4000-8000-000000000001';
+    const row = { id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', sessionId: null, purpose: 'decision',
+      lifetime: 'temporary-planner', state: kind === 'queued' ? 'queued' : 'sent',
+      messageId: 'PRIVATE_NATIVE_ACK', deliveredAt: Date.now(), sendAuthorizedAt: Date.now() - 1,
+      text: 'PRIVATE_HELPER_TEXT', mode: 'after-turn', dueAt: Date.now(), createdAt: Date.now(),
+      model: null, reasoningEffort: null, owner: 'PRIVATE_HELPER_OWNER', conversationId: route };
+    await writeDurableNow('session-input', kind === 'missing' ? [] : [row]);
+    input.resetInputForTests();
+    try {
+      const before = await input.listInputs();
+      const beforeLogs = new Set(getLog());
+      const body = { id: row.id, owner: kind === 'foreign-owner' ? 'PRIVATE_FOREIGN_OWNER' : row.owner,
+        conversationId: kind === 'malformed-route' ? 'PRIVATE_BAD_ROUTE' :
+          kind === 'foreign-route' ? 'cafe9992-0000-4000-8000-000000000002' : route,
+        response: kind === 'invalid-response' ? { private: 'PRIVATE_RESPONSE' } : 'PRIVATE_RESPONSE' };
+      const reply = await request('POST', '/input/answer', { body });
+      expect(reply.status).toBe(status);
+      if (error) expect(reply.body.error).toBe(error);
+      else expect(reply.body.ok).toBe(false);
+      expect(await input.listInputs()).toEqual(before);
+      const events = getLog().filter(entry => !beforeLogs.has(entry) && entry.event === 'browser.helper.refusal.' + code.replace(/_/g, '.'));
+      expect(events).toHaveLength(1);
+      expect(events[0]!.message).toBe('browser helper refusal code=' + code + ' hold=none');
+      for (const value of [row.id, row.owner, row.text, route, 'PRIVATE_FOREIGN_OWNER', 'PRIVATE_BAD_ROUTE', 'PRIVATE_RESPONSE'])
+        expect(events[0]!.message).not.toContain(value);
+      await request('POST', '/input/answer', { body });
+      expect(getLog().filter(entry => !beforeLogs.has(entry) && entry.event === 'browser.helper.refusal.' + code.replace(/_/g, '.'))).toHaveLength(1);
+      expect(await input.listInputs()).toEqual(before);
+    } finally { await writeDurableNow('session-input', []); input.resetInputForTests(); }
+  });
+});
