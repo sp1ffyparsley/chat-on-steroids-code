@@ -353,3 +353,12 @@ it.each(['goal_native_delivery_scope_mismatch', 'goal_canonical_scope_unverified
     expect(goalErrorMessage('request_failed: ' + code)).toBe(goalErrorMessage(code));
     expect(goalErrorMessage(code)).not.toMatch(/Three helper attempts|Restart helper|automatically retry/i);
   });
+
+describe('automatic decision safety explanations', () => {
+  it.each(['goal_external_hold', 'goal_generated_authority_claim'])('explains %s without exposing helper prose or pretending completion', code => {
+    const message = goalErrorMessage('request_failed: ' + code);
+    expect(message).not.toContain(code);
+    expect(message).toMatch(/task remains open|task remains retained|unfinished task|original task remains open/);
+    expect(message).toMatch(/no new message was sent|no continuation was sent/);
+  });
+});

@@ -4,6 +4,21 @@ export const CONVERSATION_DELETED = 'This chat was deleted in ChatGPT. Start a n
 /** Exact incumbent browser refusal; never match authored prompt text or generic errors. */
 export const NATIVE_PROMPT_ENVELOPE_REFUSAL = 'Required prompt header/footer validation failed before Send. Check the companion status and repair the prepared input before retrying.';
 
+
+/** Existing two-field helper envelope: this value is a hold, never executor text or STOP. */
+export const GOAL_EXTERNAL_HOLD_REPLY = '[[COS_EXTERNAL_HOLD]]';
+type AutomaticDecisionHoldCode = 'goal_external_hold' | 'goal_generated_authority_claim';
+export function isAutomaticDecisionHoldCode(value: unknown): value is AutomaticDecisionHoldCode {
+  return value === 'goal_external_hold' || value === 'goal_generated_authority_claim';
+}
+/** Exact control value and bounded opening claims only; this is not a permission grant detector. */
+export function automaticDecisionHold(reply: string): AutomaticDecisionHoldCode | null {
+  if (reply.startsWith(GOAL_EXTERNAL_HOLD_REPLY)) return 'goal_external_hold';
+  const opening = reply.replace(/^(?:#{1,6}\s+)?(?:\*\*|__)?/u, '');
+  return /^(?:I|we)\s+(?:hereby\s+)?(?:authori[sz]e|approve|grant|consent|give permission)\b/iu.test(opening)
+    ? 'goal_generated_authority_claim' : null;
+}
+
 const helperFailureExplanations = {
   transport_unclaimed: 'The browser did not claim the queued helper before its delivery deadline. This is a companion delivery failure, not an empty model answer; no Send was authorized for that attempt.',
   model_reasoning_unconfirmed: 'The requested helper model or reasoning could not be confirmed before Send. Check this account\'s Goal, Loop and Plan model/reasoning settings; changing the root chat picker does not change the helper preference.',
@@ -44,6 +59,8 @@ export function goalHelperFailureCause(error: string): GoalHelperFailureCause {
 
 /** Presentation only. Keep machine errors and retry/ownership decisions unchanged. */
 const explanations: Readonly<Record<string, string>> = {
+  goal_external_hold: 'Automatic continuation is waiting for an external approval or retention decision. The task remains open; no new message was sent and no permission was granted. Review the saved final and resume only after the prerequisite is resolved.',
+  goal_generated_authority_claim: 'An automatic helper claimed to authorize or approve an action. Helper text cannot grant human permission. Its answer and delivery receipt are saved; no continuation was sent and the original task remains open.',
   goal_browser_prompt_envelope_invalid: 'The companion refused the required helper prompt header/footer before Send was authorized. The exact prepared input and saved reply remain retained. Verify or reload the current companion and repair its envelope contract, then deliberately retry this same obligation; automatic replacement helpers are paused.',
   goal_human_history_incomplete: 'Part of the original request or later human changes is missing, incomplete or unverified. The saved task is retained. Recover the original request and changes before resuming this Goal; completion cannot be judged from a summary alone.',
   goal_native_delivery_scope_mismatch: 'A confirmed native message differs from its retained prepared payload or authored request. Scope verification stopped before a helper was requested; its retry budget was not spent. Keep the native message and prepared evidence for reconciliation.',

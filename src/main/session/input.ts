@@ -30,7 +30,7 @@ import { automaticFinishEnabled, confirmDeliveredGoalReplyNow, consumeGoalReplyF
 import { classifyProviderRecoveryFailure } from './recovery-failure.js';
 import { continuationForSession, committedResumeNativeReceipt } from './continuation.js';
 import { finishInstruction } from '../../shared/finish.js';
-import { CONVERSATION_DELETED, NATIVE_PROMPT_ENVELOPE_REFUSAL } from '../../shared/goal-errors.js';
+import { CONVERSATION_DELETED, NATIVE_PROMPT_ENVELOPE_REFUSAL, isAutomaticDecisionHoldCode } from '../../shared/goal-errors.js';
 import { attachmentSchema, validateInputAttachments, normalizeInputAttachments } from './input-attachments.js';
 import { validateInputImages } from './input-images.js';
 import { MAX_CHATGPT_MESSAGE_CHARS } from '../../shared/user-prompt.js';
@@ -44,7 +44,8 @@ import { MAX_AUTOMATION_OBJECTIVE_CHARS } from '../../shared/goal.js';
 const browserDecisionProtocolError = z.enum(['invalid_goal_decision_json', 'invalid_goal_decision_schema',
   'empty_reply', 'control_tokens_only', 'unsafe_control_tokens', 'reply_too_long', 'goal_content_reference_unresolved',
   'goal_canonical_scope_changed', 'goal_human_history_changed', 'goal_plan_changed',
-  'goal_original_acceptance_unverified', 'native_completion_unverified', 'loop_stop_refused']);
+  'goal_original_acceptance_unverified', 'native_completion_unverified', 'loop_stop_refused',
+  'goal_external_hold', 'goal_generated_authority_claim']);
 
 export const inputArgs = z.object({
   /** Authored recipe metadata; scheduling and delivery remain in this serialized owner. */
@@ -4118,6 +4119,14 @@ export async function requestBrowserDecision(text: string, signal: AbortSignal, 
           row.decisionSourceSessionId === options.sourceSessionId &&
           row.decisionSourceTurnId === options.sourceTurnId);
         if (sameTurn.some(row => row.goalSourceSuperseded)) throw new Error('goal_browser_source_superseded');
+        // A collected safety hold is not transport weather. Keep this exact source
+        // parked across restart; only the existing one-shot explicit reconciliation
+        // authority or a genuinely different source may request another decision.
+        const held = sameTurn.find(row => rejectedBrowserDecision(row) && row.decisionOutput &&
+          helperNativeSendConfirmed(row) && isAutomaticDecisionHoldCode(row.goalDecisionRejection));
+        if (held && isAutomaticDecisionHoldCode(held.goalDecisionRejection) &&
+            (!options.allowAmbiguousRetry || sameTurn.length !== 1))
+          throw new BrowserDecisionProtocolRejection(held.goalDecisionRejection);
         if (sameTurn.some(row => row.state === 'sent') &&
             (!options.allowAmbiguousRetry || sameTurn.length !== 1)) {
           throw new Error('goal_browser_answer_custody_unconfirmed');
@@ -4448,7 +4457,8 @@ export function completeBrowserDecision(id: string, owner: string, response: str
       // A refused forward proof must reject, not resolve raw CONTINUE text.
       // Canonical/history/plan revisions retain their more precise rejection.
       if (forwardRefused || error.code === 'goal_canonical_scope_changed' ||
-          error.code === 'goal_human_history_changed' || error.code === 'goal_plan_changed')
+          error.code === 'goal_human_history_changed' || error.code === 'goal_plan_changed' ||
+          isAutomaticDecisionHoldCode(error.code))
         waiter.reject(error);
       else waiter.resolve(response);
       return true;
@@ -4464,7 +4474,8 @@ export function completeBrowserDecision(id: string, owner: string, response: str
       if (!(error instanceof BrowserDecisionProtocolRejection) || !waiter ||
           row.lifetime !== 'temporary-planner') throw error;
       const canonicalRevision = error.code === 'goal_canonical_scope_changed' ||
-        error.code === 'goal_human_history_changed' || error.code === 'goal_plan_changed';
+        error.code === 'goal_human_history_changed' || error.code === 'goal_plan_changed' ||
+        isAutomaticDecisionHoldCode(error.code);
       if (collectForwardRefused && !canonicalRevision && error.code !== 'native_completion_unverified')
         logInfo(`browser helper: forward proof refused with protocol ${error.code}; retaining the answer under native completion wait`);
       const rejection = collectForwardRefused && !canonicalRevision
