@@ -2,6 +2,8 @@
 
 This is the custom Electron application and Chrome companion source exported for code review. It has clean public history and excludes private account stores, saved prompts, credentials, runtime logs and deployment artifacts. This source mirror is separate from upstream releases and supplies no public installer.
 
+Source-only R54 follow-up: exact native decision-hold identity now governs both status projection and supervisor intervention. A superseded/handled/Off hold no longer describes the current task; a current unchanged hold still requires its original proof. No durable receipt, result, action lease or helper budget is cleared. Six projection and five supervisor failure-first reproductions; full427Goal and134selected Bridge checks pass in the controlled source tree, with9focused checks and typecheck in this mirror. The earlier phase-clock test interface now types its existing optional timestamp. This source has not been packaged or installed; installed112 provenance remains separate.
+
 ## Latest status — October 30, 2026, 23:35 UTC
 
 Observer/background112 is qualified and installed in the private deployment. Logical source b0e752ed8eb3517a332e28f21d4b1035c95dfd86, tree5577b316bc4b1bf434f32fa0e2069a5b0d812453 and receipt-only pin52e52faf6e2475606a49361e5724d67b63bf0439 are private provenance, not public Git refs. Use this mirror's own immutable commit for source links; no public installer is supplied.

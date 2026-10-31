@@ -2978,8 +2978,8 @@ describe('native browser Loop stop rejection custody', () => {
       expect(goal.goalObjectiveFor(source.conversationId)).toBe(source.objective);
     }));
 
-  it.each(['handled', 'foreign session', 'foreign turn', 'new pickup', 'same-clock new reply'] as const)(
-    'hides a collected typed hold from a replacement client after %s', async changed => withIsolatedNativeInputOutbox(async () => {
+  it.each(['handled', 'foreign session', 'foreign turn', 'new pickup', 'same-clock new reply', 'user off'] as const)(
+    'hides a collected typed hold from every status reader after %s', async changed => withIsolatedNativeInputOutbox(async () => {
       const source = await seed(`stale-hold-view-${changed.replaceAll(' ', '-')}`);
       const originalClient = 'original-stale-hold-client';
       goal.startGoalDraft({ conversationId: source.conversationId, sessionId: source.sessionId,
@@ -2997,6 +2997,8 @@ describe('native browser Loop stop rejection custody', () => {
           expect(goal.goalPendingReplyFor(source.conversationId)).toMatchObject({
             acceptedAt: prior.acceptedAt, turnId: prior.turnId, replyId: 'genuinely-new-same-clock-reply' });
         } finally { clock.mockRestore(); }
+      } else if (changed === 'user off') {
+        await goal.setGoalSwitchNow(source.conversationId, 'loop', false);
       } else {
         const foreign = changed === 'foreign session' ? await createSession({ conversationId: 'foreign-hold-source' }) : null;
         const clock = vi.spyOn(Date, 'now').mockReturnValue(prior.acceptedAt + 1000);
@@ -3009,8 +3011,12 @@ describe('native browser Loop stop rejection custody', () => {
         } finally { clock.mockRestore(); }
       }
       const rows = await browserInput.listInputs();
-      expect(goal.goalViewFor(source.conversationId, originalClient)).toMatchObject({ stage: 'failed', error: 'goal_external_hold' });
+      const retained = goal.snapshotGoalReplies().replies;
+      expect(goal.goalViewFor(source.conversationId, originalClient)).toBeNull();
+      expect(goal.goalViewFor(source.conversationId)).toBeNull();
       expect(goal.goalViewFor(source.conversationId, 'replacement-stale-hold-client')).toBeNull();
+      expect(goal.goalDraftNeedsIntervention(source.conversationId)).toBe(false);
+      expect(goal.snapshotGoalReplies().replies).toEqual(retained);
       expect(await browserInput.listInputs()).toEqual(rows);
       expect(rows.filter(row => row.sourceHelperId === helper.id)).toHaveLength(0);
     }));

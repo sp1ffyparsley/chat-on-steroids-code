@@ -419,6 +419,8 @@ interface Descriptor {
 
 /** The caption, the bar under it, and how far along the bar the run has got. */
 interface StagePanelView {
+  /** Existing phase clock is absent on stages with no timing witness. */
+  startedAt?: number;
   stage: string;
   detail: string;
   body: string;

@@ -847,6 +847,8 @@ export function goalDraftRetryPending(conversationId: string, now = Date.now()):
 /** Reloading the source cannot repair a settled settings/transport refusal. */
 export function goalDraftNeedsIntervention(conversationId: string): boolean {
   const draft = drafts.get(conversationId);
+  if (draft?.backend === 'chatgpt' && isAutomaticDecisionHoldCode(draft.error) &&
+      settledFailure(draft) && !currentNativeDecisionHold(draft)) return false;
   return draft?.stage === 'failed' && draft.turnId === goalReplies.get(conversationId)?.turnId &&
     !retryableGoalFailure(draft.error ?? '', draft);
 }
@@ -1720,6 +1722,14 @@ function settledFailure(draft: GoalDraft): boolean {
   return draft.stage === 'failed' && draft.error !== null && !retryableGoalFailure(draft.error, draft);
 }
 
+/** Exact read-only binding for a native hold, shared by status and supervision. */
+function currentNativeDecisionHold(draft: GoalDraft): boolean {
+  const pending = goalPendingReplyFor(draft.conversationId);
+  return goalArmedFor(draft.conversationId) && draft.sourceAcceptedAt !== null && !!draft.sourceReplyId && !!pending &&
+    pending.sessionId === draft.sessionId && pending.turnId === draft.turnId &&
+    pending.replyId === draft.sourceReplyId && pending.acceptedAt === draft.sourceAcceptedAt;
+}
+
 function expireDraftPayload(draft: GoalDraft): void {
   // This is an observation hold, not a spent Send. Preserve the same obligation
   // and retry token across a long result delay; fresh native proof may release it.
@@ -1746,14 +1756,17 @@ export function goalViewFor(conversationId: string, clientId?: string): GoalDraf
   const draft = drafts.get(conversationId);
   if (!draft) return null;
   expireDraftPayload(draft);
+  // A collected native hold describes only its exact outstanding obligation.
+  // Incumbent and Main status readers must use the same source fence as a
+  // replacement page. Hiding a superseded view does not retire its durable
+  // receipt, change a retry budget, or grant another client action ownership.
+  if (draft.backend === 'chatgpt' && isAutomaticDecisionHoldCode(draft.error) && settledFailure(draft)) {
+    if (!currentNativeDecisionHold(draft)) return null;
+  }
   if (clientId !== undefined && draft.clientId !== clientId) {
-    const pending = goalPendingReplyFor(conversationId);
     // A replacement page may explain this exact native hold, never inherit its
     // writer. All action owners retain their original client/token checks.
-    if (draft.backend !== 'chatgpt' || !isAutomaticDecisionHoldCode(draft.error) || !settledFailure(draft) ||
-        draft.sourceAcceptedAt === null || !draft.sourceReplyId || !pending ||
-        pending.sessionId !== draft.sessionId || pending.turnId !== draft.turnId ||
-        pending.replyId !== draft.sourceReplyId || pending.acceptedAt !== draft.sourceAcceptedAt) return null;
+    if (draft.backend !== 'chatgpt' || !isAutomaticDecisionHoldCode(draft.error) || !settledFailure(draft)) return null;
     return { ...view(draft), text: '', reply: '' };
   }
   // An acknowledged draft has already been acted on — typed, or decided against. It is kept
