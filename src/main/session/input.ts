@@ -3557,6 +3557,7 @@ export type BrowserHelperTimeoutDisposition =
   | 'browser-preparing'
   | 'send-outcome-unconfirmed'
   | 'awaiting-answer'
+  | 'answer-archived'
   | 'ambiguous'
   | 'none';
 
@@ -3586,6 +3587,10 @@ export function settleTimedOutBrowserHelper(sourceSessionId: string): Promise<Br
     // an older unsent row must never hide the current helper's authorized/native failure.
     const row = latest?.state === 'cancelled' ? latest : null;
     if (!row) return 'none';
+    // A delivered answer already retained on this exact owner is collection custody,
+    // not permission to label it missing or create a replacement.
+    if (helperNativeSendConfirmed(row) && (row.decisionOutput || row.response !== undefined))
+      return 'answer-archived';
     if (helperConfirmedUnsent(row)) {
       // Pause can race its suspension hook or the deadline. The original semantic error
       // remains authoritative after Resume; it must not spend this turn's failure budget.

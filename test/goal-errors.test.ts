@@ -212,14 +212,21 @@ describe('Goal failure explanations', () => {
 });
 
 describe('Terminal Goal recovery currentness', () => {
-  const config = import('../src/main/config.js');
-  const durable = import('../src/main/durable.js');
-  const sessions = import('../src/main/session/store.js');
-  const goal = import('../src/main/goal.js');
-  const input = import('../src/main/session/input.js');
+  // A filtered-out suite must not leave module imports running beyond environment teardown.
+  let config: Promise<typeof import('../src/main/config.js')>;
+  let durable: Promise<typeof import('../src/main/durable.js')>;
+  let sessions: Promise<typeof import('../src/main/session/store.js')>;
+  let goal: Promise<typeof import('../src/main/goal.js')>;
+  let input: Promise<typeof import('../src/main/session/input.js')>;
   let dir: string;
 
   beforeAll(async () => {
+    config = import('../src/main/config.js');
+    durable = import('../src/main/durable.js');
+    sessions = import('../src/main/session/store.js');
+    goal = import('../src/main/goal.js');
+    input = import('../src/main/session/input.js');
+    await Promise.all([config, durable, sessions, goal, input]);
     dir = await makeTempDir('clf-goal-terminal-current-');
     (await config).initConfigPath(dir);
     (await durable).initDurableStore(dir);

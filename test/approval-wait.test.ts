@@ -335,6 +335,33 @@ describe('approval page detector', () => {
     expect(scroll).toHaveBeenCalledExactlyOnceWith({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
   });
 
+  it.each(['auto', 'scroll', 'hidden', 'clip'])('reveals a button clipped inside an overflow-%s chat pane even within the window', overflow => {
+    mount(`<div style="overflow-y:${overflow}">${cardHtml()}</div>`);
+    const button = dom.window.document.querySelectorAll('button')[1]!;
+    const pane = button.closest('[style]')!;
+    let top = 400;
+    Object.defineProperty(button, 'getClientRects', { value: () => [{ left: 10, top, width: 100, height: 30 }] });
+    Object.defineProperty(pane, 'getBoundingClientRect', { value: () => ({ left: 0, top: 0, right: 600, bottom: 300, width: 600, height: 300 }) });
+    const scroll = vi.fn(() => { top = 200; });
+    Object.defineProperty(button, 'scrollIntoView', { value: scroll });
+    Object.defineProperty(dom.window.document, 'elementFromPoint', { value: () => top < 300 ? button : pane });
+    expect(api.autoApproveIfNeeded(current)).toBe(1);
+    expect(scroll).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])('does not scroll an already revealed button or click through an overlay (overlay=%s)', overlay => {
+    mount(`<div style="overflow-y:auto">${cardHtml()}</div>`);
+    const button = dom.window.document.querySelectorAll('button')[1]!;
+    const pane = button.closest('[style]')!;
+    Object.defineProperty(button, 'getClientRects', { value: () => [{ left: 10, top: 100, width: 100, height: 30 }] });
+    Object.defineProperty(pane, 'getBoundingClientRect', { value: () => ({ left: 0, top: 0, right: 600, bottom: 300, width: 600, height: 300 }) });
+    const scroll = vi.fn();
+    Object.defineProperty(button, 'scrollIntoView', { value: scroll });
+    Object.defineProperty(dom.window.document, 'elementFromPoint', { value: () => overlay ? pane : button });
+    expect(api.autoApproveIfNeeded(current)).toBe(overlay ? 0 : 1);
+    expect(scroll).not.toHaveBeenCalled();
+  });
+
   it.each(['paused', 'disabled', 'overlay', 'scroll-failed', 'policy-changed'] as const)(
     'does not turn offscreen scrolling into click permission under %s', mode => {
     mount(cardHtml());

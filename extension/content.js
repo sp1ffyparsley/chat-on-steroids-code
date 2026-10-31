@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 113;
+  const RECORDER_VERSION = 115;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -1443,6 +1443,8 @@
   let goalPhase = '';
   /** Local start of the browser-owned half of the current Goal step. */
   let goalPhaseStartedAt = 0;
+  // Presentation-only wait clock; the same evidence hold survives repair-phase churn.
+  let goalEvidenceHoldSince = 0;
   /** Why the loop is where it is, in the app's own words. Empty unless something stopped. */
   let goalError = '';
   /** Typed refusal is presentation state, never completion or retry authority. */
@@ -10729,11 +10731,13 @@
     // Its typed hold outranks the previous retry error; never infer this from prose.
     if (goalEvidenceHoldReplacesPriorError(goal)) {
       const automation = goal.mode === 'loop' ? 'Loop' : 'Goal';
+      const holdStartedAt = Number.isFinite(goal.evidenceHoldSince) && goal.evidenceHoldSince > 0
+        ? goal.evidenceHoldSince
+        : Number.isFinite(goal.phaseStartedAt) && goal.phaseStartedAt > 0 ? goal.phaseStartedAt : 0;
       return { stage: `${automation} waiting for verified completion · activity unknown`,
         detail: [goal.wait?.detail || goal.draft?.message || goal.error || 'Exact tool-call completion has not been verified.',
           goal.wait?.nextAction || ''].filter(Boolean).join(' · '),
-        body: '', kind: 'goal', startedAt: Number.isFinite(goal.phaseStartedAt) ? goal.phaseStartedAt : 0,
-        steps: [], at: 0, done: false };
+        body: '', kind: 'goal', ...(holdStartedAt > 0 ? { startedAt: holdStartedAt } : {}), steps: [], at: 0, done: false };
     }
     const draft = goal.draft || null;
     const who = modelLabel(draft?.model || goal.model);
@@ -11070,15 +11074,25 @@
       removeStagePanel();
       return;
     }
+    const goalInput = goalConfig
+      ? { ...goalConfig, phase: goalPhase, phaseStartedAt: goalPhaseStartedAt,
+          error: goalError, errorCode: goalErrorCode, retryMs: goalRetryWaitMs, draft: goalDraft, opening }
+      : null;
+    // A repair wake re-enters this same hold through a fresh request phase. The hold began when
+    // exact completion first became unverified, not when the last phase changed, so keep one
+    // clock across those repaints. It is presentation only: no retry, Send, or receipt authority.
+    if (goalInput && goalEvidenceHoldReplacesPriorError(goalInput)) {
+      if (!(goalEvidenceHoldSince > 0))
+        goalEvidenceHoldSince = goalPhaseStartedAt > 0 ? goalPhaseStartedAt : Date.now();
+    } else {
+      goalEvidenceHoldSince = 0;
+    }
     const view = stageView({
       job, progress: operationProgress, changedAt: lastChangeAt,
       nativeRestriction: CLF_DOM.errors().find(error => error.blocking === true && error.reason === 'account_restricted'),
       summary: compactionSummaryProgress(),
       generating: generating && CLF_DOM.generating(),
-      goal: goalConfig
-        ? { ...goalConfig, phase: goalPhase, phaseStartedAt: goalPhaseStartedAt,
-            error: goalError, errorCode: goalErrorCode, retryMs: goalRetryWaitMs, draft: goalDraft, opening }
-        : null
+      goal: goalInput && { ...goalInput, evidenceHoldSince: goalEvidenceHoldSince }
     });
     if (!view) {
       removeStagePanel();
@@ -15649,12 +15663,25 @@
     const node = assistant?.node;
     if (!node?.isConnected || isStale(node)) return fallback;
     const rootSelector = '.markdown, [data-markdown-text-style="assistant-message"]';
-    const markdowns = node.matches?.(rootSelector) ? [node] : [...node.querySelectorAll(rootSelector)];
-    if (markdowns.length !== 1) return fallback;
-    const markdown = markdowns[0];
-    const rendererIds = [...node.querySelectorAll('[data-dil-message-id]')];
-    if (node.matches?.('[data-dil-message-id]')) rendererIds.push(node);
-    if (rendererIds.some(element => element.getAttribute('data-dil-message-id') !== assistant.id)) return fallback;
+    const markdowns = [...(node.matches?.(rootSelector) ? [node] : []), ...node.querySelectorAll(rootSelector)];
+    // The current renderer can nest a legacy .markdown inside its newer root.
+    // These are one answer surface, not competing answers. Keep the outer root
+    // so prose outside the nested block still vetoes extraction; siblings refuse.
+    if (markdowns.length > 32) return fallback;
+    if (markdowns.some((left, index) => markdowns.slice(index + 1).some(right =>
+        !left.contains(right) && !right.contains(left)))) return fallback;
+    const roots = markdowns.filter(candidate => !markdowns.some(other => other !== candidate && other.contains(candidate)));
+    if (roots.length !== 1) return fallback;
+    const markdown = roots[0];
+    const idSelector = '[data-dil-message-id], [data-message-id]';
+    const rendererIds = [...node.querySelectorAll(idSelector)];
+    if (node.matches?.(idSelector)) rendererIds.push(node);
+    const ancestor = node.closest?.(idSelector);
+    if (ancestor && ancestor !== node) rendererIds.push(ancestor);
+    // If both identity attributes exist, BOTH must agree; null-coalescing can hide
+    // a conflicting older id behind a newer matching renderer id.
+    if (rendererIds.some(element => ['data-dil-message-id', 'data-message-id'].some(name =>
+        element.hasAttribute(name) && element.getAttribute(name) !== assistant.id))) return fallback;
     const blocks = [...markdown.querySelectorAll('pre')];
     if (blocks.length !== 1) return fallback;
     const codes = blocks[0].querySelectorAll('code');

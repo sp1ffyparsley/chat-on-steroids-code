@@ -5731,7 +5731,7 @@ describe('desktop input delivery and helper ownership', () => {
     ]);
   });
 
-  it.each(['plain', 'code-controls', 'code-with-prose', 'two-blocks', 'new-renderer', 'new-renderer-prose', 'new-renderer-two-blocks', 'new-renderer-foreign-id'])('waits through a reference-only helper terminal and publishes its exact visible JSON once rendered (%s)', async shape => {
+  it.each(['plain', 'code-controls', 'code-with-prose', 'two-blocks', 'new-renderer', 'new-renderer-prose', 'new-renderer-two-blocks', 'new-renderer-foreign-id', 'new-renderer-nested', 'new-renderer-nested-prose', 'new-renderer-sibling-roots', 'new-renderer-foreign-data-id'])('waits through a reference-only helper terminal and publishes its exact visible JSON once rendered (%s)', async shape => {
     const canonical = '{"action":"continue","reply":"Continue the exact task."}';
     const reference = '::chatgpt-content-reference{index="0" source_message_id="helper-source"}';
     live = await harness(`https://chatgpt.com/c/${chatA}`, {
@@ -5772,12 +5772,23 @@ describe('desktop input delivery and helper ownership', () => {
         surface.querySelector('code')!.textContent = canonical;
         rendered.append(surface);
         markdown.replaceChildren(rendered);
+        if (shape.startsWith('new-renderer-nested')) {
+          const inner = live.document.createElement('div'); inner.className = 'markdown';
+          inner.append(rendered); markdown.replaceChildren(inner);
+          if (shape === 'new-renderer-nested-prose') markdown.append('This is only an example.');
+        }
+        if (shape === 'new-renderer-sibling-roots') {
+          const left = live.document.createElement('div'); left.className = 'markdown'; left.append(rendered);
+          const right = live.document.createElement('div'); right.className = 'markdown';
+          markdown.replaceChildren(left, right);
+        }
+        if (shape === 'new-renderer-foreign-data-id') rendered.setAttribute('data-message-id', 'foreign-message');
         if (shape === 'new-renderer-prose') markdown.append('This is only an example.');
         if (shape === 'new-renderer-two-blocks') rendered.append(surface.cloneNode(true));
       }
     }
     await bindFiberTurns([{ section, turn: proof }]);
-    if (shape === 'code-with-prose' || shape === 'two-blocks' || shape === 'new-renderer-prose' || shape === 'new-renderer-two-blocks' || shape === 'new-renderer-foreign-id') {
+    if (shape === 'new-renderer-sibling-roots' || shape === 'new-renderer-foreign-data-id' || shape === 'new-renderer-nested-prose' || shape === 'code-with-prose' || shape === 'two-blocks' || shape === 'new-renderer-prose' || shape === 'new-renderer-two-blocks' || shape === 'new-renderer-foreign-id') {
       expect(live.sent.filter(message => message.response)).toEqual([]);
       return;
     }
@@ -27307,6 +27318,58 @@ describe('the goal loop', () => {
     await expect(live.runtimeMessage({ type: 'clf-collect-goal-now',
       conversationId: 'bbbbbbbb-cccc-dddd-eeee-ffffffffffff' }))
       .resolves.toMatchObject({ ok: false, pending: false, error: 'wrong_conversation' });
+  });
+
+  it.each([false, true])('keeps one evidence-hold clock across repair wakes and resets on navigation (%s)', async navigate => {
+    const pending = { replyId: 'evidence-final', turnId: 'evidence-turn', acceptedAt: 1000, eventSeq: 12 };
+    const detail = 'Exact native tool completion remains unresolved.';
+    live = await harness(`https://chatgpt.com/c/${CHAT}`, {
+      ...goalReplies(),
+      activity: () => ({ ok: true, data: {
+        entries: [], stream: [], nextSince: 0, pendingTools: 0, job: null,
+        goal: { enabled: true, own: true, mode: 'loop', afterTurn: true, hasKey: true, model: MODEL,
+          pending, draft: null, wait: { reason: 'evidence', detail } }
+      } }),
+      goal_draft: () => ({ ok: false, status: 409,
+        data: { error: 'native_completion_unverified', message: detail, retryable: false } })
+    });
+    const page = live;
+    await page.hook.pullActivity();
+    await expect(page.runtimeMessage({ type: 'clf-collect-goal-now', conversationId: CHAT }))
+      .resolves.toMatchObject({ ok: true, pending: true });
+    await settle();
+
+    const panel = () => page.document.querySelector('.clf-stage');
+    const timer = () => page.document.querySelector('.clf-stage-timer') as HTMLElement;
+    /** The timer's own m:ss / h:mm:ss label as seconds. */
+    const seconds = (): number => String(timer().textContent || '').split(':')
+      .reduce((total, part) => total * 60 + Number(part), 0);
+    expect(panel()?.textContent).toContain('Loop waiting for verified completion · activity unknown');
+    expect(timer().hidden).toBe(false);
+    const before = seconds();
+    page.advance(90_000);
+    page.hook.injectStage();
+    expect(seconds()).toBe(before + 90);
+
+    // A second repair wake is not new progress: the hold clock keeps running.
+    await expect(page.runtimeMessage({ type: 'clf-collect-goal-now', conversationId: CHAT }))
+      .resolves.toMatchObject({ ok: true, pending: true });
+    await settle();
+    page.hook.injectStage();
+    expect(panel()?.textContent).toContain('Loop waiting for verified completion · activity unknown');
+    expect(timer().hidden).toBe(false);
+    expect(seconds()).toBeGreaterThanOrEqual(before + 90);
+    if (navigate) {
+      page.window.history.pushState({}, '', '/c/bbbbbbbb-cccc-dddd-eeee-ffffffffffff');
+      page.hook.observe();
+      await settle();
+      await page.hook.pullActivity();
+      await page.runtimeMessage({ type: 'clf-collect-goal-now', conversationId: 'bbbbbbbb-cccc-dddd-eeee-ffffffffffff' });
+      await settle();
+      page.hook.injectStage();
+      expect(timer().hidden).toBe(false);
+      expect(seconds()).toBeLessThan(5);
+    }
   });
 
   it('rejects a late Goal collector response when the native page changes conversation during activity fetch', async () => {

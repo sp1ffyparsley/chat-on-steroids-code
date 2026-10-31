@@ -4207,6 +4207,32 @@ describe('browser decision lifetime', () => {
       state: 'cancelled', deliveredAt: expect.any(Number), messageId: 'delivered-user-message'
     });
   });
+  it.each(['output', 'response', 'absent', 'unconfirmed'] as const)(
+    'classifies retained late helper custody without replacement (%s)', async shape => {
+      const controller = new AbortController();
+      const pending = requestBrowserDecision('Original decision', controller.signal, {
+        sourceSessionId: sessionId, lifetime: 'temporary-planner'
+      });
+      const rejected = expect(pending).rejects.toThrow('goal_browser_cancelled');
+      const row = (await listInputs())[0]!;
+      await claimBrowserInput(row.id, 'late-answer-document', null, true);
+      expect(await authorizeBrowserInput(row.id, 'late-answer-document', null)).toBe(true);
+      if (shape !== 'unconfirmed')
+        expect(await acknowledgeBrowserInput(row.id, 'late-answer-document', null, 'late-native-message')).toBe(true);
+      controller.abort(); await rejected;
+      const current = await listInputs();
+      await writeDurableNow('session-input', current.map(entry => entry.id !== row.id ? entry : { ...entry,
+        ...(shape === 'output' || shape === 'unconfirmed' ? { decisionOutput: { sha256: 'a'.repeat(64), bytes: 29 } } : {}),
+        ...(shape === 'response' ? { response: '{"action":"stop","reply":""}' } : {}) }));
+      resetInputForTests();
+      const retained = await listInputs();
+      expect(await settleTimedOutBrowserHelper(sessionId)).toBe(shape === 'unconfirmed' ? 'send-outcome-unconfirmed'
+        : shape === 'absent' ? 'awaiting-answer' : 'answer-archived');
+      expect(await listInputs()).toEqual(retained);
+      expect(retained).toHaveLength(1);
+      expect(retained[0]?.id).toBe(row.id);
+    });
+
   it('preserves a delivered temporary helper after answer expiry across a cold restore without automatic replay', async () => {
     const abort = new AbortController();
     const pending = requestBrowserDecision('Original decision', abort.signal, { sourceSessionId: sessionId, lifetime: 'temporary-planner' });

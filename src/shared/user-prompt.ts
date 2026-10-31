@@ -43,13 +43,19 @@ export function prependUserPrompt(text: string, instructions: string): string {
 export function nativePreparedInputMatches(recorded: string, prepared: string): boolean {
   if (recorded === prepared) return true;
   if (userPromptText(prepared) === null) return false;
-  return providerSerializedPayloadMatches(withoutNativeCoreMention(recorded), prepared);
+  return providerSerializedPayloadMatches(withoutNativeCoreMention(recorded, true), prepared);
 }
 
-function withoutNativeCoreMention(recorded: string): string {
+function withoutNativeCoreMention(recorded: string, allowTrailing = false): string {
   // ONE bounded native Core attachment, anchored before the complete retained payload.
   const attachment = /^\[\$[a-z][a-z0-9-]{0,80}-windows-core\]\(app:\/\/asdk_app_[a-f0-9]{32}\)/.exec(recorded);
-  return attachment ? recorded.slice(attachment[0].length) : recorded;
+  const trailing = allowTrailing
+    ? /\[\$[a-z][a-z0-9-]{0,80}-windows-core\]\(app:\/\/asdk_app_[a-f0-9]{32}\)$/.exec(recorded) : null;
+  // Exactly one native chip may precede OR follow the full framed payload.
+  // Retain duplicate/competing attachments so the complete comparison refuses them.
+  if (attachment && trailing) return recorded;
+  return attachment ? recorded.slice(attachment[0].length)
+    : trailing ? recorded.slice(0, -trailing[0].length) : recorded;
 }
 
 /** Legacy spelling proof only. The caller must independently prove a confirmed Input's

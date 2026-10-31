@@ -59,7 +59,7 @@ export function goalHelperFailureCause(error: string): GoalHelperFailureCause {
 
 /** Presentation only. Keep machine errors and retry/ownership decisions unchanged. */
 const explanations: Readonly<Record<string, string>> = {
-  goal_external_hold: 'Automatic continuation is waiting for an external approval or retention decision. The task remains open; no new message was sent and no permission was granted. Review the saved final and resume only after the prerequisite is resolved.',
+  goal_external_hold: 'The helper returned an external-hold decision. This does not establish that approval is required. The task remains open; no new message was sent and no permission was granted. Review the retained helper and current task to identify a real prerequisite or an incorrect generated hold before resuming.',
   goal_generated_authority_claim: 'An automatic helper claimed to authorize or approve an action. Helper text cannot grant human permission. Its answer and delivery receipt are saved; no continuation was sent and the original task remains open.',
   goal_browser_prompt_envelope_invalid: 'The companion refused the required helper prompt header/footer before Send was authorized. The exact prepared input and saved reply remain retained. Verify or reload the current companion and repair its envelope contract, then deliberately retry this same obligation; automatic replacement helpers are paused.',
   goal_human_history_incomplete: 'Part of the original request or later human changes is missing, incomplete or unverified. The saved task is retained. Recover the original request and changes before resuming this Goal; completion cannot be judged from a summary alone.',

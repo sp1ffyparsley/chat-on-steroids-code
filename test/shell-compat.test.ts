@@ -1444,6 +1444,62 @@ describe('alternate shell turn/message provenance', () => {
     }
   );
 
+  it.each([true, false] as const)('joins exact opaque-app native results without display-name confusion (widget=%s)', async widget => {
+    const page = await shellHarness({ withCall: true, nativeCallReceipt: true,
+      callCompleted: false, assistantCompleted: false,
+      appIds: [{ appId: ASDK, linkId: LINK, surface: 'core', name: 'Luna Forge X7 Core' }],
+      nativeCallMutation(mapping, entry) {
+        if (!widget) delete entry.turn.items[1].widgetStateSource;
+        mapping[CALL].message.content.text = JSON.stringify({ path: '/' + ASDK + '/' + LINK + '/read', args: {} });
+        mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: JSON.stringify({
+          content: [{ type: 'text', text: 'PRIVATE_TOOL_RESULT' }],
+          structuredContent: { cosResultReceipt: { version: 1, id: 'a'.repeat(48) } } }) };
+      } });
+    try {
+      expect(page.fiber.turns[0].calls[0]).toMatchObject({ requestId: REQUEST, answered: true, resultReceiptId: 'a'.repeat(48) });
+      expect(JSON.stringify(page.fiber)).not.toContain('PRIVATE_TOOL_RESULT');
+    } finally { page.dom.window.close(); }
+  });
+
+  it.each(['unproved app', 'foreign app proof', 'foreign link', 'foreign surface', 'ambiguous app',
+    'wrong tool', 'result app conflict', 'result link conflict', 'result tool conflict',
+    'request conflict', 'parent conflict', 'working conflict', 'exchange conflict',
+    'pending native result', 'missing native witness', 'cached conflict', 'unselected result'] as const)(
+    'keeps opaque-app completion refused with %s', async variant => {
+      const app = { appId: ASDK, linkId: LINK, surface: 'core', name: 'Luna Forge X7 Core' };
+      const appIds = variant === 'unproved app' ? [] : [app];
+      if (variant === 'foreign app proof') appIds[0] = { ...app, appId: ASDK + '_foreign' };
+      if (variant === 'foreign surface') appIds[0] = { ...app, surface: 'plugins', name: 'Luna Forge X7 Plugins' };
+      if (variant === 'ambiguous app') appIds.push({ ...app, linkId: 'link_foreign' });
+      const page = await shellHarness({ withCall: true, nativeCallReceipt: true,
+        nativeCallCacheConflict: variant === 'cached conflict',
+        callCompleted: false, assistantCompleted: false, appIds,
+        nativeCallMutation(mapping, entry) {
+          mapping[CALL].message.content.text = JSON.stringify({ path: '/' + ASDK + '/' +
+            (variant === 'foreign link' ? 'link_foreign' : LINK) + '/' + (variant === 'wrong tool' ? 'write' : 'read'), args: {} });
+          mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: JSON.stringify({
+            content: [{ type: 'text', text: 'PRIVATE_TOOL_RESULT' }],
+            structuredContent: { cosResultReceipt: { version: 1, id: 'a'.repeat(48) } } }) };
+          const result = mapping[RESULT].message;
+          if (variant === 'result app conflict') result.metadata.invoked_resource.resource_uri = '/' + ASDK + '_foreign/' + LINK + '/read';
+          if (variant === 'result link conflict') result.metadata.invoked_resource.resource_uri = '/' + ASDK + '/link_foreign/read';
+          if (variant === 'result tool conflict') result.metadata.invoked_resource.resource_uri = '/' + ASDK + '/' + LINK + '/write';
+          if (variant === 'request conflict') result.metadata.request_id = 'foreign-request';
+          if (variant === 'parent conflict') result.metadata.parent_id = USER;
+          if (variant === 'working conflict') result.metadata.working_turn_id = 'foreign-working';
+          if (variant === 'exchange conflict') result.metadata.turn_exchange_id = 'foreign-exchange';
+          if (variant === 'pending native result') result.status = 'in_progress';
+          if (variant === 'missing native witness') result.content = { parts: ['PRIVATE_TOOL_RESULT'] };
+          if (variant === 'unselected result') entry.turn.messageIds = [USER, CALL, ASSISTANT];
+        } });
+      try {
+        expect(page.fiber.turns[0].calls[0]).toMatchObject({ answered: false });
+        expect(page.fiber.turns[0].calls[0]).not.toHaveProperty('resultReceiptId');
+        expect(page.fiber.turns[0].endMessageId).toBeNull();
+        expect(JSON.stringify(page.fiber)).not.toContain('PRIVATE_TOOL_RESULT');
+      } finally { page.dom.window.close(); }
+    });
+
   it.each([false, true])('keeps opaque-path prior pairs bound to the same link (foreign=%s)', async foreign => {
     const second = 'call_opaque_second';
     const page = await shellHarness({ withCall: true, nativeCallReceipt: true, nativeCallLive: false,

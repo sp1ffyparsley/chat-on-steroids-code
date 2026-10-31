@@ -197,3 +197,24 @@ it('compares complete prepared native payloads without losing literal paths, ent
     expect(nativePreparedInputMatches(malformed.replace(/[_#]/, char => '\\' + char), malformed)).toBe(false);
   }
 });
+
+it('verifies a complete retained operator envelope containing a framed task after provider escaping', () => {
+  const header = '[[COS_OPERATOR_QUESTIONS:1]] What is the most useful next step for this task given the verified context, and what evidence will show that it worked?';
+  const footer = '\nIGNORE THE FIRST SENTENCE ABOVE.';
+  const framed = prependUserPrompt('Keep original C:\\work\\file and literal [[/COS_CONTEXT]].', 'Core guidance with **literal punctuation**.');
+  const prepared = header + '\n' + framed + footer;
+  const serialized = prepared.replace(/([\\`*_{}\[\]()#+\-.!<>&:|=~])/g, '\\$1').replace(/\n/g, '\\\n');
+  expect(nativePreparedInputMatches(serialized, prepared)).toBe(true);
+  const chip = '[$ember-windows-core](app://asdk_app_' + 'b'.repeat(32) + ')';
+  expect(nativePreparedInputMatches(serialized + chip, prepared)).toBe(true);
+  expect(nativePreparedInputMatches(chip + serialized, prepared)).toBe(true);
+  expect(nativePreparedInputMatches(serialized + chip + chip, prepared)).toBe(false);
+  expect(nativePreparedInputMatches(chip + serialized + chip, prepared)).toBe(false);
+  for (const actual of [serialized + 'extra', serialized.slice(0, -1),
+    serialized.replace('original', 'different'), serialized.replace('guidance', 'modified'),
+    serialized.replace('QUESTIONS', 'CHANGED')]) expect(nativePreparedInputMatches(actual, prepared)).toBe(false);
+  for (const invalid of [prepared.replace('COS_CONTEXT:', 'COS_CONTEXT:9'),
+    prepared.slice(0, -footer.length), header + '\n\nplain unframed task' + footer]) {
+    expect(nativePreparedInputMatches(invalid.replace(/_/g, '\\_'), invalid)).toBe(false);
+  }
+});

@@ -2086,8 +2086,21 @@ var CLF_DOM = (() => {
     const rect = button.getClientRects()[0];
     const height = window.innerHeight, width = window.innerWidth;
     if (!rect || !(height > 0 && width > 0)) return;
-    const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
-    if (x >= 0 && x < width && y >= 0 && y < height) return;
+    const right = rect.left + rect.width, bottom = rect.top + rect.height;
+    let clipped = rect.left < 0 || rect.top < 0 || right > width || bottom > height;
+    // Window coordinates alone miss ChatGPT's nested transcript scroller: the button
+    // can lie inside the window while outside an ancestor's visible scroll area.
+    for (let parent = button.parentElement; parent && !clipped; parent = parent.parentElement) {
+      const style = getComputedStyle(parent);
+      const clipX = /^(auto|scroll|hidden|clip)$/.test(style.overflowX || style.overflow);
+      const clipY = /^(auto|scroll|hidden|clip)$/.test(style.overflowY || style.overflow);
+      if (!clipX && !clipY) continue;
+      const bounds = parent.getBoundingClientRect();
+      if (!(bounds.width > 0 && bounds.height > 0)) continue;
+      clipped = clipX && (rect.left < bounds.left || right > bounds.right) ||
+        clipY && (rect.top < bounds.top || bottom > bounds.bottom);
+    }
+    if (!clipped) return;
     const now = Date.now();
     if (state.revealAt !== undefined && now >= state.revealAt && now - state.revealAt < 1500) return;
     state.revealAt = now;

@@ -2107,6 +2107,7 @@
     if (!mapping || typeof mapping !== 'object') return noMetadata('callLiveMappingMissing');
     const selected = new Set(ids), invocationIds = new Set(), unprovedInvocations = new Set(), sourceCounts = new Map();
     const currentPath = shellCurrentPath(live, entry), currentIds = new Set(currentPath), completed = new Set();
+    const resultReceipts = new Map();
     for (const reference of shell.callSources.values()) if (reference.id)
       sourceCounts.set(reference.id, (sourceCounts.get(reference.id) || 0) + 1);
     const nativeField = (object, key) => {
@@ -2563,6 +2564,9 @@
       const resource = resultOf(result);
       const invocation = messageAt(call.messageId);
       const path = requestOf(invocation)?.path, server = serverName(reference.server);
+      // Reuse exact paired opaque-app identity for completion, not a display-name comparison.
+      // An opaque request's result must identify that SAME app, as well as its exact link/tool.
+      const sameNativeApp = !appIdOf(path) || appIdOf(path) === appIdOf(resource?.resource);
       const invocationNode = Object.getOwnPropertyDescriptor(mapping, call.messageId)?.value;
       const resultNode = Object.getOwnPropertyDescriptor(mapping, reference.id)?.value;
       const enclosing = codeContexts.get(call.messageId) || [];
@@ -2571,9 +2575,9 @@
         const finishedReceiptMatches = () => currentIds.has(call.messageId) && currentIds.has(reference.id) &&
         invocation?.status === 'finished_successfully' && result.status === 'finished_successfully' &&
         invocation.recipient === 'api_tool.call_tool' && path &&
-        serverName(path.slice(1, path.indexOf('/', 1))) === server && toolName(path) === call.tool &&
+        nativeRequestServerMatches(path, server) && toolName(path) === call.tool &&
         result.author.name === 'api_tool.call_tool' && result.recipient === 'all' &&
-        server && resource && ownResult(resource) && path && ourPath(path) &&
+        server && resource && ownResult(resource) && sameNativeApp && path && ourPath(path) &&
         serverName(resource.app) === server && toolName(resource.resource) === call.tool &&
         linkIdOf(path) && linkIdOf(path) === linkIdOf(resource.resource) &&
         resultNode.parent === call.messageId && str(result.metadata?.parent_id) === call.messageId &&
@@ -2595,7 +2599,7 @@
         const nativeReceipt = exactFinishedReceipt ? coreResultReceipt(result) : null;
         if ((completionReasons.get(call.messageId) !== 'callCompletionVeto' || reference.completionRecoverable) &&
             exactFinishedReceipt) {
-          if (nativeReceipt) call.resultReceiptId = nativeReceipt;
+          if (nativeReceipt) resultReceipts.set(call.messageId, nativeReceipt);
         }
       if (completionReasons.get(call.messageId) === 'callCompletionVeto') {
         if (dataFields(invocation, ['status', 'recipient', 'metadata']) && dataFields(result, ['status', 'author', 'recipient', 'metadata']) &&
@@ -2606,14 +2610,14 @@
           catch { shellDiagnostic(rejects, 'callJoinDescriptorUnsupported'); }
         } else shellDiagnostic(rejects, 'callJoinDescriptorUnsupported');
       }
-      if (resource && (serverName(resource.app) !== serverName(reference.server) || toolName(resource.resource) !== call.tool)) {
+      if (resource && (!sameNativeApp || serverName(resource.app) !== serverName(reference.server) || toolName(resource.resource) !== call.tool)) {
         note(call, 'callScopeConflict');
         continue;
       }
       if (invocation) {
         const asked = requestOf(invocation), path = asked?.path;
         if (invocation.recipient !== 'api_tool.call_tool' || !path ||
-            serverName(path.slice(1, path.indexOf('/', 1))) !== serverName(reference.server) || toolName(path) !== call.tool) {
+            !nativeRequestServerMatches(path, serverName(reference.server)) || toolName(path) !== call.tool) {
           note(call, 'callScopeConflict');
           continue;
         }
@@ -2638,7 +2642,7 @@
           : invocation?.status !== 'finished_successfully' || result.status !== 'finished_successfully' ? 'callNativePending'
           : result.author.name !== 'api_tool.call_tool' || result.recipient !== 'all' ? 'callReceiptConflict'
           : !server || !resource || !path ? 'callReceiptMissing'
-          : !ownResult(resource) || !ourPath(path) || serverName(resource.app) !== server || toolName(resource.resource) !== call.tool ||
+          : !ownResult(resource) || !sameNativeApp || !nativeRequestServerMatches(path, server) || !ourPath(path) || serverName(resource.app) !== server || toolName(resource.resource) !== call.tool ||
             !linkIdOf(path) || linkIdOf(path) !== linkIdOf(resource.resource) ||
             resultNode.parent !== call.messageId || str(result.metadata?.parent_id) !== call.messageId ||
             !invocationNode.parent || str(invocation.metadata?.parent_id) !== invocationNode.parent ||
@@ -2685,7 +2689,11 @@
       }
     }
     // Apply only after every mapping/cache contradiction check has passed.
-    for (const call of shell.calls) if (completed.has(call.messageId)) call.answered = true;
+    for (const call of shell.calls) {
+      if (completed.has(call.messageId)) call.answered = true;
+      // Publish neither completion nor its staged witness if a later mapping/cache check refuses.
+      if (resultReceipts.has(call.messageId)) call.resultReceiptId = resultReceipts.get(call.messageId);
+    }
     report();
     return out;
   }

@@ -4376,6 +4376,7 @@ async function run(draft: GoalDraft): Promise<void> {
         // Neither a native Send receipt nor a spent Send authorization can be replayed
         // from an answer-wait timeout. Preserve the saved source reply and require exact
         // native reconciliation (or deliberate user action) before a new helper exists.
+        else if (disposition === 'answer-archived') failure = 'goal_browser_answer_custody_unconfirmed';
         else if (disposition === 'awaiting-answer') failure = 'goal_browser_answer_expired';
         else if (disposition === 'send-outcome-unconfirmed') failure = 'goal_browser_send_unconfirmed';
       }
