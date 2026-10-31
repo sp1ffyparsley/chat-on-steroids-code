@@ -2250,8 +2250,15 @@ globalThis.fetch=async (url,...rest)=>{
         let absent = false;
         for (let attempt = 0; attempt < 15; attempt++) {
           const census = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-            `$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${locked.pid}';` +
-            `if($null -eq $p){'absent'}else{'present'}`
+            // Parent exit alone is not preview quiescence: its selector subprocess can
+            // outlive it. Await independent native absence of the whole fixture tree
+            // before asking the unchanged recovery owner to reclaim the lease.
+            `$nodes=@(Get-CimInstance Win32_Process);` +
+            `$family=New-Object 'System.Collections.Generic.HashSet[int]';` +
+            `[void]$family.Add(${locked.pid});$changed=$true;` +
+            `while($changed){$changed=$false;foreach($p in $nodes){` +
+            `if($family.Contains([int]$p.ParentProcessId) -and $family.Add([int]$p.ProcessId)){$changed=$true}}};` +
+            `if(@($nodes|Where-Object{$family.Contains([int]$_.ProcessId)}).Count -eq 0){'absent'}else{'present'}`
           ], { encoding: 'utf8', timeout: 5000 });
           if (census.status === 0 && census.stdout.trim() === 'absent') { absent = true; break; }
           await new Promise(resolve => setTimeout(resolve, 150));
