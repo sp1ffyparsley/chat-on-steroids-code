@@ -10732,7 +10732,8 @@
       return { stage: `${automation} waiting for verified completion · activity unknown`,
         detail: [goal.wait?.detail || goal.draft?.message || goal.error || 'Exact tool-call completion has not been verified.',
           goal.wait?.nextAction || ''].filter(Boolean).join(' · '),
-        body: '', kind: 'goal', steps: [], at: 0, done: false };
+        body: '', kind: 'goal', startedAt: Number.isFinite(goal.phaseStartedAt) ? goal.phaseStartedAt : 0,
+        steps: [], at: 0, done: false };
     }
     const draft = goal.draft || null;
     const who = modelLabel(draft?.model || goal.model);
@@ -10778,7 +10779,7 @@
     if (goal.phase === 'done') {
       // A helper STOP is a decision to send no continuation, not independent
       // acceptance of every requirement. Finite work can end at an external hold.
-      return { stage: 'Goal stopped · review result', detail: 'No continuation was sent. Review the task result and remaining requirements; this is not independent completion verification.', body: '', kind: 'goal-done', ...bar(2, true) };
+      return { stage: `${goal.mode === 'loop' ? 'Loop' : 'Goal'} stopped · review result`, detail: 'No continuation was sent. Review the task result and remaining requirements; this is not independent completion verification.', body: '', kind: 'goal-done', ...bar(2, true) };
     }
     if (goal.phase === 'settling' || (!draft && goal.wait)) {
       const wait = goal.wait;
@@ -10786,7 +10787,7 @@
         const automation = goal.mode === 'loop' ? 'Loop' : 'Goal';
         return { stage: `${automation} waiting for verified completion · activity unknown`,
           detail: [wait.detail || '', wait.nextAction || ''].filter(Boolean).join(' · '),
-          body: '', kind: 'goal', steps: [], at: 0, done: false };
+          body: '', kind: 'goal', startedAt: phaseStartedAt, steps: [], at: 0, done: false };
       }
       if (wait?.reason === 'attention') {
         const automation = goal.mode === 'loop' ? 'Loop' : 'Goal';
@@ -10806,12 +10807,14 @@
                   ? `${automation} continuation pending · reply retained` : 'Waiting for exact final/tool evidence';
       const capacity = wait?.reason === 'capacity' && Number.isFinite(wait.active) && Number.isFinite(wait.limit)
         ? `${wait.active} chats are active · limit ${wait.limit}` : '';
-      const why = [wait?.detail || '', wait?.nextAction || '', capacity, clock].filter(Boolean).join(' · ');
+      const idle = wait?.reason === 'idle'
+        ? 'Automation is enabled, but this status confirms no work is executing. The timer measures time in this step, not productive work.' : '';
+      const why = [wait?.detail || '', wait?.nextAction || '', capacity, clock, idle].filter(Boolean).join(' · ');
       if (wait?.reason === 'pickup') {
         return { stage, detail: why, body: '', kind: 'goal',
-          steps: ['Reply retained', 'Decision pending'], at: 1, done: false };
+          startedAt: phaseStartedAt, steps: ['Reply retained', 'Decision pending'], at: 1, done: false };
       }
-      return { stage, detail: why, body: '', kind: 'goal', ...bar(0) };
+      return { stage, detail: why, body: '', kind: 'goal', startedAt: phaseStartedAt, ...bar(0) };
     }
     if (goal.phase === 'sending' && draft && draft.reply) {
       return { stage: 'Sending it to ChatGPT', detail: '', body: '', kind: 'goal', startedAt: phaseStartedAt, ...bar(3) };
@@ -10821,7 +10824,7 @@
     }
     if (!draft) return null;
     if (draft.stage === 'no-reply') {
-      return { stage: 'Goal stopped · review result', detail: 'No continuation was sent. Review the task result and remaining requirements; this is not independent completion verification.', body: '', kind: 'goal-done', ...bar(2, true) };
+      return { stage: `${goal.mode === 'loop' ? 'Loop' : 'Goal'} stopped · review result`, detail: 'No continuation was sent. Review the task result and remaining requirements; this is not independent completion verification.', body: '', kind: 'goal-done', ...bar(2, true) };
     }
     if (draft.stage === 'sending') {
       return { stage: backend === 'chatgpt' ? 'Waiting for ChatGPT helper result' : `Sending the answer to ${dest}`, detail: who, body: '', kind: 'goal', startedAt: draftStartedAt, ...bar(1) };

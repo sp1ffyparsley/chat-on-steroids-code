@@ -14,6 +14,8 @@ Runtime: six requests admitted, four have native Send acknowledgments and two re
 
 Publication-unacknowledged alone does not prove HTTP reached Main. Native helper Send, response extraction, durable archive, decision disposition and executor Send remain separate evidence boundaries. Historical checkpoints below are not current release status.
 
+Source follow-up after accepted112: waiting answer/idle/pickup/evidence stages reuse the existing phase clock, idle explicitly does not prove work is executing, and a Loop terminal status says Loop stopped. Seven focused content checks passed in each private source tree. This is tested SOURCE ONLY, not a newly qualified/installed package; no runtime restart/reload or receipt/acceptance policy changed.
+
 ## Historical checkpoint — before accepted111
 
 - Public URLs must use this mirror's OWN immutable commit SHA. Private qualification hashes below are provenance, not public Git refs. Source follow-up observer/background **111** (installed remains109), MAIN Fiber reply schema15 and bridge protocol16 are separate version spaces; the custom package label remains2.1.39.

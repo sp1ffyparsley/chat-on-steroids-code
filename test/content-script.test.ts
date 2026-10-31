@@ -29309,6 +29309,19 @@ describe('the goal loop', () => {
     });
   });
 
+  it.each(['answer', 'idle', 'pickup', 'evidence'])('shows the existing phase clock for a %s wait without claiming execution', async reason => {
+    live = await harness(`https://chatgpt.com/c/${CHAT}`, goalReplies());
+    const startedAt = Date.now() - 90_000;
+    const view = live.hook.goalStageView({ mode: 'loop', phase: 'settling', phaseStartedAt: startedAt,
+      wait: { reason } });
+    expect(view?.startedAt).toBe(startedAt);
+    expect(view?.done).not.toBe(true);
+    if (reason === 'idle') expect(view?.detail).toContain('confirms no work is executing');
+    expect(live.hook.goalStageView({ mode: 'loop', phase: 'done', error: '', draft: null })).toMatchObject({
+      stage: 'Loop stopped · review result', kind: 'goal-done'
+    });
+  });
+
   it('shows stopped automatic recovery without another countdown or working stage', async () => {
     live = await harness(`https://chatgpt.com/c/${CHAT}`, goalReplies());
     const view = live.hook.goalStageView({ mode: 'loop', phase: 'settling', wait: {
