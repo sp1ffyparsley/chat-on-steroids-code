@@ -389,7 +389,7 @@ export function recoveryContinuationEligibility(row: Readonly<InputEntry>): {
   // This exact helper can recover before Send and later receive the native ACK.
   // Historical diagnostic phases must not veto a newer receipt from its current
   // owner. completeBrowserDecision still verifies the waiter and source boundary.
-  if (row.purpose === 'decision' && row.owner && row.deliveredAt !== undefined &&
+  if (helperNativeSendReceipt(row) &&
       (row.state === 'decision' || row.state === 'sent')) {
     return { allowed: true, reason: 'confirmed_receipt', recoveryChainId: row.recoveryChainId, phase };
   }

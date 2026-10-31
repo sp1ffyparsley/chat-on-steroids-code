@@ -378,13 +378,28 @@ describe('session-scoped private helper custody readback', () => {
 describe('continuation lifecycle custody diagnostics', () => {
   it.each([false, true])('requires the current native receipt to resolve a historical ambiguous helper phase (receipt=%s)', receipt => {
     const row: InputEntry = { ...input(), conversationId: null, purpose: 'decision', state: 'decision',
-      owner: 'exact-helper-page', createdAt: 1, sendAuthorizedAt: 2,
+      owner: 'exact-helper-page', lifetime: 'temporary-planner', requiresAuthorization: true, createdAt: 1, sendAuthorizedAt: 2,
       recoveryFailure: { phase: 'native_send_ambiguous', retrySafe: false, detail: 'Unconfirmed Send' },
       ...(receipt ? { deliveredAt: 3, messageId: 'native-helper-question' } : {}) };
     expect(recoveryContinuationEligibility(row)).toMatchObject({ allowed: receipt,
       reason: receipt ? 'confirmed_receipt' : 'ambiguous_send' });
     if (receipt) expect(recoveryContinuationEligibility({ ...row, owner: null }).allowed).toBe(false);
   });
+
+  it.each(['missing-message', 'missing-authorization', 'reversed-time', 'invalid-time', 'missing-owner', 'authorization-not-required'] as const)(
+    'does not resolve ambiguous helper custody with a partial receipt: %s', variant => {
+      const row: InputEntry = { ...input(), conversationId: null, purpose: 'decision', state: 'decision',
+        owner: 'exact-helper-page', lifetime: 'temporary-planner', requiresAuthorization: true, createdAt: 1, sendAuthorizedAt: 2,
+        deliveredAt: 3, messageId: 'native-helper-question',
+        recoveryFailure: { phase: 'native_send_ambiguous', retrySafe: false, detail: 'Unconfirmed Send' } };
+      if (variant === 'missing-message') delete row.messageId;
+      if (variant === 'missing-authorization') delete row.sendAuthorizedAt;
+      if (variant === 'reversed-time') row.deliveredAt = 1;
+      if (variant === 'invalid-time') row.deliveredAt = Number.NaN;
+      if (variant === 'missing-owner') row.owner = null;
+      if (variant === 'authorization-not-required') row.requiresAuthorization = false;
+      expect(recoveryContinuationEligibility(row)).toMatchObject({ allowed: false, reason: 'ambiguous_send' });
+    });
 
   it('separates admitted, claimed, unresolved, and completed continuation ownership evidence', () => {
     const base: InputEntry = {
