@@ -4628,10 +4628,10 @@ var CLF_DOM = (() => {
       return { status: 'stopped', reason: eligible.length ? 'ambiguous_retry' : notReady ? 'retry_not_ready' : 'retry_unavailable' };
     }
     const error = eligible[0];
-    const pageChanged = wholePageLoadFailure
+    const pageChanged = () => wholePageLoadFailure
       ? Boolean(composer()) || pendingDraft() || turns().length !== 0 || !conversationId() || !conversationLoadFailure(error.text)
       : composer() !== box || !box?.isConnected || hasComposerAttachments() || (editorText(box) || '').trim();
-    if (!stillCurrent() || !error.node?.isConnected || !error.retry.isConnected || generating() || pageChanged) {
+    if (!stillCurrent() || !error.node?.isConnected || !error.retry.isConnected || generating() || pageChanged()) {
       return { status: 'stopped', reason: 'page_changed' };
     }
     // Some callers own a durable transaction whose one-shot fence must be committed before
@@ -4642,6 +4642,12 @@ var CLF_DOM = (() => {
       try { authorized = beforeRetry(error) === true; } catch { authorized = false; }
       if (!authorized) return { status: 'stopped', reason: 'retry_not_authorized' };
     }
+    // The authorization owner can synchronously change source, draft or native controls.
+    // Recheck after it returns, immediately before spending this exact Retry control.
+    if (!stillCurrent() || pageChanged() || generating() || !error.node?.isConnected ||
+        !error.retry.isConnected || !displayed(error.retry) || error.retry.disabled ||
+        error.retry.getAttribute('aria-disabled') === 'true')
+      return { status: 'stopped', reason: 'page_changed' };
     // Mark before clicking: navigation can destroy this document synchronously, and a delayed
     // background receipt must never make the same live control spend the retry twice.
     retriedTransportControls.add(error.retry);

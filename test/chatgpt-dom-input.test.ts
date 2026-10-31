@@ -3095,6 +3095,25 @@ describe('localized roleless transport cards', () => {
     expect(box.textContent).toBe('');
   });
 
+  it.each(['draft', 'removed control', 'disabled control', 'source changed'] as const)(
+    'rechecks the native Retry boundary after its authorization callback: %s', variant => {
+      box.textContent = '';
+      const { retry } = card('Retry', 'Message delivery timed out. Please try again.');
+      const clicked = vi.fn(); retry.addEventListener('click', clicked);
+      let current = true;
+      const authorize = vi.fn(() => {
+        if (variant === 'draft') box.textContent = 'Retain my unsent draft';
+        if (variant === 'removed control') retry.remove();
+        if (variant === 'disabled control') retry.disabled = true;
+        if (variant === 'source changed') current = false;
+        return true;
+      });
+      expect(api.retryLatestTransportFailure(() => current, authorize)).toEqual({ status: 'stopped', reason: 'page_changed' });
+      expect(authorize).toHaveBeenCalledOnce();
+      expect(clicked).not.toHaveBeenCalled();
+      if (variant === 'draft') expect(box.textContent).toBe('Retain my unsent draft');
+    });
+
   it.each(['Markdown', 'blockquote', 'pre', 'code'])
   ('does not promote an input-stream quotation inside %s when Retry sits outside the authored child', shape => {
     box.textContent = '';

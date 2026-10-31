@@ -13582,7 +13582,8 @@
         .filter(id => typeof id === 'string' && id.length > 0 && id.length <= 128)
     );
     if (!attentionIds.has(pending.commandId)) return;
-    const current = () => attentionIds.has(pending.commandId) && ownsPendingResumeNativeRetry(pending);
+    let retryAuthorized = false;
+    const current = () => attentionIds.has(pending.commandId) && ownsPendingResumeNativeRetry(pending, retryAuthorized);
     pending.nativeRetryInFlight = true;
     try {
       const result = CLF_DOM.retryLatestTransportFailure(current, () => {
@@ -13590,7 +13591,7 @@
         pending.nativeRetrySpent = true;
         // Persistence is the pre-click commit. If storage is unavailable, fail closed and leave
         // the native control untouched rather than risk another click after reinjection.
-        if (persistResumeAckPending()) return true;
+        if (persistResumeAckPending()) { retryAuthorized = true; return true; }
         pending.nativeRetrySpent = false;
         return false;
       });
