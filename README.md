@@ -2,7 +2,7 @@
 
 This is the custom Electron application and Chrome companion source exported for code review. It has clean public history and excludes private account stores, saved prompts, credentials, runtime logs and deployment artifacts. This source mirror is separate from upstream releases and supplies no public installer.
 
-## Current reviewed source — October 31, 2026
+## Current reviewed source â€” October 31, 2026
 
 Observer/background115 source is exported here. Logical private source `a613797df38f4dfddc8701413e7204695e96058d` / tree `3a2a07c442ebe0b02e94bddc07909f4d4f9b4384` is provenance, not a public Git ref. Use this mirror's own commit SHA for public source URLs. No private installer, receipt file, prompts, account configuration, runtime data or original private Git history is included.
 
