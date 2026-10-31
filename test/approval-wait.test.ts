@@ -322,6 +322,60 @@ describe('approval page detector', () => {
     expect(api.autoApproveIfNeeded(current)).toBe(1);
   });
 
+  it('reveals an offscreen once-only control before hit testing and clicking', () => {
+    mount(cardHtml());
+    const button = dom.window.document.querySelectorAll('button')[1]!;
+    let top = dom.window.innerHeight + 100;
+    Object.defineProperty(button, 'getClientRects', { value: () => [{ left: 10, top, width: 100, height: 30 }] });
+    const scroll = vi.fn(() => { top = 100; });
+    Object.defineProperty(button, 'scrollIntoView', { value: scroll });
+    Object.defineProperty(dom.window.document, 'elementFromPoint', { value: (_x: number, y: number) =>
+      y < dom.window.innerHeight ? button : null });
+    expect(api.autoApproveIfNeeded(current)).toBe(1);
+    expect(scroll).toHaveBeenCalledExactlyOnceWith({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+  });
+
+  it.each(['paused', 'disabled', 'overlay', 'scroll-failed', 'policy-changed'] as const)(
+    'does not turn offscreen scrolling into click permission under %s', mode => {
+    mount(cardHtml());
+    const button = dom.window.document.querySelectorAll('button')[1]!;
+    let allowed = mode !== 'paused';
+    let top = dom.window.innerHeight + 100;
+    if (mode === 'disabled') button.disabled = true;
+    Object.defineProperty(button, 'getClientRects', { value: () =>
+      [{ left: 10, top, width: 100, height: 30 }] });
+    const scroll = vi.fn(() => {
+      if (mode === 'scroll-failed') throw Error('layout unavailable');
+      if (mode === 'policy-changed') { allowed = false; top = 100; }
+    });
+    Object.defineProperty(button, 'scrollIntoView', { value: scroll });
+    Object.defineProperty(dom.window.document, 'elementFromPoint', { value: () => mode === 'policy-changed' ? button : null });
+    const click = vi.spyOn(button, 'click');
+    expect(api.autoApproveIfNeeded(() => allowed)).toBe(0);
+    expect(click).not.toHaveBeenCalled();
+    if (mode === 'paused' || mode === 'disabled') expect(scroll).not.toHaveBeenCalled();
+  });
+
+  it('rate limits an offscreen card that layout cannot reveal without spending its click budget', () => {
+    mount(cardHtml());
+    let now = 1000;
+    vi.spyOn(dom.window.Date, 'now').mockImplementation(() => now);
+    const button = dom.window.document.querySelectorAll('button')[1]!;
+    Object.defineProperty(button, 'getClientRects', { value: () =>
+      [{ left: 10, top: dom.window.innerHeight + 100, width: 100, height: 30 }] });
+    const scroll = vi.fn();
+    Object.defineProperty(button, 'scrollIntoView', { value: scroll });
+    const hit = vi.fn(() => null as Element | null);
+    Object.defineProperty(dom.window.document, 'elementFromPoint', { value: hit });
+    for (let n = 0; n < 10; n++) expect(api.autoApproveIfNeeded(current)).toBe(0);
+    expect(scroll).toHaveBeenCalledTimes(1);
+    now += 1500;
+    expect(api.autoApproveIfNeeded(current)).toBe(0);
+    expect(scroll).toHaveBeenCalledTimes(2);
+    hit.mockReturnValue(button);
+    expect(api.autoApproveIfNeeded(current)).toBe(1);
+  });
+
   it('keeps a logical native request budget across React card replacement', () => {
     let now = 1000;
     vi.spyOn(dom.window.Date, 'now').mockImplementation(() => now);

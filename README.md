@@ -16,6 +16,8 @@ Publication-unacknowledged alone does not prove HTTP reached Main. Native helper
 
 Source follow-up after accepted112: waiting answer/idle/pickup/evidence stages reuse the existing phase clock, idle explicitly does not prove work is executing, and a Loop terminal status says Loop stopped. Seven focused content checks passed in each private source tree. This is tested SOURCE ONLY, not a newly qualified/installed package; no runtime restart/reload or receipt/acceptance policy changed.
 
+Additional SOURCE ONLY fix: the existing approval owner can reveal a positively eligible offscreen once-only button with nearest instant scrolling, after its policy/currentness/budget gates, then revalidate exact card/button and overlay hit testing. Existing request state rate-limits reveal; no new timer, persistent grant or acceptance rule. Full affected approval suite passed75checks on Windows controlled source. Not qualified/installed; no live reload or restart.
+
 ## Historical checkpoint — before accepted111
 
 - Public URLs must use this mirror's OWN immutable commit SHA. Private qualification hashes below are provenance, not public Git refs. Source follow-up observer/background **111** (installed remains109), MAIN Fiber reply schema15 and bridge protocol16 are separate version spaces; the custom package label remains2.1.39.

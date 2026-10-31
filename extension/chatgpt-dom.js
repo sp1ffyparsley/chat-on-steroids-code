@@ -2073,10 +2073,33 @@ var CLF_DOM = (() => {
     return candidates.length === 1 ? candidates[0] : null;
   }
 
-  function approvalButtonReady(button) {
+  function approvalButtonEnabled(button) {
     if (!approvalVisible(button) || button.matches(':disabled') || button.hasAttribute('disabled') ||
         button.closest('[aria-disabled="true"]') ||
         button.closest('[aria-busy="true"]') || getComputedStyle(button).pointerEvents === 'none') return false;
+    return true;
+  }
+
+  /** Reveal only the positively identified once-only action, never jump the whole chat to bottom. */
+  function revealApprovalButton(button, state, stillCurrent) {
+    if (!approvalButtonEnabled(button) || !stillCurrent()) return;
+    const rect = button.getClientRects()[0];
+    const height = window.innerHeight, width = window.innerWidth;
+    if (!rect || !(height > 0 && width > 0)) return;
+    const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
+    if (x >= 0 && x < width && y >= 0 && y < height) return;
+    const now = Date.now();
+    if (state.revealAt !== undefined && now >= state.revealAt && now - state.revealAt < 1500) return;
+    state.revealAt = now;
+    try {
+      // Instant avoids a click racing a smooth scroll; normal hit testing below still applies.
+      button.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+      approvalDiagnostic('offscreen allow-once action reveal requested');
+    } catch { approvalDiagnostic('offscreen allow-once action reveal failed'); }
+  }
+
+  function approvalButtonReady(button) {
+    if (!approvalButtonEnabled(button)) return false;
     // Do not click through a modal/overlay. Offscreen cards wait for native layout/visibility.
     if (typeof document.elementFromPoint === 'function') {
       const rect = button.getClientRects()[0];
@@ -2105,7 +2128,6 @@ var CLF_DOM = (() => {
           if (!pendingApprovalCard(card)) continue;
           const button = approvalButton(card);
           if (!button) { approvalDiagnostic('one-time action missing or ambiguous'); continue; }
-          if (!approvalButtonReady(button)) continue;
           const now = Date.now();
           const previous = approvalAttemptState(card);
           if (previous.path !== path) continue;
@@ -2115,6 +2137,7 @@ var CLF_DOM = (() => {
             continue;
           }
           if (previous.attempts > 0 && now - previous.at < APPROVAL_RETRY_MS * previous.attempts) continue;
+          revealApprovalButton(button, previous, stillCurrent);
           // Revalidate immediately before dispatch, after all DOM reads and hit testing.
           if (!stillCurrent() || location.pathname !== path || !pendingApprovalCard(card) ||
               approvalButton(card) !== button || !approvalButtonReady(button)) continue;
