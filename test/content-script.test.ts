@@ -20220,11 +20220,12 @@ describe('the field above the composer', () => {
       { errorCode: 'native_completion_unverified' }
     ]) {
       const result = live.hook.goalStageView({ enabled: true, mode: 'loop', phase: 'retrying',
-        retryMs: 60_000, error: detail, ...state });
+        phaseStartedAt: 12_345, retryMs: 60_000, error: detail, ...state });
       expect(result).toMatchObject({ stage: 'Loop waiting for verified completion · activity unknown',
         detail: expect.stringContaining(detail), steps: [], done: false });
       expect(result!.stage).not.toContain('Retrying');
-      expect(result).not.toHaveProperty('startedAt');
+      // Elapsed phase time is not a retry deadline and grants no Send authority.
+      expect(result).toHaveProperty('startedAt', 12_345);
     }
     expect(live.sent.some(row => ['goal_draft', 'goal_prepare', 'goal_ack', 'settings_set'].includes(row.type))).toBe(false);
   });
