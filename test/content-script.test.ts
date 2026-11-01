@@ -17078,6 +17078,84 @@ describe('evidence from the page context', () => {
     );
   });
 
+
+
+  it.each([0, 1, 200])('bounds owner confirmation for200native calls plus%i independent request sightings', async bareCount => {
+    live = await harness();
+    startGenerating(live.document);
+    assistantTurn(live.document, 'batch-live-turn', []);
+    live.hook.observe();
+    await settle();
+    const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    live.reply.set('correlate', message => ({ ok: true, data: {
+      conversationId, confirmed: message.calls.slice(0, 200).map((call: any) => call.requestId),
+      confirmedTurnIds: message.turnId ? message.calls.slice(0, 200).map((call: any) => call.requestId) : []
+    } }));
+    const calls = Array.from({ length: 200 }, (_, index) => ({
+      messageId: 'batch-native-' + index, tool: 'read', order: index,
+      answered: false, requestId: 'wfr_batch_' + index, createTime: null
+    }));
+    const requests = Array.from({ length: bareCount }, (_, index) => ({
+      requestId: 'wfr_bare_' + index, createTime: 1700000002
+    }));
+    const turn = { turnId: 'batch-live-turn', conversationId, calls, requests, messages: [] };
+    await replyFiber([], [turn]);
+    await settle();
+    await live.hook.flush();
+    const handshakes = live.sent.filter(message => message.type === 'correlate');
+    expect(handshakes).toHaveLength(Math.ceil((200 + bareCount) / 200));
+    expect(handshakes.every(message => message.calls.length <= 200)).toBe(true);
+    expect(handshakes.flatMap(message => message.calls.map((call: any) => call.requestId)))
+      .toEqual([...calls, ...requests].map(call => call.requestId));
+    expect(handshakes.every(message => message.conversationId === conversationId &&
+      message.turnId === handshakes[0]!.turnId)).toBe(true);
+    // A request-only sighting never becomes a native tool invocation or result.
+    expect(emitted(live.sent, 'tool_evidence').flatMap(entry => entry.event.calls))
+      .toEqual(calls);
+    await replyFiber([], [turn]);
+    await settle();
+    expect(live.sent.filter(message => message.type === 'correlate')).toHaveLength(handshakes.length);
+  });
+
+  it.each(['route-change', 'partial-ack'] as const)('keeps batched owner custody exact after%s', async kind => {
+    live = await harness();
+    const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    startGenerating(live.document);
+    assistantTurn(live.document, 'owner-race-turn', []);
+    live.hook.observe();
+    await settle();
+    let acceptTail = false;
+    let replies = 0;
+    live.reply.set('correlate', message => {
+      replies++;
+      if (kind === 'route-change' && replies === 1)
+        live!.window.history.replaceState({}, '', '/c/11111111-2222-3333-4444-555555555555');
+      const accepted = replies === 1 || acceptTail;
+      return { ok: true, data: { conversationId,
+        confirmed: accepted ? message.calls.map((call: any) => call.requestId) : [],
+        confirmedTurnIds: accepted && message.turnId ? message.calls.map((call: any) => call.requestId) : [] } };
+    });
+    const calls = Array.from({ length: 200 }, (_, index) => ({
+      messageId: 'owner-race-' + index, tool: 'read', order: index,
+      answered: false, requestId: 'wfr_race_' + index, createTime: null
+    }));
+    const turn = { turnId: 'owner-race-turn', conversationId, calls,
+      requests: [{ requestId: 'wfr_unconfirmed_tail', createTime: 1700000002 }], messages: [] };
+    await replyFiber([], [turn]);
+    await settle();
+    const handshakes = () => live!.sent.filter(message => message.type === 'correlate');
+    expect(handshakes()[0]!.calls).toHaveLength(200);
+    expect(handshakes()).toHaveLength(kind === 'route-change' ? 1 : 2);
+    if (kind === 'route-change') return;
+    expect(handshakes()[1]!.calls.map((call: any) => call.requestId)).toEqual(['wfr_unconfirmed_tail']);
+    acceptTail = true;
+    live.advance(60_000);
+    await replyFiber([], [turn]);
+    await settle();
+    expect(handshakes()).toHaveLength(3);
+    expect(handshakes()[2]!.calls.map((call: any) => call.requestId)).toEqual(['wfr_unconfirmed_tail']);
+  });
+
   it('says nothing about a row the helper did not stamp', async () => {
     live = await harness();
     const section = assistantTurn(live.document, 'turn-1', ['Called tool!']);

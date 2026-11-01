@@ -5330,80 +5330,89 @@
       requestOwnersPending.add(key);
       traceStage(call.requestId, 'read');
     }
-    const batch = [...byRequest.values()];
-    if (batch.length === 0) return;
+    const pendingCalls = [...byRequest.values()];
+    if (pendingCalls.length === 0) return;
+    let offset = 0;
     try {
-      // The provider can expose the first MCP request immediately after native Send, before
-      // React mounts the authored user row that completes the bootstrap ACK. Preserve the
-      // exact leased worker command through that narrow window so correlation can bind the
-      // invited worker without guessing from its reusable friendly label.
-      const pendingWorker = !agent && commandAttempt?.phase === 'dispatching' && commandAttempt.agent && commandAttempt.id
-        ? { agent: commandAttempt.agent, commandId: commandAttempt.id }
-        : null;
-      const reply = await ask({
-        type: 'correlate',
-        conversationId: ownerConversation,
-        ...(requestedTurnId ? { turnId: requestedTurnId } : {}),
-        calls: batch,
-        agent: agent || pendingWorker?.agent || null,
-        agentCommandId: agentCommandId || pendingWorker?.commandId || null
-      }, owns);
-      if (!owns()) return;
-      const data = reply && reply.ok === true && reply.data && typeof reply.data === 'object' ? reply.data : null;
-      const confirmed = new Set(data && Array.isArray(data.confirmed) ? data.confirmed : []);
-      const confirmedResultReceipts = new Set(data && Array.isArray(data.confirmedResultReceipts)
-        ? data.confirmedResultReceipts : []);
-      const confirmedTurnIds = new Set(data && Array.isArray(data.confirmedTurnIds) ? data.confirmedTurnIds : []);
-      for (const call of batch) {
-        const receipt = typeof call.resultReceiptId === 'string' ? call.resultReceiptId : null;
-        const typed = Boolean(call.tool && call.messageId);
-        const key = `${ownerConversation}\u0000${call.requestId}\u0000${typed ? call.messageId : ''}\u0000${receipt || ''}`;
-        // Only an app response proves delivery. The worker accepting a journal entry
-        // is queued custody, and an owner ACK still does not prove an MCP call ran.
-        if (data?.conversationId === ownerConversation) traceStage(call.requestId, 'sent');
-        // Judge each request id on its own read-back. This additionally required
-        // `data.complete === true`, which is a *batch* verdict: a single id the app could
-        // not place (a sticky conflict, or a call it has not ingested yet) threw away the
-        // confirmation of every other id in the same message and re-queued them all.
-        if (!data || data.conversationId !== ownerConversation || !confirmed.has(call.requestId)) {
-          backOffRequestOwner(key);
-          if (data?.conversationId === ownerConversation && Array.isArray(data.conflicts) && data.conflicts.includes(call.requestId))
-            pendingStreamOrigins.delete(call.requestId);
-          continue;
-        }
-        requestOwnerRetryAt.delete(key);
-        requestOwnerAttempts.delete(key);
-        requestOwnersConfirmed.set(call.requestId, ownerConversation);
-        if (typed) {
-          // /correlations commits every typed message in this batch before
-          // confirming its workflow. Retain the observation for dedup only;
-          // a second sibling makes Main's ambiguity veto sticky, never a
-          // successful tool execution or a native-final ACK.
-          nativeCallPublications.add(`${ownerConversation}\u0000${call.requestId}\u0000${call.messageId}`);
-          if (nativeCallPublications.size > 1024)
-            nativeCallPublications.delete(nativeCallPublications.values().next().value);
-        }
-        if (receipt && confirmedResultReceipts.has(receipt))
-          resultReceiptsConfirmed.set(receipt, ownerConversation);
-        else if (receipt) backOffRequestOwner(key);
-        pendingStreamOrigins.delete(call.requestId);
-        traceStage(call.requestId, 'confirmed');
-        if (requestedTurnId) {
-          if (confirmedTurnIds.has(call.requestId)) requestTurnsConfirmed.set(call.requestId, requestedTurnId);
-          else backOffRequestOwner(key);
+      // /correlate admits 200 rows. Keep mixed typed and request-only facts within
+      // that wire bound; a successful prefix never confirms an omitted tail.
+      if (pendingCalls.length > 200) console.info('[Chat On Steroids] request ownership batching',
+        { calls: pendingCalls.length, batches: Math.ceil(pendingCalls.length / 200) });
+      for (; offset < pendingCalls.length; offset += 200) {
+        if (!owns()) return;
+        const batch = pendingCalls.slice(offset, offset + 200);
+        // The provider can expose the first MCP request immediately after native Send, before
+        // React mounts the authored user row that completes the bootstrap ACK. Preserve the
+        // exact leased worker command through that narrow window so correlation can bind the
+        // invited worker without guessing from its reusable friendly label.
+        const pendingWorker = !agent && commandAttempt?.phase === 'dispatching' && commandAttempt.agent && commandAttempt.id
+          ? { agent: commandAttempt.agent, commandId: commandAttempt.id }
+          : null;
+        const reply = await ask({
+          type: 'correlate',
+          conversationId: ownerConversation,
+          ...(requestedTurnId ? { turnId: requestedTurnId } : {}),
+          calls: batch,
+          agent: agent || pendingWorker?.agent || null,
+          agentCommandId: agentCommandId || pendingWorker?.commandId || null
+        }, owns);
+        if (!owns()) return;
+        const data = reply && reply.ok === true && reply.data && typeof reply.data === 'object' ? reply.data : null;
+        const confirmed = new Set(data && Array.isArray(data.confirmed) ? data.confirmed : []);
+        const confirmedResultReceipts = new Set(data && Array.isArray(data.confirmedResultReceipts)
+          ? data.confirmedResultReceipts : []);
+        const confirmedTurnIds = new Set(data && Array.isArray(data.confirmedTurnIds) ? data.confirmedTurnIds : []);
+        for (const call of batch) {
+          const receipt = typeof call.resultReceiptId === 'string' ? call.resultReceiptId : null;
+          const typed = Boolean(call.tool && call.messageId);
+          const key = `${ownerConversation}\u0000${call.requestId}\u0000${typed ? call.messageId : ''}\u0000${receipt || ''}`;
+          // Only an app response proves delivery. The worker accepting a journal entry
+          // is queued custody, and an owner ACK still does not prove an MCP call ran.
+          if (data?.conversationId === ownerConversation) traceStage(call.requestId, 'sent');
+          // Judge each request id on its own read-back. This additionally required
+          // `data.complete === true`, which is a *batch* verdict: a single id the app could
+          // not place (a sticky conflict, or a call it has not ingested yet) threw away the
+          // confirmation of every other id in the same message and re-queued them all.
+          if (!data || data.conversationId !== ownerConversation || !confirmed.has(call.requestId)) {
+            backOffRequestOwner(key);
+            if (data?.conversationId === ownerConversation && Array.isArray(data.conflicts) && data.conflicts.includes(call.requestId))
+              pendingStreamOrigins.delete(call.requestId);
+            continue;
+          }
+          requestOwnerRetryAt.delete(key);
+          requestOwnerAttempts.delete(key);
+          requestOwnersConfirmed.set(call.requestId, ownerConversation);
+          if (typed) {
+            // /correlations commits every typed message in this batch before
+            // confirming its workflow. Retain the observation for dedup only;
+            // a second sibling makes Main's ambiguity veto sticky, never a
+            // successful tool execution or a native-final ACK.
+            nativeCallPublications.add(`${ownerConversation}\u0000${call.requestId}\u0000${call.messageId}`);
+            if (nativeCallPublications.size > 1024)
+              nativeCallPublications.delete(nativeCallPublications.values().next().value);
+          }
+          if (receipt && confirmedResultReceipts.has(receipt))
+            resultReceiptsConfirmed.set(receipt, ownerConversation);
+          else if (receipt) backOffRequestOwner(key);
+          pendingStreamOrigins.delete(call.requestId);
+          traceStage(call.requestId, 'confirmed');
+          if (requestedTurnId) {
+            if (confirmedTurnIds.has(call.requestId)) requestTurnsConfirmed.set(call.requestId, requestedTurnId);
+            else backOffRequestOwner(key);
+          }
         }
       }
     } catch {
       // A->B->A SPA navigation can reuse this exact request/message key after
       // the old IPC was sent. Its rejected reply must not back off the NEW
       // epoch's correlation attempt: only the current owner may change retry.
-      if (owns()) for (const call of batch)
+      if (owns()) for (const call of pendingCalls.slice(offset))
         backOffRequestOwner(`${ownerConversation}\u0000${call.requestId}\u0000${call.tool && call.messageId ? call.messageId : ''}\u0000${call.resultReceiptId || ''}`);
     } finally {
       // Resetting the document clears pending keys. A late old response must
       // never erase the replacement pending under an identical A epoch key.
       if (epoch === ownerEpoch && alive && conversationId === ownerConversation)
-        for (const call of batch)
+        for (const call of pendingCalls)
           requestOwnersPending.delete(`${ownerConversation}\u0000${call.requestId}\u0000${call.tool && call.messageId ? call.messageId : ''}\u0000${call.resultReceiptId || ''}`);
     }
   }
