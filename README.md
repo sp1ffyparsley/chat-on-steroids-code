@@ -2,11 +2,11 @@
 
 This is the custom Electron application and Chrome companion source exported for code review. It has clean public history and excludes private account stores, saved prompts, credentials, runtime logs and deployment artifacts. This source mirror is separate from upstream releases and supplies no public installer.
 
-## Prepared117 reload repair - source only
+## Current117 reload repair - independently installed, browser verification open
 
 A supplied native popup reported40retired helper opening elections blocking reload. The exact shape was reproduced with valid IDs. Reload now invokes the existing retirement owner only for old, unchanged retired election mappings whose numeric tabs are positively absent from a complete unfiltered native inventory. Native tabs, payloads, saved answers, archives, Send receipts and active or uncertain owners are preserved. Account/browser-generation changes, replaced elections, incomplete inventories and storage failures remain blocking. No new retry loop, timer, broad lease clearing or automatic closure is added.
 
-Controlled companion990checks passed;13new focused regression cases cover the40-row reproduction, refusal boundaries, identity/currentness races and storage failure. Logical private source44226482cc588f84ae637bc4f56aab3b82e84307/treec1fc9492348421d40bbd7359e274c7af66856cce is preparing strict117 qualification; it is NOT installed. Current accepted installation remains116. Use this mirror commit for public source URLs; old pinned excerpts are baseline evidence. Running Chrome generation and useful automatic work remain separately unverified.
+Controlled companion990checks passed;13new focused regression cases cover the40-row reproduction, refusal boundaries, identity/currentness races and storage failure. Logical private source44226482cc588f84ae637bc4f56aab3b82e84307/treec1fc9492348421d40bbd7359e274c7af66856cce passed96preliminary and12,982Main checks/62existing skips, then33post-pin checks and readiness. Canonical117 activation completed NSIS0/exit0 on October31 at23:30EDT. All124,823protectedfiles/6,064,990,830bytes and all291programfiles/575,396,456bytes matched independently before eight normal successors;16critical configuration/queue files matched afterward. Current accepted installation is117. Chrome had fully exited, but its new executing117 cohort, actual Reload outcome and useful automatic turns still require separate live evidence. Use this mirror commit for public source URLs; old pinned excerpts are baseline evidence. Running Chrome generation and useful automatic work remain separately unverified.
 
 ## Returned R57 repairs — private116 installed and independently accepted
 
