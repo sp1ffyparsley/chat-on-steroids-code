@@ -2157,6 +2157,17 @@
     // the entire mounted selected branch back to this typed native user. This
     // recovers request identity only; every result/Code Mode receipt is still
     // checked separately below before a call can become answered.
+    // Folded native narration is not a selected tool/result. It may bridge a
+    // terminally anchored parent chain without acquiring request or completion authority.
+    // Only own-data assistant commentary/analysis with no tool recipient qualifies.
+    const unselectedNativeNarration = id => {
+      const node = nativeField(mapping, id), message = nativeField(node, 'message');
+      const recipient = nativeField(message, 'recipient');
+      return !selected.has(id) && nativeField(node, 'id') === id && nativeField(message, 'id') === id &&
+        nativeField(nativeField(message, 'author'), 'role') === 'assistant' &&
+        (recipient === undefined || recipient === 'all') &&
+        ['analysis', 'commentary'].includes(nativeField(message, 'channel'));
+    };
     let mountedNativeScopeRefusal = null;
     const mountedNativeScope = (() => {
       // No independent mounted anchor was attempted without these prerequisites.
@@ -2164,7 +2175,7 @@
       if (!shell.calls.length || !live || !typedUserId) return null;
       const refuse = reason => { mountedNativeScopeRefusal = reason; return null; };
       if (entry.turn.status !== 'complete') return refuse('nativeScopeTurnIncomplete');
-      if (!currentPath.length || currentPath[0] !== typedUserId || !currentPath.every(id => selected.has(id)))
+      if (!currentPath.length || currentPath[0] !== typedUserId || !currentPath.every(id => selected.has(id) || unselectedNativeNarration(id)))
         return refuse('nativeScopePathUnproved');
       try {
         const finals = entry.turn.items.filter(item => item?.type === 'assistant-message' && item.phase === 'final_answer');
@@ -2383,7 +2394,8 @@
               return refuse('callIdentityParentUnproved', previousScopeReasons.length
                 ? previousScopeReasons : ['nativeAncestryUnproved']);
             }
-            if (!isExec && !isExecResult && !isPreviousResult && !isPreviousInvocation)
+            const isFoldedNarration = Boolean(mountedNativeScope) && unselectedNativeNarration(id);
+            if (!isExec && !isExecResult && !isPreviousResult && !isPreviousInvocation && !isFoldedNarration)
               return refuse('callIdentityParentUnproved', ['nativeAncestryUnproved']);
             if (previousToolResult !== null && !isPreviousInvocation)
               return refuse('callIdentityParentUnproved', ['nativeAncestryUnproved']);

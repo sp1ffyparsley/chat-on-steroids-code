@@ -1841,6 +1841,50 @@ describe('alternate shell turn/message provenance', () => {
   });
 
 
+  it.each(['exact folded narration', 'foreign namespace', 'wrong parent', 'foreign role', 'tool recipient', 'unsupported channel', 'missing final receipt', 'unselected result', 'metadata accessor'] as const)(
+    'joins folded native narration only under an exact terminal namespace: %s', async variant => {
+      let accessorReads = 0;
+      const page = await shellHarness({ withCall: true, nativeCallReceipt: true,
+        callCompleted: false, assistantCompleted: false,
+        nativeCallMutation(mapping, entry) {
+          delete entry.turn.items[1].widgetStateSource;
+          entry.turn.messageIds = [USER, CALL, RESULT, ASSISTANT];
+          mapping[INTERIM] = { id: INTERIM, parent: USER, message: { id: INTERIM,
+            author: { role: 'assistant' }, recipient: 'all', channel: 'commentary',
+            content: { content_type: 'text', parts: ['PRIVATE_FOLDED_NARRATION'] },
+            metadata: { parent_id: USER, working_turn_id: 'native-folded-working',
+              turn_exchange_id: 'native-folded-exchange' } } };
+          mapping[CALL].parent = INTERIM;
+          for (const id of [CALL, RESULT, ASSISTANT]) Object.assign(mapping[id].message.metadata, {
+            working_turn_id: 'native-folded-working', turn_exchange_id: 'native-folded-exchange',
+            parent_id: mapping[id].parent
+          });
+          mapping[CALL].message.status = 'in_progress';
+          mapping[RESULT].message.status = 'in_progress';
+          if (variant === 'foreign namespace') mapping[INTERIM].message.metadata.working_turn_id = 'foreign';
+          if (variant === 'wrong parent') mapping[INTERIM].message.metadata.parent_id = ASSISTANT;
+          if (variant === 'foreign role') mapping[INTERIM].message.author.role = 'user';
+          if (variant === 'tool recipient') mapping[INTERIM].message.recipient = 'api_tool.call_tool';
+          if (variant === 'unsupported channel') mapping[INTERIM].message.channel = 'unknown';
+          if (variant === 'missing final receipt') mapping[ASSISTANT].message.status = 'in_progress';
+          if (variant === 'unselected result') entry.turn.messageIds = [USER, CALL, ASSISTANT];
+          if (variant === 'metadata accessor') Object.defineProperty(mapping[INTERIM].message, 'channel', {
+            get() { accessorReads++; throw new Error('PRIVATE_FOLDED_GETTER'); }
+          });
+        } });
+      try {
+        const turn = page.fiber.turns[0];
+        expect(turn.calls[0].requestId).toBe(variant === 'exact folded narration' ? REQUEST : null);
+        expect(turn.requests.some((row: any) => row.requestId === REQUEST && row.messageId === CALL))
+          .toBe(variant === 'exact folded narration');
+        expect(turn.calls[0].answered).toBe(false);
+        expect(turn.endMessageId).toBeNull();
+        expect(accessorReads).toBe(0);
+        expect(JSON.stringify(page.fiber)).not.toContain('PRIVATE_FOLDED_NARRATION');
+        expect(JSON.stringify(page.fiber)).not.toContain('PRIVATE_FOLDED_GETTER');
+      } finally { page.dom.window.close(); }
+    });
+
   it.each([
     ['identity only', true, false], ['finished exact result', true, true], ['cached mapping only', false, false]
   ] as const)('joins the virtualized native namespace only through an independently mounted branch: %s', async (_label, live, finished) => {

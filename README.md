@@ -1,5 +1,11 @@
 # Chat On Steroids - code research mirror
 
+## Folded native narration identity repair — source only
+
+The native branch may retain assistant analysis/commentary that is absent from the selected page inventory. The reader now accepts that narrow narration bridge only under an independently terminally anchored native namespace. Exact selected original-user, invocation, tool-result and final identities, parent edges, working/exchange scope, cache conflict and durable per-parent result checks remain required. Unselected tool results, foreign namespaces, tool recipients, unsupported channels, accessors and missing final receipts still refuse. No request identity or completion receipt is invented.
+
+Nine failure-first cases reproduced one genuine defect before repair; the whole affected425-case browser-reader suite now passes, plus TypeScript and JavaScript checks. This paired reader121 source includes the earlier complete-retained-half repair. Canonical private qualification is running; no121 package qualification, installation, executing browser activation or all-chat autonomy is claimed. Installed120 remains the deployed baseline below.
+
 ## Matching followup - source only, outside installed120
 
 A later settled native view can omit the request-ID list even though Main already retained a complete list for the same document, navigation epoch, original question and ordered native parents. Omission now preserves that exact retained mapping for the incumbent durable-result verifier; published changed or malformed mappings still refuse. The strict ordered per-parent terminal ACK, complete initial census and Code Mode parent checks are unchanged. The wait banner no longer mislabels this omission as changed identity. This does not recover request identities that were never captured.
