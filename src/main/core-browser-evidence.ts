@@ -493,6 +493,9 @@ function ordinaryFinalDiagnostic(raw: unknown): OrdinaryFinalDiagnostic | null {
     row['allCoreRequestIds'].length === calls &&
     row['allCoreRequestIds'].every((id: unknown) => typeof id === 'string' && id.length > 0 && id.length <= 100)
     ? [...row['allCoreRequestIds']] as string[] : null;
+  // Omitted identity is not a substitution, but a published malformed half must not
+  // be normalized into that omission. Preserve the retained fence and refuse this frame.
+  if (Object.getOwnPropertyDescriptor(raw, 'allCoreRequestIds')?.value !== undefined && !allCoreIds) return null;
   const identityRefusals = inventoryIncomplete ? null : identityRefusalsDiagnostic(
     Object.getOwnPropertyDescriptor(raw, 'identityRefusals')?.value, coreMessages);
   const codeIds = (name: string, expected: number): string[] | null => {
@@ -706,9 +709,12 @@ export function nativeCompletionCandidate(conversation: string): {
         (!pending.coreCallMessageIds || !pending.allCoreRequestIds ||
           pending.coreCallMessageIds.length !== pending.calls ||
           pending.allCoreRequestIds.length !== pending.calls ||
-          !final.coreCallMessageIds || !final.allCoreRequestIds ||
+          !final.coreCallMessageIds ||
           pending.coreCallMessageIds.some((id, at) => final.coreCallMessageIds![at] !== id) ||
-          pending.allCoreRequestIds.some((id, at) => final.allCoreRequestIds![at] !== id))) ||
+          // A later view may omit an already-retained complete request half. The exact
+          // native parents and Main's ordered per-parent terminal receipts still own proof.
+          (final.allCoreRequestIds !== undefined && (final.allCoreRequestIds.length !== pending.calls ||
+            pending.allCoreRequestIds.some((id, at) => final.allCoreRequestIds![at] !== id))))) ||
       // The entire original Code Mode parent set matters: an initially
       // *answered* parent might disappear while a different parent appears
       // before final. Checking only the initially open parent would then
@@ -823,7 +829,7 @@ function nativeCompletionDiagnosticFor(row: CoreBrowserEvidenceSnapshot, now: nu
     !!original?.length && (!current || original.length !== current.length || original.some((id, at) => current[at] !== id));
   if (final && (pending.calls !== final.calls || pending.codeCalls !== final.codeCalls ||
       changed(pending.coreCallMessageIds, final.coreCallMessageIds) ||
-      changed(pending.allCoreRequestIds, final.allCoreRequestIds) ||
+      (final.allCoreRequestIds !== undefined && changed(pending.allCoreRequestIds, final.allCoreRequestIds)) ||
       changed(pending.codeCallMessageIds, final.codeCallMessageIds))) return result('parents-changed');
   if (row.shellDiscovery !== 'compatible') return result('reader-unverified');
   if (final && (final.openCalls > 0 || final.openCodeCalls > 0)) return result('native-results-open');
@@ -917,7 +923,7 @@ export function nativeFinalEvidenceWait(
       (!!pending.sourceUserMessageId && final.sourceUserMessageId !== pending.sourceUserMessageId) ||
       final.calls !== pending.calls || final.codeCalls !== pending.codeCalls ||
       changed(pending.coreCallMessageIds, final.coreCallMessageIds) ||
-      changed(pending.allCoreRequestIds, final.allCoreRequestIds) ||
+      (final.allCoreRequestIds !== undefined && changed(pending.allCoreRequestIds, final.allCoreRequestIds)) ||
       changed(pending.codeCallMessageIds, final.codeCallMessageIds));
   const diagnostic = nativeCompletionDiagnosticFor(evidence, now);
   const blockers: Partial<Record<NativeCompletionDiagnostic['reason'], string>> = {

@@ -1,5 +1,11 @@
 # Chat On Steroids - code research mirror
 
+## Matching followup - source only, outside installed120
+
+A later settled native view can omit the request-ID list even though Main already retained a complete list for the same document, navigation epoch, original question and ordered native parents. Omission now preserves that exact retained mapping for the incumbent durable-result verifier; published changed or malformed mappings still refuse. The strict ordered per-parent terminal ACK, complete initial census and Code Mode parent checks are unchanged. The wait banner no longer mislabels this omission as changed identity. This does not recover request identities that were never captured.
+
+Two genuine failing cases reproduced the defect before repair. The final15focused cases and36neighboring Bridge checks passed, plus TypeScript and diff checks. Partial/duplicate/reordered ACKs, changed scope, malformed/null/empty publication and stale candidate races remain blocked. No whole qualification, package, installation, browser activation or automatic useful-work acceptance is claimed for this followup; installed120below remains the deployed baseline.
+
 ## Current120 independently installed - useful automatic work still requires verification
 
 The existing bounded page-reply owner now also covers the secondary hidden-tab repair message. Silence/unattributed reload requires a positively nonstreaming response from the same registered document, conversation and navigation epoch, with current connection, admission and controller ownership checked again before reload. Native Retry retains distinct candidate controls, elects exactly one rendered eligible handle and rechecks it after authorization. Four fixed refusal codes survive the existing bounded diagnostics. These changes preserve original-request/result fences, native Send receipts, drafts, exact model selection and security boundaries; no timeout grants replay.
