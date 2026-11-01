@@ -1,5 +1,9 @@
 # Chat On Steroids - code research mirror
 
+## Initial negative evidence retention correction — source only
+
+The first strict121 qualification passed96preliminary checks and13,044Main checks but FAILED4 with62existing skips. Those failures exposed an earlier matching guard discarding an initial negative open/incomplete census when its request half could not be admitted. Five new failure-first cases reproduced that loss. The correction preserves open Core, open Code Mode and incomplete negative observations while still refusing malformed settled claims. Original request/result debt and exact durable ACK requirements remain unchanged. All167affected evidence checks and the entire1,607-case Bridge suite passed, along with TypeScript and diff checks. One corrected canonical qualification is running; no121installation is claimed. The failed run remains failed.
+
 ## Folded native narration identity repair — source only
 
 The native branch may retain assistant analysis/commentary that is absent from the selected page inventory. The reader now accepts that narrow narration bridge only under an independently terminally anchored native namespace. Exact selected original-user, invocation, tool-result and final identities, parent edges, working/exchange scope, cache conflict and durable per-parent result checks remain required. Unselected tool results, foreign namespaces, tool recipients, unsupported channels, accessors and missing final receipts still refuse. No request identity or completion receipt is invented.

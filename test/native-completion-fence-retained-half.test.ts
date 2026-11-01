@@ -122,4 +122,30 @@ describe('retained request half refuses substituted evidence', () => {
       ['workflow-1', 'workflow-2'], CALLS)).toBe(false);
     expect(coreBrowserEvidence(TARGET)?.pendingCompletion).not.toBeNull();
   });
+  it.each(['missing-native', 'invalid-native', 'invalid-request', 'oversized', 'code-only'])(
+    'retains the initial negative census when its %s request half cannot be admitted', kind => {
+      resetCoreBrowserEvidenceForTests();
+      const initial = frame(NOW);
+      if (kind === 'missing-native') Object.assign(initial.ordinaryFinal, { coreCallMessageIds: undefined });
+      if (kind === 'invalid-native') Object.assign(initial.ordinaryFinal, { coreCallMessageIds: [null, null] });
+      if (kind === 'invalid-request') Object.assign(initial.ordinaryFinal, { allCoreRequestIds: [null, null] });
+      if (kind === 'oversized') Object.assign(initial.ordinaryFinal, { calls: 201, openCalls: 201,
+        coreCallMessageIds: Array.from({ length: 201 }, (_, i) => 'native-' + i),
+        allCoreRequestIds: Array.from({ length: 201 }, (_, i) => 'workflow-' + i) });
+      if (kind === 'code-only') Object.assign(initial.ordinaryFinal, { reason: 'open-code',
+        calls: 0, openCalls: 0, coreCallMessageIds: [], allCoreRequestIds: null,
+        codeCalls: 1, openCodeCalls: 1, codeCallMessageIds: ['code-parent'],
+        openCodeCallMessageIds: ['code-parent'] });
+      expect(noteCoreBrowserEvidence(initial)).toBe(true);
+      const retained = coreBrowserEvidence(TARGET)?.pendingCompletion;
+      expect(retained).toMatchObject({ calls: initial.ordinaryFinal.calls,
+        codeCalls: initial.ordinaryFinal.codeCalls, allCoreRequestIds: kind === 'code-only' ? [] : null });
+      expect(nativeCompletionCandidate(TARGET)).toBeNull();
+      expect(nativeCompletionDiagnostic(TARGET)?.reason).not.toBe('no-retained-fence');
+      // A later empty view cannot erase the original negative census.
+      noteCoreBrowserEvidence({ ...initial, observedAt: NOW + 1000, ordinaryFinal: null });
+      expect(coreBrowserEvidence(TARGET)?.pendingCompletion).toEqual(retained);
+      expect(nativeCompletionCandidate(TARGET)).toBeNull();
+    });
+
 });

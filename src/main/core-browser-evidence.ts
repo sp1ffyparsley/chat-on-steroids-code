@@ -493,9 +493,11 @@ function ordinaryFinalDiagnostic(raw: unknown): OrdinaryFinalDiagnostic | null {
     row['allCoreRequestIds'].length === calls &&
     row['allCoreRequestIds'].every((id: unknown) => typeof id === 'string' && id.length > 0 && id.length <= 100)
     ? [...row['allCoreRequestIds']] as string[] : null;
-  // Omitted identity is not a substitution, but a published malformed half must not
-  // be normalized into that omission. Preserve the retained fence and refuse this frame.
-  if (Object.getOwnPropertyDescriptor(raw, 'allCoreRequestIds')?.value !== undefined && !allCoreIds) return null;
+  // Malformed published identity cannot settle a retained fence as an omission.
+  // Keep an open/incomplete negative census, however: dropping it would erase the
+  // very original-source debt that later native/durable proof must reconcile.
+  if (Object.getOwnPropertyDescriptor(raw, 'allCoreRequestIds')?.value !== undefined && !allCoreIds &&
+      openCalls === 0 && openCodeCalls === 0 && !inventoryIncomplete) return null;
   const identityRefusals = inventoryIncomplete ? null : identityRefusalsDiagnostic(
     Object.getOwnPropertyDescriptor(raw, 'identityRefusals')?.value, coreMessages);
   const codeIds = (name: string, expected: number): string[] | null => {
