@@ -2715,10 +2715,11 @@ async function noteTabConversation(source, value) {
   if (!ownsDocument(source)) return false;
   // A same-tab full navigation is not a close until the replacement document proves it is
   // a different conversation. This keeps ordinary reloads alive while still retiring A
-  // when the new document eventually binds B.
+  // when the new document eventually binds B. A departure is not a physical human
+  // tab close: keep that distinction in the durable close receipt and across worker restart.
   if (previous && previous !== conversationId && !conversationStillOpen(previous)) {
     await drain();
-    await enqueueClose(previous);
+    await enqueueClose(previous, true);
     await drainCloses();
   }
   return true;
@@ -3574,6 +3575,11 @@ async function createChatTab(url, background = false, active = !background, open
   if (openConversationRequest) await rememberOpenConversationTab(tab, openConversationRequest);
   return tab;
 }
+
+// Reuse the incumbent bounded page-reply owner for repair actions too. A silent content
+// script must release this profile's single maintenance flight; timeout is not an ACK,
+// proof that no click occurred, or permission to replay an effect.
+const REPAIR_PAGE_REPLY_MS = 15_000;
 
 /** Bound waiting for a page; a missing reply never grants action or replay authority. */
 async function tabReply(tabId, message, options, timeoutMs = 3000, missingReply = null) {
@@ -4926,8 +4932,8 @@ async function offerStopTurns(requests, background = false) {
       const source = { tab: tab.id, documentId, navigationEpoch };
       const latest = await chrome.tabs.get(tab.id);
       if (!current() || !ownsDocument(source) || latest.pendingUrl || conversationFromUrl(latest.url) !== request.conversationId) return;
-      await chrome.tabs.sendMessage(tab.id, { type: 'clf-stop-turn', id: request.id,
-        conversationId: request.conversationId, turnId: request.turnId }, { documentId });
+      await tabReply(tab.id, { type: 'clf-stop-turn', id: request.id,
+        conversationId: request.conversationId, turnId: request.turnId }, { documentId }, REPAIR_PAGE_REPLY_MS);
     })().catch(() => undefined).finally(() => stopOffers.delete(request.id)));
   }
   await Promise.all(offers);
@@ -7258,7 +7264,7 @@ async function performBrowserRepairs(repairs, policy) {
           type: 'clf-collect-goal-now',
           conversationId
         };
-        const first = await chrome.tabs.sendMessage(target.id, message).catch(() => null);
+        const first = await tabReply(target.id, message, undefined, REPAIR_PAGE_REPLY_MS);
         const result = await retryRepairMessageAfterTabWake(
           target,
           conversationId,
@@ -7328,7 +7334,7 @@ async function performBrowserRepairs(repairs, policy) {
       }
       if (action === 'continue' && target) {
         if (!await recheckNativeRepair()) continue;
-        const result = await chrome.tabs.sendMessage(target.id, { type: 'clf-stop-interrupted-turn', conversationId });
+        const result = await tabReply(target.id, { type: 'clf-stop-interrupted-turn', conversationId }, undefined, REPAIR_PAGE_REPLY_MS);
         if (result?.ok === false && result.error === 'page_not_idle') {
           const deferred = await call(`/status?repairDeferred=${encodeURIComponent(token)}&repairCause=streaming`);
           if (!deferred.ok) throw new Error('interrupted_stop_defer_failed');
@@ -7337,10 +7343,10 @@ async function performBrowserRepairs(repairs, policy) {
         if (result?.ok !== true) throw new Error(result?.error || 'interrupted_stop_unconfirmed');
       } else if (action === 'compact' && target) {
         if (!await recheckNativeRepair()) continue;
-        const result = await chrome.tabs.sendMessage(target.id, {
+        const result = await tabReply(target.id, {
           type: 'clf-compact-interrupted-turn',
           conversationId
-        });
+        }, undefined, REPAIR_PAGE_REPLY_MS);
         if (result?.ok !== true) throw new Error(result?.error || 'interrupted_compaction_unavailable');
       } else if (action === 'retry' && target) {
         if (!await recheckNativeRepair()) continue;
@@ -7348,7 +7354,7 @@ async function performBrowserRepairs(repairs, policy) {
           type: 'clf-retry-failed-turn',
           conversationId
         };
-        const first = await chrome.tabs.sendMessage(target.id, message).catch(() => null);
+        const first = await tabReply(target.id, message, undefined, REPAIR_PAGE_REPLY_MS);
         const result = retryControlPending === true ? first : await retryRepairMessageAfterTabWake(
           target,
           conversationId,
@@ -7430,8 +7436,10 @@ async function performBrowserRepairs(repairs, policy) {
           // reloading that document produces the native "Resume stream unavailable" / load
           // failure loop and can discard a valid answer. Return the untouched handout with a
           // bounded settle delay; real activity will retire it through the existing owner.
-          const status = await chrome.tabs.sendMessage(target.id, { type: 'clf-page-status' })
-            .catch(() => null);
+          const status = await tabReply(target.id, { type: 'clf-page-status' }, undefined, REPAIR_PAGE_REPLY_MS);
+          // A timed-out/negative observer does not prove the page is idle. Retain the
+          // original repair and report its missing witness; never reload from ambiguity.
+          if (status?.ok !== true) throw new Error('page_status_unconfirmed');
           if (status?.ok === true && status.streaming === true) {
             const deferred = await call(`/status?repairDeferred=${encodeURIComponent(token)}&repairCause=streaming`);
             if (!deferred.ok) throw new Error('streaming_repair_defer_failed');
@@ -7487,8 +7495,9 @@ async function performBrowserRepairs(repairs, policy) {
       // drafts or credentials). These fixed codes are diagnostics, not replay authorization.
       const failure = [
         'retry_unavailable', 'ambiguous_retry', 'page_not_idle', 'page_changed',
-        'retry_not_authorized', 'native_retry_unavailable', 'native_retry_failed',
-        'interrupted_compaction_unavailable', 'interruption_not_visible', 'compaction_busy',
+        'retry_not_authorized', 'native_retry_unavailable', 'native_retry_failed', 'page_status_unconfirmed',
+        'interrupted_compaction_unavailable', 'interrupted_stop_unconfirmed', 'goal_wake_unconfirmed',
+        'interruption_not_visible', 'compaction_busy',
         'worker_compaction_disabled', 'conversation_changed', 'recorder_inactive'
       ].includes(error?.message) ? error.message : 'action_failed';
       await call(`/status?repairFailed=${encodeURIComponent(token)}&repairAction=${repairAction}&repairFailure=${failure}`);
@@ -8879,7 +8888,7 @@ const HANDLERS = {
     // releaseTab drains the queue and posts /closed itself only when this document was the
     // last live view. This page signal is a conversation departure, not proof Chrome removed
     // the physical tab; chrome.tabs.onRemoved owns that distinct fact.
-    return releaseTab(source.tab, message.conversationId, source.documentId, source.navigationEpoch, undefined, undefined, undefined, undefined, currentAdmission);
+    return releaseTab(source.tab, message.conversationId, source.documentId, source.navigationEpoch, undefined, undefined, true, undefined, currentAdmission);
   },
   async compact(message, _sender, source) {
     const currentAdmission = conversationAdmission(source, cleanConversationId(message.conversationId) ?? cleanConversationId(tabConversations[String(source.tab)]));
@@ -10550,7 +10559,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 117;
+const PAGE_RECORDER_VERSION = 118;
 
 let deferredRecoveryWork = null;
 

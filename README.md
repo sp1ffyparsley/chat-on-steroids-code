@@ -1,5 +1,13 @@
 # Chat On Steroids - code research mirror
 
+## Candidate118 repair - source under qualification, installed117 unchanged
+
+The single profile maintenance pass now uses its existing bounded page-reply owner for native Retry, interrupted Stop/compaction, Goal collection, liveness inspection and exact stop offers. A silent renderer releases the maintenance flight after15seconds; timeout never grants replay or proves a native effect did not occur. Silence/unattributed reload requires positive page status. Conversation navigation persists a nonmanual departure receipt across service-worker restart; actual physical removal and legacy unmarked records retain manual-close fences.
+
+Seven new cases exercise five silent repair paths and two durable departure boundaries. Initial production regressions were reproduced before repair. Corrected141focused companion cases passed, alongside4private predecessor and11Bridge manual-close cases and typecheck/syntax. An earlier whole run passed996/997 with one mistaken test-argument expectation, now corrected; the source-frozen canonical full qualification is still running. This is SOURCE ONLY, logical private sourceee6f031d5378c815fef6effc11c991950f0800b8/treef406a8d7ec73065069e895c393960138d96fa16c. Installed117 remains actual. The three production/test deltas are exported; private deployment receipt updates are not public activation authority. No new public installer or fully autonomous fleet claim.
+
+Unresolved native original-parent/result matches, exact helper model confirmation, helper disposition and executing companion generation still require evidence. Source/test qualification, installation, native Send receipts and useful automatic successor work remain separate. No identity, model, draft, claim, pause, unknown-effect, security or rollback checks were weakened.
+
 This is the custom Electron application and Chrome companion source exported for code review. It has clean public history and excludes private account stores, saved prompts, credentials, runtime logs and deployment artifacts. This source mirror is separate from upstream releases and supplies no public installer.
 
 ## Current117 reload repair - independently installed, browser verification open

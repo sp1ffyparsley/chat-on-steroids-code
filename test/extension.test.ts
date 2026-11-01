@@ -2406,6 +2406,76 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     }
   });
 
+  it.each([
+    { action: 'retry', reason: 'assistant-error', result: 'retried:native_retry_unavailable' },
+    { action: 'continue', reason: 'assistant-error', result: 'stopped:interrupted_stop_unconfirmed' },
+    { action: 'compact', reason: 'compaction', result: 'compacted:interrupted_compaction_unavailable' },
+    { action: 'reload', reason: 'goal', result: 'reloaded:goal_wake_unconfirmed' },
+    { action: 'reload', reason: 'silence', result: 'reloaded:page_status_unconfirmed' }
+  ])('releases the single maintenance flight when the page it is repairing never answers ($reason/$action)', async ({ action, reason, result }) => {
+    // One deaf collector used to park the only in-flight maintenance pass forever, so every other
+    // chat's repair, delivery and hygiene waited on it and the next alarm re-entered that same hung
+    // promise. The bound has to turn it into a failed receipt for this repair alone, and never into
+    // a browser mutation: a missing reply is not proof that reloading or clicking is safe.
+    vi.useFakeTimers();
+    try {
+      let armed = false;
+      let handed = false;
+      const failures: string[] = [];
+      const passes: number[] = [];
+      const fetch = vi.fn(async (input: string) => {
+        const url = new URL(input);
+        if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (url.pathname === '/repairs/claim') return response(200, { allowed: true });
+        if (url.pathname === '/status') {
+          if (url.searchParams.has('repairFailed')) {
+            failures.push(`${url.searchParams.get('repairAction')}:${url.searchParams.get('repairFailure')}`);
+            return response(200, { ok: true });
+          }
+          if (url.searchParams.has('repaired') || url.searchParams.has('repairDeferred')) {
+            return response(200, { ok: true });
+          }
+          passes.push(1);
+          if (armed && !handed) {
+            handed = true;
+            return response(200, { repairs: [{ conversationId: CHAT, token: 'deaf-page-token',
+              reason, action, requiresClaim: true }] });
+          }
+          return response(200, { repairs: [] });
+        }
+        return response(200, {});
+      });
+      const worker = loadWorker({
+        local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch,
+        tabsSendMessage: async () => ({ ok: true })
+      });
+      await worker.registerTab(231);
+      await worker.send({ type: 'bind', conversationId: CHAT }, 231);
+      worker.tabsSendMessage.mockImplementation(() => new Promise(() => undefined));
+      armed = true;
+      const passesBeforeAlarm = passes.length;
+
+      const firstAlarm = worker.fireAlarm();
+      await vi.runAllTimersAsync();
+      await firstAlarm;
+      expect(failures, JSON.stringify({ passes: passes.length, urls: fetch.mock.calls.map(c => c[0]), sends: worker.tabsSendMessage.mock.calls })).toEqual([result]);
+      expect(worker.tabsReload).not.toHaveBeenCalled();
+      expect(worker.tabsCreate).not.toHaveBeenCalled();
+      expect(passes.length).toBe(passesBeforeAlarm + 1);
+
+      // The flight is free again, so the next alarm runs a whole new pass instead of sharing the
+      // pass the unbounded wait would have kept forever.
+      const secondAlarm = worker.fireAlarm();
+      await vi.runAllTimersAsync();
+      await secondAlarm;
+      expect(passes.length).toBe(passesBeforeAlarm + 2);
+      expect(failures).toHaveLength(1);
+      expect(worker.tabsReload).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reloads the exact tab holding the chat the app named, and reports it once', async () => {
     const { fetch, asked, actions } = appWith(CHAT);
     const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
@@ -2453,7 +2523,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     await worker.fireAlarm();
 
     expect(worker.tabsSendMessage).toHaveBeenCalledWith(23,
-      { type: 'clf-retry-failed-turn', conversationId: CHAT });
+      { type: 'clf-retry-failed-turn', conversationId: CHAT }, undefined);
     expect(worker.tabsReload).not.toHaveBeenCalled();
     expect(worker.tabsCreate).not.toHaveBeenCalled();
     expect(receipts).toEqual(['retried']);
@@ -2501,7 +2571,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     await worker.fireAlarm();
 
     expect(worker.tabsSendMessage).toHaveBeenCalledWith(230,
-      { type: 'clf-retry-failed-turn', conversationId: CHAT });
+      { type: 'clf-retry-failed-turn', conversationId: CHAT }, undefined);
     expect(worker.tabsSendMessage).toHaveBeenCalledWith(230, { type: 'clf-page-status' }, undefined);
     expect(deferred).toEqual(['streaming']);
     expect(failed).toEqual([]);
@@ -2652,7 +2722,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     await worker.fireAlarm();
 
     expect(worker.tabsSendMessage).toHaveBeenCalledWith(24,
-      { type: 'clf-retry-failed-turn', conversationId: CHAT });
+      { type: 'clf-retry-failed-turn', conversationId: CHAT }, undefined);
     expect(deferred).toEqual([expect.objectContaining({
       repairDeferred: 'retry-model-block-token', repairCause: 'model-blocked', retrySpent: '1',
       expectedModel: 'gpt-5-6-thinking', expectedEffort: 'high',
@@ -2816,7 +2886,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     armed = true;
     await worker.fireAlarm();
 
-    expect(worker.tabsSendMessage).toHaveBeenCalledWith(27, { type: 'clf-page-status' });
+    expect(worker.tabsSendMessage).toHaveBeenCalledWith(27, { type: 'clf-page-status' }, undefined);
     expect(worker.tabsReload).not.toHaveBeenCalled();
     expect(worker.tabsCreate).not.toHaveBeenCalled();
     expect(deferred).toEqual(['streaming']);
@@ -2963,7 +3033,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     await worker.fireAlarm();
 
     expect(worker.tabsSendMessage).toHaveBeenCalledWith(46,
-      { type: 'clf-collect-goal-now', conversationId: CHAT });
+      { type: 'clf-collect-goal-now', conversationId: CHAT }, undefined);
     if (reloaded) expect(worker.tabsReload).toHaveBeenCalledWith(46);
     else expect(worker.tabsReload).not.toHaveBeenCalled();
     expect(worker.tabsCreate).not.toHaveBeenCalled();
@@ -2997,7 +3067,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     await worker.fireAlarm();
 
     expect(worker.tabsSendMessage).toHaveBeenCalledWith(25,
-      { type: action === 'compact' ? 'clf-compact-interrupted-turn' : 'clf-stop-interrupted-turn', conversationId: CHAT });
+      { type: action === 'compact' ? 'clf-compact-interrupted-turn' : 'clf-stop-interrupted-turn', conversationId: CHAT }, undefined);
     expect(worker.tabsReload).not.toHaveBeenCalled();
     expect(worker.tabsCreate).not.toHaveBeenCalled();
     expect(receipts).toEqual([action === 'compact' ? 'compacted' : 'stopped']);
@@ -3317,7 +3387,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     armed = true;
     await worker.fireAlarm();
     expect(worker.tabsSendMessage).toHaveBeenCalledWith(49,
-      { type: 'clf-collect-goal-now', conversationId: CHAT });
+      { type: 'clf-collect-goal-now', conversationId: CHAT }, undefined);
     expect(trace).toContain('claim');
     expect(trace).toContain('recheck-denied');
     expect(trace).not.toContain('repaired');
@@ -10711,6 +10781,64 @@ describe('extension observation journal', () => {
     await worker.navigateTab(12, 'https://chatgpt.com/');
     expect(closed).toEqual([conversationId]);
     expect(session.data.tabConversations).toEqual({});
+  });
+
+  it('treats a same-tab move to another chat as a departure, not a human close', async () => {
+    const a = '11111111-2222-3333-4444-555555555561';
+    const b = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeee61';
+    const closed: Array<{ conversationId: string; manual: boolean }> = [];
+    const worker = loadWorker({
+      local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      session: new FakeStorageArea(),
+      fetch: async (input: string, init: Record<string, unknown> = {}) => {
+        const path = new URL(input).pathname;
+        if (path === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (path === '/events') return response(200, { sessionId: 'session', stored: 1 });
+        if (path === '/closed') {
+          closed.push(JSON.parse(String(init.body)));
+          return response(200, { ok: true });
+        }
+        return response(200, {});
+      }
+    });
+
+    await worker.send({ type: 'bind', conversationId: a }, 12);
+    // The page moved to B in the same tab. A is gone from view, but nothing was closed.
+    await worker.send({ type: 'bind', conversationId: b }, 12);
+
+    expect(closed).toEqual([{ conversationId: a, manual: false }]);
+  });
+
+  it('keeps a departure close non-manual across a service-worker restart, while a legacy row still fences', async () => {
+    const departure = '11111111-2222-3333-4444-555555555562';
+    const legacy = '11111111-2222-3333-4444-555555555563';
+    const bodies: Array<{ conversationId: string; manual: boolean }> = [];
+    const local = new FakeStorageArea({
+      port: 8765,
+      token: 'paired-token',
+      closeOutbox: [
+        { conversationId: departure, queuedAt: 1_700_000_000_000, byExtension: true },
+        { conversationId: legacy, queuedAt: 1_700_000_000_001 }
+      ]
+    });
+    const session = new FakeStorageArea({ closeOutbox: local.data.closeOutbox });
+    const fetch = async (input: string, init: Record<string, unknown> = {}) => {
+      const path = new URL(input).pathname;
+      if (path === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (path === '/closed') bodies.push(JSON.parse(String(init.body)));
+      return response(200, { ok: true });
+    };
+    // MV3 can suspend the worker between the page departure and the app acknowledging it. The
+    // classification is a durable receipt, so it must come from storage, not from the event that
+    // queued it. A legacy row with no marker predates this distinction and stays manual: an old
+    // real close must keep its fence rather than being guessed into an automatic reopen.
+    const worker = loadWorker({ local, session, fetch });
+    await worker.fireAlarm();
+    expect(bodies).toEqual([
+      { conversationId: departure, manual: false },
+      { conversationId: legacy, manual: true }
+    ]);
+    expect(local.data.closeOutbox).toEqual([]);
   });
 
   it('lets terminal navigation beat a delayed message from the dying document', async () => {
