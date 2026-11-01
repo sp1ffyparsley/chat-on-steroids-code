@@ -1709,7 +1709,7 @@ async function discover(force = false, allowBinding = false) {
   if (instanceBindingError === 'invalid_instance_binding') return null;
   instanceBindingError = null;
   // A fresh Chrome profile must never silently attach to the first (legacy) bridge when
-  // The primary account and an isolated account are both running. The popup offers an explicit choice.
+  // Gustavo and an isolated account are both running. The popup offers an explicit choice.
   if (!instanceId && port === null && !token) {
     const choices = await localAccountChoices();
     if (choices.length > 1) {
@@ -10559,7 +10559,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 118;
+const PAGE_RECORDER_VERSION = 119;
 
 let deferredRecoveryWork = null;
 

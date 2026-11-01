@@ -11395,6 +11395,69 @@ describe('generation identity while ChatGPT mounts and reorders assistant sectio
  * "Unattributed activity", the first of them 194 ms after the premature end.
  */
 describe('a stop button that goes missing while the turn is still running', () => {
+  it.each(['visible', 'answered'] as const)('holds native finals across a provider approval boundary (%s)', async mode => {
+    live = await harness();
+    userTurn(live.document, 'approval-boundary-question', 'perform the task');
+    startGenerating(live.document);
+    const section = assistantTurn(live.document, 'approval-boundary-answer', []);
+    live.hook.observe(); await settle();
+    let waiting = true;
+    (live.window as any).CLF_DOM.approvalWaiting = () => waiting;
+    stopGenerating(live.document);
+    live.hook.observe(); await settle();
+    if (mode === 'answered') { waiting = false; live.hook.observe(); await settle(); }
+    const binding = { section, turn: { turnId: 'approval-boundary-answer', endMessageId: 'approval-boundary-message',
+      messages: [{ role: 'assistant', stable: true, messageId: 'approval-boundary-message',
+        rawMessageId: 'approval-boundary-message', rawText: 'Tool approval pending.', renderedHtml: '<p>Tool approval pending.</p>' }] } };
+    await bindFiberTurns([binding]);
+    await live.hook.flush();
+    expect(emitted(live.sent, 'turn_end')).toHaveLength(0);
+    expect(emitted(live.sent, 'assistant_message').filter(row => row.event.final === true)).toHaveLength(0);
+    waiting = false;
+    live.advance(10_001);
+    await bindFiberTurns([binding]);
+    await live.hook.flush();
+    expect(emitted(live.sent, 'turn_end').map(row => row.event.outcome)).toEqual(['completed']);
+    expect(emitted(live.sent, 'assistant_message').filter(row => row.event.final === true)).toHaveLength(1);
+  });
+
+  it('keeps explicit Stop immediate while a provider approval is pending', async () => {
+    live = await harness();
+    userTurn(live.document, 'approval-stop-question', 'perform the task');
+    startGenerating(live.document);
+    assistantTurn(live.document, 'approval-stop-answer', []);
+    live.hook.observe(); await settle();
+    (live.window as any).CLF_DOM.approvalWaiting = () => true;
+    (live.document.querySelector('[data-testid="stop-button"]') as HTMLButtonElement).click();
+    stopGenerating(live.document);
+    live.hook.observe(); await settle(); await live.hook.flush();
+    expect(emitted(live.sent, 'turn_end').map(row => row.event.outcome)).toEqual(['stopped']);
+  });
+
+  it('does not carry an approval grace window into the next local generation', async () => {
+    live = await harness();
+    userTurn(live.document, 'approval-old-question', 'first task');
+    startGenerating(live.document);
+    assistantTurn(live.document, 'approval-old-answer', []);
+    live.hook.observe(); await settle();
+    let waiting = true;
+    (live.window as any).CLF_DOM.approvalWaiting = () => waiting;
+    live.hook.observe(); await settle();
+    (live.document.querySelector('[data-testid="stop-button"]') as HTMLButtonElement).click();
+    stopGenerating(live.document);
+    live.hook.observe(); await settle();
+    waiting = false;
+    userTurn(live.document, 'approval-new-question', 'second task');
+    startGenerating(live.document);
+    const section = assistantTurn(live.document, 'approval-new-answer', []);
+    live.hook.observe(); await settle();
+    await bindFiberTurns([{ section, turn: { turnId: 'approval-new-answer', endMessageId: 'approval-new-message',
+      messages: [{ role: 'assistant', stable: true, messageId: 'approval-new-message',
+        rawMessageId: 'approval-new-message', rawText: 'Second task completed.', renderedHtml: '<p>Second task completed.</p>' }] } }]);
+    await live.hook.flush();
+    expect(emitted(live.sent, 'turn_end').map(row => row.event.outcome)).toEqual(['stopped', 'completed']);
+  });
+
   const dropout = async (ticks: number): Promise<void> => {
     stopGenerating(live!.document);
     for (let tick = 0; tick < ticks; tick++) {
@@ -17628,6 +17691,30 @@ describe('the activity feed', () => {
 });
 
 describe('the Compact & resume control', () => {
+  it.each(['same-chat', 'other-account', 'unpaired', 'unbound', 'new-chat'] as const)(
+    'retains only a bound passive nickname while offline with a nonempty draft (%s)', async mode => {
+      let connected = true;
+      live = await harness(undefined, {
+        status: () => ({ connected, paired: mode !== 'unpaired' || connected,
+          instanceId: mode === 'unbound' ? null : !connected && mode === 'other-account' ? 'profile-other' : 'profile-nickname' }),
+        activity: () => ({ ok: true, data: { entries: [], stream: [], nextSince: 0,
+          pendingTools: 0, chatNickname: 'Video editor task' } })
+      });
+      await live.hook.checkStatus(); await live.hook.pullActivity(); live.hook.injectControl();
+      const label = live.document.querySelector('.clf-chat-nickname') as HTMLElement;
+      expect(label.hidden).toBe(false);
+      const composer = live.document.querySelector('#prompt-textarea')!;
+      composer.textContent = 'Keep this unsent human draft';
+      connected = false;
+      await live.hook.checkStatus();
+      if (mode === 'new-chat') live.window.history.pushState({}, '', '/');
+      live.hook.injectControl();
+      expect(label.hidden).toBe(mode !== 'same-chat');
+      expect(composer.textContent).toBe('Keep this unsent human draft');
+      expect(live.sent.some(message => ['goal_open', 'goal_draft', 'goal_ack', 'desktop_input'].includes(message.type))).toBe(false);
+    });
+
+
   it('shows the local nickname as text and clears it when navigating away', async () => {
     live = await harness(undefined, {
       activity: () => ({ ok: true, data: { entries: [], stream: [], nextSince: 0,
@@ -17725,7 +17812,7 @@ describe('the Compact & resume control', () => {
       status: () => ({ connected: paired, paired, instanceId: paired ? 'profile-business' : null }),
       accountChoices: () => ({ ok: true, instanceId: null, accounts: [
         { instanceId: 'profile-business', name: 'Business', compatible: true },
-        { instanceId: 'profile-epsilon', name: 'Epsilon', compatible: true }
+        { instanceId: 'profile-rivera', name: 'Rivera', compatible: true }
       ] }), pairTo
     });
     await live.hook.checkStatus();
@@ -17747,7 +17834,7 @@ describe('the Compact & resume control', () => {
   it.each(['accept', 'cancel', 'selection-changed', 'closed', 'wrong-target', 'extra-field', 'bad-digest', 'bad-count'])
     ('requires exact retained-history confirmation before pairing (%s)', async (mode) => {
       const offer = { version: 1, targetInstanceId: 'profile-business', snapshotDigest: 'a'.repeat(64), journalCount: 1, ordinaryCloseCount: 1 };
-      if (mode === 'wrong-target') offer.targetInstanceId = 'profile-epsilon';
+      if (mode === 'wrong-target') offer.targetInstanceId = 'profile-rivera';
       if (mode === 'extra-field') Object.assign(offer, { force: true });
       if (mode === 'bad-digest') offer.snapshotDigest = 'not-a-digest';
       if (mode === 'bad-count') offer.journalCount = -1;
@@ -17760,7 +17847,7 @@ describe('the Compact & resume control', () => {
         status: () => ({ connected: paired, paired, instanceId: paired ? 'profile-business' : null }),
         accountChoices: () => ({ ok: true, accounts: [
           { instanceId: 'profile-business', name: 'Business', compatible: true },
-          { instanceId: 'profile-epsilon', name: 'Epsilon', compatible: true }
+          { instanceId: 'profile-rivera', name: 'Rivera', compatible: true }
         ] }), pairTo
       });
       await live.hook.checkStatus(); live.hook.injectControl(); live.hook.toggleMenu();
@@ -17770,7 +17857,7 @@ describe('the Compact & resume control', () => {
       const confirm = vi.spyOn(live.dom.window, 'confirm').mockImplementation(() => {
         if (mode === 'selection-changed') {
           const current = live!.document.querySelector('[aria-label="COS account"]') as HTMLSelectElement;
-          current.value = 'profile-epsilon'; current.dispatchEvent(new live!.dom.window.Event('change', { bubbles: true }));
+          current.value = 'profile-rivera'; current.dispatchEvent(new live!.dom.window.Event('change', { bubbles: true }));
         }
         if (mode === 'closed') live!.hook.closeMenu();
         return mode !== 'cancel';
@@ -17807,7 +17894,7 @@ describe('the Compact & resume control', () => {
       const accepts = ['accept', 'close-only'].includes(mode);
       const malformed = ['observations-only', 'wrong-target', 'extra-field', 'hidden-extra', 'accessor', 'bad-digest', 'bad-count', 'empty', 'wrong-key', 'missing-offer'].includes(mode);
       const getter = vi.fn(() => 1);
-      if (mode === 'wrong-target') offer.targetInstanceId = 'profile-epsilon';
+      if (mode === 'wrong-target') offer.targetInstanceId = 'profile-rivera';
       if (mode === 'extra-field') Object.assign(offer, { force: true });
       if (mode === 'hidden-extra') Object.defineProperty(offer, 'force', { value: true });
       if (mode === 'accessor') Object.defineProperty(offer, 'journalCount', { get: getter, enumerable: true });
@@ -17826,7 +17913,7 @@ describe('the Compact & resume control', () => {
         status: () => ({ connected: paired, paired, instanceId: paired ? 'profile-business' : null }),
         accountChoices: () => ({ ok: true, accounts: [
           { instanceId: 'profile-business', name: 'Business', compatible: true },
-          { instanceId: 'profile-epsilon', name: 'Epsilon', compatible: true }
+          { instanceId: 'profile-rivera', name: 'Rivera', compatible: true }
         ] }), pairTo
       });
       await live.hook.checkStatus(); live.hook.injectControl(); live.hook.toggleMenu();
@@ -17836,7 +17923,7 @@ describe('the Compact & resume control', () => {
       const confirm = vi.spyOn(live.dom.window, 'confirm').mockImplementation(() => {
         if (mode === 'retarget') {
           const current = live!.document.querySelector('[aria-label="COS account"]') as HTMLSelectElement;
-          current.value = 'profile-epsilon'; current.dispatchEvent(new live!.dom.window.Event('change', { bubbles: true }));
+          current.value = 'profile-rivera'; current.dispatchEvent(new live!.dom.window.Event('change', { bubbles: true }));
         }
         if (mode === 'closed') live!.hook.closeMenu();
         if (mode === 'stale-document') {

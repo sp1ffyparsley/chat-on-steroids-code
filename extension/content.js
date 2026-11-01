@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 118;
+  const RECORDER_VERSION = 119;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -534,6 +534,24 @@
    * pressing stop — still ends the turn at once.
    */
   let quietSince = 0;
+  // A provider approval can temporarily leave its previous end_turn message mounted.
+  // Keep that message partial through the existing observer/scan cadence; no new timer.
+  // Ownership prevents the grace window leaking across routes, epochs or generations.
+  const APPROVAL_SETTLE_MS = 10_000;
+  let approvalHold = null;
+  function approvalHolding() {
+    if (!generating || !turnId || userStopped) return false;
+    const now = Date.now();
+    if (CLF_DOM.approvalWaiting()) {
+      approvalHold = { turnId, epoch, conversationId, at: now };
+      return true;
+    }
+    return approvalHold?.turnId === turnId && approvalHold.epoch === epoch &&
+      approvalHold.conversationId === conversationId && now >= approvalHold.at &&
+      now - approvalHold.at < APPROVAL_SETTLE_MS;
+  }
+
+
   /**
    * How the turn looked when its stop button first went missing, and the turn it described.
    *
@@ -1413,6 +1431,7 @@
   /** Exact durable main-process proof that this conversation is a completed finite one-off. */
   let finiteOneOff = false;
   let chatNickname = '';
+  let chatNicknameOwner = null;
   // Shared by native Stop recovery and its app-authorized transport retry; not a new timer.
   let recoveryStopping = false;
   /**
@@ -2337,6 +2356,7 @@
     desktopDecision = null;
     finiteOneOff = false;
     chatNickname = '';
+    chatNicknameOwner = null;
     nativeErrorAttention = false;
     if (automationModelRetryTimer !== null) cancelLater(automationModelRetryTimer);
     automationModelRetryTimer = null;
@@ -3465,7 +3485,11 @@
     publishDesktopDecisionPartial();
     completeDesktopDecision();
     const id = CLF_DOM.conversationId();
-    if (id && id === conversationId) autoApproveNativeTools();
+    // Witness the card before the elected approval owner can synchronously remove it.
+    if (id && id === conversationId) {
+      approvalHolding();
+      autoApproveNativeTools();
+    }
     // One DOM turn snapshot per observation, created lazily because a transient id-less route
     // returns before transcript work. Everything below this stack frame that needs `turns()`
     // receives the same array explicitly; it is never cached across an await or another tick.
@@ -3879,7 +3903,8 @@
       }
     }
 
-    if (generating && nowGenerating && quietSince > 0) {
+    const heldForApproval = approvalHolding();
+    if (generating && (nowGenerating || heldForApproval) && quietSince > 0) {
       // The stop button came back, so it never went away in the sense that matters: this is
       // one turn that flickered, not two turns. Everything the generation holds — its id,
       // its baselines, its reported-progress map — is still the right state to carry on
@@ -3889,7 +3914,7 @@
       quietOutcome = null;
     }
 
-    if (generating && !nowGenerating) {
+    if (generating && !nowGenerating && !heldForApproval) {
       // The turn as it stood on the first quiet observation, read once. See quietOutcome.
       if (quietSince === 0) {
         quietSince = Date.now();
@@ -5899,8 +5924,11 @@
         // like a sequence of finished answers and could let recovery treat the wrong one as
         // completion evidence.
         const terminalMessageId = turn.endMessageId;
+        const heldForApproval = generating &&
+          (index === activeTurnIndex || (activeTurnIndex < 0 && index === answer.turns.length - 1)) &&
+          approvalHolding();
         const exactTerminal = Boolean(
-          terminalMessageId &&
+          terminalMessageId && !heldForApproval &&
             (message.rawMessageId === terminalMessageId || message.messageId === terminalMessageId)
         );
         const state = terminalMessageId
@@ -5984,7 +6012,8 @@
       activeTurnIndex >= 0 &&
       activeLocalTurnId === turnId &&
       Boolean(answer.turns[activeTurnIndex]?.endMessageId) &&
-      !settledFinals.has(answer.turns[activeTurnIndex].endMessageId)
+      !settledFinals.has(answer.turns[activeTurnIndex].endMessageId) &&
+      !approvalHolding()
     ) {
       fiberTerminalMessageId = answer.turns[activeTurnIndex].endMessageId;
       settledFinals.add(fiberTerminalMessageId);
@@ -8230,6 +8259,8 @@
     pulling = ownPull;
     const forId = conversationId;
     const forEpoch = epoch;
+    const nicknameInstance = status.instanceId;
+    const nicknameAccountIntent = statusAccountIntent;
     const ownScope = { work: ownPull, conversationId: forId, epoch: forEpoch };
     pullingOwner = ownScope;
     const current = () => alive && conversationId === forId && epoch === forEpoch;
@@ -8430,7 +8461,12 @@
       goalConfig = data.goal && typeof data.goal === 'object' ? data.goal : null;
       if (goalConfig) goalDraft = goalConfig.draft || null;
       finiteOneOff = data.finiteOneOff === true;
-      chatNickname = typeof data.chatNickname === 'string' ? data.chatNickname : '';
+      // The task label is passive presentation. Retain it across transport loss only
+      // when the same paired account, document epoch and conversation still own it.
+      const nicknameCurrent = status.instanceId === nicknameInstance && statusAccountIntent === nicknameAccountIntent;
+      chatNickname = nicknameCurrent && typeof data.chatNickname === 'string' ? data.chatNickname : '';
+      chatNicknameOwner = chatNickname ? { conversationId: forId, epoch: forEpoch,
+        instanceId: nicknameInstance, accountIntent: nicknameAccountIntent } : null;
       const nextBootstrap = data.bootstrap === 'resume' || data.bootstrap === 'worker' ? data.bootstrap : null;
       bootstrapOwner = nextBootstrap && typeof data.bootstrapMessageId === 'string' && data.bootstrapMessageId
         ? { conversationId: forId, epoch: forEpoch, messageId: data.bootstrapMessageId } : null;
@@ -10361,7 +10397,10 @@
     const busy = state.mode === 'busy' || state.mode === 'waiting';
     control.root.hidden = state.mode === 'hidden';
     control.root.dataset.clfMode = state.mode;
-    const nickname = status.connected && composerChat().state === 'chat' ? chatNickname : '';
+    const nicknameOwned = chatNicknameOwner?.conversationId === conversationId && chatNicknameOwner.epoch === epoch &&
+      chatNicknameOwner.instanceId === status.instanceId && chatNicknameOwner.accountIntent === statusAccountIntent;
+    const nicknameReadable = status.connected || (status.paired && Boolean(chatNicknameOwner?.instanceId));
+    const nickname = nicknameOwned && nicknameReadable && composerChat().state === 'chat' ? chatNickname : '';
     control.nickname.textContent = nickname;
     control.nickname.hidden = !nickname;
     control.nickname.setAttribute('data-clf-tip', nickname ? `Chat On Steroids: ${nickname}` : '');

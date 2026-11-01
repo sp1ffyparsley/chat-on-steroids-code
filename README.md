@@ -1,5 +1,17 @@
 # Chat On Steroids - code research mirror
 
+## Current119 installed privately - browser execution and useful autonomy still unverified
+
+The paired recorder now preserves the active local turn while its native approval card is present, including the ten-second settling interval after the card disappears. The same conversation, document epoch and local turn must still own that hold; an explicit user Stop remains authoritative. This fixes a premature completion boundary without creating a timer, granting a new permission scope or inventing completion evidence. Passive task nicknames survive a transport outage only for the same paired account, conversation and document epoch.
+
+The exact reviewed119 production/test files are exported here. The canonical private qualification passed96preliminary and12,998Main checks with62existing skips, then33post-pin checks and readiness0. The initial strict run failed one Bridge test timeout and two cascading hook timeouts; unchanged isolated123 and wholeBridge1,603 checks passed, followed by one justified successful strict retry. No timeout or assertion was weakened.
+
+Private activation finished exit0/NSIS0 at2026-11-01T15:25:24Z. All127,285 protected files/6,234,183,282B matched before successor startup. Main independently rehashed all291 installed program files/575,399,480B to tree902c75398cc003774ade1c1b75ac1bb4671b126b5a01229399c791f1ef5b3c78. All16 critical configuration/input files remained exact after startup, with all8maintenance pauses retained. Logical private source5bbc5f2e5214106485149f92bc8838a4db5ab3a2/tree98a9310999b683cf3c61f39a7324890755e024cb is provenance, not a public Git ref. No public installer or private deployment data is included.
+
+No chats were restarted or given new work messages. Executing Chrome119, exact missing original-parent/result associations, delivered-helper collection, useful product completion and automatic next turns remain independently unverified. Additional shared-workspace R58 Retry/liveness/diagnostic changes passed1,288affected checks but remain SOURCE ONLY, outside119 and outside this public export. Do not equate those tests with whole-workspace qualification or installed fixes.
+
+Earlier checkpoints below are historical; this119 section controls current installed provenance. The original repository, stores, prompts, deployment receipts and rollback stay private.
+
 ## Current118 installed - browser execution and useful autonomy still unverified
 
 The existing profile maintenance owner now bounds page replies for native Retry, interrupted Stop/compaction, Goal collection, liveness inspection and exact stop offers. A silent renderer releases that flight after15seconds; timeout never grants replay or proves a native effect did not occur. Silence/unattributed reload requires positive page status. Conversation navigation persists a nonmanual departure receipt across worker restart; physical removal and legacy unmarked records retain their manual-close fences.
