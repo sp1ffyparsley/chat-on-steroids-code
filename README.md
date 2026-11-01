@@ -2,6 +2,12 @@
 
 This is the custom Electron application and Chrome companion source exported for code review. It has clean public history and excludes private account stores, saved prompts, credentials, runtime logs and deployment artifacts. This source mirror is separate from upstream releases and supplies no public installer.
 
+## Prepared117 reload repair - source only
+
+A supplied native popup reported40retired helper opening elections blocking reload. The exact shape was reproduced with valid IDs. Reload now invokes the existing retirement owner only for old, unchanged retired election mappings whose numeric tabs are positively absent from a complete unfiltered native inventory. Native tabs, payloads, saved answers, archives, Send receipts and active or uncertain owners are preserved. Account/browser-generation changes, replaced elections, incomplete inventories and storage failures remain blocking. No new retry loop, timer, broad lease clearing or automatic closure is added.
+
+Controlled companion990checks passed;13new focused regression cases cover the40-row reproduction, refusal boundaries, identity/currentness races and storage failure. Logical private source44226482cc588f84ae637bc4f56aab3b82e84307/treec1fc9492348421d40bbd7359e274c7af66856cce is preparing strict117 qualification; it is NOT installed. Current accepted installation remains116. Use this mirror commit for public source URLs; old pinned excerpts are baseline evidence. Running Chrome generation and useful automatic work remain separately unverified.
+
 ## Returned R57 repairs — private116 installed and independently accepted
 
 The reviewed follow-up fixes three reproduced boundaries: native timeout Retry admission for an exact provider alert beside authored user text; attempted handoff custody recorded at the final native-click witness rather than earlier authorization; and retained answer classification across terminal helper states or wall-clock rollback. Authored text, historical controls, unknown Send, model, tool and source fences remain. Archive classification grants no new forwarding or retry authority.

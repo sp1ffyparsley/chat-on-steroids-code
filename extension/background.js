@@ -4252,7 +4252,34 @@ async function temporaryHelperOutputSaved(id, owner, conversationId, source) {
  * helpers use the retained accepted-decision receipt while untouched roots keep the generic
  * empty-page proof. Document/epoch, pin, draft and foreground-window fences remain mandatory.
  */
-async function cleanupRetiredInputTabs(elections, activeIds) {
+async function cleanupRetiredInputTabs(elections, activeIds, absentProof = null) {
+  // Reload may precede the maintenance sweep after the person closed old helper tabs.
+  // Settle only the retired election, never its native receipt, answer or archive. A
+  // complete unfiltered native inventory proves absence; a rejected tabs.get does not.
+  if (absentProof) {
+    const { tabs, candidates, generation, current } = absentProof;
+    if (!current() || generation !== commandLeaseGeneration || !Array.isArray(tabs) ||
+        !tabs.every(tab => Number.isInteger(tab?.id))) return;
+    const present = new Set(tabs.map(tab => tab.id)), removed = [];
+    for (const entry of candidates) {
+      const { id, row, tab, stage, retiredAt } = entry;
+      if (!current() || generation !== commandLeaseGeneration) break;
+      if (elections[id] !== row || stage !== 'retired' || row.stage !== stage ||
+          row.tab !== tab || row.retiredAt !== retiredAt || !Number.isInteger(tab) ||
+          !Number.isFinite(retiredAt) || Date.now() - retiredAt < RETIRED_INPUT_TAB_GRACE_MS ||
+          present.has(tab)) continue;
+      delete elections[id]; removed.push(entry);
+    }
+    if (removed.length) {
+      try { await persistLive(); }
+      catch (error) {
+        for (const { id, row } of removed) if (!Object.prototype.hasOwnProperty.call(elections, id)) elections[id] = row;
+        throw error;
+      }
+      console.info('[Chat On Steroids] retired absent helper opening elections', removed.length);
+    }
+    return;
+  }
   const now = Date.now();
   if (now - lastRetiredInputSweepAt < RETIRED_INPUT_SWEEP_MS) return;
   lastRetiredInputSweepAt = now;
@@ -10067,10 +10094,17 @@ async function reloadCompanionSafely() {
     console.info('[Chat On Steroids] companion reload deferred; retained custody', reported);
     return { ok: false, error: 'reload_deferred', pendingWork: reported };
   };
+  let absentInputProof = null;
   const conversationInventory = async () => {
+    // Snapshot existing elections before yielding to Chrome. A new or replaced opening
+    // cannot borrow an older inventory's absence, even when its UUID is unchanged.
+    const candidates = Object.entries(inputOpenings).map(([id, row]) =>
+      ({ id, row, tab: row?.tab, stage: row?.stage, retiredAt: row?.retiredAt }));
+    const generation = commandLeaseGeneration;
     // Chrome's URL query matches the committed URL only. A blank/foreign tab may already
     // be navigating to ChatGPT; include that pending document at both reload boundaries.
     const tabs = await boundedTabInventory({});
+    absentInputProof = Array.isArray(tabs) ? { tabs, candidates, generation } : null;
     return Array.isArray(tabs) ? tabs.filter(tab => isChatGptUrl(tab?.url) || isChatGptUrl(tab?.pendingUrl)) : null;
   };
   try {
@@ -10091,6 +10125,9 @@ async function reloadCompanionSafely() {
     await Promise.all([...journalWorkers]);
     await drainCloses();
     await Promise.all([liveWriteQueue, journalWriteQueue, connectionPersistTail]);
+    if (!current()) return defer({ connectionChanged: 1 });
+    if (absentInputProof) await cleanupRetiredInputTabs(inputOpenings, null,
+      { ...absentInputProof, current });
     const durableLeases = await durableReloadLeases();
     if (!durableLeases) return defer({ leaseDurabilityUnverified: 1 });
     const pending = await accountPairingBusy(false, null, null, null, null, durableLeases);
@@ -10513,7 +10550,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 116;
+const PAGE_RECORDER_VERSION = 117;
 
 let deferredRecoveryWork = null;
 

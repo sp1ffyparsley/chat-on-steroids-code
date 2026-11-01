@@ -1391,6 +1391,67 @@ describe('custody-preserving companion reload', () => {
     expect(unknown.runtimeReload).not.toHaveBeenCalled();
   });
 
+  it('reload retires forty old helper elections only after a complete inventory proves their tabs absent', async () => {
+    const openings = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [
+      `a1111111-2222-4333-8444-${String(i).padStart(12, '0')}`, { tab: 400 + i, stage: 'retired', retiredAt: Date.now() - 3600_000,
+        temporary: true, owner: `retained-owner-${i}`, conversationId }
+    ]));
+    const local = new FakeStorageArea({ disconnected: true, inputOpenings: openings });
+    const worker = loadWorker({ local, session: new FakeStorageArea(), tabsQuery: async () => [] });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(await request(worker)).toMatchObject({ ok: true, reloading: true });
+    expect(local.data.inputOpenings).toEqual({});
+    expect(worker.runtimeReload).toHaveBeenCalledTimes(1);
+    expect(worker.tabsRemove).not.toHaveBeenCalled();
+    expect(worker.tabsSendMessage).not.toHaveBeenCalled();
+  });
+
+  it.each(['live-nonchat-tab', 'unknown-inventory', 'not-retired', 'recent-retirement', 'unreadable-tab-id'])(
+    'reload preserves retired-input custody without exact absence proof: %s', async reason => {
+      const opening = { tab: reason === 'unreadable-tab-id' ? null : 41,
+        stage: reason === 'not-retired' ? 'ready' : 'retired',
+        retiredAt: Date.now() - (reason === 'recent-retirement' ? 0 : 3600_000),
+        temporary: true, owner: 'retained-owner', conversationId };
+      const local = new FakeStorageArea({ disconnected: true, inputOpenings: { 'a1111111-2222-4333-8444-555555555555': opening } });
+      const worker = loadWorker({ local, session: new FakeStorageArea(), tabsQuery: async () => {
+        if (reason === 'unknown-inventory') throw new Error('inventory unavailable');
+        return reason === 'live-nonchat-tab' ? [{ id: 41, url: 'https://example.com/' }] : [];
+      } });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(await request(worker)).toMatchObject({ ok: false, error: 'reload_deferred' });
+      expect(local.data.inputOpenings).toEqual({ 'a1111111-2222-4333-8444-555555555555': opening });
+      expect(worker.runtimeReload).not.toHaveBeenCalled();
+      expect(worker.tabsRemove).not.toHaveBeenCalled();
+    });
+
+  it.each(['replaced-election', 'changed-tab', 'changed-stage', 'changed-retirement', 'changed-generation', 'changed-account', 'storage-failure'])(
+    'absent retirement preserves custody across %s', async reason => {
+      const id = 'a1111111-2222-4333-8444-555555555555';
+      const row = { tab: 41, stage: 'retired', retiredAt: Date.now() - 3600_000 };
+      const elections = { [id]: row };
+      const candidate = { id, row, tab: row.tab, stage: row.stage, retiredAt: row.retiredAt };
+      if (reason === 'replaced-election') elections[id] = { ...row };
+      if (reason === 'changed-tab') row.tab = 42;
+      if (reason === 'changed-stage') row.stage = 'ready';
+      if (reason === 'changed-retirement') row.retiredAt++;
+      const retained = elections[id];
+      const persistLive = vi.fn(async () => { if (reason === 'storage-failure') throw new Error('storage failed'); });
+      const start = backgroundSource.indexOf('async function cleanupRetiredInputTabs(');
+      const end = backgroundSource.indexOf('\nconst desktopInputReceiverRepairs', start);
+      const run = vm.runInNewContext(`${backgroundSource.slice(start, end)};cleanupRetiredInputTabs`, {
+        Date, Number, Set, Object, Array, console: { info: vi.fn() },
+        commandLeaseGeneration: reason === 'changed-generation' ? 'new-generation' : 'old-generation',
+        RETIRED_INPUT_TAB_GRACE_MS: 60_000, persistLive
+      });
+      const proof = { tabs: [], candidates: [candidate], generation: 'old-generation',
+        current: () => reason !== 'changed-account' };
+      if (reason === 'storage-failure') await expect(run(elections, null, proof)).rejects.toThrow('storage failed');
+      else await run(elections, null, proof);
+      expect(elections[id]).toBe(retained);
+      expect(Object.keys(elections)).toEqual([id]);
+      expect(persistLive).toHaveBeenCalledTimes(reason === 'storage-failure' ? 1 : 0);
+    });
+
   it('reports retired helper elections as a sanitized subset of retained input openings', async () => {
     const inputId = 'a1111111-2222-4333-8444-555555555555';
     const owner = 'private-helper-owner-document';
