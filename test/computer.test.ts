@@ -224,20 +224,22 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
     // captureAfter exists to make action and verification one round trip. If the lock is
     // released between them, another agent's capture can land in the gap and the "after"
     // picture proves nothing about the action it was supposed to verify.
+    // Ordering concerns the real action/capture lock, not a transient owned-window DWM surface.
+    // Screen captures retain the same native frame-order proof; window capture guards stay covered separately.
     const order: string[] = [];
-    const base = await screenshot({ window: fixtureWindow, maxWidth: 320 });
+    const base = await screenshot({ maxWidth: 320 });
 
     // The serialization contract concerns the action/capture lock, not whether an
     // unrelated foreground process permits focus. A native zero-wait exercises the
     // same action transaction and real capture without requiring focus or pointer input.
     const combined = actAndCapture([{ type: 'wait', ms: 0 }], {
       frameId: base.frameId,
-      capture: { window: fixtureWindow, maxWidth: 320 }
+      capture: { maxWidth: 320 }
     }).then((result) => {
       order.push('combined');
       return result;
     });
-    const interloper = screenshot({ window: fixtureWindow, maxWidth: 320 }).then((shot) => {
+    const interloper = screenshot({ maxWidth: 320 }).then((shot) => {
       order.push('interloper');
       return shot;
     });

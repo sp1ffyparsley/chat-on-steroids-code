@@ -2678,7 +2678,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     await worker.fireAlarm();
     expect(failed).toEqual([expect.objectContaining({
       repairFailed: 'diagnostic-native-retry-token', repairAction: 'retried',
-      repairFailure: failure === 'retry_unavailable' ? 'retry_unavailable' : failure === 'throw' ? 'native_retry_unavailable' : 'action_failed'
+      repairFailure: failure === 'retry_unavailable' || failure === 'retry_not_ready' ? failure : failure === 'throw' ? 'native_retry_unavailable' : 'action_failed'
     })]);
     expect(JSON.stringify(failed)).not.toContain('private draft and token');
     expect(worker.tabsReload).not.toHaveBeenCalled();
@@ -3487,7 +3487,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
         return response(200, {});
       });
       const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch,
-        tabsSendMessage: async () => ({ ok: true, conversationId: CHAT, epoch: 0 }),
+        tabsSendMessage: async () => ({ ok: true, conversationId: CHAT, epoch: 0, streaming: false }),
         tabsGet: async () => ({ id: 21, url: `https://chatgpt.com/c/${CHAT}`, status: 'complete' }),
         tabsQuery: async () => {
           if (handed) {
@@ -6501,6 +6501,120 @@ describe('managed renderer lifecycle wake', () => {
   });
 });
 
+
+describe('returned R58 repair reply and document boundaries', () => {
+  const paired = { port: 8765, token: 'paired-token' };
+  const CHAT = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  const OTHER = '11111111-2222-4333-8444-555555555555';
+  it('bounds the secondary hidden repair reply without replay or late success credit', async () => {
+    vi.useFakeTimers();
+    let release!: (value: unknown) => void;
+    let pending: Promise<unknown> | undefined;
+    try {
+      const start = backgroundSource.indexOf('async function retryRepairMessageAfterTabWake(');
+      const end = backgroundSource.indexOf('\n/**', start);
+      const replyStart = backgroundSource.indexOf('async function tabReply(');
+      const replyEnd = backgroundSource.indexOf('\n/**', replyStart);
+      const target = { id: 81, windowId: 7, active: false };
+      const previous = { id: 82, windowId: 7, active: true };
+      const activated = new Set<(info: { tabId: number; windowId: number }) => void>();
+      const updated = new Set<unknown>();
+      const sendMessage = vi.fn(() => new Promise(resolve => { release = resolve; }));
+      const update = vi.fn(async (id: number) => {
+        target.active = id === 81; previous.active = id === 82;
+        for (const fn of activated) fn({ tabId: id, windowId: 7 });
+      });
+      const run = vm.runInNewContext(backgroundSource.slice(replyStart, replyEnd) + '\n' +
+        backgroundSource.slice(start, end) + '; retryRepairMessageAfterTabWake', {
+        REPAIR_PAGE_REPLY_MS: 15_000, setTimeout, clearTimeout, console,
+        chrome: { windows: { get: async () => ({ focused: false }) }, tabs: {
+          query: async () => [target, previous], update, sendMessage,
+          onUpdated: { addListener: (fn: unknown) => updated.add(fn), removeListener: (fn: unknown) => updated.delete(fn) },
+          onActivated: { addListener: (fn: (info: { tabId: number; windowId: number }) => void) => activated.add(fn),
+            removeListener: (fn: (info: { tabId: number; windowId: number }) => void) => activated.delete(fn) }
+        } },
+        connectionEpoch: 0, instanceId: 'test-instance', token: 'paired', port: 8765, browserId: 'test-browser',
+        disconnected: false, companionReloadFlight: null, tabDocuments: { '81': 'original-document' }, tabEpochs: { '81': 0 },
+        conversationAdmission: () => () => true, browserControlsTab: () => false,
+        concreteConversationForTab: () => CHAT, conversationFromUrl: () => CHAT
+      });
+      let settled = false;
+      pending = run(target, CHAT, { ok: false }, { type: 'clf-goal-wake' }, () => true);
+      void pending!.then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(350);
+      expect(sendMessage).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(15_001);
+      expect(settled).toBe(true);
+      expect(await pending).toBeNull();
+      expect(previous.active).toBe(true);
+      expect(activated.size).toBe(0);
+      expect(updated.size).toBe(0);
+      release({ ok: true });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await pending).toBeNull();
+      expect(sendMessage).toHaveBeenCalledOnce();
+    } finally {
+      release?.(null);
+      await vi.advanceTimersByTimeAsync(1);
+      await pending;
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['stable', 'unknown-streaming', 'wrong-epoch', 'wrong-conversation', 'document-replaced', 'pending-navigation'])(
+    'binds silence reload to explicit nonstreaming evidence from the same document: %s', async mode => {
+      let armed = false, handed = false, changed = false;
+      let pendingUrl: string | undefined;
+      const receipts: string[] = [];
+      const failures: string[] = [];
+      const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(),
+        tabsQuery: async () => [{ id: 291, windowId: 7, url: `https://chatgpt.com/c/${CHAT}`, status: 'complete' }],
+        tabsGet: async () => ({ id: 291, url: `https://chatgpt.com/c/${CHAT}`, pendingUrl, status: 'complete' }),
+        fetch: async input => {
+          const url = new URL(input);
+          if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+          if (url.pathname === '/repairs/claim') return response(200, { allowed: true });
+          if (url.pathname === '/status') {
+            if (url.searchParams.has('repaired')) receipts.push(url.searchParams.get('repairAction')!);
+            if (url.searchParams.has('repairFailed')) failures.push(url.searchParams.get('repairFailure')!);
+            if (armed && !handed) { handed = true; return response(200, { repairs: [{
+              conversationId: CHAT, token: 'r58-silence', reason: 'silence', action: 'reload', requiresClaim: true
+            }] }); }
+            return response(200, { repairs: [] });
+          }
+          return response(200, {});
+        },
+        tabsSendMessage: async (_id, message) => {
+          if (message.type !== 'clf-page-status' || !handed || changed) return undefined;
+          changed = true;
+          if (mode === 'document-replaced') {
+            await worker.startTabNavigation(291);
+            await worker.registerTab(291, 'replacement-document');
+          }
+          if (mode === 'pending-navigation') pendingUrl = `https://chatgpt.com/c/${OTHER}`;
+          return { ok: true, conversationId: mode === 'wrong-conversation' ? OTHER : CHAT,
+            epoch: mode === 'wrong-epoch' ? 1 : 0, ...(mode === 'unknown-streaming' ? {} : { streaming: false }) };
+        }
+      });
+      await worker.registerTab(291);
+      await worker.send({ type: 'bind', conversationId: CHAT }, 291);
+      await worker.fireAlarm();
+      worker.tabsReload.mockClear();
+      worker.tabsSendMessage.mockClear();
+      armed = true;
+      await worker.fireAlarm();
+      if (mode === 'stable') {
+        expect(worker.tabsReload).toHaveBeenCalledExactlyOnceWith(291);
+        expect(worker.tabsSendMessage).toHaveBeenCalledWith(291, { type: 'clf-page-status' }, { documentId: 'document-291-0' });
+        expect(receipts).toEqual(['reloaded']);
+      } else {
+        expect(worker.tabsReload).not.toHaveBeenCalled();
+        expect(receipts).toEqual([]);
+        expect(failures).toHaveLength(1);
+      }
+      expect(worker.tabsCreate).not.toHaveBeenCalled();
+    });
+});
 
 describe('app-owned retained tab pool', () => {
   it('keeps a later manual close queued when an older automatic close response arrives', async () => {
@@ -11293,7 +11407,7 @@ describe('extension connection', () => {
     expect(local.data.instanceId).toBe(instanceId);
   });
 
-  it('requires separate explicit companion choices for Primary, Zeta and Alpha', async () => {
+  it('requires separate explicit companion choices for Gustavo, Jeremiah and Footlettuce', async () => {
     const pairPorts: number[] = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
@@ -11301,22 +11415,22 @@ describe('extension connection', () => {
       if (url.pathname === '/hello' && [8765, 8767, 8768].includes(candidate)) {
         return response(200, {
           app: 'chat-on-steroids',
-          instanceId: candidate === 8765 ? 'local-instance' : candidate === 8768 ? 'profile-zeta' : 'profile-alpha',
-          displayName: candidate === 8765 ? 'Primary' : candidate === 8768 ? 'Zeta' : 'Alpha',
+          instanceId: candidate === 8765 ? 'local-instance' : candidate === 8768 ? 'profile-jeremiah' : 'profile-footlettuce',
+          displayName: candidate === 8765 ? 'Gustavo' : candidate === 8768 ? 'Jeremiah' : 'Footlettuce',
           legacyInstance: candidate === 8765, paired: false
         });
       }
       if (url.pathname === '/pair') {
         pairPorts.push(candidate);
         expect([8767, 8768]).toContain(candidate);
-        const instanceId = candidate === 8768 ? 'profile-zeta' : 'profile-alpha';
+        const instanceId = candidate === 8768 ? 'profile-jeremiah' : 'profile-footlettuce';
         expect(JSON.parse(String(init.body))).toEqual({ reconnect: true, instanceId });
         return response(200, { token: `${instanceId}-token`, instanceId });
       }
       return response(503, {});
     });
-    const ZetaStorage = new FakeStorageArea();
-    const worker = loadWorker({ local: ZetaStorage, session: new FakeStorageArea(), fetch });
+    const jeremiahStorage = new FakeStorageArea();
+    const worker = loadWorker({ local: jeremiahStorage, session: new FakeStorageArea(), fetch });
 
     expect(await worker.send({ type: 'status' })).toMatchObject({
       connected: false, paired: false, instanceId: null, instanceError: 'instance_selection_required'
@@ -11326,29 +11440,29 @@ describe('extension connection', () => {
     const choices = await worker.send({ type: 'accountChoices' }, 1, undefined, popupUrl);
     expect(choices).toMatchObject({ ok: true });
     expect(choices.accounts).toEqual(expect.arrayContaining([
-      { instanceId: 'local-instance', name: 'Primary', port: 8765, legacy: true, compatible: true },
-      { instanceId: 'profile-zeta', name: 'Zeta', port: 8768, legacy: false, compatible: true },
-      { instanceId: 'profile-alpha', name: 'Alpha', port: 8767, legacy: false, compatible: true }
+      { instanceId: 'local-instance', name: 'Gustavo', port: 8765, legacy: true, compatible: true },
+      { instanceId: 'profile-jeremiah', name: 'Jeremiah', port: 8768, legacy: false, compatible: true },
+      { instanceId: 'profile-footlettuce', name: 'Footlettuce', port: 8767, legacy: false, compatible: true }
     ]));
-    expect(await worker.send({ type: 'pairTo', instanceId: 'profile-zeta' }, 1, undefined, popupUrl)).toMatchObject({ ok: true });
+    expect(await worker.send({ type: 'pairTo', instanceId: 'profile-jeremiah' }, 1, undefined, popupUrl)).toMatchObject({ ok: true });
     expect(pairPorts).toEqual([8768]);
-    expect(ZetaStorage.data).toMatchObject({ port: 8768, instanceId: 'profile-zeta', token: 'profile-zeta-token' });
+    expect(jeremiahStorage.data).toMatchObject({ port: 8768, instanceId: 'profile-jeremiah', token: 'profile-jeremiah-token' });
     expect(await worker.send({ type: 'status' })).toMatchObject({ connected: true, paired: true, port: 8768 });
 
-    // Each Chrome profile owns independent extension storage. Selecting Alpha in a
-    // different profile cannot silently retarget Zeta's saved companion or bridge.
-    const AlphaStorage = new FakeStorageArea();
-    const AlphaWorker = loadWorker({ local: AlphaStorage, session: new FakeStorageArea(), fetch });
-    expect(await AlphaWorker.send({ type: 'status' })).toMatchObject({
+    // Each Chrome profile owns independent extension storage. Selecting Footlettuce in a
+    // different profile cannot silently retarget Jeremiah's saved companion or bridge.
+    const footlettuceStorage = new FakeStorageArea();
+    const footlettuceWorker = loadWorker({ local: footlettuceStorage, session: new FakeStorageArea(), fetch });
+    expect(await footlettuceWorker.send({ type: 'status' })).toMatchObject({
       connected: false, paired: false, instanceError: 'instance_selection_required'
     });
-    expect(await AlphaWorker.send({ type: 'pairTo', instanceId: 'profile-alpha' }, 1, undefined, popupUrl))
+    expect(await footlettuceWorker.send({ type: 'pairTo', instanceId: 'profile-footlettuce' }, 1, undefined, popupUrl))
       .toMatchObject({ ok: true });
     expect(pairPorts).toEqual([8768, 8767]);
-    expect(AlphaStorage.data).toMatchObject({
-      port: 8767, instanceId: 'profile-alpha', token: 'profile-alpha-token'
+    expect(footlettuceStorage.data).toMatchObject({
+      port: 8767, instanceId: 'profile-footlettuce', token: 'profile-footlettuce-token'
     });
-    expect(ZetaStorage.data).toMatchObject({ port: 8768, instanceId: 'profile-zeta', token: 'profile-zeta-token' });
+    expect(jeremiahStorage.data).toMatchObject({ port: 8768, instanceId: 'profile-jeremiah', token: 'profile-jeremiah-token' });
   });
 
   it('offers private development alongside installed legacy and pairs only the chosen dev port', async () => {
@@ -11441,10 +11555,10 @@ describe('extension connection', () => {
         return response(200, { app: 'chat-on-steroids', instanceId: devId, paired: false });
       }
       if (url.pathname === '/hello' && url.port === '8768')
-        return response(200, { app: 'chat-on-steroids', instanceId: 'profile-zeta', paired: false });
+        return response(200, { app: 'chat-on-steroids', instanceId: 'profile-jeremiah', paired: false });
       if (url.pathname === '/pair') {
         pairPorts.push(Number(url.port));
-        return response(200, { instanceId: url.port === '8796' ? devId : 'profile-zeta', token: 'latest-Zeta-token' });
+        return response(200, { instanceId: url.port === '8796' ? devId : 'profile-jeremiah', token: 'latest-jeremiah-token' });
       }
       return response(503, {});
     });
@@ -11453,15 +11567,15 @@ describe('extension connection', () => {
     const popup = 'chrome-extension://fcckeonnadegkheflpbppbddkpkdhjip/popup.html';
     const older = worker.send({ type: 'pairTo', instanceId: devId }, 1, undefined, popup);
     await started;
-    const newer = worker.send({ type: 'pairTo', instanceId: 'profile-zeta' }, 1, undefined, popup);
+    const newer = worker.send({ type: 'pairTo', instanceId: 'profile-jeremiah' }, 1, undefined, popup);
     // Permit the second message to register its intent before the original /hello resolves.
     for (let i = 0; i < 5; i++) await Promise.resolve();
     releaseDevHello();
     expect(await older).toMatchObject({ ok: false });
     expect(await newer).toMatchObject({ ok: true });
     expect(pairPorts).toEqual([8768]);
-    expect(local.data).toMatchObject({ instanceId: 'profile-zeta', port: 8768,
-      token: 'latest-Zeta-token', disconnected: false });
+    expect(local.data).toMatchObject({ instanceId: 'profile-jeremiah', port: 8768,
+      token: 'latest-jeremiah-token', disconnected: false });
   });
 
   it('persists a later Disconnect after a pending popup retarget storage write', async () => {
@@ -11515,25 +11629,25 @@ describe('extension connection', () => {
       const candidate = Number(url.port);
       if (url.pathname === '/hello' && (candidate === 8765 || candidate === 8768)) {
         return response(200, {
-          app: 'chat-on-steroids', instanceId: candidate === 8765 ? 'local-instance' : 'profile-zeta',
-          displayName: candidate === 8765 ? 'Primary' : 'Zeta', legacyInstance: candidate === 8765,
+          app: 'chat-on-steroids', instanceId: candidate === 8765 ? 'local-instance' : 'profile-jeremiah',
+          displayName: candidate === 8765 ? 'Gustavo' : 'Jeremiah', legacyInstance: candidate === 8765,
           paired: candidate === 8765, bridge: BRIDGE_PROTOCOL
         });
       }
       if (url.pathname === '/pair') {
         pairPorts.push(candidate);
-        return response(200, { token: 'Zeta-token', instanceId: 'profile-zeta' });
+        return response(200, { token: 'jeremiah-token', instanceId: 'profile-jeremiah' });
       }
       return response(503, {});
     });
-    const local = new FakeStorageArea({ instanceId: 'local-instance', port: 8765, token: 'Primary-token' });
+    const local = new FakeStorageArea({ instanceId: 'local-instance', port: 8765, token: 'gustavo-token' });
     const worker = loadWorker({ local, session: new FakeStorageArea(), fetch });
     expect(await worker.send({ type: 'status' })).toMatchObject({ connected: true, paired: true, port: 8765 });
     const popupUrl = 'chrome-extension://fcckeonnadegkheflpbppbddkpkdhjip/popup.html';
-    expect(await worker.send({ type: 'pairTo', instanceId: 'profile-zeta' }, 1, undefined, popupUrl))
+    expect(await worker.send({ type: 'pairTo', instanceId: 'profile-jeremiah' }, 1, undefined, popupUrl))
       .toMatchObject({ ok: true });
     expect(pairPorts).toEqual([8768]);
-    expect(local.data).toMatchObject({ instanceId: 'profile-zeta', port: 8768, token: 'Zeta-token' });
+    expect(local.data).toMatchObject({ instanceId: 'profile-jeremiah', port: 8768, token: 'jeremiah-token' });
   });
 
   const currentPairingPage = async () => ({ ok: true, epoch: 0, streaming: false, generating: false, pendingTools: 0 });
@@ -11593,12 +11707,12 @@ describe('extension connection', () => {
     };
   };
 
-  it.each([{ id: 'profile-business', port: '8770' }, { id: 'profile-epsilon', port: '8771' }])
+  it.each([{ id: 'profile-business', port: '8770' }, { id: 'profile-rivera', port: '8771' }])
   ('enrolls a never-bound observer journal only into the explicitly selected $id after durable pairing', async ({ id, port }) => {
     const observation = { conversationId: '11111111-2222-3333-4444-555555555555',
       provisional: null, agent: null, agentCommandId: null, project: null,
       event: { kind: 'assistant_message', time: Date.now(), text: 'original private observation', messageId: 'native-message' } };
-    const local = new FakeStorageArea({ popupAccountChoiceInstanceId: id === 'profile-business' ? 'profile-epsilon' : 'profile-business' });
+    const local = new FakeStorageArea({ popupAccountChoiceInstanceId: id === 'profile-business' ? 'profile-rivera' : 'profile-business' });
     const session = new FakeStorageArea({ journal: [observation] });
     let release!: () => void;
     const held = new Promise<void>(resolve => { release = resolve; });
@@ -11607,7 +11721,7 @@ describe('extension connection', () => {
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
       if (url.pathname === '/hello' && ['8770', '8771'].includes(url.port)) return response(200, {
-        app: 'chat-on-steroids', instanceId: url.port === '8770' ? 'profile-business' : 'profile-epsilon', bridge: BRIDGE_PROTOCOL
+        app: 'chat-on-steroids', instanceId: url.port === '8770' ? 'profile-business' : 'profile-rivera', bridge: BRIDGE_PROTOCOL
       });
       if (url.pathname === '/pair') {
         pairPorts.push(url.port);
@@ -11640,7 +11754,7 @@ describe('extension connection', () => {
 
   it('enrolls a prospectively proved never-bound ordinary close and drains observations before closing', async () => {
     const conversationId = '11111111-2222-3333-4444-555555555556';
-    const local = new FakeStorageArea({ popupAccountChoiceInstanceId: 'profile-epsilon' });
+    const local = new FakeStorageArea({ popupAccountChoiceInstanceId: 'profile-rivera' });
     const session = new FakeStorageArea();
     const delivered: string[] = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
@@ -11798,7 +11912,7 @@ describe('extension connection', () => {
 
   it.each([
     { choice: 'profile-business', observations: false },
-    { choice: 'profile-epsilon', observations: true },
+    { choice: 'profile-rivera', observations: true },
     { choice: 'a'.repeat(64), observations: false }
   ])('treats a bounded popup account choice as UI preference during history preservation ($choice)', async ({ choice, observations }) => {
     const { local, session } = legacyFirstBindingStorage({
@@ -11856,7 +11970,7 @@ describe('extension connection', () => {
 
   it('permits preservation beside the fresh idle record written by the actual browser-control owner', async () => {
     const { local, session } = legacyFirstBindingStorage({
-      local: { commandLeaseGeneration: 'c'.repeat(32), popupAccountChoiceInstanceId: 'profile-epsilon' },
+      local: { commandLeaseGeneration: 'c'.repeat(32), popupAccountChoiceInstanceId: 'profile-rivera' },
       session: { journal: [], recoveryMonitoring: false, terminalDocuments: {} }
     });
     const controlSource = (await fs.readFile(path.join(process.cwd(), 'extension', 'browser-control.js'), 'utf8'))
@@ -11920,7 +12034,7 @@ describe('extension connection', () => {
   });
 
   it.each([false, true])('diagnoses preservation independently of monitoring-off adoption (unsupported session field=%s)', async unsupported => {
-    const { local, session, conversationId } = legacyFirstBindingStorage({ local: { popupAccountChoiceInstanceId: 'profile-epsilon' }, session: {
+    const { local, session, conversationId } = legacyFirstBindingStorage({ local: { popupAccountChoiceInstanceId: 'profile-rivera' }, session: {
       recoveryMonitoring: false, terminalDocuments: {},
       tabDocuments: { '51': 'private-document-1', '52': 'private-document-2', '53': 'private-document-3', '54': 'private-document-4' },
       tabEpochs: { '51': 1, '52': 2, '53': 3, '54': 4 },
@@ -12077,7 +12191,7 @@ describe('extension connection', () => {
   });
 
   it('seals exact unassigned data before pairing, holds old replay and delivers only a new chat across restart', async () => {
-    const { local, session, conversationId } = legacyFirstBindingStorage({ local: { popupAccountChoiceInstanceId: 'profile-epsilon' }, session: {
+    const { local, session, conversationId } = legacyFirstBindingStorage({ local: { popupAccountChoiceInstanceId: 'profile-rivera' }, session: {
       recoveryMonitoring: false, terminalDocuments: {}, tabConversations: { '51': '11111111-2222-3333-4444-555555555557' }
     }, row: { legacyScope: { originalAccount: null, unknownLabel: 'kept verbatim' } },
     event: { legacyEvent: { retained: [null, 7, 'ordinary unknown data'] } }, close: { originalScope: null } });
@@ -12115,7 +12229,7 @@ describe('extension connection', () => {
     expect(await worker.send({ type: 'pairTo', instanceId: 'profile-business',
       operatorPreservation: offer.operatorPreservation }, 1, undefined, popup)).toEqual({ ok: true });
     expect(paths).toEqual(['pair']);
-    expect(local.data.popupAccountChoiceInstanceId).toBe('profile-epsilon');
+    expect(local.data.popupAccountChoiceInstanceId).toBe('profile-rivera');
     expect(local.data.instanceId).toBe('profile-business');
     const archiveBefore = structuredClone(local.data.sealedUnassignedHistory);
     const restarted = loadWorker(options);
@@ -12833,7 +12947,7 @@ describe('extension connection', () => {
       ${backgroundSource.slice(start, end)}; exactOperatorPreservation(value, expected);`,
     { value, expected, TextEncoder, stableOperatorAdoptionJson: JSON.stringify });
     expect(read({ ...expected })).toBe(true);
-    for (const [field, wrong] of Object.entries({ version: 2, targetInstanceId: 'profile-epsilon', snapshotDigest: 'b'.repeat(64),
+    for (const [field, wrong] of Object.entries({ version: 2, targetInstanceId: 'profile-rivera', snapshotDigest: 'b'.repeat(64),
       journalCount: 1, ordinaryCloseCount: 2 })) expect(read({ ...expected, [field]: wrong })).toBe(false);
     expect(read({ ...expected, force: true })).toBe(false);
     expect(read(Object.defineProperty({ ...expected }, 'hidden', { value: true }))).toBe(false);
@@ -13547,7 +13661,7 @@ describe('extension connection', () => {
 
   it.each([
     { name: 'late raw null port', local: { port: null } },
-    { name: 'late raw prior tuple', local: { instanceId: 'profile-epsilon', port: 8771, token: 'private-prior-token', disconnected: false } },
+    { name: 'late raw prior tuple', local: { instanceId: 'profile-rivera', port: 8771, token: 'private-prior-token', disconnected: false } },
     { name: 'late raw native receipt', session: { pendingInputReceipts: { foreign: { private: 'unchanged native receipt' } } } }
   ])('rechecks $name at serialized first-enrollment acceptance without compensating an unwritten selection', async (late) => {
     const observation = { conversationId: '11111111-2222-3333-4444-555555555555',
@@ -13580,7 +13694,7 @@ describe('extension connection', () => {
   it('does not erase a foreign raw selection appearing before first-enrollment absence compensation', async () => {
     const observation = { conversationId: '11111111-2222-3333-4444-555555555555',
       event: { kind: 'assistant_message', text: 'retain private observation' } };
-    const selected = { instanceId: 'profile-epsilon', port: 8771, token: 'foreign-selection-token', disconnected: false };
+    const selected = { instanceId: 'profile-rivera', port: 8771, token: 'foreign-selection-token', disconnected: false };
     const local = new FakeStorageArea();
     const session = new FakeStorageArea({ journal: [observation] });
     const remove = vi.spyOn(local, 'remove');
@@ -13648,7 +13762,7 @@ describe('extension connection', () => {
     const start = backgroundSource.indexOf('let connectionPersistTail =');
     const end = backgroundSource.indexOf('let liveWriteQueue =', start);
     const local = new FakeStorageArea();
-    const selected = { instanceId: 'profile-epsilon', port: 8771, token: 'newer-exact-token', disconnected: false };
+    const selected = { instanceId: 'profile-rivera', port: 8771, token: 'newer-exact-token', disconnected: false };
     let release!: () => void;
     const held = new Promise<void>(resolve => { release = resolve; });
     let writing = false;
@@ -13803,8 +13917,8 @@ describe('extension connection', () => {
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input), candidate = Number(url.port);
       if (url.pathname === '/hello' && [8770, 8771].includes(candidate)) return response(200, {
-        app: 'chat-on-steroids', instanceId: candidate === 8770 ? 'profile-business' : 'profile-epsilon',
-        displayName: candidate === 8770 ? 'Business' : 'Epsilon', bridge: BRIDGE_PROTOCOL, paired: false
+        app: 'chat-on-steroids', instanceId: candidate === 8770 ? 'profile-business' : 'profile-rivera',
+        displayName: candidate === 8770 ? 'Business' : 'Rivera', bridge: BRIDGE_PROTOCOL, paired: false
       });
       if (url.pathname === '/pair') {
         pairPorts.push(candidate);
@@ -13817,7 +13931,7 @@ describe('extension connection', () => {
     const worker = loadWorker({ local, session: new FakeStorageArea(), fetch, tabsSendMessage: currentPairingPage });
     const page = 'https://chatgpt.com/c/business';
     const choices = await worker.send({ type: 'accountChoices', navigationEpoch: 0 }, 1, 'document-business', page);
-    expect(choices.accounts.map((row: any) => row.instanceId)).toEqual(['profile-business', 'profile-epsilon']);
+    expect(choices.accounts.map((row: any) => row.instanceId)).toEqual(['profile-business', 'profile-rivera']);
     expect(pairPorts).toEqual([]);
     expect(await worker.send({ type: 'pairTo', instanceId: 'profile-business', navigationEpoch: 0 }, 1, 'document-business', page))
       .toEqual({ ok: true });
@@ -13829,11 +13943,11 @@ describe('extension connection', () => {
     const local = new FakeStorageArea();
     const fetch = vi.fn(async (_input: string) => response(503, {}));
     const worker = loadWorker({ local, session: new FakeStorageArea(), fetch, tabsSendMessage: currentPairingPage });
-    expect(await worker.send({ type: 'pairTo', instanceId: 'profile-zeta' }, 1, undefined, 'https://example.com/'))
+    expect(await worker.send({ type: 'pairTo', instanceId: 'profile-jeremiah' }, 1, undefined, 'https://example.com/'))
       .toMatchObject({ ok: false, error: 'popup_required' });
     expect(await worker.send({ type: 'accountChoices' }, 1, '', 'https://chatgpt.com/'))
       .toMatchObject({ ok: false, error: 'document_identity_missing' });
-    expect(await worker.send({ type: 'pairTo', instanceId: 'profile-zeta' }, 1, undefined,
+    expect(await worker.send({ type: 'pairTo', instanceId: 'profile-jeremiah' }, 1, undefined,
       'chrome-extension://fcckeonnadegkheflpbppbddkpkdhjip/popup.html-other'))
       .toMatchObject({ ok: false, error: 'popup_required' });
     expect(fetch.mock.calls.some(([input]) => new URL(input).pathname !== '/hello')).toBe(false);
@@ -14177,11 +14291,11 @@ describe('extension connection', () => {
     };
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
-      const instance = url.port === '8765' ? 'local-instance' : url.port === '8770' ? 'profile-business' : 'profile-epsilon';
+      const instance = url.port === '8765' ? 'local-instance' : url.port === '8770' ? 'profile-business' : 'profile-rivera';
       if (url.pathname === '/hello' && ['8765', '8770', '8771'].includes(url.port)) return response(200, {
         app: 'chat-on-steroids', instanceId: instance, bridge: BRIDGE_PROTOCOL
       });
-      if (url.pathname === '/pair') return response(200, { token: url.port === '8770' ? 'business-token' : 'Epsilon-token', instanceId: instance });
+      if (url.pathname === '/pair') return response(200, { token: url.port === '8770' ? 'business-token' : 'rivera-token', instanceId: instance });
       return response(503, {});
     });
     const worker = loadWorker({ local, session: new FakeStorageArea(), fetch, tabsSendMessage: currentPairingPage });
@@ -14189,17 +14303,17 @@ describe('extension connection', () => {
     const older = worker.send({ type: 'pairTo', instanceId: 'profile-business' }, 1, undefined, popup);
     await vi.waitFor(() => expect(writingToken).toBe(true));
     const newer = action === 'disconnect' ? worker.send({ type: 'unpair' })
-      : worker.send({ type: 'pairTo', instanceId: 'profile-epsilon' }, 1, undefined, popup);
+      : worker.send({ type: 'pairTo', instanceId: 'profile-rivera' }, 1, undefined, popup);
     for (let i = 0; i < 12; i++) await Promise.resolve();
     release();
     expect(await older).toMatchObject({ ok: false });
     expect(await newer).toMatchObject({ ok: true });
     expect(local.data).toMatchObject(action === 'disconnect'
       ? { instanceId: 'profile-business', token: null, disconnected: true }
-      : { instanceId: 'profile-epsilon', port: 8771, token: 'Epsilon-token', disconnected: false });
+      : { instanceId: 'profile-rivera', port: 8771, token: 'rivera-token', disconnected: false });
     const restarted = loadWorker({ local, session: new FakeStorageArea(), fetch });
     expect(await restarted.send({ type: 'status' })).toMatchObject(action === 'disconnect'
-      ? { paired: false, disconnected: true } : { instanceId: 'profile-epsilon', paired: true });
+      ? { paired: false, disconnected: true } : { instanceId: 'profile-rivera', paired: true });
   });
 
   it('does not overwrite the newer account pairing diagnostic with an old network result', async () => {
@@ -14209,13 +14323,13 @@ describe('extension connection', () => {
     const local = new FakeStorageArea({ instanceId: 'local-instance', port: 8765, token: 'existing-token' });
     const fetch = vi.fn(async (input: string) => {
       const url = new URL(input);
-      const instance = url.port === '8765' ? 'local-instance' : url.port === '8770' ? 'profile-business' : 'profile-epsilon';
+      const instance = url.port === '8765' ? 'local-instance' : url.port === '8770' ? 'profile-business' : 'profile-rivera';
       if (url.pathname === '/hello' && ['8765', '8770', '8771'].includes(url.port)) return response(200, {
         app: 'chat-on-steroids', instanceId: instance, bridge: BRIDGE_PROTOCOL
       });
       if (url.pathname === '/pair') {
         if (url.port === '8770') { oldPairStarted = true; await held; }
-        return response(200, { token: url.port === '8770' ? 'business-token' : 'Epsilon-token', instanceId: instance });
+        return response(200, { token: url.port === '8770' ? 'business-token' : 'rivera-token', instanceId: instance });
       }
       return response(503, {});
     });
@@ -14223,11 +14337,11 @@ describe('extension connection', () => {
     const popup = 'chrome-extension://fcckeonnadegkheflpbppbddkpkdhjip/popup.html';
     const older = worker.send({ type: 'pairTo', instanceId: 'profile-business' }, 1, undefined, popup);
     await vi.waitFor(() => expect(oldPairStarted).toBe(true));
-    expect(await worker.send({ type: 'pairTo', instanceId: 'profile-epsilon' }, 1, undefined, popup)).toMatchObject({ ok: true });
+    expect(await worker.send({ type: 'pairTo', instanceId: 'profile-rivera' }, 1, undefined, popup)).toMatchObject({ ok: true });
     release();
     expect(await older).toMatchObject({ ok: false });
     const status = await worker.send({ type: 'status' });
-    expect(status).toMatchObject({ instanceId: 'profile-epsilon', paired: true });
+    expect(status).toMatchObject({ instanceId: 'profile-rivera', paired: true });
     expect(status).not.toHaveProperty('pairError');
   });
 

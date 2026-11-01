@@ -1,5 +1,15 @@
 # Chat On Steroids - code research mirror
 
+## Current120 independently installed - useful automatic work still requires verification
+
+The existing bounded page-reply owner now also covers the secondary hidden-tab repair message. Silence/unattributed reload requires a positively nonstreaming response from the same registered document, conversation and navigation epoch, with current connection, admission and controller ownership checked again before reload. Native Retry retains distinct candidate controls, elects exactly one rendered eligible handle and rechecks it after authorization. Four fixed refusal codes survive the existing bounded diagnostics. These changes preserve original-request/result fences, native Send receipts, drafts, exact model selection and security boundaries; no timeout grants replay.
+
+The final strict qualification passed96preliminary and13,024Main checks with62existing skips, followed by33post-pin installer checks and exact-predecessor readiness. Three earlier qualifications remain recorded as failed: rendered Retry test fixtures, a new test response type, and an owned-window capture refusal. Corrections retained production guards and exact assertions; the native ordering test uses real screen captures. This source export includes those reviewed production and test changes.
+
+Private activation completed exit0/NSIS0 at2026-11-01T17:05:07Z. All127,286protected files/6,234,897,750B matched before successor startup. Main independently rehashed all291installed program files/575,402,598B to treee12b25ba78bc33e41fcd90c5803ccd44c665d22809ae85daae9420142f96e6e7;16critical configuration/input files stayed exact after startup. Logical private source5f334f70562bbcfd57030448f792a63e6475907f/tree74065bcfc1dad36f97e046c0b377632b41bd76a7 is provenance, not a public Git ref. Private stores, deployment artifacts, account details and original Git history are excluded.
+
+The existing assignments are being resumed through their incumbent owners without duplicate task prompts. Installed files, opened pages, LoopOn and apparent activity do not prove useful work. Missing original-parent/request joins, source/document changes, helper collection and automatic next turns remain independently verified boundaries; no all-fixed or sustained-autonomy claim is made. Earlier installed checkpoints below are historical.
+
 ## Current119 installed privately - browser execution and useful autonomy still unverified
 
 The paired recorder now preserves the active local turn while its native approval card is present, including the ten-second settling interval after the card disappears. The same conversation, document epoch and local turn must still own that hold; an explicit user Stop remains authoritative. This fixes a premature completion boundary without creating a timer, granting a new permission scope or inventing completion evidence. Passive task nicknames survive a transport outage only for the same paired account, conversation and document epoch.

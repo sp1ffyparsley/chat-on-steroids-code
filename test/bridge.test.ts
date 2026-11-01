@@ -25380,7 +25380,7 @@ describe('unattributed activity recovery', () => {
     } finally { vi.useRealTimers(); }
   });
 
-  it.each(['retry_unavailable', 'private draft and token must not be recorded'])('records a failed Retry after reload with bounded diagnostics: %s', async failure => {
+  it.each(['retry_unavailable', 'retry_not_ready', 'page_status_unconfirmed', 'interrupted_stop_unconfirmed', 'goal_wake_unconfirmed', 'private draft and token must not be recorded'])('records a failed Retry after reload with bounded diagnostics: %s', async failure => {
     await pair();
     const error = { kind: 'chat_error', time: Date.now(), turnId: 'diagnostic-retry-answer',
       text: 'Resume stream unavailable', recoverable: true };
@@ -25402,7 +25402,7 @@ describe('unattributed activity recovery', () => {
       .filter((event): event is Extract<SessionEvent, { kind: 'progress' }> => event.kind === 'progress'));
     const text = JSON.stringify(progress);
     expect(text).toContain('Native Retry failed');
-    expect(text).toContain(failure === 'retry_unavailable' ? 'retry_unavailable' : 'action_failed');
+    expect(text).toContain(failure === 'private draft and token must not be recorded' ? 'action_failed' : failure);
     expect(text).not.toContain('private draft and token');
   });
 

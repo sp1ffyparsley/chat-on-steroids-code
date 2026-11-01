@@ -5889,7 +5889,7 @@ describe('desktop input delivery and helper ownership', () => {
     expect(await live.runtimeMessage({ type: 'clf-desktop-input', id: inputId, conversationId: null })).toEqual({ ok: true });
     const alert = live.document.createElement('div');
     alert.setAttribute('role', 'alert'); alert.append(warning);
-    const retry = live.document.createElement('button'); retry.textContent = 'Retry';
+    const retry = live.document.createElement('button'); retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
     retry.addEventListener('click', () => { retries += 1; }); alert.append(retry);
     live.document.body.append(alert);
     live.hook.observe(); await settle();
@@ -5932,7 +5932,7 @@ describe('desktop input delivery and helper ownership', () => {
     const copy = live.document.createElement('p');
     copy.textContent = 'A network error occurred. Please check your connection and try again. ';
     const retry = live.document.createElement('button');
-    retry.textContent = 'Retry';
+    retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
     retry.addEventListener('click', () => { retries += 1; });
     card.append(copy, retry);
     section.append(card);
@@ -6069,7 +6069,7 @@ describe('desktop input delivery and helper ownership', () => {
           copy.setAttribute('role', 'alert');
           copy.textContent = 'A network error occurred. Please check your connection and try again.';
           const retry = live!.document.createElement('button');
-          retry.textContent = 'Retry';
+          retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
           historical.append(copy, retry);
           live!.document.body.append(historical);
         }
@@ -6117,7 +6117,7 @@ describe('desktop input delivery and helper ownership', () => {
           providerErrorCopy.setAttribute('role', 'alert');
           providerErrorCopy.textContent = 'A network error occurred. Please check your connection and try again.';
           const retry = live!.document.createElement('button');
-          retry.textContent = 'Retry';
+          retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
           failure.append(providerErrorCopy, retry);
           live!.document.body.append(failure);
         }
@@ -6362,7 +6362,7 @@ describe('desktop input delivery and helper ownership', () => {
       const card = live!.document.createElement('div');
       const alert = live!.document.createElement('p'); alert.setAttribute('role', 'alert'); alert.textContent = 'Model not found';
       alert.setAttribute('data-clf-test-rendered', '1');
-      const retry = live!.document.createElement('button'); retry.textContent = 'Retry'; retry.addEventListener('click', retried);
+      const retry = live!.document.createElement('button'); retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1'); retry.addEventListener('click', retried);
       card.append(alert, retry); live!.document.body.append(card);
       live!.hook.observe();
     });
@@ -6400,7 +6400,7 @@ describe('desktop input delivery and helper ownership', () => {
     const card = live.document.createElement('div');
     const alert = live.document.createElement('p'); alert.setAttribute('role', 'alert'); alert.textContent = 'Model not found';
     alert.setAttribute('data-clf-test-rendered', '1');
-    const retry = live.document.createElement('button'); retry.textContent = 'Retry';
+    const retry = live.document.createElement('button'); retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
     const clicked = vi.fn(); retry.addEventListener('click', clicked);
     card.append(alert, retry); live.document.body.append(card);
     live.hook.observe(); await settle(); await live.hook.flush();
@@ -6572,7 +6572,7 @@ describe('activity feed cadence', () => {
       const copy = document.createElement('p');
       copy.textContent = 'Could not load this ChatGPT conversation';
       const retry = document.createElement('button');
-      retry.textContent = 'Retry';
+      retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
       Object.defineProperty(retry, 'getClientRects', { value: () => [{ width: 80, height: 32 }] });
       retry.addEventListener('click', () => { clicks += 1; });
       card.append(copy, retry);
@@ -6606,7 +6606,7 @@ describe('activity feed cadence', () => {
     const alert = live.document.createElement('p');
     alert.setAttribute('role', 'alert');
     alert.textContent = 'Could not load this ChatGPT conversation';
-    const retry = live.document.createElement('button'); retry.textContent = 'Retry';
+    const retry = live.document.createElement('button'); retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
     const clicked = vi.fn(); retry.addEventListener('click', clicked);
     card.append(alert, retry); live.document.body.append(card);
     stopGenerating(live.document);
@@ -7855,7 +7855,7 @@ describe('resume transport evidence', () => {
     live.hook.observe(); await settle();
     expect(emitted(live.sent, 'chat_error')).toHaveLength(1);
     const retry = live.document.createElement('button');
-    retry.textContent = 'Retry'; card.append(retry);
+    retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1'); card.append(retry);
     live.hook.observe(); await settle(); await live.hook.flush();
     expect(emitted(live.sent, 'chat_error').map(row => row.event)).toEqual([
       expect.objectContaining({ reason: 'stream_gone' }),
@@ -14234,7 +14234,7 @@ describe('how a turn is recorded as having ended', () => {
     await settle();
 
     const retry = live.document.createElement('button');
-    retry.textContent = 'Retry';
+    retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
     card.append(retry);
     live.hook.observe();
     await settle();
@@ -14280,7 +14280,7 @@ describe('how a turn is recorded as having ended', () => {
     copy.textContent =
       'Something went wrong while generating the response. If this issue persists please contact us through our help center at help.openai.com. ';
     const retry = live.document.createElement('button');
-    retry.textContent = 'Retry';
+    retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
     card.append(copy, retry);
     live.document.body.append(card);
     live.hook.observe();
@@ -14308,7 +14308,7 @@ describe('how a turn is recorded as having ended', () => {
     const copy = live.document.createElement('p');
     copy.textContent = 'Something went wrong. Please contact OpenAI support. ';
     const retry = live.document.createElement('button');
-    retry.textContent = 'Retry';
+    retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
     card.append(copy, retry);
     live.document.body.append(card);
 
@@ -14343,7 +14343,7 @@ describe('how a turn is recorded as having ended', () => {
       markdown.className = 'markdown';
       markdown.textContent = 'Something went wrong. Please contact OpenAI support. ';
       const retry = live.document.createElement('button');
-      retry.textContent = 'Retry';
+      retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
       markdown.append(retry);
       current.append(markdown);
     }
@@ -14392,6 +14392,30 @@ describe('how a turn is recorded as having ended', () => {
     expect(emitted(live.sent, 'chat_error')).toEqual([]);
   });
 
+  it.each(['visible', 'unrendered', 'hidden', 'inert', 'css-hidden', 'two-controls'] as const)('keeps native Retry rendering and unique-control authority in the content owner (%s)', async mode => {
+    const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    let clicks = 0;
+    live = await harness(`https://chatgpt.com/c/${conversationId}`, {}, document => {
+      retryModelProof(document, conversationId);
+      const card = document.createElement('div'); card.setAttribute('role', 'alert');
+      const copy = document.createElement('p'); copy.textContent = 'Message delivery timed out. Please try again. ';
+      const retry = document.createElement('button'); retry.textContent = 'Retry';
+      if (mode !== 'unrendered') retry.setAttribute('data-clf-test-rendered', '1');
+      retry.addEventListener('click', () => { clicks++; });
+      card.append(copy, retry);
+      if (mode === 'hidden') card.hidden = true;
+      if (mode === 'inert') card.setAttribute('inert', '');
+      if (mode === 'css-hidden') card.style.visibility = 'hidden';
+      if (mode === 'two-controls') {
+        const second = retry.cloneNode(true); second.addEventListener('click', () => { clicks++; }); card.append(second);
+      }
+      document.body.append(card);
+    });
+    const result = await live.runtimeMessage({ type: 'clf-retry-failed-turn', conversationId });
+    expect(result).toMatchObject({ ok: mode === 'visible' });
+    expect(clicks).toBe(mode === 'visible' ? 1 : 0);
+  });
+
   it('clicks one app-authorized native Retry for an idle ordinary failed turn without authoring text', async () => {
     const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
     let clicks = 0;
@@ -14401,7 +14425,7 @@ describe('how a turn is recorded as having ended', () => {
       const copy = document.createElement('p');
       copy.textContent = 'Message delivery timed out. Please try again. ';
       const retry = document.createElement('button');
-      retry.textContent = 'Retry';
+      retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
       retry.addEventListener('click', () => { clicks += 1; });
       card.append(copy, retry);
       document.body.append(card);
@@ -14486,7 +14510,7 @@ describe('how a turn is recorded as having ended', () => {
     card.setAttribute('role', 'alert');
     card.textContent = 'Connection interrupted. Waiting for the complete answer ';
     const retry = live.document.createElement('button');
-    retry.textContent = 'Retry';
+    retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
     retry.addEventListener('click', () => actions.push('retry'));
     card.append(retry);
     live.document.body.append(card);
@@ -14526,7 +14550,7 @@ describe('how a turn is recorded as having ended', () => {
     card.setAttribute('role', 'alert');
     card.textContent = 'Message delivery timed out. Please try again later. ';
     const retry = live.document.createElement('button');
-    retry.textContent = 'Retry';
+    retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
     const clicked = vi.fn();
     retry.addEventListener('click', clicked);
     card.append(retry);
@@ -14558,7 +14582,7 @@ describe('how a turn is recorded as having ended', () => {
     expect(await live.runtimeMessage(retryMessage)).toEqual({ ok: false, error: 'retry_not_ready' });
     expect(clicks).toBe(0);
     const retry = live.document.createElement('button');
-    retry.textContent = 'Retry';
+    retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
     retry.addEventListener('click', () => { clicks += 1; });
     live.document.querySelector('#retry-readiness-card')!.append(retry);
     expect(await live.runtimeMessage(retryMessage)).toEqual({ ok: true });
@@ -14580,7 +14604,7 @@ describe('how a turn is recorded as having ended', () => {
       const copy = document.createElement('p');
       copy.textContent = 'Message delivery timed out. Please try again. ';
       const retry = document.createElement('button');
-      retry.textContent = 'Retry';
+      retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
       retry.addEventListener('click', () => { clicks += 1; });
       card.append(copy, retry);
       document.body.append(card);
@@ -14608,7 +14632,7 @@ describe('how a turn is recorded as having ended', () => {
       const copy = document.createElement('p');
       copy.textContent = 'A network error occurred. Please check your connection and try again. ';
       const retry = document.createElement('button');
-      retry.textContent = 'Retry';
+      retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
       retry.addEventListener('click', () => {
         clicks += 1;
         trigger.setAttribute('data-clf-selected-effort', 'medium');
@@ -14642,7 +14666,7 @@ describe('how a turn is recorded as having ended', () => {
       const copy = document.createElement('p');
       copy.textContent = `${failureText} `;
       const retry = document.createElement('button');
-      retry.textContent = 'Retry';
+      retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
       retry.addEventListener('click', () => { clicks += 1; });
       card.append(copy, retry);
       document.body.append(card);
@@ -14666,7 +14690,7 @@ describe('how a turn is recorded as having ended', () => {
       const copy = document.createElement('p');
       copy.textContent = 'Resume stream unavailable ';
       const retry = document.createElement('button');
-      retry.textContent = 'Retry';
+      retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
       retry.addEventListener('click', () => { clicks += 1; });
       card.append(copy, retry);
       if (layout === 'stale-shell') {
@@ -14693,7 +14717,7 @@ describe('how a turn is recorded as having ended', () => {
       const copy = document.createElement('p');
       copy.textContent = 'Invalid URL (POST /api/f/conversation/resume) ';
       const retry = document.createElement('button');
-      retry.textContent = 'Retry';
+      retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
       retry.addEventListener('click', () => { clicks += 1; });
       card.append(copy, retry);
       document.body.append(card);
@@ -14714,7 +14738,7 @@ describe('how a turn is recorded as having ended', () => {
       const copy = document.createElement('p');
       copy.textContent = 'Invalid URL (POST /api/f/conversation/delete) ';
       const retry = document.createElement('button');
-      retry.textContent = 'Retry';
+      retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
       retry.addEventListener('click', () => { clicks += 1; });
       card.append(copy, retry);
       document.body.append(card);
@@ -14734,7 +14758,7 @@ describe('how a turn is recorded as having ended', () => {
       const copy = document.createElement('p');
       copy.textContent = 'Failed to fetch ';
       const retry = document.createElement('button');
-      retry.textContent = 'Retry';
+      retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
       retry.addEventListener('click', () => { clicks += 1; });
       card.append(copy, retry);
       document.body.append(card);
@@ -14755,7 +14779,7 @@ describe('how a turn is recorded as having ended', () => {
       const copy = document.createElement('p');
       copy.textContent = 'Stream cache expired ';
       const retry = document.createElement('button');
-      retry.textContent = 'Retry';
+      retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
       retry.addEventListener('click', () => { clicks += 1; });
       card.append(copy, retry);
       document.body.append(card);
@@ -14777,7 +14801,7 @@ describe('how a turn is recorded as having ended', () => {
       const copy = document.createElement('p');
       copy.textContent = 'Message delivery timed out. Please try again. ';
       const retry = document.createElement('button');
-      retry.textContent = 'Retry';
+      retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
       retry.addEventListener('click', () => { clicks += 1; });
       card.append(copy, retry);
       document.body.append(card);
@@ -14812,7 +14836,7 @@ describe('how a turn is recorded as having ended', () => {
       copy.setAttribute('role', 'alert');
       copy.textContent = `Connection interrupted. ${wording} for the complete answer`;
       const retry = document.createElement('button');
-      retry.textContent = 'Retry';
+      retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
       card.append(copy, retry);
       document.body.append(card);
     });
@@ -14869,7 +14893,7 @@ describe('how a turn is recorded as having ended', () => {
         const copy = document.createElement('p');
         copy.textContent = 'Message delivery timed out. Please try again. ';
         const retry = document.createElement('button');
-        retry.textContent = 'Retry';
+        retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
         retry.addEventListener('click', click);
         node.append(copy, retry);
         return node;
@@ -14896,7 +14920,7 @@ describe('how a turn is recorded as having ended', () => {
     copy.textContent =
       'A network error occurred. If this issue persists please contact us through our help center at help.openai.com. ';
     const retry = live.document.createElement('button');
-    retry.textContent = 'Retry';
+    retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
     card.append(copy, retry);
     live.document.body.append(card);
     live.hook.observe();
@@ -14923,7 +14947,7 @@ describe('how a turn is recorded as having ended', () => {
     const copy = live.document.createElement('p');
     copy.textContent = 'A network error occurred. Please check your connection and try again. ';
     const retry = live.document.createElement('button');
-    retry.textContent = 'Retry';
+    retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
     card.append(copy, retry);
     live.document.body.append(card);
     live.hook.observe();
@@ -14943,7 +14967,7 @@ describe('how a turn is recorded as having ended', () => {
     const [started] = emitted(live.sent, 'turn_start').map(entry => entry.event);
     const heading = live.document.createElement('button');
     heading.setAttribute('aria-expanded', 'false'); heading.textContent = 'This model is currently on cooldown';
-    const retry = live.document.createElement('button'); retry.textContent = 'Retry';
+    const retry = live.document.createElement('button'); retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
     section.append(heading, retry);
     const fallback = vi.fn(async () => ({ status: 'retried', model: 'gpt-6', fromModel: 'gpt-7-astra', from: 'pro', to: 'pro' }));
     (live.window as any).CLF_DOM.recoverModelCooldown = fallback;
@@ -15182,7 +15206,7 @@ describe('how a turn is recorded as having ended', () => {
     explanation.textContent =
       'The earlier card said “Something went wrong while generating the response.” Use this only if you want to try that request again. ';
     const retry = live.document.createElement('button');
-    retry.textContent = 'Retry';
+    retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
     explanation.append(retry);
     live.document.body.append(explanation);
     live.hook.observe();
@@ -20430,7 +20454,7 @@ describe('the field above the composer', () => {
     alert.setAttribute('role', warning.includes('quick check') ? 'status' : 'alert');
     alert.setAttribute('data-clf-test-rendered', '1');
     alert.append(warning);
-    const retry = live.document.createElement('button'); retry.textContent = 'Retry';
+    const retry = live.document.createElement('button'); retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
     retry.addEventListener('click', () => { retries += 1; });
     alert.append(retry);
     live.document.querySelector('main')!.append(alert);
@@ -21576,7 +21600,7 @@ describe('the fresh chat the app opened', () => {
     const copy = live.document.createElement('p');
     copy.textContent = 'Message delivery timed out. Please try again. ';
     const retry = live.document.createElement('button');
-    retry.textContent = 'Retry';
+    retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
     retry.addEventListener('click', () => {
       persistedBeforeClick = JSON.parse(live!.window.sessionStorage.getItem('clf-resume-ack-v1') || '{}')
         .nativeRetrySpent === true;

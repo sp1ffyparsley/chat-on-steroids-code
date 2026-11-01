@@ -17496,8 +17496,9 @@ async function failRepairAttempt(
   // Keep the old companion's absent diagnostics compatible, but never persist arbitrary
   // transport text. This allowlist matches the companion's fixed failure projection.
   const failureCode = failure === null ? null : [
-    'retry_unavailable', 'ambiguous_retry', 'page_not_idle', 'page_changed',
-    'retry_not_authorized', 'native_retry_unavailable', 'native_retry_failed',
+    'retry_unavailable', 'retry_not_ready', 'ambiguous_retry', 'page_not_idle', 'page_changed',
+    'retry_not_authorized', 'native_retry_unavailable', 'native_retry_failed', 'page_status_unconfirmed',
+    'interrupted_stop_unconfirmed', 'goal_wake_unconfirmed',
     'interrupted_compaction_unavailable', 'interruption_not_visible', 'compaction_busy',
     'worker_compaction_disabled', 'conversation_changed', 'recorder_inactive', 'retry_tab_opened'
   ].includes(failure) ? failure : 'action_failed';

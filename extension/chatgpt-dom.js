@@ -2868,6 +2868,13 @@ var CLF_DOM = (() => {
           return;
         }
         const existing = out[index];
+        // One diagnostic card may contain distinct native controls. Coalescing its text must
+        // not silently elect the first button; the action owner still requires a unique handle.
+        const controls = [...new Set([
+          ...(existing.retryControls || (existing.retry ? [existing.retry] : [])),
+          ...(candidate.retryControls || (candidate.retry ? [candidate.retry] : []))
+        ])];
+        if (controls.length > 1) existing.retryControls = controls;
         if (candidate.retry && !existing.retry) {
           out[index] = { ...existing, retry: candidate.retry,
             recoverable: existing.reason || existing.blocking
@@ -2925,7 +2932,7 @@ var CLF_DOM = (() => {
         if (node.closest && node.closest(OWN_SURFACES)) continue;
         if (!displayed(node)) continue;
         if (value.length <= 2 || value.length >= 500) continue;
-        // Observed native helper alert. This is an account
+        // Observed 2026-10-08: native Footlettuce helper alert. This is an account
         // restriction, not transport failure; never grant its adjacent Retry authority.
         const hourlyLimit = /^you['’]ve reached our limit of messages per hour\. please try again later\.?(?:\s*retry)?$/i.test(value);
         // Current native 5.5 quota alert (October11) omits both the model and
@@ -4581,6 +4588,20 @@ var CLF_DOM = (() => {
    * failure, or more than one eligible current control all fail closed.
    */
   const retriedTransportControls = new WeakSet();
+  /** Diagnostic visibility is deliberately permissive; a Retry action needs rendered evidence. */
+  function retryControlReady(control) {
+    return safe(() => {
+      if (!control?.isConnected || control.disabled || control.getAttribute('aria-disabled') === 'true' ||
+          control.closest('[hidden],[inert],[aria-hidden="true"],[aria-disabled="true"]') ||
+          onKeptPage(control) || !displayed(control)) return false;
+      for (let node = control; node; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' ||
+            style.contentVisibility === 'hidden' || style.opacity === '0' || style.pointerEvents === 'none') return false;
+      }
+      return [...control.getClientRects()].some(rect => rect.width > 0 && rect.height > 0);
+    }, false);
+  }
   // A visible Stop alone is not permission to interrupt. Only the latest provider-owned
   // interrupted-stream card qualifies; historical/authored errors and drafts never do.
   function interruptedTransportFailure() {
@@ -4619,12 +4640,10 @@ var CLF_DOM = (() => {
     }
     const latest = allTurns.at(-1);
     const latestSection = latest ? turnNodes(latest).at(-1) : null;
-    const currentErrors = errors().filter(error => {
+    const readCurrentErrors = () => errors().filter(error => {
       if (error.recoverable !== true || error.blocking === true || error.reason ||
           error.node?.closest?.(`${OWN_SURFACES},.markdown,.whitespace-pre-wrap,blockquote,pre,code,[data-markdown-text-style],[data-content-search-unit-key$=":user"],[data-clf-user-text],[contenteditable]`)) return false;
-      // A provider delivery-failure alert can be a sibling of the authored text
-      // inside the current user wrapper. Only its own exact native Retry qualifies;
-      // the user body, wrapper text and an unrelated nearby button never do.
+      // Only a provider alert with its own native Retry may sit beside authored user text.
       if (error.node?.closest?.('[data-message-author-role="user"]') &&
           (error.node.getAttribute('role') !== 'alert' || !error.retry || !error.node.contains(error.retry))) return false;
       const turnContainer = error.node?.closest?.(TURN);
@@ -4632,9 +4651,19 @@ var CLF_DOM = (() => {
       return !turnContainer || Boolean(latestSection && (latestSection === turnContainer ||
         latestSection.contains(error.node) || turnContainer.contains(latestSection)));
     });
-    const eligible = currentErrors.filter(error => error.retry &&
-      !retriedTransportControls.has(error.node) && !retriedTransportControls.has(error.retry) && error.retry.isConnected && displayed(error.retry) &&
-      !error.retry.disabled && error.retry.getAttribute('aria-disabled') !== 'true');
+    const eligibleControls = (currentErrors) => {
+      const controls = new Map();
+      for (const error of currentErrors) {
+        if (retriedTransportControls.has(error.node)) continue;
+        for (const retry of error.retryControls || (error.retry ? [error.retry] : [])) {
+          if (!retriedTransportControls.has(retry) && retryControlReady(retry) && !controls.has(retry))
+            controls.set(retry, { ...error, retry });
+        }
+      }
+      return [...controls.values()];
+    };
+    const currentErrors = readCurrentErrors();
+    const eligible = eligibleControls(currentErrors);
     if (eligible.length !== 1) {
       // A positively identified failed card can precede its Retry control. This invocation has
       // not clicked anything, but an already-spent control is NOT the same readiness evidence.
@@ -4646,10 +4675,10 @@ var CLF_DOM = (() => {
       return { status: 'stopped', reason: eligible.length ? 'ambiguous_retry' : notReady ? 'retry_not_ready' : 'retry_unavailable' };
     }
     const error = eligible[0];
-    const pageChanged = () => wholePageLoadFailure
+    const pageChanged = wholePageLoadFailure
       ? Boolean(composer()) || pendingDraft() || turns().length !== 0 || !conversationId() || !conversationLoadFailure(error.text)
       : composer() !== box || !box?.isConnected || hasComposerAttachments() || (editorText(box) || '').trim();
-    if (!stillCurrent() || !error.node?.isConnected || !error.retry.isConnected || generating() || pageChanged()) {
+    if (!stillCurrent() || !error.node?.isConnected || !error.retry.isConnected || generating() || pageChanged) {
       return { status: 'stopped', reason: 'page_changed' };
     }
     // Some callers own a durable transaction whose one-shot fence must be committed before
@@ -4660,12 +4689,17 @@ var CLF_DOM = (() => {
       try { authorized = beforeRetry(error) === true; } catch { authorized = false; }
       if (!authorized) return { status: 'stopped', reason: 'retry_not_authorized' };
     }
-    // The authorization owner can synchronously change source, draft or native controls.
-    // Recheck after it returns, immediately before spending this exact Retry control.
-    if (!stillCurrent() || pageChanged() || generating() || !error.node?.isConnected ||
-        !error.retry.isConnected || !displayed(error.retry) || error.retry.disabled ||
-        error.retry.getAttribute('aria-disabled') === 'true')
+    // The synchronous authorization hook may itself remount/hide the card, add another control,
+    // change the draft or advance the native source. Its result cannot carry stale DOM authority.
+    const finalControls = eligibleControls(readCurrentErrors());
+    const finalPageChanged = wholePageLoadFailure
+      ? Boolean(composer()) || pendingDraft() || turns().length !== 0 || !conversationId()
+      : composer() !== box || !box?.isConnected || hasComposerAttachments() || (editorText(box) || '').trim() ||
+        (turnNodes(turns().at(-1)).at(-1) || null) !== latestSection;
+    if (!stillCurrent() || generating() || finalPageChanged || finalControls.length !== 1 ||
+        finalControls[0].node !== error.node || finalControls[0].retry !== error.retry) {
       return { status: 'stopped', reason: 'page_changed' };
+    }
     // Mark before clicking: navigation can destroy this document synchronously, and a delayed
     // background receipt must never make the same live control spend the retry twice.
     retriedTransportControls.add(error.retry);

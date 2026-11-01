@@ -871,8 +871,8 @@ describe('one native HTML edit for prepared text', () => {
 });
 
 describe('native Core attachment', () => {
-  const connectorName = 'Luna Forge X7 — Primary Core';
-  const appId = 'asdk_app_Primary';
+  const connectorName = 'Luna Forge X7 — Gustavo Core';
+  const appId = 'asdk_app_gustavo';
   const coreMenu = () => {
     const add = document.createElement('button');
     add.type = 'button';
@@ -3065,6 +3065,35 @@ describe('localized roleless transport cards', () => {
     node.append(copy, retry); parent.append(node);
     return { node, copy, retry };
   }
+
+  it.each(['two-controls', 'hidden', 'inert', 'aria-hidden', 'css-hidden', 'zero-geometry', 'hidden-at-authorization', 'second-at-authorization', 'one-control'])(
+    'keeps Retry diagnostic evidence separate from current action authority: %s', mode => {
+      box.textContent = '';
+      const { node, retry } = card('Retry', 'Message delivery timed out. Please try again. ');
+      node.setAttribute('role', 'alert');
+      const clicked = vi.fn(); retry.addEventListener('click', clicked);
+      const addSecond = () => {
+        const second = retry.cloneNode(true) as HTMLButtonElement;
+        second.addEventListener('click', clicked); node.append(second);
+      };
+      if (mode === 'two-controls') addSecond();
+      if (mode === 'hidden') node.hidden = true;
+      if (mode === 'inert') node.setAttribute('inert', '');
+      if (mode === 'aria-hidden') node.setAttribute('aria-hidden', 'true');
+      if (mode === 'css-hidden') node.style.visibility = 'hidden';
+      if (mode === 'zero-geometry') Object.defineProperty(retry, 'getClientRects', { value: () => [] });
+      const authorize = vi.fn(() => {
+        if (mode === 'hidden-at-authorization') node.hidden = true;
+        if (mode === 'second-at-authorization') addSecond();
+        return true;
+      });
+      expect(api.errors().some(error => error.node === node)).toBe(true);
+      const result = api.retryLatestTransportFailure(() => true, authorize);
+      expect(result.status).toBe(mode === 'one-control' ? 'retried' : 'stopped');
+      expect(clicked).toHaveBeenCalledTimes(mode === 'one-control' ? 1 : 0);
+      if (mode === 'two-controls') expect(result.reason).toBe('ambiguous_retry');
+      expect(api.errors().some(error => error.node === node)).toBe(true);
+    });
 
   it('reports a bounded localized transport card without granting click authority', () => {
     const { node, retry } = card();

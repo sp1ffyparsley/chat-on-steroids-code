@@ -3700,7 +3700,7 @@ async function retryRepairMessageAfterTabWake(
     // original delivery semantics, including an ambiguous unanswered message.
     return wakeGuard ? await tabReply(target.id, message,
       typeof owner.documentId === 'string' ? { documentId: owner.documentId } : undefined)
-      : await chrome.tabs.sendMessage(target.id, message).catch(() => null);
+      : await tabReply(target.id, message, undefined, REPAIR_PAGE_REPLY_MS);
   } finally {
     if (previous && selectionIssued && selectionObserved && !selectionInterrupted && sameOwner()) {
       try {
@@ -7043,6 +7043,9 @@ async function performBrowserRepairs(repairs, policy) {
     policy.automationProfile === 'rotation';
   for (let index = 0; index < repairs.length; index += 1) {
     const { conversationId, token, action, focus, requiresClaim, reason, retryControlPending } = repairs[index];
+    const observedReloadRecovery = reason === 'unattributed' || reason === 'silence';
+    const repairConnectionEpoch = connectionEpoch;
+    const repairAdmission = conversationAdmission(null, conversationId);
     const guardedGoalRecovery = requiresClaim && action === 'reload' &&
       (reason === 'goal' || reason === 'automation');
     // Native Core may still be running behind a completed/404 response stream.
@@ -7130,7 +7133,9 @@ async function performBrowserRepairs(repairs, policy) {
         } catch { /* Unknown route must block the mutation. */ }
       }
       const key = String(target.id);
-      return Boolean(latest && !latest.pendingUrl && latest.status !== 'loading' &&
+      return Boolean(connectionEpoch === repairConnectionEpoch && !disconnected &&
+        !companionReloadFlight && repairAdmission() && !browserControlsTab(target.id) &&
+        latest && !latest.pendingUrl && latest.status !== 'loading' &&
         conversationFromUrl(latest.url) === conversationId &&
         tabDocuments[key] === recoveryDocument.documentId &&
         tabEpochs[key] === recoveryDocument.navigationEpoch);
@@ -7430,25 +7435,36 @@ async function performBrowserRepairs(repairs, policy) {
             continue;
           }
         }
-        if (!collectedLiveGoal && (reason === 'unattributed' || reason === 'silence')) {
+        if (!collectedLiveGoal && observedReloadRecovery) {
           // Attribution and silence recovery exist to wake a page that stopped reporting. They
           // must never interrupt a page that can positively prove ChatGPT is still streaming:
           // reloading that document produces the native "Resume stream unavailable" / load
           // failure loop and can discard a valid answer. Return the untouched handout with a
           // bounded settle delay; real activity will retire it through the existing owner.
-          const status = await tabReply(target.id, { type: 'clf-page-status' }, undefined, REPAIR_PAGE_REPLY_MS);
-          // A timed-out/negative observer does not prove the page is idle. Retain the
-          // original repair and report its missing witness; never reload from ambiguity.
+          // The bound is the repair window, not the default probe wait: a collector that answers
+          // late is still streaming, and reading it as "not streaming" would reload it.
+          if (typeof recoveryDocument?.documentId !== 'string' || !recoveryDocument.documentId ||
+              !Number.isSafeInteger(recoveryDocument.navigationEpoch) || recoveryDocument.navigationEpoch < 0)
+            throw new Error('page_status_unconfirmed');
+          const status = await tabReply(target.id, { type: 'clf-page-status' },
+            { documentId: recoveryDocument.documentId },
+            REPAIR_PAGE_REPLY_MS);
+          // A missing observer is not an idle-page witness. Preserve the repair and
+          // avoid a reload which could race a late accepted native action.
           if (status?.ok !== true) throw new Error('page_status_unconfirmed');
-          if (status?.ok === true && status.streaming === true) {
+          if (status.streaming === true) {
             const deferred = await call(`/status?repairDeferred=${encodeURIComponent(token)}&repairCause=streaming`);
             if (!deferred.ok) throw new Error('streaming_repair_defer_failed');
             continue;
           }
+          if (status.streaming !== false) throw new Error('page_status_unconfirmed');
+          if (status.conversationId !== conversationId || status.epoch !== recoveryDocument.navigationEpoch)
+            throw new Error('conversation_changed');
         }
         if (!collectedLiveGoal) {
           if (!await recheckNativeRepair()) continue;
-          if (guardedNativeRecovery && !await targetStillOwnsGoal()) throw new Error('conversation_changed');
+          if ((guardedNativeRecovery || observedReloadRecovery) && !await targetStillOwnsGoal())
+            throw new Error('conversation_changed');
           await chrome.tabs.reload(target.id);
         } else if (!await recheckNativeRepair()) {
           // A collector accepting a draft is NOT proof that native Send was
@@ -7494,7 +7510,7 @@ async function performBrowserRepairs(repairs, policy) {
       // Never forward Chrome exception text or arbitrary page strings (which can contain URLs,
       // drafts or credentials). These fixed codes are diagnostics, not replay authorization.
       const failure = [
-        'retry_unavailable', 'ambiguous_retry', 'page_not_idle', 'page_changed',
+        'retry_unavailable', 'retry_not_ready', 'ambiguous_retry', 'page_not_idle', 'page_changed',
         'retry_not_authorized', 'native_retry_unavailable', 'native_retry_failed', 'page_status_unconfirmed',
         'interrupted_compaction_unavailable', 'interrupted_stop_unconfirmed', 'goal_wake_unconfirmed',
         'interruption_not_visible', 'compaction_busy',
@@ -10559,7 +10575,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 119;
+const PAGE_RECORDER_VERSION = 120;
 
 let deferredRecoveryWork = null;
 
