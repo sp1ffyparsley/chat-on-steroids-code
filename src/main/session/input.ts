@@ -3583,14 +3583,17 @@ export function settleTimedOutBrowserHelper(sourceSessionId: string): Promise<Br
       logInfo(`browser helper ${latest!.id}: exact pre-Send failure retained under account hold; source retry budget preserved`);
       return failedHold === 'goal_browser_signed_out' ? 'signed-out' : 'automation-paused';
     }
+    // Archive custody survives terminal disposition and wall-clock rollback. This is
+    // classification only: it neither accepts a decision nor authorizes another Send.
+    if (latest && terminal(latest) && helperNativeSendReceipt(latest) &&
+        (latest.decisionOutput || latest.response !== undefined)) {
+      logInfo(`browser helper custody: phase=answer-archived state=${latest.state} clockCurrent=${Number(helperNativeSendConfirmed(latest))}`);
+      return 'answer-archived';
+    }
     // A prior attempt's cancellation cannot classify this latest request. In particular,
     // an older unsent row must never hide the current helper's authorized/native failure.
     const row = latest?.state === 'cancelled' ? latest : null;
     if (!row) return 'none';
-    // A delivered answer already retained on this exact owner is collection custody,
-    // not permission to label it missing or create a replacement.
-    if (helperNativeSendConfirmed(row) && (row.decisionOutput || row.response !== undefined))
-      return 'answer-archived';
     if (helperConfirmedUnsent(row)) {
       // Pause can race its suspension hook or the deadline. The original semantic error
       // remains authoritative after Resume; it must not spend this turn's failure budget.

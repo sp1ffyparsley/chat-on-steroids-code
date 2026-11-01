@@ -4621,7 +4621,12 @@ var CLF_DOM = (() => {
     const latestSection = latest ? turnNodes(latest).at(-1) : null;
     const currentErrors = errors().filter(error => {
       if (error.recoverable !== true || error.blocking === true || error.reason ||
-          error.node?.closest?.(`${OWN_SURFACES},.markdown,blockquote,pre,code,[data-message-author-role="user"],[data-markdown-text-style],[data-content-search-unit-key$=":user"],[data-clf-user-text],[contenteditable]`)) return false;
+          error.node?.closest?.(`${OWN_SURFACES},.markdown,.whitespace-pre-wrap,blockquote,pre,code,[data-markdown-text-style],[data-content-search-unit-key$=":user"],[data-clf-user-text],[contenteditable]`)) return false;
+      // A provider delivery-failure alert can be a sibling of the authored text
+      // inside the current user wrapper. Only its own exact native Retry qualifies;
+      // the user body, wrapper text and an unrelated nearby button never do.
+      if (error.node?.closest?.('[data-message-author-role="user"]') &&
+          (error.node.getAttribute('role') !== 'alert' || !error.retry || !error.node.contains(error.retry))) return false;
       const turnContainer = error.node?.closest?.(TURN);
       if (wholePageLoadFailure) return !turnContainer && conversationLoadFailure(error.text);
       return !turnContainer || Boolean(latestSection && (latestSection === turnContainer ||

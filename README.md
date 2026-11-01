@@ -2,6 +2,12 @@
 
 This is the custom Electron application and Chrome companion source exported for code review. It has clean public history and excludes private account stores, saved prompts, credentials, runtime logs and deployment artifacts. This source mirror is separate from upstream releases and supplies no public installer.
 
+## Returned R57 repairs — source only
+
+The reviewed follow-up fixes three reproduced boundaries: native timeout Retry admission for an exact provider alert beside authored user text; attempted handoff custody recorded at the final native-click witness rather than earlier authorization; and retained answer classification across terminal helper states or wall-clock rollback. Authored text, historical controls, unknown Send, model, tool and source fences remain. Archive classification grants no new forwarding or retry authority.
+
+Five failure-first cases failed on the prior production source, then12 focused cases passed. In the controlled source owner, the four affected whole suites passed2,994 cases with2 existing skips; root typecheck and changed JavaScript syntax checks passed. The public export's focused validation is separate from private qualification. Logical private source82e1b765 is provenance, not a public Git ref. These changes are not packaged or installed; accepted installed115 and executing-browser uncertainty remain as recorded below. No source-only test result proves live Retry, useful work or automatic next turns.
+
 ## Current reviewed source — October 31, 2026
 
 Observer/background115 source is exported here. Logical private source `a613797df38f4dfddc8701413e7204695e96058d` / tree `3a2a07c442ebe0b02e94bddc07909f4d4f9b4384` is provenance, not a public Git ref. Use this mirror's own commit SHA for public source URLs. No private installer, receipt file, prompts, account configuration, runtime data or original private Git history is included.

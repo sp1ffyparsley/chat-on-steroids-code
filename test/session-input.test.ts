@@ -4233,6 +4233,35 @@ describe('browser decision lifetime', () => {
       expect(retained[0]?.id).toBe(row.id);
     });
 
+  it.each(['sent', 'failed', 'cancelled', 'clock-rollback', 'unconfirmed', 'missing', 'newer-unsent'] as const)(
+    'reports archived terminal helper custody without granting recovery (%s)', async shape => {
+      const controller = new AbortController();
+      const pending = requestBrowserDecision('Retain this exact helper', controller.signal, {
+        sourceSessionId: sessionId, lifetime: 'temporary-planner'
+      });
+      const rejected = expect(pending).rejects.toThrow('goal_browser_cancelled');
+      const row = (await listInputs())[0]!;
+      await claimBrowserInput(row.id, 'terminal-archive-owner', null, true);
+      expect(await authorizeBrowserInput(row.id, 'terminal-archive-owner', null)).toBe(true);
+      if (shape !== 'unconfirmed')
+        expect(await acknowledgeBrowserInput(row.id, 'terminal-archive-owner', null, 'terminal-native-message')).toBe(true);
+      controller.abort(); await rejected;
+      const current = await listInputs();
+      const state = shape === 'sent' ? 'sent' : shape === 'failed' ? 'failed' : 'cancelled';
+      const rows = current.map(entry => entry.id !== row.id ? entry : { ...entry, state,
+        ...(shape === 'missing' ? {} : { decisionOutput: { sha256: 'a'.repeat(64), bytes: 28 } }),
+        ...(shape === 'clock-rollback' ? { deliveredAt: Date.now() + 60_000 } : {}) });
+      if (shape === 'newer-unsent') rows.push({ ...row, id: randomUUID(), state: 'cancelled',
+        createdAt: Date.now() + 1, owner: null });
+      await writeDurableNow('session-input', rows);
+      resetInputForTests();
+      const retained = await listInputs();
+      expect(await settleTimedOutBrowserHelper(sessionId)).toBe(shape === 'unconfirmed' ? 'send-outcome-unconfirmed'
+        : shape === 'missing' ? 'awaiting-answer' : shape === 'newer-unsent' ? 'queued-unclaimed' : 'answer-archived');
+      if (shape !== 'newer-unsent') expect(await listInputs()).toEqual(retained);
+      expect((await listInputs()).find(entry => entry.id === row.id)).toEqual(retained.find(entry => entry.id === row.id));
+    });
+
   it('preserves a delivered temporary helper after answer expiry across a cold restore without automatic replay', async () => {
     const abort = new AbortController();
     const pending = requestBrowserDecision('Original decision', abort.signal, { sourceSessionId: sessionId, lifetime: 'temporary-planner' });

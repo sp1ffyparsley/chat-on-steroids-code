@@ -28850,6 +28850,35 @@ describe('the goal loop', () => {
     expect(live.window.sessionStorage.getItem('clf-goal-spent-v1')).toContain('g-token');
   });
 
+  it('keeps a Loop Send positively unattempted when final picker confirmation remounts Send', async () => {
+    const source = liveFeed();
+    live = await harness(`https://chatgpt.com/c/${CHAT}`, source.replies);
+    const sends = watchSend(live.document);
+    acceptProviderSend(live.document, '6ac024bb-486c-43e8-bf8e-4be1147847d9');
+    const adapter = (live.window as any).CLF_DOM;
+    let proofs = 0;
+    adapter.selectModelSettings = vi.fn(async (_model: string, _effort: string, current: () => boolean) => {
+      if (proofs++ === 0) {
+        const button = live!.document.querySelector('[data-testid="send-button"]')!;
+        button.replaceWith(button.cloneNode(true));
+      }
+      return current();
+    });
+    source.set(readyDraft('Keep the same handoff after a native Send remount'));
+    await live.hook.pullActivity(); await settle();
+    expect(proofs).toBe(1);
+    expect(sends()).toBe(0);
+    expect(acks(live)).toEqual([]);
+    expect(live.window.sessionStorage.getItem('clf-goal-prepared-v1') || '').not.toContain('send-attempted');
+    expect(live.window.sessionStorage.getItem('clf-goal-spent-v1')).toBeNull();
+    expect(composerText(live.document)).toBe('');
+    // The remount also replaced the fixture's native provider listener.
+    acceptProviderSend(live.document, '6ac024bb-486c-43e8-bf8e-4be1147847da');
+    await live.hook.pullActivity(); await settle();
+    expect(proofs).toBe(2);
+    expect(acks(live)).toEqual([expect.objectContaining({ token: 'g-token', messageId: expect.any(String) })]);
+  });
+
   it('keeps the exact Loop draft unspent when final effort confirmation fails, then sends it once after proof returns', async () => {
     const source = liveFeed();
     live = await harness(`https://chatgpt.com/c/${CHAT}`, source.replies);

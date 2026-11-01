@@ -12899,9 +12899,6 @@
         // Freeze its confirmed result before native Send, without triggering another
         // picker read that could alter the live composer/selection boundary.
         sendSelection = { model: preferred.model, reasoningEffort: sendEffort };
-        rememberUserSend();
-        rememberGoalPrepared(target, draft.token, 'send-attempted');
-        sendAttempted = true;
         return true;
       }, (user, nativeConversation) => {
         // A Loop continuation is not delivered merely because the composer cleared or Stop
@@ -12915,7 +12912,13 @@
       goalCore ? draft.reply : null,
       goalCore ? () => CLF_DOM.composerAuthoredText(goalCore.connectorName, goalCore.appId) : null,
       goalCore ? (actual, expected) => sendText(actual) === sendText(expected) : null,
-      null, sentRequestForGoal);
+      null, sentRequestForGoal, false, () => {
+        // Commit attempted custody only at the native click, after the DOM owner's
+        // final editor/draft/control checks. An authorized remount is still unsent.
+        rememberUserSend();
+        rememberGoalPrepared(target, draft.token, 'send-attempted');
+        sendAttempted = true;
+      });
       if (!onDocument() || !sendAttempted) return;
       const witnessedSendReceipt = userSendReceipt;
       const ownsDraft = goalDraft?.token === draft.token;

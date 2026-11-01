@@ -3095,6 +3095,40 @@ describe('localized roleless transport cards', () => {
     expect(box.textContent).toBe('');
   });
 
+  it.each(['current-user-wrapper', 'trailing-error-only', 'quoted-user', 'historical-error-only'] as const)(
+    'binds a delivery-timeout Retry to its latest native failure section (%s)', shape => {
+      box.textContent = '';
+      const prior = document.createElement('section');
+      prior.dataset.testid = 'conversation-turn-prior'; prior.dataset.turn = 'assistant';
+      prior.innerHTML = '<div data-message-author-role="assistant" data-message-id="prior-answer"><div class="markdown">Earlier answer</div></div>';
+      document.body.append(prior);
+      const section = document.createElement('section');
+      section.dataset.testid = 'conversation-turn-failed'; section.dataset.turn = 'user';
+      if (shape === 'current-user-wrapper' || shape === 'quoted-user') {
+        section.innerHTML = '<div data-message-author-role="user" data-message-id="current-user"><div class="whitespace-pre-wrap">Actual task</div></div>';
+      }
+      document.body.append(section);
+      const host = section.querySelector('[data-message-author-role="user"]') || section;
+      const { retry, node } = card('Retry', 'Message delivery timed out. Please try again. ', host);
+      node.setAttribute('role', 'alert');
+      if (shape === 'quoted-user') node.className = 'whitespace-pre-wrap';
+      if (shape === 'historical-error-only') {
+        const newer = prior.cloneNode(true) as HTMLElement;
+        newer.dataset.testid = 'conversation-turn-newer'; section.after(newer);
+      }
+      const clicked = vi.fn(); retry.addEventListener('click', clicked);
+      const authorize = vi.fn(() => true);
+      if (shape === 'current-user-wrapper') expect(api.errors()).toContainEqual(expect.objectContaining({ node, retry }));
+      const result = api.retryLatestTransportFailure(() => true, authorize);
+      const permitted = shape === 'current-user-wrapper' || shape === 'trailing-error-only';
+      expect(result.status).toBe(permitted ? 'retried' : 'stopped');
+      expect(clicked).toHaveBeenCalledTimes(permitted ? 1 : 0);
+      if (permitted) {
+        expect(api.retryLatestTransportFailure(() => true, authorize).status).toBe('stopped');
+        expect(clicked).toHaveBeenCalledOnce();
+      } else expect(authorize).not.toHaveBeenCalled();
+    });
+
   it.each(['draft', 'removed control', 'disabled control', 'source changed'] as const)(
     'rechecks the native Retry boundary after its authorization callback: %s', variant => {
       box.textContent = '';
