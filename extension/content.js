@@ -4111,6 +4111,7 @@
     if (typeof MutationObserver !== 'function' || !document.body) return;
     let timer = null;
     let urgentQueued = false;
+    let approvalQueued = false;
     let hiddenGenerationProbeAt = 0;
     const tabStatusNodeRelevant = (node) => {
       const element = node && node.nodeType === 1 ? node : node?.parentElement;
@@ -4131,6 +4132,24 @@
         tabStatusNodeRelevant(record.target) ||
         [...(record.addedNodes || [])].some(tabStatusNodeRelevant) ||
         [...(record.removedNodes || [])].some(tabStatusNodeRelevant));
+      // Approval dispatch is small and latency-sensitive. Do not put it behind the
+      // full transcript's debounce or a background-tab timer. Reuse this observer,
+      // coalesce the burst and retain every live policy/card/owner check.
+      if (!approvalQueued && tabStatusMutation && records.some(record =>
+        CLF_DOM.approvalMutationRelevant?.(record.target) ||
+        [...(record.addedNodes || [])].some(node => CLF_DOM.approvalMutationRelevant?.(node)))) {
+        approvalQueued = true;
+        const approvalEpoch = epoch, approvalConversation = conversationId, approvalPath = location.pathname;
+        void Promise.resolve().then(() => {
+          approvalQueued = false;
+          if (!alive || !recorderHandle.healthy() || !sameChat() || epoch !== approvalEpoch ||
+              conversationId !== approvalConversation || location.pathname !== approvalPath) return;
+          try {
+            approvalHolding();
+            autoApproveNativeTools();
+          } catch { console.warn('[Chat On Steroids] Native approval observation failed; the card remains pending.'); }
+        });
+      }
       // Idle background pages can mutate styling continuously. Probe their cheap Stop-control
       // signal at most once a second; only real work is allowed through to transcript scans.
       if (pageHidden() && !hiddenObservationActive()) {

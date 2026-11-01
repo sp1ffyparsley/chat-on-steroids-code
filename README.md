@@ -1,5 +1,11 @@
 # Chat On Steroids - code research mirror
 
+## Native approval latency correction — unqualified source follow-up
+
+An enabled native Allow-once action could be inside the viewport yet covered by our own status panel. The existing reveal helper now recognizes only the verified own status surface outside dialogs and centers that exact action, then retains normal currentness and hit testing. Approval-card mutations also receive one coalesced, scope-bound approval-only microtask through the existing observer instead of waiting behind the transcript debounce. Pause, route/epoch ownership, exact one-time action classification, policy and attempt budgets remain required. No persistent security grant or blind clicker is added.
+
+Eleven new cases include five genuine failure-first regressions. Both complete clean-source suites passed1,771cases with0failures/0skips (1,683content and88approval), plus TypeScript, both JavaScript syntax checks and diff checks. The broader shared-Primary run was interrupted without a final result and is not called green. This reviewed delta is source only: qualified121 and installed120 do not contain these approval changes. Native activation and useful automatic-work acceptance remain open.
+
 ## Mixed request owner-confirmation batching — unqualified source follow-up
 
 A complete native-call inventory may contain200rows while separate request sightings add another200rows. Sending their combined owner-confirmation request in one message exceeded the receiver’s200-row boundary and left the tail without ownership ACKs. The existing confirmation owner now sends serial chunks of at most200, rechecks the same route/document/epoch ownership before and after each reply, and applies only exact ACKs. A route change stops later chunks; an unacknowledged tail may retry without replaying its accepted prefix. The native-call evidence limit and exact terminal-result requirements remain unchanged.

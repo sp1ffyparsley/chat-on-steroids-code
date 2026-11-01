@@ -1342,6 +1342,34 @@ describe('native approval automation ownership', () => {
     expect((await live.runtimeMessage({ type: 'clf-recorder-ping' }) as any).requiredFeatures.nativeAllowOnce).toBe(true);
   });
 
+  it.each(['foreground-card', 'enabled-late', 'paused', 'route-changed'] as const)(
+    'attempts eligible native approvals before the transcript debounce (%s)', async mode => {
+      live = await ready();
+      startGenerating(live.document);
+      live.hook.observe(); await settle();
+      if (mode === 'paused') {
+        live.reply.set('activity', () => ({ ok: true, data: { automationPaused: true } }));
+        await live.hook.pullActivity(); await settle();
+      }
+      const win = live.window as any;
+      const originalTimeout = win.setTimeout;
+      win.setTimeout = (fn: () => void, ms?: number) => {
+        if (ms === 250) return 0;
+        return originalTimeout(fn, ms);
+      };
+      try {
+        const approval = addApproval(live, mode === 'enabled-late');
+        if (mode === 'route-changed') live.window.history.pushState(null, '', '/c/bbbbbbbb-cccc-dddd-eeee-ffffffffffff');
+        await settle(100);
+        if (mode === 'enabled-late') {
+          expect(approval.clicked()).toBe(0);
+          approval.allow.disabled = false;
+          await settle(100);
+        }
+        expect(approval.clicked()).toBe(mode === 'paused' || mode === 'route-changed' ? 0 : 1);
+      } finally { win.setTimeout = originalTimeout; }
+    });
+
   it.each([false, true])('uses the existing mutation observer for a late card (hidden: %s)', async hidden => {
     live = await ready();
     live.hook.observe();

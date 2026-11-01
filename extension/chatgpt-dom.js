@@ -2100,14 +2100,22 @@ var CLF_DOM = (() => {
       clipped = clipX && (rect.left < bounds.left || right > bounds.right) ||
         clipY && (rect.top < bounds.top || bottom > bounds.bottom);
     }
-    if (!clipped) return;
+    // Our status panel can cover a button that is inside every scroll boundary.
+    // Reveal that exact native action above the panel; never click through the panel
+    // or move a provider/user dialog out of the way.
+    const hit = typeof document.elementFromPoint === 'function'
+      ? document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2) : null;
+    const ownStageOverlap = !!hit?.closest?.('.clf-stage[data-clf-stage="1"][role="status"]') &&
+      !hit.closest('[role="dialog"],[role="alertdialog"]');
+    if (!clipped && !ownStageOverlap) return;
     const now = Date.now();
     if (state.revealAt !== undefined && now >= state.revealAt && now - state.revealAt < 1500) return;
     state.revealAt = now;
     try {
       // Instant avoids a click racing a smooth scroll; normal hit testing below still applies.
-      button.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
-      approvalDiagnostic('offscreen allow-once action reveal requested');
+      button.scrollIntoView({ block: ownStageOverlap ? 'center' : 'nearest', inline: 'nearest', behavior: 'instant' });
+      approvalDiagnostic(ownStageOverlap ? 'owned status panel overlaps allow-once action; reveal requested'
+        : 'offscreen allow-once action reveal requested');
     } catch { approvalDiagnostic('offscreen allow-once action reveal failed'); }
   }
 

@@ -322,6 +322,37 @@ describe('approval page detector', () => {
     expect(api.autoApproveIfNeeded(current)).toBe(1);
   });
 
+  it.each(['clear', 'still-covered', 'external-modal', 'paused', 'policy-changed'] as const)(
+    'reveals an in-viewport Allow once covered by the owned status panel (%s)', mode => {
+      mount(cardHtml() + '<div class="clf-stage" data-clf-stage="1" role="status"><span class="clf-stage-detail">Pending approval</span></div><div role="dialog" id="external-modal"></div>');
+      const button = dom.window.document.querySelectorAll('button')[1]!;
+      const status = dom.window.document.querySelector('.clf-stage-detail')!;
+      const external = dom.window.document.getElementById('external-modal')!;
+      let allowed = mode !== 'paused', revealed = false;
+      Object.defineProperty(button, 'getClientRects', { value: () => [{ left: 10, top: 100, width: 100, height: 30 }] });
+      const scroll = vi.fn(() => { revealed = true; if (mode === 'policy-changed') allowed = false; });
+      Object.defineProperty(button, 'scrollIntoView', { value: scroll });
+      Object.defineProperty(dom.window.document, 'elementFromPoint', { value: () =>
+        mode === 'external-modal' ? external : revealed && mode !== 'still-covered' ? button : status });
+      const click = vi.spyOn(button, 'click');
+      expect(api.autoApproveIfNeeded(() => allowed)).toBe(mode === 'clear' ? 1 : 0);
+      if (mode === 'paused' || mode === 'external-modal') expect(scroll).not.toHaveBeenCalled();
+      else expect(scroll).toHaveBeenCalledExactlyOnceWith({ block: 'center', inline: 'nearest', behavior: 'instant' });
+      expect(click).toHaveBeenCalledTimes(mode === 'clear' ? 1 : 0);
+    });
+
+  it.each(['lookalike', 'inside-dialog'])('does not reveal through an unowned or modal status surface (%s)', mode => {
+    const overlay = '<div class="clf-stage" '+(mode === 'lookalike' ? '' : 'data-clf-stage="1"')+' role="status"><span id="cover">Covered</span></div>';
+    mount(cardHtml() + (mode === 'inside-dialog' ? '<div role="dialog">'+overlay+'</div>' : overlay));
+    const button = dom.window.document.querySelectorAll('button')[1]!;
+    Object.defineProperty(button, 'getClientRects', { value: () => [{ left: 10, top: 100, width: 100, height: 30 }] });
+    const scroll = vi.fn();
+    Object.defineProperty(button, 'scrollIntoView', { value: scroll });
+    Object.defineProperty(dom.window.document, 'elementFromPoint', { value: () => dom.window.document.getElementById('cover') });
+    expect(api.autoApproveIfNeeded(current)).toBe(0);
+    expect(scroll).not.toHaveBeenCalled();
+  });
+
   it('reveals an offscreen once-only control before hit testing and clicking', () => {
     mount(cardHtml());
     const button = dom.window.document.querySelectorAll('button')[1]!;
