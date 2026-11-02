@@ -1,14 +1,14 @@
 # Chat On Steroids - code research mirror
 
-## Current November 2 source — update124 qualification pending
+## Current November 2 source — update124 installed
 
-This mirror contains accepted update123 fixes plus the reviewed update124 candidate: ordinary native Retry leaves an unchanged text draft in place and never submits it; pre-click draft changes and attachments retain the existing recovery owner without spending Retry; latest-question reads share a bounded cache per exact store identity/revision; missing companion counters stay unknown. Model, account, original request/result and native Send checks remain required.
+This mirror contains accepted update123 fixes plus update124: ordinary native Retry leaves an unchanged text draft in place and never submits it; pre-click draft changes and attachments retain the existing recovery owner without spending Retry; latest-question reads share a bounded cache per exact store identity/revision; missing companion counters stay unknown. Model, account, original request/result and native Send checks remain required.
 
-Update123 is independently installed. Update124 is **not yet qualified or installed**. 865 session/DOM/popup checks, 67 selected companion/bridge checks and 33 installer checks passed, plus TypeScript and JavaScript validation. The canonical isolated package build is running. Earlier source-only headings below are historical checkpoints. Tests and delivery receipts do not certify sustained useful automatic work.
+Update124 was independently installed and accepted on November 2 at 16:27 UTC. Its canonical isolated qualification passed 96 preliminary checks and 13,112 main checks with 62 existing skips, followed by 33 post-pin installer checks and readiness validation. Exact source: aa979d92fbc2310aa000a3103e028d80bf0b48d8; receipt pin: b74af0ceee4bc891fd1aa934d5ccf41865d58174. All 130,415 protected files matched before successor startup; all 291 installed files matched the qualified package. Settings and input receipts were independently unchanged after startup. Running recorder124 was observed in each of six Chrome profile cohorts. This does not certify every task route, cleared receipt debt, useful automatic next turns or a sustained soak. Historical source-only headings below describe earlier checkpoints.
 
 Live upstream reviewed November 2: [`edbbe9ed`](https://github.com/totec448-spec/chat-on-steroids/commit/edbbe9edded28e92b95654d25985b5430847ac7a), latest release v2.1.49. Current-question caching and truthful popup diagnostics are selective adaptations. Broader summary rescue and current-model fallback were not blindly merged. The original repository remains private; prompts, account stores, logs, browser data and deployment artifacts are excluded. One credential-shaped diagnostic test fixture is replaced with a plain synthetic value; its non-disclosure assertions and production code are unchanged.
 
-
+Remaining runtime gaps include historical document/request/result attribution, bounded helper/recovery holds and provider response-load failures. The update preserves uncertain work and does not treat a reload, fresh browser observation or an accepted native Send as terminal tool completion.
 
 ## Native approval latency correction — unqualified source follow-up
 
