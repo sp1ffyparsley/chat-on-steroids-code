@@ -459,8 +459,11 @@ export interface GoalDraftView {
   retryable: boolean;
 }
 
+type GoalHelperSelection = Readonly<{ model: string | null; reasoningEffort: ReasoningEffort | null }>;
+
 // `retryable` is left out on purpose: it is read off the failure every time it is asked for,
 // so there is no second place where a draft can be described as retryable and be wrong.
+
 interface GoalDraft extends Omit<GoalDraftView, 'retryable'> {
   sessionId: string;
   /** Pickup episode frozen before the external decision request begins. */
@@ -475,6 +478,8 @@ interface GoalDraft extends Omit<GoalDraftView, 'retryable'> {
   objectiveSystemPrompt: string;
   /** The loop instruction, frozen for the same reason. Used only when `mode` is `loop`. */
   loopSystemPrompt: string;
+  /** One selected pair owns both this request and its native-Sent answer deadline. */
+  helper: GoalHelperSelection | null;
   /**
    * Which mode this draft was started in, frozen with its prompts.
    *
@@ -2530,6 +2535,7 @@ export function startGoalDraft(input: StartGoalDraftInput): GoalDraftView {
     (reply.helperFailureCount ?? 0) >= MAX_AUTOMATIC_BROWSER_HELPER_FAILURES;
   const restoredToken = typeof input.token === 'string' && input.token.length > 0 && input.token.length <= 200
     ? input.token : null;
+  const helper = backend === 'chatgpt' ? goalHelperSelection() : null;
   const draft: GoalDraft = {
     token: restoredToken ?? `goal-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
     conversationId: input.conversationId,
@@ -2544,6 +2550,7 @@ export function startGoalDraft(input: StartGoalDraftInput): GoalDraftView {
     systemPrompt: settings.prompt,
     objectiveSystemPrompt: settings.objectivePrompt,
     loopSystemPrompt: settings.loopPrompt,
+    helper,
     mode: goalDrivingMode(input.conversationId),
     continuationPolicy: settings.continuationPolicy ?? 'strict',
     objective: goalObjectiveFor(input.conversationId),
@@ -2551,7 +2558,7 @@ export function startGoalDraft(input: StartGoalDraftInput): GoalDraftView {
     turnId: input.turnId,
     stage: helperCircuitOpen ? 'failed' : 'sending',
     stageStartedAt: startedAt,
-    model: backend === 'chatgpt' ? settings.helperModel ?? 'gpt-6-thinking' : settings.model,
+    model: helper ? helper.model ?? "ChatGPT's current selection" : settings.model,
     text: '',
     reply: '',
     error: helperCircuitOpen ? 'goal_browser_helper_exhausted' : null,
@@ -2632,6 +2639,8 @@ function settle(draft: GoalDraft, stage: GoalStage, error: string | null = null)
  * caps and the same refusal rules as every other message this app has ever typed.
  */
 interface GoalRequest {
+  /** Captured with the draft/deadline; later settings saves cannot replace this pair. */
+  helper?: GoalHelperSelection | null;
   lifetime?: 'temporary-planner';
   sourceSessionId?: string;
   /** The exact source Goal/Loop turn; different turns may create different helpers. */
@@ -2853,7 +2862,7 @@ async function requestGoalDecision(request: GoalRequest): Promise<GoalDecision |
           throw new BrowserDecisionProtocolRejection('loop_stop_refused');
         return handoff;
       },
-      ...goalHelperSelection()
+      ...(request.helper ?? goalHelperSelection())
       }), request.mode);
     } catch (error) {
       // Input has already durably preserved this exact helper's failed answer
@@ -2945,6 +2954,15 @@ function modelFamily(choice: { id: string; label: string; aliases?: string[] }):
   return null;
 }
 
+/** Adapted from upstream #2033: preserve our ten-minute native-Sent baseline and
+ * extend only slower reasoning. Preparation and all existing custody bounds stay separate. */
+export function goalBrowserAnswerTimeoutMs(helper: GoalHelperSelection | null): number {
+  const effort = helper?.reasoningEffort;
+  if (effort === 'pro') return 20 * 60_000;
+  if (effort === 'xhigh' || effort === 'max' || effort === 'ultra') return 12 * 60_000;
+  return BROWSER_ANSWER_TIMEOUT_MS;
+}
+
 /**
  * Resolves the Goal/Loop helper selection against the catalog observed for this account.
  *
@@ -2953,7 +2971,7 @@ function modelFamily(choice: { id: string; label: string; aliases?: string[] }):
  * pair is either provider-confirmed or left pinned so browser admission holds the durable command.
  * Before discovery, the saved settings remain unchanged so startup does not guess.
  */
-export function goalHelperSelection(): { model: string | null; reasoningEffort: ReasoningEffort | null } {
+export function goalHelperSelection(): GoalHelperSelection {
   const settings = getConfig().goal;
   let model: string | null = settings.helperModel ?? 'gpt-6-thinking';
   let reasoningEffort: ReasoningEffort | null = settings.helperReasoning ?? 'high';
@@ -4016,6 +4034,7 @@ async function run(draft: GoalDraft): Promise<void> {
   // Context/credential reads yielded above. Do not spend a helper or retire
   // owed work if real activity appeared while those reads were in flight.
   if (!await normalLoopReady(draft)) return settle(draft, 'failed', 'goal_readiness_changed');
+  const answerTimeoutMs = goalBrowserAnswerTimeoutMs(draft.helper);
   const abort = new AbortController();
   draft.abort = abort;
   let requestTimedOut = false;
@@ -4028,7 +4047,7 @@ async function run(draft: GoalDraft): Promise<void> {
   let timer = setTimeout(() => {
     if (draft.backend !== 'chatgpt') return expire();
     // Keep a hard bound even if the durable owner itself stalls while being read.
-    timer = setTimeout(expire, BROWSER_ANSWER_TIMEOUT_MS);
+    timer = setTimeout(expire, answerTimeoutMs);
     // Do not abandon a confirmed native Send merely because preparation's deadline elapsed.
     // Read the incumbent outbox, not a tab, countdown, activity label or conversation id:
     // Temporary Chat legitimately has no conversation binding. Only this request's unique,
@@ -4042,10 +4061,10 @@ async function run(draft: GoalDraft): Promise<void> {
         entry.deliveredAt >= entry.createdAt && entry.deliveredAt <= now && Boolean(entry.messageId));
       if (requestFinished || abort.signal.aborted || draft.acknowledged || drafts.get(draft.conversationId) !== draft) return;
       const delivered = matches.length === 1 ? matches[0] : undefined;
-      const remaining = delivered ? Math.min(delivered.deliveredAt! + BROWSER_ANSWER_TIMEOUT_MS,
-        requestStartedAt + REQUEST_TIMEOUT_MS + BROWSER_ANSWER_TIMEOUT_MS) - Date.now() : 0;
+      const remaining = delivered ? Math.min(delivered.deliveredAt! + answerTimeoutMs,
+        requestStartedAt + REQUEST_TIMEOUT_MS + answerTimeoutMs) - Date.now() : 0;
       if (remaining <= 0) return expire();
-      logInfo(`goal: helper ${delivered!.id} has native delivery; retaining exact answer waiter for up to ${remaining}ms`);
+      logInfo(`goal: helper ${delivered!.id} has native delivery; retaining exact answer waiter for up to ${remaining}ms (answer limit=${answerTimeoutMs}ms, frozen reasoning=${draft.helper?.reasoningEffort ?? 'default'})`);
       clearTimeout(timer);
       timer = setTimeout(expire, remaining);
     }).catch(error => {
@@ -4060,6 +4079,7 @@ async function run(draft: GoalDraft): Promise<void> {
       logInfo(`goal: finite settled source ${draft.conversationId}/${draft.turnId} permits useful reconciliation; a STOP proposal retains missing native results without another executor message`);
     const decision = draft.backend === 'templates' ? templateGoalDecision(messages.filter((message) => message.role === 'assistant').at(-1)?.content ?? '', Math.floor(Math.random() * 200), Math.floor(Math.random() * 200)) : await requestDrivingDecision({
       backend: draft.backend,
+      helper: draft.helper,
       endpoint,
       reasoning,
       sourceSessionId: draft.sessionId,

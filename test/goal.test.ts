@@ -2189,13 +2189,18 @@ describe('finite Goal acceptance reference', () => {
   });
 });
 
-it('marks only the actual native helper answer deadline for archive-only late collection', async () => {
+it.each([
+  { effort: 'high', answerMs: 600_000, changeToPro: false },
+  { effort: 'xhigh', answerMs: 720_000, changeToPro: false },
+  { effort: 'pro', answerMs: 1_200_000, changeToPro: false },
+  { effort: 'low', answerMs: 600_000, changeToPro: true }
+] as const)('marks only the actual native helper answer deadline for archive-only late collection ($effort / changed=$changeToPro)', async ({ effort, answerMs, changeToPro }) => {
   const conversationId = 'exact-native-helper-answer-expiry';
   const turnId = 'exact-expiry-source-turn';
   await writeDurableNow('session-input', []);
   browserInput.resetInputForTests();
   await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal,
-    enabled: true, backend: 'chatgpt', loopBackend: 'chatgpt' } });
+    enabled: true, backend: 'chatgpt', loopBackend: 'chatgpt', helperReasoning: effort } });
   const session = await createSession({ conversationId });
   await goal.setGoalSwitchNow(conversationId, 'goal', true);
   await appendEvent(session.id, { source: 'extension', time: Date.now() - 1000,
@@ -2205,9 +2210,10 @@ it('marks only the actual native helper answer deadline for archive-only late co
   await goal.acceptGoalReplyNow({ conversationId, sessionId: session.id, replyId: 'exact-expiry-final',
     turnId, eventSeq: 1, blocked: false });
   const requestDecision = browserInput.requestBrowserDecision;
-  const captured: { signal?: AbortSignal; id?: string } = {};
+  const captured: { signal?: AbortSignal; id?: string; effort?: unknown } = {};
   const request = vi.spyOn(browserInput, 'requestBrowserDecision').mockImplementation((text, signal, options = {}) => {
     captured.signal = signal;
+    captured.effort = options.reasoningEffort;
     return requestDecision(text, signal, { ...options, onQueued: id => {
       captured.id = id;
       options.onQueued?.(id);
@@ -2215,15 +2221,23 @@ it('marks only the actual native helper answer deadline for archive-only late co
   });
   vi.useFakeTimers();
   try {
-    goal.startGoalDraft({ conversationId, sessionId: session.id, turnId });
+    goal.startGoalDraft({ conversationId, sessionId: session.id, turnId, deferStart: true });
+    if (changeToPro) {
+      const current = (await import('../src/main/config.js')).getConfig();
+      await saveConfig({ ...current, goal: { ...current.goal, helperReasoning: 'pro' } });
+    }
+    goal.beginGoalDraft(conversationId, goal.goalViewFor(conversationId)!.token);
     await vi.waitFor(() => expect(captured.id).toBeTruthy());
     const id = captured.id!;
+    expect(captured.effort).toBe(effort);
     expect(await browserInput.claimBrowserInput(id, 'expiry-driver-document', null, true)).not.toBeNull();
     expect(await browserInput.authorizeBrowserInput(id, 'expiry-driver-document', null)).toBe(true);
     expect(await browserInput.acknowledgeBrowserInput(id, 'expiry-driver-document', null, 'exact-native-helper-question')).toBe(true);
     await vi.advanceTimersByTimeAsync(180_000);
     expect(captured.signal?.aborted).toBe(false);
-    await vi.advanceTimersByTimeAsync(600_001);
+    await vi.advanceTimersByTimeAsync(answerMs - 180_000 - 1);
+    expect(captured.signal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(2);
     await vi.waitFor(() => expect(goal.goalViewFor(conversationId)?.stage).toBe('failed'));
     expect(captured.signal?.reason).toBeInstanceOf(DOMException);
     expect(captured.signal?.reason).toMatchObject({ name: 'TimeoutError', message: 'goal_browser_answer_expired' });

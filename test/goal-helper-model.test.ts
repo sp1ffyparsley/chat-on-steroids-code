@@ -14,7 +14,7 @@ vi.mock('../src/main/config.js', async original => {
   return { ...real, getConfig: () => ({ ...real.defaultConfig(), goal: { ...real.defaultConfig().goal, ...state.goal } }) };
 });
 
-const { goalHelperSelection, goalProgressFor } = await import('../src/main/goal.js');
+const { goalHelperSelection, goalProgressFor, goalBrowserAnswerTimeoutMs } = await import('../src/main/goal.js');
 
 beforeEach(() => {
   state.models = [
@@ -137,3 +137,10 @@ it('changes nothing before the account catalog has been observed', () => {
   state.goal = { helperModel: 'gpt-6-pro', helperReasoning: 'pro' };
   expect(goalHelperSelection()).toEqual({ model: 'gpt-6-pro', reasoningEffort: 'pro' });
 });
+
+// Keep our existing ten-minute native-Sent custody; extend only slower reasoning.
+it.each([['low', 10], ['medium', 10], ['high', 10], ['xhigh', 12], ['max', 12], ['ultra', 12], ['pro', 20], [null, 10]] as const)(
+  'bounds the frozen native helper answer window for %s at %i minutes', (effort, minutes) => {
+    expect(goalBrowserAnswerTimeoutMs(effort === null ? null : { model: 'gpt-6-thinking', reasoningEffort: effort }))
+      .toBe(minutes * 60_000);
+  });
