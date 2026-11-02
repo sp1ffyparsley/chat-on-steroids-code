@@ -1,6 +1,6 @@
 # Chat On Steroids - code research mirror
 
-## Update126 reviewed source — qualification running, installed125 unchanged
+## Update126 qualified — protected installation in progress, installed125 remains baseline
 
 The new source admits an exact original native completion reobserved after navigation only when the new page positively proves a fresh inactive final for the same original question and full ordered original Core/request/Code parent inventory. It never rebinds the old fence or enriches missing original request IDs. The existing Main verifier still requires every real, integrity-checked durable terminal result and exact checkpoint commit before clearing the hold. Source changes do not authorize Send or replay.
 
@@ -8,7 +8,7 @@ Upstream PR2041 reply-size guidance is adapted to the existing per-chat Goal dra
 
 Failure-first:4positive reobservation failures with12refusal controls, then16focused passes. The broader evidence/Bridge run recorded1,795passes and one existing detached-worker sweep timing failure; that exact case passed in isolation, but the failed whole run remains failed until canonical qualification. Helper guidance had3failure-first failures/1control, then582whole Goal/backend checks passed. TypeScript, paired JavaScript syntax, diff and2focused predecessor checks passed. Counts overlap.
 
-Reviewed private source identity: b748cec4e015f69f212f6d0811bdd0865019e350; tree:2a4643387cc1ebf026580abbf8cce9c8669fa2e6. These are provenance, not public Git refs. One canonical strict build is running. No126package/install/browser activation or useful automatic next turn is claimed. Missing original identities, current native timeout recovery and sustained useful automation remain open. The accepted125 baseline below remains deployed.
+Reviewed private source identity: b748cec4e015f69f212f6d0811bdd0865019e350; tree:2a4643387cc1ebf026580abbf8cce9c8669fa2e6. These are provenance, not public Git refs. Canonical retry2 passed96preliminary and13,153Main checks with62existing skips in714.14seconds;33post-pin checks and readiness passed. The first qualification failed65pass/5fail in the launcher process-census suite; that exact check then passed alone and all70launcher cases passed without overlapping app-control activity. Assertions and production guards were unchanged; the failed first build remains failed. The new package is qualified and pinned, but installation acceptance, browser activation and useful automatic next turns are still separate. Missing original identities, current native timeout recovery and sustained useful automation remain open. Protected installation is in progress. The accepted125 baseline below remains the installed authority until independent data/program verification accepts126.
 
 ## Current November 2 source — update125 installed
 
