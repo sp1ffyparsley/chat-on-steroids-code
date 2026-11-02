@@ -703,7 +703,6 @@ export function nativeCompletionCandidate(conversation: string): {
   // into a known original parent set, even when the exact user UUID agrees.
   // This candidate is exclusively for an originally COMPLETE tool census.
   if (!row || !pending || pending.reason === 'inventory-incomplete' || !pending.sourceUserMessageId || !final ||
-      row.documentId !== pending.documentId || row.navigationEpoch !== pending.navigationEpoch ||
       row.shellDiscovery !== 'compatible' || final.reason !== 'associated' || final.questions < 1 ||
       final.openCalls !== 0 || final.openCodeCalls !== 0 ||
       final.sourceUserMessageId !== pending.sourceUserMessageId ||
@@ -732,6 +731,19 @@ export function nativeCompletionCandidate(conversation: string): {
         pending.openCodeCallMessageIds.length !== pending.openCodeCalls ||
         !final.answeredCodeCallMessageIds ||
         pending.openCodeCallMessageIds.some(id => !final.answeredCodeCallMessageIds!.includes(id))))) return null;
+  if (row.documentId !== pending.documentId || row.navigationEpoch !== pending.navigationEpoch) {
+    // Navigation does not change a native operation's identity. A NEW document may
+    // reobserve that exact original only with a fresh independent native final,
+    // the full original request half (no omission/enrichment), and every same
+    // ordered Core/Code parent already checked above. Do not rebind the fence.
+    // Main still requires each original durable terminal receipt before its CAS
+    // clears the old checkpoint; this candidate grants no Send or replay.
+    const observed = settledNativeTurnCandidate(conversation);
+    if (!observed || pending.calls < 1 || pending.observedAt > Date.now() ||
+        row.observedAt <= pending.observedAt || !final.allCoreRequestIds ||
+        final.allCoreRequestIds.length !== pending.calls ||
+        !pending.allCoreRequestIds || pending.allCoreRequestIds.some((id, at) => final.allCoreRequestIds![at] !== id)) return null;
+  }
   return { observedAt: row.observedAt, pendingObservedAt: pending.observedAt,
     reason: pending.reason, openCalls: pending.openCalls,
     allCoreRequestIds: pending.allCoreRequestIds ? [...pending.allCoreRequestIds] : null,
@@ -822,8 +834,10 @@ function nativeCompletionDiagnosticFor(row: CoreBrowserEvidenceSnapshot, now: nu
   if (!pending) return result('no-retained-fence');
   if (pending.reason === 'inventory-incomplete') return result('inventory-incomplete');
   if (!pending.sourceUserMessageId) return result('original-source-missing');
-  if (row.documentId !== pending.documentId || row.navigationEpoch !== pending.navigationEpoch)
-    return result('document-changed');
+  if (row.documentId !== pending.documentId || row.navigationEpoch !== pending.navigationEpoch) {
+    const reobserved = nativeCompletionCandidate(row.conversationId);
+    if (!reobserved || reobserved.observedAt !== row.observedAt) return result('document-changed');
+  }
   if (final?.sourceUserMessageId && final.sourceUserMessageId !== pending.sourceUserMessageId)
     return result('question-changed');
   if (shape.missingOriginalNativeIds) return result('original-native-identity-missing');
@@ -952,6 +966,8 @@ export function nativeFinalEvidenceWait(
       ? 'CoS last observed an unresolved native tool result, but that browser observation is stale and current activity is unknown. Elapsed time is not a completion receipt.'
       : pending.reason === 'inventory-incomplete'
         ? 'This native turn exposed only an incomplete Core/Code Mode call inventory. The number and completion of omitted native invocations are unknown; a later final-looking page cannot verify the original tool results.'
+      : documentChanged && diagnostic.reason === 'durable-proof-required'
+        ? 'The current page reobserved the exact original question and completed native parent set. CoS still requires every original durable tool-result receipt before clearing the saved hold; no continuation has been sent.'
       : documentChanged
         ? 'The browser document or navigation epoch changed while an earlier native tool result remained unresolved. The original tool identities and saved work are retained; the new page observation does not prove those results completed.'
       : identitiesChanged

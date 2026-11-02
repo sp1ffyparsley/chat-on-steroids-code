@@ -8446,6 +8446,29 @@ describe('activity feed', () => {
       diagnostic, expected, report, restart, returned, associated };
   }
 
+  it.each([false, true])('reconciles exact original results after reload only with real durable receipts (returned: %s)', async returned => {
+    const f = await privateNativeCheckpointFixture();
+    const input = await import('../src/main/session/input.js');
+    const priorInputs = await input.listInputs();
+    const originalFence = await sessionStoreModule.readSessionNativeCompletionFenceCheckpoint(
+      f.sessionId, f.conversationId, f.profileId);
+    if (returned) await f.returned();
+    const frame = { ...f.diagnostic, documentId: 'reloaded-exact-original-' + randomUUID(),
+      navigationEpoch: f.diagnostic.navigationEpoch + 1, observedAt: Date.now(), ordinaryFinal: f.associated() };
+    expect((await request('POST', '/activity?conversationId=' + f.conversationId,
+      { body: { coreDiagnostic: frame } })).status).toBe(200);
+    const checkpoint = await sessionStoreModule.readSessionNativeCompletionFenceCheckpoint(
+      f.sessionId, f.conversationId, f.profileId);
+    if (returned) {
+      expect(checkpoint?.fence).toBeNull();
+      expect(coreBrowserEvidence(f.conversationId)?.pendingCompletion).toBeNull();
+    } else {
+      expect(checkpoint?.fence).toEqual(originalFence?.fence);
+      expect(coreBrowserEvidence(f.conversationId)?.pendingCompletion).toMatchObject({ documentId: f.diagnostic.documentId });
+    }
+    expect(await input.listInputs()).toEqual(priorInputs);
+  });
+
   it.each([[16, false], [17, false], [52, false], [200, false], [0, false]] as const)(
     'resolves the exact native incident after all %i original parents return without exceeding its workflow diagnostic cap (shared: %s)',
     async (parents, shared) => {

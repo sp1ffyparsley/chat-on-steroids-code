@@ -1770,3 +1770,46 @@ it('publishes readable partial plan stages while final validation remains author
   expect(progress).toHaveBeenCalledWith({ phase: 'generating', text: '1. Build the fea' });
   expect(progress.mock.calls.some(([update]) => update.phase === 'ready')).toBe(false);
 });
+
+
+describe('helper reply length recovery instructions', () => {
+  it.each(['goal', 'loop'] as const)('corrects only the %s chat after an oversized helper reply, then clears on a fitting reply', async mode => {
+    await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true, backend: 'chatgpt', loopBackend: 'chatgpt' } });
+    const id = 'oversized-helper-' + mode;
+    const sessionId = await recording(id, 'Preserve the exact original scope');
+    await goal.setGoalSwitchNow(id, mode, true);
+    browser.request.mockResolvedValueOnce(JSON.stringify({ action: 'continue', reply: 'x'.repeat(17_000) }));
+    goal.startGoalDraft({ conversationId: id, sessionId, turnId: 'oversized' });
+    expect(await settled(id)).toMatchObject({ stage: 'failed', error: 'reply_too_long' });
+    expect(browser.request.mock.calls[0]?.[0]).not.toContain('Your previous helper reply was too long');
+    browser.request.mockResolvedValueOnce('{"action":"continue","reply":"Verify the remaining original acceptance."}');
+    goal.startGoalDraft({ conversationId: id, sessionId, turnId: 'shorter' });
+    expect(await settled(id)).toMatchObject({ stage: 'ready' });
+    expect(browser.request.mock.calls[1]?.[0]).toContain('Your previous helper reply was too long');
+    expect(browser.request.mock.calls[1]?.[0]).toContain('under 6,000 characters');
+    expect(getLog().some(row => row.message.includes('next helper request will ask for a shorter reply'))).toBe(true);
+    browser.request.mockResolvedValueOnce('{"action":"continue","reply":"Continue the original unfinished work."}');
+    goal.startGoalDraft({ conversationId: id, sessionId, turnId: 'fitted' });
+    expect(await settled(id)).toMatchObject({ stage: 'ready' });
+    expect(browser.request.mock.calls[2]?.[0]).not.toContain('Your previous helper reply was too long');
+    expect(browser.request).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(['reply_too_long', 'unrelated_transport_failure'])('retains source-local length feedback only for %s', async failure => {
+    await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true, backend: 'chatgpt' } });
+    const id = 'helper-length-source';
+    const sessionId = await recording(id, 'Keep the original useful task');
+    browser.request.mockRejectedValueOnce(new Error(failure));
+    goal.startGoalDraft({ conversationId: id, sessionId, turnId: 'first' });
+    expect((await settled(id)).stage).toBe('failed');
+    const otherSession = await recording('other-length-chat', 'Independent original task');
+    browser.request.mockResolvedValueOnce('{"action":"continue","reply":"Check its own remaining work."}');
+    goal.startGoalDraft({ conversationId: 'other-length-chat', sessionId: otherSession, turnId: 'other' });
+    expect(await settled('other-length-chat')).toMatchObject({ stage: 'ready' });
+    expect(browser.request.mock.calls[1]?.[0]).not.toContain('Your previous helper reply was too long');
+    browser.request.mockResolvedValueOnce('{"action":"continue","reply":"Check the remaining original task."}');
+    goal.startGoalDraft({ conversationId: id, sessionId, turnId: 'retry-source' });
+    expect(await settled(id)).toMatchObject({ stage: 'ready' });
+    expect(String(browser.request.mock.calls[2]?.[0]).includes('Your previous helper reply was too long')).toBe(failure === 'reply_too_long');
+  });
+});

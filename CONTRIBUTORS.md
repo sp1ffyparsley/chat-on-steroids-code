@@ -6,6 +6,8 @@ Some contributions were adapted into maintainer snapshot commits and their origi
 
 ## Incorporated code and designs
 
+- November2 helper reply-length guidance selectively adapts [@Maximapple](https://github.com/Maximapple)'s [PR2041](https://github.com/totec448-spec/chat-on-steroids/pull/2041). This fork preserves its existing16,000-character native response cap and2,000–6,000 preferred native budget; shorter-reply feedback stays on the existing chat draft and never creates a retry/cache owner or relaxes native delivery custody.
+
 - October24 ordinary event-read batching selectively adapts [@Maximapple](https://github.com/Maximapple)'s [PR1829](https://github.com/totec448-spec/chat-on-steroids/pull/1829), commits [6bcfce1d](https://github.com/totec448-spec/chat-on-steroids/commit/6bcfce1d958fcc1e04feeba8d86ae42b4ef1c9f1) and [aa71137b](https://github.com/totec448-spec/chat-on-steroids/commit/aa71137bdeaeb349c9796e023d0149906f5142d7). Five existing readers await their own journal queue while summary writes remain batched; this fork retains stronger witness/fsync/deletion/shutdown flushes. The regression reuses the existing real-filesystem suite and controls only the batch timer. Integration retains `Co-authored-by: Maxim <5410641+Maximapple@users.noreply.github.com>`.
 
 

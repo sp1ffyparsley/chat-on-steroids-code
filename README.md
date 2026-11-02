@@ -1,5 +1,15 @@
 # Chat On Steroids - code research mirror
 
+## Update126 reviewed source — qualification running, installed125 unchanged
+
+The new source admits an exact original native completion reobserved after navigation only when the new page positively proves a fresh inactive final for the same original question and full ordered original Core/request/Code parent inventory. It never rebinds the old fence or enriches missing original request IDs. The existing Main verifier still requires every real, integrity-checked durable terminal result and exact checkpoint commit before clearing the hold. Source changes do not authorize Send or replay.
+
+Upstream PR2041 reply-size guidance is adapted to the existing per-chat Goal draft: normal replies are asked to stay under10,000characters; an actual reply_too_long failure adds under6,000character guidance on that chat’s next request and clears after a fitting decision. Strict JSON, hard transport caps, retry budgets and model/source/security guards stay intact; no global retry cache or replacement owner is added.
+
+Failure-first:4positive reobservation failures with12refusal controls, then16focused passes. The broader evidence/Bridge run recorded1,795passes and one existing detached-worker sweep timing failure; that exact case passed in isolation, but the failed whole run remains failed until canonical qualification. Helper guidance had3failure-first failures/1control, then582whole Goal/backend checks passed. TypeScript, paired JavaScript syntax, diff and2focused predecessor checks passed. Counts overlap.
+
+Reviewed private source identity: b748cec4e015f69f212f6d0811bdd0865019e350; tree:2a4643387cc1ebf026580abbf8cce9c8669fa2e6. These are provenance, not public Git refs. One canonical strict build is running. No126package/install/browser activation or useful automatic next turn is claimed. Missing original identities, current native timeout recovery and sustained useful automation remain open. The accepted125 baseline below remains deployed.
+
 ## Current November 2 source — update125 installed
 
 Update125 is independently installed and accepted. It includes the earlier draft-preserving native Retry, bounded request-owner confirmation, helper preservation, source-bound status and latest-question cache repairs, plus two new reliability fixes:

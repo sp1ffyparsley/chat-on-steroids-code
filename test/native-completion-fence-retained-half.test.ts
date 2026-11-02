@@ -168,3 +168,48 @@ describe('native result wait after browser activation', () => {
     expect(coreBrowserEvidence(TARGET)?.pendingCompletion).toMatchObject({ documentId: DOCUMENT, navigationEpoch: 7, allCoreRequestIds: ['workflow-1', 'workflow-2'] });
   });
 });
+
+
+describe('exact original completion reobserved after navigation', () => {
+  it.each(['document', 'epoch', 'both'] as const)('offers only the same complete original for durable verification after %s changes', kind => {
+    resetCoreBrowserEvidenceForTests();
+    expect(noteCoreBrowserEvidence(frame(Date.now() - 20))).toBe(true);
+    const original = coreBrowserEvidence(TARGET)!.pendingCompletion!;
+    const next = settled(Date.now(), { settledFinalMessageId: 'abababab-3333-4333-8333-333333333333' });
+    if (kind !== 'epoch') next.documentId = 'new-original-document';
+    if (kind !== 'document') next.navigationEpoch = 8;
+    expect(noteCoreBrowserEvidence(next)).toBe(true);
+    const candidate = nativeCompletionCandidate(TARGET);
+    expect(candidate).toMatchObject({ allCoreRequestIds: ['workflow-1', 'workflow-2'], coreCallMessageIds: CALLS });
+    // A candidate is not completion and never rebinds the original private fence.
+    expect(coreBrowserEvidence(TARGET)!.pendingCompletion).toEqual(original);
+    expect(acknowledgeNativeCompletion(TARGET, next.observedAt, original.observedAt,
+      ['workflow-1'], ['native-call-1'])).toBe(false);
+  });
+
+  it.each(['no-final', 'question', 'native-parent', 'request-half', 'missing-original-half',
+    'missing-current-half', 'open-result', 'busy', 'stale', 'future', 'code-parent'] as const)(
+    'retains the old document fence when reobservation proof is %s', kind => {
+      resetCoreBrowserEvidenceForTests();
+      const first = frame(Date.now() - 20);
+      if (kind === 'missing-original-half') delete (first.ordinaryFinal as any).allCoreRequestIds;
+      expect(noteCoreBrowserEvidence(first)).toBe(true);
+      const original = coreBrowserEvidence(TARGET)!.pendingCompletion!;
+      const now = Date.now();
+      const next = settled(now, { settledFinalMessageId: 'abababab-3333-4333-8333-333333333333' });
+      next.documentId = 'new-original-document';
+      if (kind === 'no-final') delete (next.ordinaryFinal as any).settledFinalMessageId;
+      if (kind === 'question') next.ordinaryFinal.sourceUserMessageId = 'abababab-4444-4444-8444-444444444444';
+      if (kind === 'native-parent') next.ordinaryFinal.coreCallMessageIds = ['substituted', CALLS[1]!];
+      if (kind === 'request-half') next.ordinaryFinal.allCoreRequestIds = ['substituted', 'workflow-2'];
+      if (kind === 'missing-current-half') delete (next.ordinaryFinal as any).allCoreRequestIds;
+      if (kind === 'open-result') next.ordinaryFinal.openCalls = 1;
+      if (kind === 'busy') next.ordinaryFinal.activeTurnMapped = true;
+      if (kind === 'stale') next.observedAt = now - 120_000;
+      if (kind === 'future') next.observedAt = now + 120_000;
+      if (kind === 'code-parent') Object.assign(next.ordinaryFinal, { codeCalls: 1, codeCallMessageIds: ['new-code'], answeredCodeCallMessageIds: ['new-code'] });
+      expect(noteCoreBrowserEvidence(next)).toBe(kind !== 'stale');
+      expect(nativeCompletionCandidate(TARGET)).toBeNull();
+      expect(coreBrowserEvidence(TARGET)!.pendingCompletion).toEqual(original);
+    });
+});
