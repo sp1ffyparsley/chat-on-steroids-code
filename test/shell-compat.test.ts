@@ -1885,6 +1885,55 @@ describe('alternate shell turn/message provenance', () => {
       } finally { page.dom.window.close(); }
     });
 
+  it.each(['identity only', 'finished result', 'foreign namespace', 'wrong parent', 'foreign role',
+    'tool recipient', 'unsupported channel', 'missing final receipt', 'unselected result', 'metadata accessor'] as const)(
+    'keeps selected native narration on the same exact request ancestry: %s', async variant => {
+      let accessorReads = 0;
+      const accepted = variant === 'identity only' || variant === 'finished result';
+      const page = await shellHarness({ withCall: true, nativeCallReceipt: true,
+        callCompleted: false, assistantCompleted: false,
+        nativeCallMutation(mapping, entry) {
+          delete entry.turn.items[1].widgetStateSource;
+          entry.turn.messageIds = [USER, INTERIM, CALL, RESULT, ASSISTANT];
+          mapping[INTERIM] = { id: INTERIM, parent: USER, message: { id: INTERIM,
+            author: { role: 'assistant' }, recipient: 'all', channel: 'analysis',
+            content: { content_type: 'text', parts: ['PRIVATE_SELECTED_NARRATION'] },
+            metadata: { parent_id: USER, working_turn_id: 'native-selected-working',
+              turn_exchange_id: 'native-selected-exchange' } } };
+          mapping[CALL].parent = INTERIM;
+          for (const id of [CALL, RESULT, ASSISTANT]) Object.assign(mapping[id].message.metadata, {
+            working_turn_id: 'native-selected-working', turn_exchange_id: 'native-selected-exchange',
+            parent_id: mapping[id].parent
+          });
+          if (variant === 'finished result') mapping[RESULT].message.content = {
+            content_type: 'code', language: 'json', text: JSON.stringify({
+              content: [{ type: 'text', text: 'PRIVATE_SELECTED_RESULT' }],
+              structuredContent: { cosResultReceipt: { version: 1, id: 'a'.repeat(48) } }
+            }) };
+          else { mapping[CALL].message.status = 'in_progress'; mapping[RESULT].message.status = 'in_progress'; }
+          if (variant === 'foreign namespace') mapping[INTERIM].message.metadata.working_turn_id = 'foreign';
+          if (variant === 'wrong parent') mapping[INTERIM].message.metadata.parent_id = ASSISTANT;
+          if (variant === 'foreign role') mapping[INTERIM].message.author.role = 'user';
+          if (variant === 'tool recipient') mapping[INTERIM].message.recipient = 'api_tool.call_tool';
+          if (variant === 'unsupported channel') mapping[INTERIM].message.channel = 'unknown';
+          if (variant === 'missing final receipt') mapping[ASSISTANT].message.status = 'in_progress';
+          if (variant === 'unselected result') entry.turn.messageIds = [USER, INTERIM, CALL, ASSISTANT];
+          if (variant === 'metadata accessor') Object.defineProperty(mapping[INTERIM].message, 'channel', {
+            get() { accessorReads++; throw new Error('PRIVATE_SELECTED_GETTER'); }
+          });
+        } });
+      try {
+        const turn = page.fiber.turns[0];
+        expect(turn.calls[0].requestId).toBe(accepted ? REQUEST : null);
+        expect(turn.requests.some((row: any) => row.requestId === REQUEST && row.messageId === CALL)).toBe(accepted);
+        expect(turn.calls[0].answered).toBe(variant === 'finished result');
+        expect(turn.endMessageId).toBe(variant === 'finished result' ? ASSISTANT : null);
+        expect(accessorReads).toBe(0);
+        for (const value of ['PRIVATE_SELECTED_NARRATION', 'PRIVATE_SELECTED_RESULT', 'PRIVATE_SELECTED_GETTER'])
+          expect(JSON.stringify(page.fiber)).not.toContain(value);
+      } finally { page.dom.window.close(); }
+    });
+
   it.each([
     ['identity only', true, false], ['finished exact result', true, true], ['cached mapping only', false, false]
   ] as const)('joins the virtualized native namespace only through an independently mounted branch: %s', async (_label, live, finished) => {

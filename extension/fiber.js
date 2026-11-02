@@ -2157,13 +2157,14 @@
     // the entire mounted selected branch back to this typed native user. This
     // recovers request identity only; every result/Code Mode receipt is still
     // checked separately below before a call can become answered.
-    // Folded native narration is not a selected tool/result. It may bridge a
-    // terminally anchored parent chain without acquiring request or completion authority.
+    // Mounted and folded native narration have the same ancestry role. Neither
+    // is a tool/result; both may bridge a terminally anchored parent chain
+    // without acquiring request or completion authority.
     // Only own-data assistant commentary/analysis with no tool recipient qualifies.
-    const unselectedNativeNarration = id => {
+    const nativeNarration = id => {
       const node = nativeField(mapping, id), message = nativeField(node, 'message');
       const recipient = nativeField(message, 'recipient');
-      return !selected.has(id) && nativeField(node, 'id') === id && nativeField(message, 'id') === id &&
+      return nativeField(node, 'id') === id && nativeField(message, 'id') === id &&
         nativeField(nativeField(message, 'author'), 'role') === 'assistant' &&
         (recipient === undefined || recipient === 'all') &&
         ['analysis', 'commentary'].includes(nativeField(message, 'channel'));
@@ -2189,7 +2190,7 @@
       if (currentPath[0] !== typedUserId) {
         prerequisite('nativeAnchorUserPathMismatch'); return refuse('nativeScopePathUnproved');
       }
-      if (!currentPath.every(id => selected.has(id) || unselectedNativeNarration(id))) {
+      if (!currentPath.every(id => selected.has(id) || nativeNarration(id))) {
         prerequisite('nativeAnchorUnselectedPath'); return refuse('nativeScopePathUnproved');
       }
       try {
@@ -2409,8 +2410,8 @@
               return refuse('callIdentityParentUnproved', previousScopeReasons.length
                 ? previousScopeReasons : ['nativeAncestryUnproved']);
             }
-            const isFoldedNarration = Boolean(mountedNativeScope) && unselectedNativeNarration(id);
-            if (!isExec && !isExecResult && !isPreviousResult && !isPreviousInvocation && !isFoldedNarration)
+            const isNativeNarration = Boolean(mountedNativeScope) && nativeNarration(id);
+            if (!isExec && !isExecResult && !isPreviousResult && !isPreviousInvocation && !isNativeNarration)
               return refuse('callIdentityParentUnproved', ['nativeAncestryUnproved']);
             if (previousToolResult !== null && !isPreviousInvocation)
               return refuse('callIdentityParentUnproved', ['nativeAncestryUnproved']);

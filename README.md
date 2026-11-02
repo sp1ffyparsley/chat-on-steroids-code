@@ -1,5 +1,11 @@
 # Chat On Steroids - code research mirror
 
+## Source follow-up — selected narration request matching
+
+The alternate-shell reader accepted an independently terminally anchored assistant analysis/commentary ancestor only while it was folded/unselected. Mounting the same native message caused its following tool call to lose exact request identity; even a real finished result receipt could not be recovered. The existing own-data narration predicate now handles both selected and folded ancestors under the same terminal namespace, native-user, parent, cache and scope checks. Identity-only observations still cannot complete a tool; the separate actual result receipt and Main durable validation remain required.
+
+Two positive regression cases failed before the repair; eight refusal controls already passed. The repaired whole reader/evidence suites pass742cases and the whole content suite passes1688cases, plus TypeScript, JavaScript and diff checks. This follow-up is **source only, not packaged or installed**. Installed update124 remains unchanged. Current live unselected-path refusals and historical document/request/result debt are not declared cleared by this regression fix.
+
 ## Current November 2 source — update124 installed
 
 This mirror contains accepted update123 fixes plus update124: ordinary native Retry leaves an unchanged text draft in place and never submits it; pre-click draft changes and attachments retain the existing recovery owner without spending Retry; latest-question reads share a bounded cache per exact store identity/revision; missing companion counters stay unknown. Model, account, original request/result and native Send checks remain required.
