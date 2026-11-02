@@ -1,5 +1,15 @@
 # Chat On Steroids - code research mirror
 
+## Current November 2 source — update124 qualification pending
+
+This mirror contains accepted update123 fixes plus the reviewed update124 candidate: ordinary native Retry leaves an unchanged text draft in place and never submits it; pre-click draft changes and attachments retain the existing recovery owner without spending Retry; latest-question reads share a bounded cache per exact store identity/revision; missing companion counters stay unknown. Model, account, original request/result and native Send checks remain required.
+
+Update123 is independently installed. Update124 is **not yet qualified or installed**. 865 session/DOM/popup checks, 67 selected companion/bridge checks and 33 installer checks passed, plus TypeScript and JavaScript validation. The canonical isolated package build is running. Earlier source-only headings below are historical checkpoints. Tests and delivery receipts do not certify sustained useful automatic work.
+
+Live upstream reviewed November 2: [`edbbe9ed`](https://github.com/totec448-spec/chat-on-steroids/commit/edbbe9edded28e92b95654d25985b5430847ac7a), latest release v2.1.49. Current-question caching and truthful popup diagnostics are selective adaptations. Broader summary rescue and current-model fallback were not blindly merged. The original repository remains private; prompts, account stores, logs, browser data and deployment artifacts are excluded. One credential-shaped diagnostic test fixture is replaced with a plain synthetic value; its non-disclosure assertions and production code are unchanged.
+
+
+
 ## Native approval latency correction — unqualified source follow-up
 
 An enabled native Allow-once action could be inside the viewport yet covered by our own status panel. The existing reveal helper now recognizes only the verified own status surface outside dialogs and centers that exact action, then retains normal currentness and hit testing. Approval-card mutations also receive one coalesced, scope-bound approval-only microtask through the existing observer instead of waiting behind the transcript debounce. Pause, route/epoch ownership, exact one-time action classification, policy and attempt budgets remain required. No persistent security grant or blind clicker is added.

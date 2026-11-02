@@ -791,6 +791,8 @@ export const REQUEST_ID_GRACE_MS = evidenceWindow(20_000);
 let attributionRepairTimer: NodeJS.Timeout | null = null;
 let attributionRepairRequested = false;
 let fullAttributionRepair = false;
+/** One delayed storage retry per fresh page-evidence/startup trigger, on the existing timer. */
+let attributionRepairRetryUsed = false;
 const repairRequestIds = new Set<string>();
 // Derived negative-read cache only: exact ownership still comes from correlation.ts.
 const repairBuckets = new Map<string, { toolCalls: number; updatedAt: number; requestIds: Set<string> }>();
@@ -809,8 +811,11 @@ function startAttributionRepair(): void {
       await repairDeterministicAttributionNow(affected);
     } catch (err) {
       logWarn(`late request attribution repair failed: ${(err as Error).message}`);
+      // Known storage failures schedule inside the pass before its durability error is
+      // rethrown. Do not spend that same retry twice; catch unexpected failures here too.
+      if (!attributionRepairTimer) retryFailedAttributionRepair();
     }
-    if (attributionRepairRequested) startAttributionRepair();
+    if (attributionRepairRequested && !attributionRepairTimer) startAttributionRepair();
   });
   attributionRepairChain = run.then(
     () => undefined,
@@ -824,6 +829,7 @@ function startAttributionRepair(): void {
  * recorder/session flush just because startup deliberately did not block the first window on it.
  */
 export function queueDeterministicAttributionRepair(): void {
+  attributionRepairRetryUsed = false;
   attributionRepairRequested = true;
   fullAttributionRepair = true;
   if (attributionRepairTimer) {
@@ -834,6 +840,11 @@ export function queueDeterministicAttributionRepair(): void {
 }
 
 function scheduleAttributionRepair(requestId: string): void {
+  if (attributionRepairRetryUsed && attributionRepairTimer) {
+    clearTimeout(attributionRepairTimer);
+    attributionRepairTimer = null;
+  }
+  attributionRepairRetryUsed = false;
   attributionRepairRequested = true;
   repairRequestIds.add(requestId);
   if (repairRequestIds.size > 50_000) { repairRequestIds.clear(); fullAttributionRepair = true; }
@@ -842,6 +853,25 @@ function scheduleAttributionRepair(requestId: string): void {
     attributionRepairTimer = null;
     startAttributionRepair();
   }, 250);
+  attributionRepairTimer.unref?.();
+}
+
+function retryFailedAttributionRepair(): void {
+  if (attributionRepairRetryUsed) {
+    logWarn('request attribution: automatic storage retry exhausted; pending calls await new evidence or startup');
+    return;
+  }
+  attributionRepairRetryUsed = true;
+  attributionRepairRequested = true;
+  // Reconstruct from retained source journals and current exact correlations, not a cached
+  // partial transfer. All asset, owner, journal and duplicate checks run again unchanged.
+  fullAttributionRepair = true;
+  if (attributionRepairTimer) clearTimeout(attributionRepairTimer);
+  logInfo('request attribution: storage repair failed; scheduling one retry in 1000ms using existing exact proof');
+  attributionRepairTimer = setTimeout(() => {
+    attributionRepairTimer = null;
+    startAttributionRepair();
+  }, 1000);
   attributionRepairTimer.unref?.();
 }
 
@@ -1003,6 +1033,7 @@ async function repairDeterministicAttributionNow(affected?: ReadonlySet<string>)
  let repairedSessions = 0;
  let repairedCalls = 0;
   let deferredDestinationSyncError: Error | null = null;
+  let storageFailed = false;
   const exactCurrentOwner = async (conversationId: string, sessionId: string): Promise<boolean> => {
     // A correlation names one exact historical session, but that is not proof
     // that the conversation still has one unique current attachment. The store
@@ -1027,6 +1058,7 @@ async function repairDeterministicAttributionNow(affected?: ReadonlySet<string>)
       // One damaged holding bucket must remain untouched, but it must not starve
       // independent exact request-id repairs in other sessions.
       repairBuckets.delete(summary.id);
+      storageFailed = true;
       logWarn('late request attribution repair held: source journal integrity unverified');
       continue;
     }
@@ -1127,6 +1159,7 @@ async function repairDeterministicAttributionNow(affected?: ReadonlySet<string>)
           const data = await readAsset(summary.id, assetId);
           if (!data) {
             assetsComplete = false;
+            storageFailed = true;
             break;
           }
           await verifyAndSyncSessionAsset(summary.id, assetId, data);
@@ -1141,6 +1174,7 @@ async function repairDeterministicAttributionNow(affected?: ReadonlySet<string>)
       }
     } catch (err) {
       assetsComplete = false;
+      storageFailed = true;
       logWarn(`could not repair unattributed session ${summary.id}: ${(err as Error).message}`);
     }
     if (!assetsComplete) continue;
@@ -1160,6 +1194,7 @@ async function repairDeterministicAttributionNow(affected?: ReadonlySet<string>)
     try {
       await syncSessionJournal(summary.id);
     } catch (err) {
+      storageFailed = true;
       logWarn('late request attribution repair held: source journal sync failed for ' + summary.id + ': ' + String((err as Error).message));
       continue;
     }
@@ -1189,6 +1224,7 @@ async function repairDeterministicAttributionNow(affected?: ReadonlySet<string>)
             if ((readError as NodeJS.ErrnoException).code === 'ENOENT') raw = null;
             else {
               assetsComplete = false;
+              storageFailed = true;
               logWarn('late request attribution repair held: destination journal unreadable for ' + targetSessionId);
               break;
             }
@@ -1201,6 +1237,7 @@ async function repairDeterministicAttributionNow(affected?: ReadonlySet<string>)
           targetEvents = [];
         } catch (inspectionError) {
           assetsComplete = false;
+          storageFailed = true;
           logWarn('late request attribution repair held: destination inspection failed for ' + targetSessionId + ': ' + String((inspectionError as Error).message));
           break;
         }
@@ -1258,6 +1295,7 @@ async function repairDeterministicAttributionNow(affected?: ReadonlySet<string>)
           });
         } catch (err) {
           assetsComplete = false;
+          storageFailed = true;
           logWarn('late request attribution repair held: destination append failed for ' + event.call.callId + ': ' + String((err as Error).message));
           break;
         }
@@ -1280,6 +1318,7 @@ async function repairDeterministicAttributionNow(affected?: ReadonlySet<string>)
         // recovery owner. Keep this bucket for a later pass and keep repairing
         // independent source buckets during this pass.
         assetsComplete = false;
+        storageFailed = true;
         deferredDestinationSyncError ??= err instanceof Error ? err : new Error(String(err));
         logWarn('late request attribution repair held: destination journal sync failed for ' + targetSessionId + ': ' + String((err as Error).message));
         break;
@@ -1297,6 +1336,7 @@ async function repairDeterministicAttributionNow(affected?: ReadonlySet<string>)
     } catch (err) {
       // Failure is local to this holding bucket. Its original journal remains
       // the custody source, and the next pass reconstructs its cache from disk.
+      storageFailed = true;
       logWarn('late request attribution repair held: source rewrite failed for ' + summary.id + ': ' + String((err as Error).message));
       continue;
     } finally {
@@ -1318,6 +1358,7 @@ async function repairDeterministicAttributionNow(affected?: ReadonlySet<string>)
   }
 
   if (repairedSessions > 0) notifyChanged();
+  if (storageFailed) retryFailedAttributionRepair();
   // Surface the durability failure to the original caller after independent
   // buckets have had a chance to complete. The source remains authoritative,
   // and callers still see the failed destination commit as a failed pass.
@@ -1980,13 +2021,18 @@ export function recordToolCall(input: ToolCallInput): Promise<ToolCallRecord | n
 export async function flushRecorder(): Promise<void> {
   // Admission is synchronous even while a request is still waiting for its owner. Include work
   // admitted during a flush too; endpoint/bridge shutdown closes producers before this barrier.
-  while (pendingRecordings.size) await Promise.all([...pendingRecordings]);
-  if (attributionRepairTimer) {
-    clearTimeout(attributionRepairTimer);
-    attributionRepairTimer = null;
-    startAttributionRepair();
+  for (;;) {
+    while (pendingRecordings.size) await Promise.all([...pendingRecordings]);
+    if (attributionRepairTimer) {
+      clearTimeout(attributionRepairTimer);
+      attributionRepairTimer = null;
+      startAttributionRepair();
+    }
+    const chain = attributionRepairChain;
+    await chain.catch(() => undefined);
+    // A storage failure can schedule its one retry while this barrier awaits the pass.
+    if (!pendingRecordings.size && !attributionRepairTimer && chain === attributionRepairChain) break;
   }
-  await attributionRepairChain.catch(() => undefined);
 }
 
 async function fileToolCall(input: ToolCallInput, target: Target): Promise<ToolCallRecord | null> {
@@ -3365,6 +3411,7 @@ export function resetRecorderForTests(): void {
     attributionRepairTimer = null;
   }
   attributionRepairRequested = false;
+  attributionRepairRetryUsed = false;
   attributionRepairChain = Promise.resolve();
   fullAttributionRepair = false;
   repairRequestIds.clear();

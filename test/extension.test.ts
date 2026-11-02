@@ -2579,6 +2579,54 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     expect(worker.tabsReload).not.toHaveBeenCalled();
   });
 
+  it('defers native Retry blocked by an unsent composer without spending the repair', async () => {
+    let armed = false;
+    let handed = false;
+    const deferred: string[] = [];
+    const failed: string[] = [];
+    const receipts: string[] = [];
+    const fetch = vi.fn(async (input: string) => {
+      const url = new URL(input);
+      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/repairs/claim') return response(200, { allowed: true });
+      if (url.pathname === '/status') {
+        if (url.searchParams.has('repairDeferred')) {
+          deferred.push(url.searchParams.get('repairCause') || '');
+          return response(200, { repairs: [] });
+        }
+        if (url.searchParams.has('repairFailed')) failed.push(url.searchParams.get('repairAction') || '');
+        if (url.searchParams.has('repaired')) receipts.push(url.searchParams.get('repairAction') || '');
+        if (armed && !handed) {
+          handed = true;
+          return response(200, { repairs: [{ conversationId: CHAT, token: 'draft-native-retry-token',
+            reason: 'assistant-error', action: 'retry', requiresClaim: true }] });
+        }
+        return response(200, { repairs: [] });
+      }
+      return response(200, {});
+    });
+    const worker = loadWorker({
+      local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch,
+      tabsSendMessage: async (_id, message) => {
+        if (message.type === 'clf-retry-failed-turn')
+          return { ok: false, error: 'page_not_idle', composerBlocked: true };
+        return { ok: true, streaming: false };
+      }
+    });
+    await worker.registerTab(230);
+    await worker.send({ type: 'bind', conversationId: CHAT }, 230);
+    armed = true;
+    await worker.fireAlarm();
+    await worker.fireAlarm();
+
+    expect(deferred).toEqual(['composer-blocked']);
+    expect(failed).toEqual([]);
+    expect(receipts).toEqual([]);
+    expect(worker.tabsSendMessage.mock.calls.filter(([, message]) =>
+      message.type === 'clf-retry-failed-turn')).toHaveLength(1);
+    expect(worker.tabsReload).not.toHaveBeenCalled();
+  });
+
   it.each(['not-ready', 'discarded', 'redirected', 'missing', 'transport-lost', 'spent'])('checks native Retry readiness without extra tab mutation: %s', async surface => {
     let armed = false;
     let handed = false;
@@ -10356,6 +10404,7 @@ describe('extension observation journal', () => {
       callIdentityRecovered: 1, callIdentityPriorPair: 2, callIdentityUserUnproved: 3,
       callIdentityNativeUnproved: 4, callIdentityScopeUnproved: 5, callIdentityParentUnproved: 6,
       callIdentitySelectedWithheld: 7,
+      nativeAnchorLiveMissing: 1, nativeAnchorUserMissing: 2, nativeAnchorTurnIncomplete: 3, nativeAnchorPathEmpty: 4, nativeAnchorUserPathMismatch: 5, nativeAnchorUnselectedPath: 6, nativeAnchorPrerequisite: 7,
       identityReasonCurrentQuestionMissing: 1,
       identityReasonCurrentQuestionUnselected: 2,
       identityReasonCurrentQuestionConflict: 3,
@@ -10418,6 +10467,7 @@ describe('extension observation journal', () => {
     expect(legacy?.shellScan?.rejects).not.toHaveProperty('assistantTerminalReceiptMatched');
     for (const key of ['userProjected', 'callJoinReferenceMissing', 'callJoinReferenceUnselected', 'callJoinReferenceConflict',
       'callJoinResultMissing', 'callJoinResultIdentity', 'callJoinDescriptorUnsupported', 'callIdentityRecovered', 'callIdentityPriorPair', 'callIdentityUserUnproved', 'callIdentityNativeUnproved', 'callIdentityScopeUnproved', 'callIdentityParentUnproved', 'callIdentitySelectedWithheld',
+      'nativeAnchorLiveMissing', 'nativeAnchorUserMissing', 'nativeAnchorTurnIncomplete', 'nativeAnchorPathEmpty', 'nativeAnchorUserPathMismatch', 'nativeAnchorUnselectedPath', 'nativeAnchorPrerequisite',
       'identityReasonCurrentQuestionMissing', 'identityReasonCurrentQuestionUnselected', 'identityReasonCurrentQuestionConflict', 'identityReasonNativeInvocationMissing', 'identityReasonNativeInvocationMismatch', 'identityReasonRequestIdMissing', 'identityReasonDecodedPathMissing', 'identityReasonDecodedPathForeign', 'identityReasonServerMissing', 'identityReasonServerMismatch', 'identityReasonToolMismatch', 'identityReasonWorkingTurnMissing', 'identityReasonWorkingTurnMismatch', 'identityReasonTurnExchangeMissing', 'identityReasonTurnExchangeMismatch', 'identityReasonNativeAncestryUnproved', 'identityReasonPriorRequestIdMissing', 'identityReasonPriorRequestIdMismatch', 'identityReasonPriorResultResourceIncomplete', 'identityReasonPriorToolScopeMismatch', 'identityReasonNativeScopeTurnIncomplete', 'identityReasonNativeScopePathUnproved', 'identityReasonNativeScopeFinalCount', 'identityReasonNativeScopeFinalPathMismatch', 'identityReasonNativeScopeFinalReceiptUnproved', 'identityReasonNativeScopeFinalNamespaceMissing', 'identityReasonNativeScopeNodeConflict', 'identityReasonNativeScopeCacheConflict', 'identityReasonNativeScopeBranchConflict', 'identityReasonNativeScopeUnsupported']) {
       const inherited = Object.assign(Object.create({ [key]: 400 }), {
         fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0 });

@@ -557,7 +557,7 @@ function paintDetails(status, info, tabUnavailable = false) {
   detail(
     grid,
     'extension',
-    status ? `v${status.extensionVersion} · protocol ${status.extensionProtocol}` : null,
+    status ? `v${status.extensionVersion || '?'} · protocol ${status.extensionProtocol ?? '?'}` : null,
     status && status.compatible === false
   );
   detail(grid, 'chat id', (info && info.isChat === true && info.conversationId) || null);
@@ -572,7 +572,7 @@ function paintDetails(status, info, tabUnavailable = false) {
     Boolean(!tabUnavailable && info?.isChat === true && info.terminal)
   );
   detail(grid, 'recorder', tabUnavailable ? 'status unavailable' : page
-    ? `recorder v${page.recorderVersion} · run ${page.runId}`
+    ? `recorder v${page.recorderVersion ?? '?'} · run ${page.runId || '?'}`
     : info?.isChat === true ? 'not attached' : info ? 'not applicable · no ChatGPT page selected' : null,
   Boolean(!tabUnavailable && info?.isChat === true && !page));
   detail(grid, 'turn', page ? (page.generating ? `${shorten(page.turnId, 8)} · live` : 'idle') : null);
@@ -594,7 +594,8 @@ function paintDetails(status, info, tabUnavailable = false) {
   detail(
     grid,
     'tab status counts',
-    tabUnavailable ? 'unknown' : info?.isChat === true ? `${info.pending} held · ${info.pendingAll} total`
+    tabUnavailable ? 'unknown' : info?.isChat === true
+      ? Number.isFinite(info.pending) && Number.isFinite(info.pendingAll) ? `${info.pending} held · ${info.pendingAll} total` : 'unknown'
       : info ? 'not applicable · no ChatGPT page selected' : null,
     Boolean(!tabUnavailable && info?.isChat === true && info.pendingAll)
   );
@@ -605,7 +606,7 @@ function paintDetails(status, info, tabUnavailable = false) {
     Boolean(sent && sent.ok === false)
   );
   detail(grid, 'delivered', sent ? sent.total : null);
-  detail(grid, 'page sends', page ? `${page.sends} · ${page.failures} failed` : null, Boolean(page && page.failures));
+  detail(grid, 'page sends', page && Number.isFinite(page.sends) ? `${page.sends} · ${Number(page.failures) || 0} failed` : null, Boolean(page && page.failures));
 }
 
 async function refresh() {

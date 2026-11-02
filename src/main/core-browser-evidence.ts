@@ -50,6 +50,7 @@ export const CORE_SHELL_CALL_REJECTION_KEYS = Object.freeze([
   'callIdentityUserUnproved', 'callIdentityNativeUnproved',
   'callIdentityScopeUnproved', 'callIdentityParentUnproved',
   'callIdentitySelectedWithheld',
+    'nativeAnchorLiveMissing', 'nativeAnchorUserMissing', 'nativeAnchorTurnIncomplete', 'nativeAnchorPathEmpty', 'nativeAnchorUserPathMismatch', 'nativeAnchorUnselectedPath', 'nativeAnchorPrerequisite',
   'identityReasonCurrentQuestionMissing',
   'identityReasonCurrentQuestionUnselected',
   'identityReasonCurrentQuestionConflict',
@@ -914,14 +915,16 @@ export function nativeFinalEvidenceWait(
     now - evidence.observedAt > CORE_BROWSER_EVIDENCE_MAX_AGE_MS;
   const final = evidence.ordinaryFinal;
   const changed = (original: string[] | null, observed?: string[]): boolean =>
-    original !== null && original.length > 0 && (!observed || original.length !== observed.length ||
-      original.some((id, index) => observed[index] !== id));
+    original !== null && original.length > 0 && !!observed &&
+    (original.length !== observed.length || original.some((id, index) => observed[index] !== id));
   // The browser may show Response complete while its original call is still
   // missing. Distinguish a *changed native identity* from simple late
   // publication in the existing GoalWait projection; never display the
   // private message/request ids, infer Send, or add a new diagnostic owner.
+  const documentChanged = evidence.documentId !== pending.documentId ||
+    evidence.navigationEpoch !== pending.navigationEpoch;
   const identitiesChanged = !stale && !!final && final.reason === 'associated' &&
-    (evidence.documentId !== pending.documentId || evidence.navigationEpoch !== pending.navigationEpoch ||
+    (documentChanged ||
       (!!pending.sourceUserMessageId && final.sourceUserMessageId !== pending.sourceUserMessageId) ||
       final.calls !== pending.calls || final.codeCalls !== pending.codeCalls ||
       changed(pending.coreCallMessageIds, final.coreCallMessageIds) ||
@@ -949,6 +952,8 @@ export function nativeFinalEvidenceWait(
       ? 'CoS last observed an unresolved native tool result, but that browser observation is stale and current activity is unknown. Elapsed time is not a completion receipt.'
       : pending.reason === 'inventory-incomplete'
         ? 'This native turn exposed only an incomplete Core/Code Mode call inventory. The number and completion of omitted native invocations are unknown; a later final-looking page cannot verify the original tool results.'
+      : documentChanged
+        ? 'The browser document or navigation epoch changed while an earlier native tool result remained unresolved. The original tool identities and saved work are retained; the new page observation does not prove those results completed.'
       : identitiesChanged
         ? 'The native question or tool identities changed since an unresolved Core/Code Mode call. The original result still has no exact terminal receipt.'
       : 'CoS cannot verify this final answer because exact native tool completion remains unresolved. This wait is not proof that work is running.',

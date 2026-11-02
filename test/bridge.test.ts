@@ -25048,6 +25048,34 @@ describe('unattributed activity recovery', () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it('parks an exact draft-blocked native Retry without expiry, reissue or reload promotion', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      await pair();
+      await events(PRIME, [
+        { kind: 'user_message', time: Date.now(), messageId: 'draft-retry-question', text: 'Preserve this answer' },
+        openTurn('draft-retry-answer'),
+        { kind: 'chat_error', time: Date.now(), turnId: 'draft-retry-answer',
+          text: 'Message delivery timed out. Please try again.', recoverable: true, retryAvailable: true },
+        endTurn('draft-retry-answer', 'failed')
+      ]);
+      const retry = await maintenance();
+      expect(retry).toMatchObject({ conversationId: PRIME, reason: 'assistant-error', action: 'retry' });
+      expect((await request('POST', '/repairs/claim', { body: { token: retry!.token } })).body.allowed).toBe(true);
+      const deferred = await request('GET',
+        `/status?repairDeferred=${encodeURIComponent(retry!.token)}&repairCause=composer-blocked`);
+      expect(deferred.body.repairs).toEqual([]);
+      expect((await request('POST', '/repairs/claim', { body: { token: retry!.token } })).body.allowed).toBe(false);
+      vi.setSystemTime(Date.now() + 5 * 60_000);
+      expect(await maintenance()).toBeNull();
+      await request('GET', `/status?repairFailed=${encodeURIComponent(retry!.token)}&repairAction=retried`);
+      expect(await maintenance()).toBeNull();
+      await events(PRIME, [{ kind: 'chat_error', time: Date.now(), turnId: 'draft-retry-answer',
+        text: 'Message delivery timed out. Please try again.', recoverable: true, retryAvailable: true }]);
+      expect(await maintenance()).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
   it('keeps a resumed assistant stream on the same unspent native Retry instead of promoting it to reload', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
@@ -34812,7 +34840,8 @@ it.each([
   }
 });
 
-it('retires ambiguous helper fences only at the deliberate Resume boundary', async () => {
+it.each(['confirmed-unsent', 'unconfirmed', 'native-sent'] as const)(
+  'bulk Resume preserves uncertain helper fences and scopes exact-chat recovery (%s)', async custody => {
   const { listInputs, resetInputForTests } = await import('../src/main/session/input.js');
   const chat = 'a6767676-1111-4111-8111-000000000206';
   const inputId = 'a6767676-2222-4222-8222-000000000206';
@@ -34831,6 +34860,9 @@ it('retires ambiguous helper fences only at the deliberate Resume boundary', asy
       state: 'cancelled', text: 'Choose the next action', mode: 'after-turn', dueAt: Date.now() - 1,
       createdAt: Date.now() - 1, model: null, reasoningEffort: null, owner: 'old-helper-document',
       decisionSourceSessionId: recorded.body.sessionId, conversationId: null,
+      ...(custody !== 'unconfirmed' ? { requiresAuthorization: true } : {}),
+      ...(custody === 'native-sent' ? { sendAuthorizedAt: Date.now() - 1,
+        deliveredAt: Date.now(), messageId: 'retained-native-helper-send' } : {}),
       error: 'Browser helper delivery was not confirmed'
     }]);
     resetInputForTests();
@@ -34839,11 +34871,19 @@ it('retires ambiguous helper fences only at the deliberate Resume boundary', asy
     await resumeAutomationChats({ startBrowser: false, maxQueued: 0 });
     expect(await listInputs()).toEqual([expect.objectContaining({ id: inputId, state: 'cancelled' })]);
 
-    // Deliberate Resume all is the one user-authorized boundary that releases the fence.
-    expect(await resumeAutomationChats({ startBrowser: false })).toMatchObject({ eligible: 1, queued: 1 });
-    expect(await listInputs()).toEqual([expect.objectContaining({
-      id: inputId, state: 'failed', error: 'User authorized a new helper'
-    })]);
+    const before = await listInputs();
+    // An exact-chat action must never withdraw another source's helper fence.
+    await resumeAutomationChats({ sessionId: 'unrelated-resume-source', startBrowser: false });
+    expect(await listInputs()).toEqual(before);
+
+    await resumeAutomationChats({ startBrowser: false });
+    if (custody === 'confirmed-unsent') {
+      expect(await listInputs()).toEqual([expect.objectContaining({
+        id: inputId, state: 'failed', error: 'User authorized a new helper'
+      })]);
+    } else {
+      expect(await listInputs()).toEqual(before);
+    }
   } finally {
     await writeDurableNow('session-input', []);
     resetInputForTests();
@@ -36150,6 +36190,7 @@ describe('diagnostic-only original scope reasons', () => {
     }] } });
     const sessionId = created.body.sessionId as string;
     const reasons = {
+      nativeAnchorLiveMissing: 1, nativeAnchorUserMissing: 2, nativeAnchorTurnIncomplete: 3, nativeAnchorPathEmpty: 4, nativeAnchorUserPathMismatch: 5, nativeAnchorUnselectedPath: 6, nativeAnchorPrerequisite: 7,
       identityReasonCurrentQuestionMissing: 0,
       identityReasonCurrentQuestionUnselected: 0,
       identityReasonCurrentQuestionConflict: 0,

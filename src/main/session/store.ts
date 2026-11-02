@@ -2535,12 +2535,31 @@ export async function readRecentEvents(
   return readRecentEventsFromDisk(sessionId, limit, options);
 }
 
+type LatestQuestion = Extract<SessionEvent, { kind: 'user_message' }> | undefined;
+// Adapted from Maximapple's upstream 6277c2c5 / 5cc1460c. Keep this fork's original
+// question ordering; cache only the same open-store identity and journal revision.
+const latestQuestionReads = new Map<string, {
+  owner: OpenSession; revision: number; read: Promise<LatestQuestion>
+}>();
+
 /** The latest authored question, unaffected by later revisions of older messages. */
 export async function readLatestUserMessage(sessionId: string): Promise<Extract<SessionEvent, { kind: 'user_message' }> | undefined> {
   assertSessionId(sessionId);
   await settleSessionWrites(sessionId);
-  const [message] = await readRecentEventsFromDisk(sessionId, 1, { kinds: ['user_message'], orderByOrigin: true });
-  return message?.kind === 'user_message' ? message : undefined;
+  const owner = open.get(sessionId);
+  const cached = latestQuestionReads.get(sessionId);
+  if (owner && cached?.owner === owner && cached.revision === owner.nextSeq) return cached.read;
+  const read = readRecentEventsFromDisk(sessionId, 1, { kinds: ['user_message'], orderByOrigin: true })
+    .then(([message]): LatestQuestion => message?.kind === 'user_message' ? message : undefined);
+  if (owner) {
+    const entry = { owner, revision: owner.nextSeq, read };
+    latestQuestionReads.set(sessionId, entry);
+    if (latestQuestionReads.size > 200) latestQuestionReads.delete(latestQuestionReads.keys().next().value!);
+    void read.catch(() => {
+      if (latestQuestionReads.get(sessionId) === entry) latestQuestionReads.delete(sessionId);
+    });
+  }
+  return read;
 }
 
 /** Recorded local execution, not a native tool label or a request-id sighting alone. */
@@ -4660,6 +4679,7 @@ export async function emptyDeletedSessions(): Promise<number> {
 
 /** Test seam: forgets in-memory state without touching the files. */
 export function resetSessionStoreForTests(): void {
+  latestQuestionReads.clear();
   unreadableCanonicalShardWarnings.clear();
   canonicalShardWarningEpoch++;
   for (const entry of open.values()) if (entry.metaTimer) clearTimeout(entry.metaTimer);

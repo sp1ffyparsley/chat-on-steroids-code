@@ -3514,7 +3514,11 @@ export function suspendPausedBrowserDecisionWaits(): Promise<void> {
 /** A deliberate user action withdraws one source chat's ambiguous helper fences.
  * Every old owner remains terminal forever; this authorizes one replacement helper rather
  * than one replacement per duplicate warning left by older builds. */
-export function authorizeBrowserHelperRetry(id: string, sourceSessionId: string, sourceTurnId?: string): Promise<boolean> {
+export type BrowserHelperRetryOptions = { confirmedUnsentOnly?: boolean };
+
+export function authorizeBrowserHelperRetry(
+  id: string, sourceSessionId: string, sourceTurnId?: string, options: BrowserHelperRetryOptions = {}
+): Promise<boolean> {
   return serial(async () => {
     const current = await load();
     const row = current.find(entry => entry.id === id && entry.decisionSourceSessionId === sourceSessionId
@@ -3536,6 +3540,14 @@ export function authorizeBrowserHelperRetry(id: string, sourceSessionId: string,
           entry.toolReceiptUncertain !== true && !!sourceTurnId && entry.decisionSourceTurnId === sourceTurnId)
       ));
     if (!row || current.some(entry => entry.decisionSourceSessionId === sourceSessionId && !terminal(entry))) return false;
+    // The newest warning cannot authorize retiring an older same-source native/uncertain Send.
+    // Recheck the complete cancelled set here, after selection and before any durable mutation.
+    if (options.confirmedUnsentOnly && (row.state !== 'cancelled' || current.some(entry =>
+      entry.decisionSourceSessionId === sourceSessionId && entry.purpose === 'decision' &&
+      entry.state === 'cancelled' && !helperConfirmedUnsent(entry)))) {
+      logInfo('browser helper bulk retry held: source retains uncertain or native Send custody');
+      return false;
+    }
     if (row.state === 'sent' || row.state === 'failed') return true;
     let retired = 0;
     await commit(current.map(entry => {

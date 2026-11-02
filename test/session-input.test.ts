@@ -3772,6 +3772,46 @@ describe('durable user input ownership', () => {
 });
 
 describe('browser decision lifetime', () => {
+  it.each(['legacy-owner', 'authorized', 'native-sent', 'response', 'mixed-source', 'accepted-answer'] as const)(
+    'bulk helper retry preserves uncertain custody (%s)', async shape => {
+      const unsent: InputEntry = {
+        ...input({ sessionId: null }), purpose: 'decision', lifetime: 'temporary-planner',
+        decisionSourceSessionId: sessionId, decisionSourceTurnId: 'bulk-source-turn',
+        state: 'cancelled', owner: null, createdAt: now, conversationId: null, requiresAuthorization: true
+      };
+      const uncertain: InputEntry = { ...unsent, owner: 'retained-document',
+        ...(shape === 'legacy-owner' ? { requiresAuthorization: undefined } : {}),
+        ...(shape === 'authorized' ? { sendAuthorizedAt: now } : {}),
+        ...(shape === 'native-sent' ? { sendAuthorizedAt: now, deliveredAt: now, messageId: 'native-message' } : {}),
+        ...(shape === 'response' ? { response: 'Retained helper answer' } : {}),
+        ...(shape === 'accepted-answer' ? { state: 'sent', response: 'Accepted helper answer' } : {})
+      };
+      const rows = shape === 'mixed-source'
+        ? [unsent, { ...uncertain, id: randomUUID(), requiresAuthorization: undefined }]
+        : [uncertain];
+      await writeDurableNow('session-input', rows);
+      resetInputForTests();
+      const before = await listInputs();
+      expect(await authorizeBrowserHelperRetry(rows[0]!.id, sessionId, 'bulk-source-turn',
+        { confirmedUnsentOnly: true })).toBe(false);
+      expect(await listInputs()).toEqual(before);
+    });
+
+  it('bulk helper retry retires only positively unsent duplicate warnings', async () => {
+    const rows: InputEntry[] = [0, 1].map(() => ({
+      ...input({ sessionId: null }), purpose: 'decision', lifetime: 'temporary-planner',
+      decisionSourceSessionId: sessionId, state: 'cancelled', owner: 'unsent-document',
+      createdAt: now, conversationId: null, requiresAuthorization: true
+    }));
+    await writeDurableNow('session-input', rows);
+    resetInputForTests();
+    expect(await authorizeBrowserHelperRetry(rows[1]!.id, sessionId, undefined,
+      { confirmedUnsentOnly: true })).toBe(true);
+    expect((await listInputs()).map(row => ({ id: row.id, state: row.state })))
+      .toEqual(rows.map(row => ({ id: row.id, state: 'failed' })));
+  });
+
+
   it('uses durable pause for helper admission without waking Chrome or creating another hold owner', async () => {
     const wakeDecision = vi.fn(async () => undefined);
     configureInputDelivery({ applyAutomation: automate, changed, wakeDecision });

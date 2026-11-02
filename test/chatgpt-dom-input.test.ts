@@ -27,7 +27,7 @@ interface DomApi {
   generating(): boolean;
   noteStopClick(target: Node): boolean;
   clearStoppedTurn(): void;
-  retryLatestTransportFailure(current?: () => boolean, beforeRetry?: () => boolean): { status: string; reason?: string };
+  retryLatestTransportFailure(current?: () => boolean, beforeRetry?: () => boolean, preserveComposerDraft?: boolean): { status: string; reason?: string };
   sendButton(): HTMLButtonElement | null;
   temporaryChatReady(): boolean;
   confirmTemporaryChatIntroduction(): void;
@@ -3065,6 +3065,53 @@ describe('localized roleless transport cards', () => {
     node.append(copy, retry); parent.append(node);
     return { node, copy, retry };
   }
+
+  it.each(['unchanged', 'changed text', 'attachment', 'route', 'remount', 'hidden', 'ambiguous', 'authorization refused'])(
+    'keeps draft-preserving native Retry bound to the unchanged provider control: %s', change => {
+      const draft = 'Unsent user text\n[[CLF-HANDOFF:0123456789abcdef]]';
+      box.textContent = draft;
+      const route = dom.window.location.pathname;
+      const { node, retry } = card('Retry', 'Message delivery timed out. Please try again. ');
+      node.setAttribute('role', 'alert');
+      const clicked = vi.fn();
+      const sent = vi.fn();
+      retry.addEventListener('click', clicked);
+      button.addEventListener('click', sent);
+      const authorize = vi.fn(() => {
+        if (change === 'changed text') box.textContent = 'User changed the draft';
+        if (change === 'attachment') {
+          const file = document.createElement('button');
+          file.setAttribute('aria-label', 'Remove file: pending.png');
+          document.querySelector('form')!.append(file);
+        }
+        if (change === 'route') dom.reconfigure({ url: 'https://chatgpt.com/c/newer-chat' });
+        if (change === 'remount') box.replaceWith(box.cloneNode(true));
+        if (change === 'hidden') retry.hidden = true;
+        if (change === 'ambiguous') node.append(retry.cloneNode(true));
+        return change !== 'authorization refused';
+      });
+      expect(api.retryLatestTransportFailure(() => dom.window.location.pathname === route, authorize, true).status)
+        .toBe(change === 'unchanged' ? 'retried' : 'stopped');
+      expect(clicked).toHaveBeenCalledTimes(change === 'unchanged' ? 1 : 0);
+      expect(sent).not.toHaveBeenCalled();
+      expect(document.querySelector('#prompt-textarea')!.textContent)
+        .toBe(change === 'changed text' ? 'User changed the draft' : draft);
+      if (change === 'unchanged') {
+        expect(api.retryLatestTransportFailure(() => true, authorize, true).status).toBe('stopped');
+        expect(clicked).toHaveBeenCalledOnce();
+      }
+    });
+
+  it('retains the empty-composer requirement for callers without draft-preserving Retry authority', () => {
+    const { retry } = card('Retry', 'Message delivery timed out. Please try again. ');
+    const clicked = vi.fn(); retry.addEventListener('click', clicked);
+    const authorize = vi.fn(() => true);
+    expect(api.retryLatestTransportFailure(() => true, authorize))
+      .toEqual({ status: 'stopped', reason: 'page_not_idle' });
+    expect(authorize).not.toHaveBeenCalled();
+    expect(clicked).not.toHaveBeenCalled();
+    expect(box.textContent).toBe('Exact app prompt');
+  });
 
   it.each(['two-controls', 'hidden', 'inert', 'aria-hidden', 'css-hidden', 'zero-geometry', 'hidden-at-authorization', 'second-at-authorization', 'one-control'])(
     'keeps Retry diagnostic evidence separate from current action authority: %s', mode => {

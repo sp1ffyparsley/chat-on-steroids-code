@@ -2172,11 +2172,26 @@
     const mountedNativeScope = (() => {
       // No independent mounted anchor was attempted without these prerequisites.
       // A diagnostic failure never changes the namespace or any acceptance predicate.
-      if (!shell.calls.length || !live || !typedUserId) return null;
+      const prerequisite = reason => {
+        shellDiagnostic(rejects, 'nativeAnchorPrerequisite');
+        shellDiagnostic(rejects, reason);
+      };
+      if (!shell.calls.length) return null;
+      if (!live) { prerequisite('nativeAnchorLiveMissing'); return null; }
+      if (!typedUserId) { prerequisite('nativeAnchorUserMissing'); return null; }
       const refuse = reason => { mountedNativeScopeRefusal = reason; return null; };
-      if (entry.turn.status !== 'complete') return refuse('nativeScopeTurnIncomplete');
-      if (!currentPath.length || currentPath[0] !== typedUserId || !currentPath.every(id => selected.has(id) || unselectedNativeNarration(id)))
-        return refuse('nativeScopePathUnproved');
+      if (entry.turn.status !== 'complete') {
+        prerequisite('nativeAnchorTurnIncomplete'); return refuse('nativeScopeTurnIncomplete');
+      }
+      if (!currentPath.length) {
+        prerequisite('nativeAnchorPathEmpty'); return refuse('nativeScopePathUnproved');
+      }
+      if (currentPath[0] !== typedUserId) {
+        prerequisite('nativeAnchorUserPathMismatch'); return refuse('nativeScopePathUnproved');
+      }
+      if (!currentPath.every(id => selected.has(id) || unselectedNativeNarration(id))) {
+        prerequisite('nativeAnchorUnselectedPath'); return refuse('nativeScopePathUnproved');
+      }
       try {
         const finals = entry.turn.items.filter(item => item?.type === 'assistant-message' && item.phase === 'final_answer');
         if (finals.length !== 1) return refuse('nativeScopeFinalCount');
@@ -2861,7 +2876,8 @@
     if (!rejects) return;
     // Optional capability counters only appear when observed.
     if (!Object.prototype.hasOwnProperty.call(rejects, reason)) {
-      if (reason !== 'callRequestIdPresent' && reason !== 'callRequestIdMissing') return;
+      if (reason !== 'callRequestIdPresent' && reason !== 'callRequestIdMissing' &&
+          !/^nativeAnchor(?:LiveMissing|UserMissing|TurnIncomplete|PathEmpty|UserPathMismatch|UnselectedPath|Prerequisite)$/.test(reason)) return;
       rejects[reason] = 0;
     }
     rejects[reason] = Math.min(MAX_ROWS, rejects[reason] + 1);

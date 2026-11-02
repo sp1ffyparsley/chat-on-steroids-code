@@ -4633,17 +4633,21 @@ var CLF_DOM = (() => {
     });
     return matches.length === 1 ? matches[0].node : null;
   }
-  function retryLatestTransportFailure(stillCurrent = () => true, beforeRetry = null) {
+  function retryLatestTransportFailure(stillCurrent = () => true, beforeRetry = null, preserveComposerDraft = false) {
     // Native Retry belongs to ChatGPT's failed turn, not to the new-message composer. After a
     // delivery timeout the editor may be temporarily read-only even though the exact Retry
     // control is enabled. Keep the empty-editor/attachment/active-turn fences, but do not
     // require the editor to accept a *new* message before retrying the old one.
     const box = composer();
+    const originalDraft = box ? (editorText(box) || '') : '';
+    const draftBlocksRetry = () => preserveComposerDraft === true
+      ? (editorText(box) || '') !== originalDraft
+      : Boolean((editorText(box) || '').trim());
     const allTurns = turns();
     const wholePageLoadFailure = !box && Boolean(conversationId()) && allTurns.length === 0;
     const pendingDraft = () => [...document.querySelectorAll('textarea#pending-conversation-input')].some(composerHasDraft);
     if (!stillCurrent() || generating() || wholePageLoadFailure && pendingDraft() || (!wholePageLoadFailure && (!box?.isConnected ||
-        hasComposerAttachments() || (editorText(box) || '').trim()))) {
+        hasComposerAttachments() || draftBlocksRetry()))) {
       return { status: 'stopped', reason: 'page_not_idle' };
     }
     const latest = allTurns.at(-1);
@@ -4685,7 +4689,7 @@ var CLF_DOM = (() => {
     const error = eligible[0];
     const pageChanged = wholePageLoadFailure
       ? Boolean(composer()) || pendingDraft() || turns().length !== 0 || !conversationId() || !conversationLoadFailure(error.text)
-      : composer() !== box || !box?.isConnected || hasComposerAttachments() || (editorText(box) || '').trim();
+      : composer() !== box || !box?.isConnected || hasComposerAttachments() || draftBlocksRetry();
     if (!stillCurrent() || !error.node?.isConnected || !error.retry.isConnected || generating() || pageChanged) {
       return { status: 'stopped', reason: 'page_changed' };
     }
@@ -4702,7 +4706,7 @@ var CLF_DOM = (() => {
     const finalControls = eligibleControls(readCurrentErrors());
     const finalPageChanged = wholePageLoadFailure
       ? Boolean(composer()) || pendingDraft() || turns().length !== 0 || !conversationId()
-      : composer() !== box || !box?.isConnected || hasComposerAttachments() || (editorText(box) || '').trim() ||
+      : composer() !== box || !box?.isConnected || hasComposerAttachments() || draftBlocksRetry() ||
         (turnNodes(turns().at(-1)).at(-1) || null) !== latestSection;
     if (!stillCurrent() || generating() || finalPageChanged || finalControls.length !== 1 ||
         finalControls[0].node !== error.node || finalControls[0].retry !== error.retry) {

@@ -86,6 +86,7 @@ function shellScanDiagnostic(raw) {
     'callIdentityRecovered', 'callIdentityPriorPair', 'callIdentityUserUnproved',
     'callIdentityNativeUnproved', 'callIdentityScopeUnproved', 'callIdentityParentUnproved',
     'callIdentitySelectedWithheld',
+    'nativeAnchorLiveMissing', 'nativeAnchorUserMissing', 'nativeAnchorTurnIncomplete', 'nativeAnchorPathEmpty', 'nativeAnchorUserPathMismatch', 'nativeAnchorUnselectedPath', 'nativeAnchorPrerequisite',
     'identityReasonCurrentQuestionMissing',
     'identityReasonCurrentQuestionUnselected',
     'identityReasonCurrentQuestionConflict',
@@ -7373,6 +7374,11 @@ async function performBrowserRepairs(repairs, policy) {
           if (!deferred.ok) throw new Error('foreground_repair_defer_failed');
           continue;
         }
+        if (result?.ok === false && result?.composerBlocked === true) {
+          const deferred = await call(`/status?repairDeferred=${encodeURIComponent(token)}&repairCause=composer-blocked`);
+          if (!deferred.ok) throw new Error('composer_blocked_retry_defer_failed');
+          continue;
+        }
         if (result?.ok === false && result?.error === 'page_not_idle') {
           // The failed card can remain mounted while ChatGPT has already resumed the same answer.
           // `retryAppFailedTurn()` correctly refuses to click anything while native generation is
@@ -10575,7 +10581,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 121;
+const PAGE_RECORDER_VERSION = 124;
 
 let deferredRecoveryWork = null;
 

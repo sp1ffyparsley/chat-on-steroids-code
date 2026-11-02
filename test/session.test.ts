@@ -6371,3 +6371,37 @@ describe('activity windows', () => {
     expect(CHAT_ACTIVE_MS - CHAT_SILENCE_MS).toBeGreaterThanOrEqual(60_000);
   });
 });
+
+// Adapted from upstream Maximapple 6277c2c5 / 5cc1460c.
+describe('the latest question of a chat', () => {
+  it('reads the journal once per revision, and again after anything new is recorded', async () => {
+    const session = await createSession({ conversationId: 'conv-latest-question-cache' });
+    await upsertMessageEvent(session.id, { kind: 'user_message', time: 1_000, source: 'extension', messageId: 'q-one', message: { text: 'Build it', chars: 8, truncated: false } });
+    for (let n = 0; n < 50; n++) await appendEvent(session.id, { kind: 'progress', time: 2_000 + n, source: 'extension', message: { text: `step ${n}`, chars: 6, truncated: false } });
+    const opened = vi.spyOn(fs, 'open');
+    // Either slash: Windows paths use backslashes (CodeRabbit on #2030).
+    const journalReads = () => opened.mock.calls.filter(([file]) => String(file).replace(/\\/g, '/').endsWith(`${session.id}/events.jsonl`)).length;
+    try {
+      expect((await readLatestUserMessage(session.id))?.messageId).toBe('q-one');
+      const first = journalReads();
+      expect(first).toBeGreaterThan(0);
+      expect((await readLatestUserMessage(session.id))?.messageId).toBe('q-one');
+      expect((await readLatestUserMessage(session.id))?.messageId).toBe('q-one');
+      expect(journalReads(), 'an unchanged chat was scanned again').toBe(first);
+      // Callers at the same new revision share one scan instead of each reading the journal.
+      await appendEvent(session.id, { kind: 'progress', time: 8_000, source: 'extension', message: { text: 'shared', chars: 6, truncated: false } });
+      const beforeShared = journalReads();
+      const answers = await Promise.all([readLatestUserMessage(session.id), readLatestUserMessage(session.id), readLatestUserMessage(session.id)]);
+      expect(answers.map(answer => answer?.messageId)).toEqual(['q-one', 'q-one', 'q-one']);
+      expect(journalReads() - beforeShared).toBe(1);
+      // A new question is seen at once.
+      await upsertMessageEvent(session.id, { kind: 'user_message', time: 9_000, source: 'extension', messageId: 'q-two', message: { text: 'Now test it', chars: 11, truncated: false } });
+      expect((await readLatestUserMessage(session.id))?.messageId).toBe('q-two');
+      // So is anything else recorded: the next read checks the journal again.
+      const beforeAppend = journalReads();
+      await appendEvent(session.id, { kind: 'progress', time: 9_500, source: 'extension', message: { text: 'more', chars: 4, truncated: false } });
+      expect((await readLatestUserMessage(session.id))?.messageId).toBe('q-two');
+      expect(journalReads()).toBeGreaterThan(beforeAppend);
+    } finally { opened.mockRestore(); }
+  });
+});

@@ -2025,6 +2025,38 @@ describe('alternate shell turn/message provenance', () => {
     });
 
   it.each([
+    ['cached only', false, 'complete', ASSISTANT, 'nativeAnchorLiveMissing'],
+    ['incomplete turn', true, 'in_progress', ASSISTANT, 'nativeAnchorTurnIncomplete'],
+    ['missing current path', true, 'complete', 'missing-native-node', 'nativeAnchorPathEmpty'],
+    ['missing live wins first', false, 'in_progress', 'missing-native-node', 'nativeAnchorLiveMissing'],
+    ['incomplete turn wins before path', true, 'in_progress', 'missing-native-node', 'nativeAnchorTurnIncomplete']
+  ] as const)('narrows the native anchor prerequisite without granting identity: %s', async (_label, live, status, current, reason) => {
+    const page = await shellHarness({ withCall: true, nativeCallReceipt: true, nativeCallLive: live,
+      status, nativeCurrentNode: current, callCompleted: false, assistantCompleted: false,
+      nativeCallMutation(mapping, entry) {
+        delete entry.turn.items[1].widgetStateSource;
+        entry.turn.messageIds = [USER, CALL, RESULT, ASSISTANT];
+        for (const id of [CALL, RESULT, ASSISTANT]) Object.assign(mapping[id].message.metadata, {
+          working_turn_id: 'native-working-generation', turn_exchange_id: 'native-exchange-generation',
+          parent_id: mapping[id].parent
+        });
+      } });
+    try {
+      const rejects = page.fiber.shellScan.rejects;
+      expect(rejects.nativeAnchorPrerequisite).toBe(1);
+      expect(rejects[reason]).toBe(1);
+      const reasons = ['nativeAnchorLiveMissing', 'nativeAnchorUserMissing', 'nativeAnchorTurnIncomplete',
+        'nativeAnchorPathEmpty', 'nativeAnchorUserPathMismatch', 'nativeAnchorUnselectedPath'];
+      expect(reasons.reduce((total, key) => total + (rejects[key] ?? 0), 0)).toBe(1);
+      expect(page.fiber.turns[0].calls[0]).toMatchObject({ requestId: null, answered: false });
+      expect(page.fiber.turns[0].requests.some((row: any) => row.requestId === REQUEST && row.messageId === CALL)).toBe(false);
+      expect(page.fiber.turns[0].endMessageId).toBeNull();
+      expect(JSON.stringify(page.fiber.shellScan)).not.toContain('native-working-generation');
+      expect(JSON.stringify(page.fiber)).not.toContain('PRIVATE_TOOL_RESULT');
+    } finally { page.dom.window.close(); }
+  });
+
+  it.each([
     ['identity only', true, false],
     ['finished exact result', true, true],
     ['cached mapping only', false, false]

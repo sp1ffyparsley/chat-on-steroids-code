@@ -1086,6 +1086,7 @@ describe('Core tool-surface incident diagnostics', () => {
       'callIdentityRecovered', 'callIdentityPriorPair', 'callIdentityUserUnproved',
       'callIdentityNativeUnproved', 'callIdentityScopeUnproved', 'callIdentityParentUnproved',
       'callIdentitySelectedWithheld',
+      'nativeAnchorLiveMissing', 'nativeAnchorUserMissing', 'nativeAnchorTurnIncomplete', 'nativeAnchorPathEmpty', 'nativeAnchorUserPathMismatch', 'nativeAnchorUnselectedPath', 'nativeAnchorPrerequisite',
       'identityReasonCurrentQuestionMissing',
       'identityReasonCurrentQuestionUnselected',
       'identityReasonCurrentQuestionConflict',
@@ -1251,6 +1252,7 @@ describe('Core tool-surface incident diagnostics', () => {
   it('retains only bounded completion veto diagnostics without promoting them to live tool proof', () => {
     resetCoreBrowserEvidenceForTests();
     const details = { callVetoReceiptChecked: 1, callVetoReceiptMatched: 1,
+      nativeAnchorLiveMissing: 1, nativeAnchorUserMissing: 2, nativeAnchorTurnIncomplete: 3, nativeAnchorPathEmpty: 4, nativeAnchorUserPathMismatch: 5, nativeAnchorUnselectedPath: 6, nativeAnchorPrerequisite: 7,
       callJoinReferenceMissing: 1, callJoinReferenceUnselected: 2, callJoinReferenceConflict: 3,
       callJoinResultMissing: 4, callJoinResultIdentity: 5, callJoinDescriptorUnsupported: 400,
       assistantTerminalReceiptChecked: 2, assistantTerminalReceiptMatched: 1,
@@ -1289,6 +1291,7 @@ describe('Core tool-surface incident diagnostics', () => {
     expect(legacy?.shellScan?.rejects).not.toHaveProperty('assistantTerminalReceiptChecked');
     expect(legacy?.shellScan?.rejects).not.toHaveProperty('assistantTerminalReceiptMatched');
     for (const key of ['userProjected', 'callVetoReceiptChecked', 'callVetoReceiptMatched',
+      'nativeAnchorLiveMissing', 'nativeAnchorUserMissing', 'nativeAnchorTurnIncomplete', 'nativeAnchorPathEmpty', 'nativeAnchorUserPathMismatch', 'nativeAnchorUnselectedPath', 'nativeAnchorPrerequisite',
       'callJoinReferenceMissing', 'callJoinReferenceUnselected', 'callJoinReferenceConflict',
       'callJoinResultMissing', 'callJoinResultIdentity', 'callJoinDescriptorUnsupported',
       'assistantTerminalReceiptChecked', 'assistantTerminalReceiptMatched']) {
@@ -1740,7 +1743,7 @@ describe('durable event-driven diagnostic incidents', () => {
   });
 
   it('coalesces one exact episode, keeps recovery text out of durable state, and never replays an ambiguous wake', async () => {
-    const secretEpisode = 'episode-sk-proj-abcdefghijklmnopqrstuvwxyz0123456789';
+    const secretEpisode = 'episode-private-fixture-not-for-storage';
     const first = await noteExhaustedDiagnosticIncidentNow(exhausted({
       recoveryEpisodeId: secretEpisode,
       inputCustody: 'sent'
@@ -1758,7 +1761,7 @@ describe('durable event-driven diagnostic incidents', () => {
 
     const raw = await readDurable<unknown>('diagnostic-incidents');
     expect(JSON.stringify(raw)).not.toContain(secretEpisode);
-    expect(JSON.stringify(raw)).not.toContain('sk-proj-abcdefghijklmnopqrstuvwxyz0123456789');
+    expect(JSON.stringify(raw)).not.toContain('private-fixture-not-for-storage');
 
     const offer = await claimDiagnosticIncidentWakeNow(NOW + 3);
     expect(offer).toMatchObject({

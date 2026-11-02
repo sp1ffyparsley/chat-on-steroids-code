@@ -310,6 +310,7 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
     // it returns must describe one moment: centres computed against its own screenshot,
     // never against the frame the interloper installed.
     let checked = 0;
+    const captureDiagnostics: unknown[] = [];
     const { windows } = await listWindows();
     const candidates = windows.filter(window => window.id === fixtureWindow);
     for (const candidate of candidates) {
@@ -319,6 +320,7 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
         const [state, other] = await Promise.all([statePromise, interloper]);
         expect(state.screenshot).not.toBeNull();
         const shot = state.screenshot!;
+        captureDiagnostics.push({ fixture: candidate.id, captureMode: shot.captureMode, region: shot.region, width: shot.width, height: shot.height, elements: state.elements.map(element => ({ name: element.name, bounds: element.bounds, imageBounds: element.imageBounds })) });
         expect(shot.frameId).not.toBe(other.frameId);
         for (const element of state.elements) {
           // Eligibility is derived from raw desktop bounds/capture metadata, never from
@@ -350,11 +352,12 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
         }
         if (checked > 0) break;
       } catch (error) {
+        captureDiagnostics.push({ fixture: candidate.id, error: error instanceof Error ? error.message : String(error) });
         if (!/CAPTURE_FAILED:|WINDOW_NOT_FOUND:/.test(error instanceof Error ? error.message : String(error))) throw error;
       }
     }
     // The owned Form has a real button; missing eligible controls is a failure, never a skip.
-    expect(checked).toBeGreaterThan(0);
+    expect(checked, JSON.stringify({ fixtureWindow, candidates: candidates.length, captureDiagnostics })).toBeGreaterThan(0);
   });
 
   it('refuses a ref minted before the desktop helper restarted', async () => {

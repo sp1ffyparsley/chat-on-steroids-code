@@ -4461,7 +4461,7 @@ export async function resumeAutomationChats(options: AutomationResumeOptions = {
   if (!background && !options.sessionId) {
     const helpers = await retryPausedGoalBrowserHelpers();
     if (helpers.eligible > 0) {
-      logInfo(`bridge: deliberate resume retired ambiguous helper fences for ${helpers.restarted}/${helpers.eligible} source chat(s)`);
+      logInfo(`bridge: bulk resume retired positively unsent helpers for ${helpers.restarted}/${helpers.eligible} source chat(s); retained ${helpers.skipped} source(s)`);
     }
   }
   const seen = new Set<string>();

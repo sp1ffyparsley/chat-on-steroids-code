@@ -14475,6 +14475,110 @@ describe('how a turn is recorded as having ended', () => {
     expect((live.document.querySelector('#prompt-textarea')?.textContent || '').trim()).toBe('');
   });
 
+  it.each(['attachment', 'draft-during-authorization'])('defers native Retry for a protected composer without spending its control: %s', async kind => {
+    const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    let clicks = 0;
+    live = await harness(`https://chatgpt.com/c/${conversationId}`, {}, document => {
+      retryModelProof(document, conversationId);
+      const card = document.createElement('div');
+      const copy = document.createElement('p');
+      copy.textContent = 'Message delivery timed out. Please try again. ';
+      const retry = document.createElement('button');
+      retry.textContent = 'Retry';
+      retry.setAttribute('data-clf-test-rendered', '1');
+      retry.addEventListener('click', () => { clicks += 1; });
+      card.append(copy, retry);
+      document.body.append(card);
+    });
+    const composer = live.document.querySelector('#prompt-textarea')!;
+    let attachment: HTMLButtonElement | undefined;
+    if (kind === 'attachment') {
+      attachment = live.document.createElement('button');
+      attachment.type = 'button';
+      attachment.setAttribute('aria-label', 'Remove file: user-owned.png');
+      composer.parentElement!.append(attachment);
+    } else {
+      const provider = (live.window as any).CLF_DOM;
+      const selection = provider.visibleModelSelection.bind(provider);
+      vi.spyOn(provider, 'visibleModelSelection').mockImplementationOnce(() => {
+        composer.textContent = 'contionue';
+        return selection();
+      });
+    }
+
+    expect(await live.runtimeMessage({ type: 'clf-retry-failed-turn', conversationId: 'wrong-chat' }))
+      .toEqual({ ok: false, error: 'page_not_idle' });
+    expect(await live.runtimeMessage({ type: 'clf-retry-failed-turn', conversationId })).toEqual({
+      ok: false, error: kind === 'draft-during-authorization' ? 'page_changed' : 'page_not_idle',
+      composerBlocked: true
+    });
+    expect(clicks).toBe(0);
+    expect(composer.textContent).toBe(kind === 'attachment' ? '' : 'contionue');
+    if (attachment) expect(attachment.isConnected).toBe(true);
+
+    // Only the fixture owner clears its own draft. The refused Retry remains unspent.
+    composer.textContent = '';
+    attachment?.remove();
+    expect(await live.runtimeMessage({ type: 'clf-retry-failed-turn', conversationId })).toEqual({ ok: true });
+    expect(clicks).toBe(1);
+    expect(await live.runtimeMessage({ type: 'clf-retry-failed-turn', conversationId }))
+      .toEqual({ ok: false, error: 'retry_unavailable' });
+    expect(clicks).toBe(1);
+  });
+
+  it.each(['contionue', '[[CLF-HANDOFF:0123456789abcdef]]\nSaved handoff draft'])('retries the failed message while leaving a separate unsent draft untouched: %s', async draft => {
+    const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    let retries = 0;
+    let sends = 0;
+    live = await harness(`https://chatgpt.com/c/${conversationId}`, {}, document => {
+      retryModelProof(document, conversationId);
+      document.querySelector('#prompt-textarea')!.textContent = draft;
+      document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => { sends += 1; });
+      const card = document.createElement('div');
+      card.setAttribute('role', 'alert');
+      card.textContent = 'Message delivery timed out. Please try again. ';
+      const retry = document.createElement('button');
+      retry.textContent = 'Retry';
+      retry.setAttribute('data-clf-test-rendered', '1');
+      retry.addEventListener('click', () => { retries += 1; });
+      card.append(retry);
+      document.body.append(card);
+    });
+    expect(await live.runtimeMessage({ type: 'clf-retry-failed-turn', conversationId: 'wrong-chat' }))
+      .toEqual({ ok: false, error: 'page_not_idle' });
+    expect(await live.runtimeMessage({ type: 'clf-retry-failed-turn', conversationId })).toEqual({ ok: true });
+    expect(retries).toBe(1);
+    expect(sends).toBe(0);
+    expect(composerText(live.document)).toBe(draft);
+    expect(await live.runtimeMessage({ type: 'clf-retry-failed-turn', conversationId }))
+      .toEqual({ ok: false, error: 'retry_unavailable' });
+    expect(retries).toBe(1);
+    expect(composerText(live.document)).toBe(draft);
+  });
+
+  it('never reports a draft deferral after the native Retry was already clicked', async () => {
+    const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    let clicks = 0;
+    live = await harness(`https://chatgpt.com/c/${conversationId}`, {}, document => {
+      retryModelProof(document, conversationId);
+      const card = document.createElement('div');
+      card.setAttribute('role', 'alert');
+      card.textContent = 'Message delivery timed out. Please try again. ';
+      const retry = document.createElement('button');
+      retry.textContent = 'Retry';
+      retry.setAttribute('data-clf-test-rendered', '1');
+      retry.addEventListener('click', () => {
+        clicks += 1;
+        document.querySelector('#prompt-textarea')!.textContent = 'new user draft';
+      });
+      card.append(retry);
+      document.body.append(card);
+    });
+    expect(await live.runtimeMessage({ type: 'clf-retry-failed-turn', conversationId })).toEqual({ ok: true });
+    expect(clicks).toBe(1);
+    expect(composerText(live.document)).toBe('new user draft');
+  });
+
   it.each(['Waiting', 'Please wait'])('stops the exact interrupted stream (%s) without requiring Retry or typing over the next owner', async wording => {
     const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
     live = await harness(`https://chatgpt.com/c/${conversationId}`, {
@@ -17106,8 +17210,6 @@ describe('evidence from the page context', () => {
     );
   });
 
-
-
   it.each([0, 1, 200])('bounds owner confirmation for200native calls plus%i independent request sightings', async bareCount => {
     live = await harness();
     startGenerating(live.document);
@@ -17484,6 +17586,7 @@ describe('the activity feed', () => {
       callIdentityRecovered: 1, callIdentityPriorPair: 2, callIdentityUserUnproved: 3,
       callIdentityNativeUnproved: 4, callIdentityScopeUnproved: 5, callIdentityParentUnproved: 6,
       callIdentitySelectedWithheld: 7,
+      nativeAnchorLiveMissing: 1, nativeAnchorUserMissing: 2, nativeAnchorTurnIncomplete: 3, nativeAnchorPathEmpty: 4, nativeAnchorUserPathMismatch: 5, nativeAnchorUnselectedPath: 6, nativeAnchorPrerequisite: 7,
       identityReasonCurrentQuestionMissing: 1,
       identityReasonCurrentQuestionUnselected: 2,
       identityReasonCurrentQuestionConflict: 3,
@@ -17552,6 +17655,7 @@ describe('the activity feed', () => {
     for (const key of ['userProjected', 'callVetoReceiptChecked', 'callVetoReceiptMatched',
       'callJoinReferenceMissing', 'callJoinReferenceUnselected', 'callJoinReferenceConflict',
       'callJoinResultMissing', 'callJoinResultIdentity', 'callJoinDescriptorUnsupported', 'callIdentityRecovered', 'callIdentityPriorPair', 'callIdentityUserUnproved', 'callIdentityNativeUnproved', 'callIdentityScopeUnproved', 'callIdentityParentUnproved', 'callIdentitySelectedWithheld',
+      'nativeAnchorLiveMissing', 'nativeAnchorUserMissing', 'nativeAnchorTurnIncomplete', 'nativeAnchorPathEmpty', 'nativeAnchorUserPathMismatch', 'nativeAnchorUnselectedPath', 'nativeAnchorPrerequisite',
       'identityReasonCurrentQuestionMissing', 'identityReasonCurrentQuestionUnselected', 'identityReasonCurrentQuestionConflict', 'identityReasonNativeInvocationMissing', 'identityReasonNativeInvocationMismatch', 'identityReasonRequestIdMissing', 'identityReasonDecodedPathMissing', 'identityReasonDecodedPathForeign', 'identityReasonServerMissing', 'identityReasonServerMismatch', 'identityReasonToolMismatch', 'identityReasonWorkingTurnMissing', 'identityReasonWorkingTurnMismatch', 'identityReasonTurnExchangeMissing', 'identityReasonTurnExchangeMismatch', 'identityReasonNativeAncestryUnproved', 'identityReasonPriorRequestIdMissing', 'identityReasonPriorRequestIdMismatch', 'identityReasonPriorResultResourceIncomplete', 'identityReasonPriorToolScopeMismatch', 'identityReasonNativeScopeTurnIncomplete', 'identityReasonNativeScopePathUnproved', 'identityReasonNativeScopeFinalCount', 'identityReasonNativeScopeFinalPathMismatch', 'identityReasonNativeScopeFinalReceiptUnproved', 'identityReasonNativeScopeFinalNamespaceMissing', 'identityReasonNativeScopeNodeConflict', 'identityReasonNativeScopeCacheConflict', 'identityReasonNativeScopeBranchConflict', 'identityReasonNativeScopeUnsupported',
       'assistantTerminalReceiptChecked', 'assistantTerminalReceiptMatched']) {
       const inherited = Object.assign(Object.create({ [key]: 400 }), {

@@ -791,8 +791,8 @@ describe('Goal decision backends', () => {
     browser.authorize.mockResolvedValue(true);
     expect(await goal.retryPausedGoalBrowserHelpers()).toEqual({ eligible: 2, restarted: 2, skipped: 0 });
     expect(browser.authorize.mock.calls).toEqual([
-      ['first-new', first, undefined],
-      ['second-only', second, undefined]
+      ['first-new', first, undefined, { confirmedUnsentOnly: true }],
+      ['second-only', second, undefined, { confirmedUnsentOnly: true }]
     ]);
     expect(browser.request).not.toHaveBeenCalled();
   });

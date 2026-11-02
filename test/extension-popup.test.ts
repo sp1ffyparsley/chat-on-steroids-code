@@ -31,6 +31,21 @@ function openPopup(reload: () => void, url = 'https://extension-popup.test/', re
 
 const accountChoiceKey = 'popupAccountChoiceInstanceId';
 
+it('keeps missing worker and older-recorder counters unknown instead of reporting zero or undefined', () => {
+  const document = openPopup(vi.fn());
+  (document.getElementById('more') as HTMLDetailsElement).open = true;
+  (popup!.window as any).paintDetails({ connected: true, paired: true, compatible: true, port: 8765 },
+    { isChat: true, tab: 71, page: { events: 3, calls: 1 } });
+  const cells = () => [...document.querySelectorAll('#grid dd')].map(node => node.textContent);
+  expect(cells().join(' ')).not.toContain('undefined');
+  expect(cells().join(' ')).not.toContain('0 held · 0 total');
+  expect(cells()).toContain('unknown');
+  (popup!.window as any).paintDetails({ connected: true, paired: true, compatible: true, port: 8765 },
+    { isChat: true, tab: 71, pending: 0, pendingAll: 0, page: { events: 3, calls: 1, sends: 4, failures: 1 } });
+  expect(cells()).toContain('0 held · 0 total');
+  expect(cells()).toContain('4 · 1 failed');
+});
+
 it.each([
   ['ready', 'ready', 'ok'], ['paused', 'paused in CoS', 'off'],
   ['policy-unverified', 'waiting for policy', 'wait'], ['route-unverified', 'waiting for chat', 'wait'],
@@ -222,8 +237,8 @@ it.each([true, false])('requests optional screenshot permission only from a deli
   } else expect(document.getElementById('debugCaptureStatus')?.textContent).toContain('did not grant');
 });
 const popupAccounts = [
-  { instanceId: 'profile-Primary', name: 'Primary', port: 8765, compatible: true },
-  { instanceId: 'profile-Epsilon', name: 'Epsilon', port: 8771, compatible: true }
+  { instanceId: 'profile-gustavo', name: 'Gustavo', port: 8765, compatible: true },
+  { instanceId: 'profile-rivera', name: 'Rivera', port: 8771, compatible: true }
 ];
 
 function accountPopupSender(status: Record<string, unknown> = { connected: false, paired: false }, accounts = popupAccounts) {
@@ -244,44 +259,44 @@ it('retains an explicit popup account choice after reopen and extension reload e
   let document = openPopup(reload, undefined, vi.fn(), send, storage);
   await vi.waitFor(() => expect(document.querySelectorAll('#accountSelect option')).toHaveLength(2));
   let select = document.getElementById('accountSelect') as HTMLSelectElement;
-  select.value = 'profile-Epsilon'; select.dispatchEvent(new popup!.window.Event('change'));
-  await vi.waitFor(() => expect(stored[accountChoiceKey]).toBe('profile-Epsilon'));
+  select.value = 'profile-rivera'; select.dispatchEvent(new popup!.window.Event('change'));
+  await vi.waitFor(() => expect(stored[accountChoiceKey]).toBe('profile-rivera'));
   expect(send.mock.calls.some(([message]) => message.type === 'pairTo')).toBe(false);
   document.getElementById('accountConnect')!.click();
   await vi.waitFor(() => expect(document.getElementById('accountStatus')?.textContent).toBe('Unassigned history remains held.'));
   popup!.window.close();
   document = openPopup(reload, undefined, vi.fn(), send, storage);
-  await vi.waitFor(() => expect((document.getElementById('accountSelect') as HTMLSelectElement).value).toBe('profile-Epsilon'));
+  await vi.waitFor(() => expect((document.getElementById('accountSelect') as HTMLSelectElement).value).toBe('profile-rivera'));
   select = document.getElementById('accountSelect') as HTMLSelectElement;
-  select.value = 'profile-Primary'; select.dispatchEvent(new popup!.window.Event('change'));
-  select.value = 'profile-Epsilon'; select.dispatchEvent(new popup!.window.Event('change'));
+  select.value = 'profile-gustavo'; select.dispatchEvent(new popup!.window.Event('change'));
+  select.value = 'profile-rivera'; select.dispatchEvent(new popup!.window.Event('change'));
   document.getElementById('reloadBtn')!.click();
   await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
   popup!.window.close();
   document = openPopup(reload, undefined, vi.fn(), send, storage);
-  await vi.waitFor(() => expect((document.getElementById('accountSelect') as HTMLSelectElement).value).toBe('profile-Epsilon'));
+  await vi.waitFor(() => expect((document.getElementById('accountSelect') as HTMLSelectElement).value).toBe('profile-rivera'));
   expect(send.mock.calls.filter(([message]) => message.type === 'pairTo')).toHaveLength(1);
   expect(send.mock.calls.some(([message]) => ['pair', 'unpair', 'settings_set', 'goal_open'].includes(message.type))).toBe(false);
   expect(storage.set.mock.calls.every(([patch]) => Object.keys(patch).length === 1 && typeof patch[accountChoiceKey] === 'string')).toBe(true);
 });
 
 it('restores the draft popup choice while accurately naming the currently paired account', async () => {
-  const send = accountPopupSender({ connected: true, paired: true, compatible: true, instanceId: 'profile-Primary', port: 8765 });
+  const send = accountPopupSender({ connected: true, paired: true, compatible: true, instanceId: 'profile-gustavo', port: 8765 });
   const document = openPopup(vi.fn(), undefined, vi.fn(), send, {
-    get: async () => ({ [accountChoiceKey]: 'profile-Epsilon' }), set: vi.fn(async () => undefined)
+    get: async () => ({ [accountChoiceKey]: 'profile-rivera' }), set: vi.fn(async () => undefined)
   });
-  await vi.waitFor(() => expect((document.getElementById('accountSelect') as HTMLSelectElement).value).toBe('profile-Epsilon'));
-  expect(document.getElementById('accountStatus')?.textContent).toContain('Primary');
-  expect(document.getElementById('accountStatus')?.textContent).not.toMatch(/(?:connected|paired) to Epsilon/);
+  await vi.waitFor(() => expect((document.getElementById('accountSelect') as HTMLSelectElement).value).toBe('profile-rivera'));
+  expect(document.getElementById('accountStatus')?.textContent).toContain('Gustavo');
+  expect(document.getElementById('accountStatus')?.textContent).not.toMatch(/(?:connected|paired) to Rivera/);
   expect((document.getElementById('accountConnect') as HTMLButtonElement).disabled).toBe(false);
   expect(send.mock.calls.some(([message]) => ['pairTo', 'pair', 'unpair'].includes(message.type))).toBe(false);
 });
 
 it.each(['missing', 'deleted', 'incompatible', 'oversized', 'object'])('falls back from a %s saved popup account choice without selecting or pairing it', async mode => {
-  const accounts = popupAccounts.map(account => ({ ...account, compatible: mode === 'incompatible' && account.name === 'Epsilon' ? false : account.compatible }));
-  const saved = mode === 'missing' ? undefined : mode === 'deleted' ? 'profile-deleted' : mode === 'oversized' ? 'x'.repeat(1000) : mode === 'object' ? { instanceId: 'profile-Epsilon' } : 'profile-Epsilon';
-  const current = mode === 'incompatible' ? 'profile-Primary' : 'profile-Epsilon';
-  const send = accountPopupSender({ connected: true, paired: true, compatible: true, instanceId: current, port: current === 'profile-Primary' ? 8765 : 8771 }, accounts);
+  const accounts = popupAccounts.map(account => ({ ...account, compatible: mode === 'incompatible' && account.name === 'Rivera' ? false : account.compatible }));
+  const saved = mode === 'missing' ? undefined : mode === 'deleted' ? 'profile-deleted' : mode === 'oversized' ? 'x'.repeat(1000) : mode === 'object' ? { instanceId: 'profile-rivera' } : 'profile-rivera';
+  const current = mode === 'incompatible' ? 'profile-gustavo' : 'profile-rivera';
+  const send = accountPopupSender({ connected: true, paired: true, compatible: true, instanceId: current, port: current === 'profile-gustavo' ? 8765 : 8771 }, accounts);
   const set = vi.fn(async () => undefined);
   const document = openPopup(vi.fn(), undefined, vi.fn(), send, { get: async () => ({ [accountChoiceKey]: saved }), set });
   await vi.waitFor(() => expect(document.querySelectorAll('#accountSelect option')).toHaveLength(2));
@@ -292,7 +307,7 @@ it.each(['missing', 'deleted', 'incompatible', 'oversized', 'object'])('falls ba
 
 it('leaves an incompatible-only popup account unselected and refuses to send it', async () => {
   const send = accountPopupSender({}, [{ ...popupAccounts[1]!, compatible: false }]);
-  const document = openPopup(vi.fn(), undefined, vi.fn(), send, { get: async () => ({ [accountChoiceKey]: 'profile-Epsilon' }), set: vi.fn(async () => undefined) });
+  const document = openPopup(vi.fn(), undefined, vi.fn(), send, { get: async () => ({ [accountChoiceKey]: 'profile-rivera' }), set: vi.fn(async () => undefined) });
   await vi.waitFor(() => expect(document.querySelectorAll('#accountSelect option')).toHaveLength(1));
   expect((document.getElementById('accountSelect') as HTMLSelectElement).value).toBe('');
   expect((document.getElementById('accountConnect') as HTMLButtonElement).disabled).toBe(true);
@@ -316,17 +331,17 @@ it.each(['read', 'write'])('shows a recoverable popup account preference %s erro
     expect(document.body.textContent).not.toContain('PRIVATE_LOCAL_STORAGE_ERROR');
   }
   const select = document.getElementById('accountSelect') as HTMLSelectElement;
-  select.value = 'profile-Epsilon'; select.dispatchEvent(new popup!.window.Event('change'));
-  if (mode === 'read') await vi.waitFor(() => expect(stored[accountChoiceKey]).toBe('profile-Epsilon'));
+  select.value = 'profile-rivera'; select.dispatchEvent(new popup!.window.Event('change'));
+  if (mode === 'read') await vi.waitFor(() => expect(stored[accountChoiceKey]).toBe('profile-rivera'));
   else await vi.waitFor(() => expect(document.getElementById('alert')?.textContent).toMatch(/could not save the account choice/i));
   if (mode === 'write') {
     expect(document.getElementById('alert')?.hidden).toBe(false);
     expect(document.body.textContent).not.toContain('PRIVATE_LOCAL_STORAGE_ERROR');
     expect(document.getElementById('accountStatus')?.textContent).not.toMatch(/^Connected/);
     fail = false;
-    select.value = 'profile-Primary'; select.dispatchEvent(new popup!.window.Event('change'));
-    select.value = 'profile-Epsilon'; select.dispatchEvent(new popup!.window.Event('change'));
-    await vi.waitFor(() => expect(stored[accountChoiceKey]).toBe('profile-Epsilon'));
+    select.value = 'profile-gustavo'; select.dispatchEvent(new popup!.window.Event('change'));
+    select.value = 'profile-rivera'; select.dispatchEvent(new popup!.window.Event('change'));
+    await vi.waitFor(() => expect(stored[accountChoiceKey]).toBe('profile-rivera'));
   }
   await vi.waitFor(() => expect(document.getElementById('alert')?.hidden).toBe(true));
   expect(send.mock.calls.some(([message]) => ['pairTo', 'pair', 'unpair'].includes(message.type))).toBe(false);
@@ -340,10 +355,10 @@ it('keeps a newer explicit popup choice when a delayed preference read completes
   const document = openPopup(vi.fn(), undefined, vi.fn(), send, storage);
   await vi.waitFor(() => expect(document.querySelectorAll('#accountSelect option')).toHaveLength(2));
   const select = document.getElementById('accountSelect') as HTMLSelectElement;
-  select.value = 'profile-Epsilon'; select.dispatchEvent(new popup!.window.Event('change'));
-  release({ [accountChoiceKey]: 'profile-Primary' });
-  await vi.waitFor(() => expect(stored[accountChoiceKey]).toBe('profile-Epsilon'));
-  expect(select.value).toBe('profile-Epsilon');
+  select.value = 'profile-rivera'; select.dispatchEvent(new popup!.window.Event('change'));
+  release({ [accountChoiceKey]: 'profile-gustavo' });
+  await vi.waitFor(() => expect(stored[accountChoiceKey]).toBe('profile-rivera'));
+  expect(select.value).toBe('profile-rivera');
   expect(send.mock.calls.some(([message]) => message.type === 'pairTo')).toBe(false);
 });
 
@@ -362,16 +377,16 @@ it('serializes rapid popup choice writes and waits for the latest choice before 
   const document = openPopup(reload, undefined, vi.fn(), send, storage);
   await vi.waitFor(() => expect(document.querySelectorAll('#accountSelect option')).toHaveLength(2));
   const select = document.getElementById('accountSelect') as HTMLSelectElement;
-  select.value = 'profile-Primary'; select.dispatchEvent(new popup!.window.Event('change'));
+  select.value = 'profile-gustavo'; select.dispatchEvent(new popup!.window.Event('change'));
   await vi.waitFor(() => expect(storage.set).toHaveBeenCalledTimes(1));
-  select.value = 'profile-Epsilon'; select.dispatchEvent(new popup!.window.Event('change'));
+  select.value = 'profile-rivera'; select.dispatchEvent(new popup!.window.Event('change'));
   document.getElementById('reloadBtn')!.click();
   expect(reload).not.toHaveBeenCalled();
   release();
   await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
-  expect(stored[accountChoiceKey]).toBe('profile-Epsilon');
+  expect(stored[accountChoiceKey]).toBe('profile-rivera');
   expect(storage.set).toHaveBeenCalledTimes(2);
-  expect(select.value).toBe('profile-Epsilon');
+  expect(select.value).toBe('profile-rivera');
   expect(send.mock.calls.some(([message]) => message.type === 'pairTo')).toBe(false);
 });
 
@@ -390,17 +405,17 @@ it('permits explicit Reload after a failed popup preference write and recovers a
   const document = openPopup(reload, undefined, vi.fn(), send, storage);
   await vi.waitFor(() => expect(document.querySelectorAll('#accountSelect option')).toHaveLength(2));
   const select = document.getElementById('accountSelect') as HTMLSelectElement;
-  select.value = 'profile-Epsilon'; select.dispatchEvent(new popup!.window.Event('change'));
+  select.value = 'profile-rivera'; select.dispatchEvent(new popup!.window.Event('change'));
   document.getElementById('reloadBtn')!.click();
   await vi.waitFor(() => expect(document.getElementById('alert')?.textContent).toContain('could not save the account choice'));
   await vi.waitFor(() => expect((document.getElementById('reloadBtn') as HTMLButtonElement).disabled).toBe(false));
   expect(reload).toHaveBeenCalledTimes(1);
-  expect(select.value).toBe('profile-Epsilon');
+  expect(select.value).toBe('profile-rivera');
   fail = false;
   select.dispatchEvent(new popup!.window.Event('change'));
   document.getElementById('reloadBtn')!.click();
   await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(2));
-  expect(stored[accountChoiceKey]).toBe('profile-Epsilon');
+  expect(stored[accountChoiceKey]).toBe('profile-rivera');
   expect(document.body.textContent).not.toContain('PRIVATE_PREFERENCE_SAVE_ERROR');
   expect(send.mock.calls.some(([message]) => ['pairTo', 'pair', 'unpair'].includes(message.type))).toBe(false);
 });
@@ -420,13 +435,13 @@ it.each(['read', 'write'])('ignores an older popup preference %s rejection after
   await vi.waitFor(() => expect(document.querySelectorAll('#accountSelect option')).toHaveLength(2));
   const select = document.getElementById('accountSelect') as HTMLSelectElement;
   if (mode === 'write') {
-    select.value = 'profile-Primary'; select.dispatchEvent(new popup!.window.Event('change'));
+    select.value = 'profile-gustavo'; select.dispatchEvent(new popup!.window.Event('change'));
     await vi.waitFor(() => expect(storage.set).toHaveBeenCalledTimes(1));
   }
-  select.value = 'profile-Epsilon'; select.dispatchEvent(new popup!.window.Event('change'));
+  select.value = 'profile-rivera'; select.dispatchEvent(new popup!.window.Event('change'));
   reject(new Error('PRIVATE_STALE_PREFERENCE_ERROR'));
-  await vi.waitFor(() => expect(stored[accountChoiceKey]).toBe('profile-Epsilon'));
-  expect(select.value).toBe('profile-Epsilon');
+  await vi.waitFor(() => expect(stored[accountChoiceKey]).toBe('profile-rivera'));
+  expect(select.value).toBe('profile-rivera');
   expect(document.getElementById('alert')?.hidden).toBe(true);
   expect(document.body.textContent).not.toContain('PRIVATE_STALE_PREFERENCE_ERROR');
   expect(send.mock.calls.some(([message]) => ['pairTo', 'pair', 'unpair'].includes(message.type))).toBe(false);
@@ -435,14 +450,14 @@ it.each(['read', 'write'])('ignores an older popup preference %s rejection after
 it.each(['accept', 'cancel', 'selection-changed', 'wrong-target', 'extra-field', 'bad-count'])
   ('confirms exact retained history in the popup before pairing (%s)', async (mode) => {
     const offer = { version: 1, targetInstanceId: 'profile-business', snapshotDigest: 'b'.repeat(64), journalCount: 1, ordinaryCloseCount: 1 };
-    if (mode === 'wrong-target') offer.targetInstanceId = 'profile-Epsilon';
+    if (mode === 'wrong-target') offer.targetInstanceId = 'profile-rivera';
     if (mode === 'extra-field') Object.assign(offer, { force: true });
     if (mode === 'bad-count') offer.ordinaryCloseCount = 0.5;
     let paired = false;
     const send = vi.fn(async (message: any) => {
       if (message.type === 'accountChoices') return { ok: true, accounts: [
         { instanceId: 'profile-business', name: 'Business', port: 8770, compatible: true },
-        { instanceId: 'profile-Epsilon', name: 'Epsilon', port: 8771, compatible: true }
+        { instanceId: 'profile-rivera', name: 'Rivera', port: 8771, compatible: true }
       ] };
       if (message.type === 'status') return { connected: paired, paired, compatible: true, instanceId: paired ? 'profile-business' : null };
       if (message.type === 'pairTo') {
@@ -456,7 +471,7 @@ it.each(['accept', 'cancel', 'selection-changed', 'wrong-target', 'extra-field',
     const select = document.getElementById('accountSelect') as HTMLSelectElement;
     select.value = 'profile-business'; select.dispatchEvent(new popup!.window.Event('change'));
     const confirm = vi.spyOn(popup!.window, 'confirm').mockImplementation(() => {
-      if (mode === 'selection-changed') { select.value = 'profile-Epsilon'; select.dispatchEvent(new popup!.window.Event('change')); }
+      if (mode === 'selection-changed') { select.value = 'profile-rivera'; select.dispatchEvent(new popup!.window.Event('change')); }
       return mode !== 'cancel';
     });
     document.getElementById('accountConnect')!.click();
@@ -479,7 +494,7 @@ it.each(['accept', 'close-only', 'observations-only', 'cancel', 'retarget'])('of
   const send = vi.fn(async (message: any) => {
     if (message.type === 'accountChoices') return { ok: true, accounts: [
       { instanceId: 'profile-business', name: 'Business', port: 8770, compatible: true },
-      { instanceId: 'profile-Epsilon', name: 'Epsilon', port: 8771, compatible: true }
+      { instanceId: 'profile-rivera', name: 'Rivera', port: 8771, compatible: true }
     ] };
     if (message.type === 'status') return { connected: paired, paired, compatible: true, instanceId: paired ? 'profile-business' : null };
     if (message.type === 'pairTo') {
@@ -494,7 +509,7 @@ it.each(['accept', 'close-only', 'observations-only', 'cancel', 'retarget'])('of
   const select = document.getElementById('accountSelect') as HTMLSelectElement;
   select.value = 'profile-business'; select.dispatchEvent(new popup!.window.Event('change'));
   const confirm = vi.spyOn(popup!.window, 'confirm').mockImplementation(() => {
-    if (mode === 'retarget') select.value = 'profile-Epsilon';
+    if (mode === 'retarget') select.value = 'profile-rivera';
     return mode !== 'cancel';
   });
   document.getElementById('accountConnect')!.click();
@@ -514,7 +529,7 @@ it.each(['wrong-target', 'hidden-extra', 'accessor', 'wrong-key', 'missing-offer
   ('refuses malformed preservation offers in the popup (%s)', async mode => {
     const offer = { version: 1, targetInstanceId: 'profile-business', snapshotDigest: 'c'.repeat(64), journalCount: 0, ordinaryCloseCount: 1 };
     const getter = vi.fn(() => 0);
-    if (mode === 'wrong-target') offer.targetInstanceId = 'profile-Epsilon';
+    if (mode === 'wrong-target') offer.targetInstanceId = 'profile-rivera';
     if (mode === 'hidden-extra') Object.defineProperty(offer, 'force', { value: true });
     if (mode === 'accessor') Object.defineProperty(offer, 'journalCount', { get: getter, enumerable: true });
     const diagnostic = 'This Chrome profile still has pending CoS work: chat-close receipts (1). History eligibility diagnostic: terminal_mismatch. Terminal custody diagnostic: monitoring_off. Recovery protocol 1.';

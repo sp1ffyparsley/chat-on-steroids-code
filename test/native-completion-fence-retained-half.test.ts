@@ -149,3 +149,22 @@ describe('retained request half refuses substituted evidence', () => {
     });
 
 });
+
+describe('native result wait after browser activation', () => {
+  it.each(['document', 'epoch', 'both'])('explains a changed %s without claiming original tool identity changed', kind => {
+    resetCoreBrowserEvidenceForTests();
+    expect(noteCoreBrowserEvidence(frame(NOW))).toBe(true);
+    const next = settled(NOW + 1000);
+    if (kind !== 'epoch') next.documentId = 'reloaded-document';
+    if (kind !== 'document') next.navigationEpoch = 8;
+    expect(noteCoreBrowserEvidence(next)).toBe(true);
+    const wait = nativeFinalEvidenceWait(coreBrowserEvidence(TARGET), NOW + 1000)!;
+    expect(wait.reason).toBe('evidence');
+    expect(wait.detail).toMatch(/browser document or navigation epoch changed/i);
+    expect(wait.detail).not.toMatch(/tool identities changed/);
+    expect(wait.nextAction).toMatch(/no replay/);
+    expect(nativeCompletionDiagnostic(TARGET)?.reason).toBe('document-changed');
+    expect(nativeCompletionCandidate(TARGET)).toBeNull();
+    expect(coreBrowserEvidence(TARGET)?.pendingCompletion).toMatchObject({ documentId: DOCUMENT, navigationEpoch: 7, allCoreRequestIds: ['workflow-1', 'workflow-2'] });
+  });
+});

@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 121;
+  const RECORDER_VERSION = 124;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -2914,6 +2914,7 @@
       !modelCatalogBusy && !pluginRefreshBusy &&
       (!desktopDecision || desktopDecision === recoverableDecision && recoverableDecision.onTarget());
     const wholePageLoadFailure = !CLF_DOM.composer() && Boolean(CLF_DOM.conversationId()) && CLF_DOM.turns().length === 0;
+    const separateDraft = !recoverableDecision ? (CLF_DOM.composerText() || '') : '';
     let expectedSelection = null;
     let modelPreflightFailed = false;
     const result = CLF_DOM.retryLatestTransportFailure(current, () => {
@@ -2924,7 +2925,7 @@
         return false;
       }
       return true;
-    });
+    }, !recoverableDecision);
     if (result?.status === 'retried' && recoverableDecision) {
       // A candidate observed before native Retry belongs to the failed generation. The same
       // durable decision owner collects the replacement answer, but its settle grace starts over.
@@ -2935,9 +2936,25 @@
         return { ok: false, error: 'retry_model_unverified', modelBlocked: true, retrySpent: false,
           expectedModel: null, expectedEffort: null, actualModel: null, actualEffort: null };
       }
+      // The DOM owner positively refused before clicking. Retain a user-owned draft or
+      // attachment without charging the app's Retry budget or promoting toward reload.
+      // A stale route, model refusal or already-clicked Retry cannot borrow this deferral.
+      if ((result?.reason === 'page_not_idle' || result?.reason === 'page_changed') &&
+          current() && CLF_DOM.conversationId() === sourceConversation &&
+          ((CLF_DOM.composerText() || '').trim() || CLF_DOM.hasComposerAttachments())) {
+        console.info('[Chat On Steroids] native Retry deferred: protected composer; no click');
+        return { ok: false, error: result.reason, composerBlocked: true };
+      }
       return { ok: false, error: result?.reason || 'native_retry_unavailable' };
     }
     if (wholePageLoadFailure) return { ok: true };
+
+    if (separateDraft.trim()) {
+      // Native Retry targets the provider's failed message, never the new-message Send control.
+      // Keep the user's draft in place; a provider-side change after the click is diagnostic,
+      // not authority to refund/replay a Retry or overwrite whatever the user types next.
+      console.info('[Chat On Steroids] native Retry clicked; separate composer was not submitted');
+    }
 
     // Give the native Retry event one short UI turn to publish any provider-owned reset. The
     // subsequent activity watchdog still decides whether useful work resumed; this check owns
@@ -4594,6 +4611,7 @@
       'callIdentityRecovered', 'callIdentityPriorPair', 'callIdentityUserUnproved',
       'callIdentityNativeUnproved', 'callIdentityScopeUnproved', 'callIdentityParentUnproved',
       'callIdentitySelectedWithheld',
+    'nativeAnchorLiveMissing', 'nativeAnchorUserMissing', 'nativeAnchorTurnIncomplete', 'nativeAnchorPathEmpty', 'nativeAnchorUserPathMismatch', 'nativeAnchorUnselectedPath', 'nativeAnchorPrerequisite',
       'identityReasonCurrentQuestionMissing',
       'identityReasonCurrentQuestionUnselected',
       'identityReasonCurrentQuestionConflict',

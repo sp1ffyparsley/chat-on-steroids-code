@@ -44,7 +44,7 @@
  * into somebody's conversation.
  */
 
-import { requestBrowserDecision, authorizeBrowserHelperRetry, settleTimedOutBrowserHelper, pausedBrowserHelpers, listInputs, retainSourceHelperContinuation, ordinaryInputTerminalReply, ordinaryInputWatchdogBoundary, withGoalReplyActivationInput, BrowserDecisionProtocolRejection, BrowserDecisionSourceSuperseded, type BrowserDecisionHandoff, type InputEntry } from './session/input.js';
+import { requestBrowserDecision, authorizeBrowserHelperRetry, settleTimedOutBrowserHelper, pausedBrowserHelpers, listInputs, retainSourceHelperContinuation, ordinaryInputTerminalReply, ordinaryInputWatchdogBoundary, withGoalReplyActivationInput, BrowserDecisionProtocolRejection, BrowserDecisionSourceSuperseded, type BrowserDecisionHandoff, type BrowserHelperRetryOptions, type InputEntry } from './session/input.js';
 import { canonicalInputProvenanceMatches, recordAutomaticGoalInput } from './session/input-history.js';
 import { GOAL_EXTERNAL_HOLD_REPLY, automaticDecisionHold, isAutomaticDecisionHoldCode, goalErrorMessage, goalHelperFailureCause, isGoalHelperFailureCause, type GoalHelperFailureCause } from '../shared/goal-errors.js';
 import { MAX_CHATGPT_MESSAGE_CHARS, nativePreparedInputMatches, retainedLegacyInputPayloadMatches, userPromptText } from '../shared/user-prompt.js';
@@ -1777,13 +1777,16 @@ export function goalViewFor(conversationId: string, clientId?: string): GoalDraf
   return view(draft);
 }
 
-export async function retryGoalBrowserHelper(sourceSessionId: string, inputId: string, restartDraft = true): Promise<boolean> {
+export async function retryGoalBrowserHelper(
+  sourceSessionId: string, inputId: string, restartDraft = true,
+  retryOptions: BrowserHelperRetryOptions = {}
+): Promise<boolean> {
   const session = await getSession(sourceSessionId);
   if (!session?.conversationId) return false;
   const draft = drafts.get(session.conversationId);
   if (draft && (draft.sessionId !== sourceSessionId || draft.stage !== 'failed')) return false;
   if (draft && !goalArmedFor(session.conversationId)) return false;
-  if (!await authorizeBrowserHelperRetry(inputId, sourceSessionId, draft?.turnId)) return false;
+  if (!await authorizeBrowserHelperRetry(inputId, sourceSessionId, draft?.turnId, retryOptions)) return false;
   // The explicit Restart action is separate from switching Loop Off/On. Both must grant
   // only this saved pending turn permission for one new helper after a cold accepted
   // answer. Keep the grant in the existing durable reply owner before restarting a draft.
@@ -1862,7 +1865,7 @@ export async function retryPausedGoalBrowserHelpers(): Promise<HelperBulkRetryRe
     // Bulk recovery rearms the durable obligation and reloads its source immediately after
     // all fences are retired. Do not start a disposable in-memory draft that rearming would
     // have to cancel a moment later.
-    if (await retryGoalBrowserHelper(sourceSessionId, inputId, false)) result.restarted += 1;
+    if (await retryGoalBrowserHelper(sourceSessionId, inputId, false, { confirmedUnsentOnly: true })) result.restarted += 1;
     else result.skipped += 1;
   }
   return result;
