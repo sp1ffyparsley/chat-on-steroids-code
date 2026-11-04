@@ -9220,6 +9220,7 @@ describe('activity feed', () => {
     const sessionId = opened.body.sessionId;
     for (let index = 0; index < 2; index++) await recorder.recordToolCall({ tool: 'read', args: args[index],
       content: [{ type: 'text', text: 'Returned original result' }], resultReceiptId: receipts[index],
+      invocationSha256: invocationArgumentsDigest('read', args[index])!,
       requestId: null, outcome: 'ok', durationMs: 1, startedAt: Date.now() });
     await recorder.flushRecorder();
     const calls = nativeIds.map((messageId, index) => ({ messageId, requestId, tool: 'read', order: index,

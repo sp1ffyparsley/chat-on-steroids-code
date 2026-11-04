@@ -75,7 +75,6 @@ import {
 } from './store.js';
 import {
   awaitRequestCorrelation,
-  invocationArgumentsDigest,
   commitRequestCorrelations,
   correlationCommitPending,
   observeRequestCorrelations,
@@ -2159,8 +2158,7 @@ async function fileToolCall(input: ToolCallInput, target: Target): Promise<ToolC
       if (summary.tone !== 'bad') summary.tone = 'warn';
     }
 
-    const invocationSha256 = input.resultReceiptId
-      ? input.invocationSha256 ?? invocationArgumentsDigest(input.tool, input.args) : null;
+    const invocationSha256 = input.resultReceiptId ? input.invocationSha256 : null;
     const call: ToolCallRecord = {
       ...(target.attribution === 'request_id' && target.conversationId && evidence.processCompletion && evidence.processSessionId && input.tool === 'exec_command'
         ? { process: { sessionId: evidence.processSessionId } } : {}),

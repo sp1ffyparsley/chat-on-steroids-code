@@ -651,6 +651,15 @@ describe('endpoint hardening', () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it('does not manufacture invocation authority for a recorder-only legacy receipt', async () => {
+    const { recordToolCall } = await import('../src/main/session/recorder.js');
+    const call = await recordToolCall({ tool: 'read', args: { paths: ['/workspace/notes.txt'] },
+      resultReceiptId: 'd'.repeat(48), content: [{ type: 'text', text: 'Legacy original result' }],
+      outcome: 'ok', requestId: null, durationMs: 1, startedAt: Date.now() });
+    expect(call?.resultReceiptId).toBe('d'.repeat(48));
+    expect(call?.invocationSha256).toBeUndefined();
+  });
+
   it('keeps the original wire invocation digest when SDK validation adds defaults', async () => {
     const { withInboundRequestId } = await import('../src/main/mcp/inbound.js');
     const { invocationArgumentsDigest } = await import('../src/main/session/correlation.js');
