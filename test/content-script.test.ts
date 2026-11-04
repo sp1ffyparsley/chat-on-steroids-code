@@ -56,12 +56,12 @@ describe('same-document evidence reader refresh', () => {
     const timeout = window.setTimeout;
     window.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms);
     const listener = (event: any) => {
-      if (event.data?.source !== 'clf-fiber-ask') return;
+      if (event.data?.source !== 'clf-fiber-ask-v2') return;
       scans.push(event.data.nonce);
       beforeReply();
       window.dispatchEvent(new window.MessageEvent('message', { source: window, data: {
         source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce,
-        v: 15, scanOk: true, rows: [], turns
+        v: 17, scanOk: true, rows: [], turns
       } }));
     };
     window.addEventListener('message', listener);
@@ -265,9 +265,9 @@ describe('same-document evidence reader refresh', () => {
     const window = live.window as any, timeout = window.setTimeout;
     window.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms);
     const nonces: string[] = [];
-    const onAsk = (event: any) => { if (event.data?.source === 'clf-fiber-ask') nonces.push(event.data.nonce); };
+    const onAsk = (event: any) => { if (event.data?.source === 'clf-fiber-ask-v2') nonces.push(event.data.nonce); };
     const reply = (nonce: string, scanOk: boolean) => window.dispatchEvent(new window.MessageEvent('message', {
-      source: window, data: { source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 15, scanOk, rows: [], turns: [] }
+      source: window, data: { source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 17, scanOk, rows: [], turns: [] }
     }));
     window.addEventListener('message', onAsk);
     onTestFinished(() => { window.removeEventListener('message', onAsk); window.setTimeout = timeout; });
@@ -577,10 +577,10 @@ function retryModelProof(document: Document, conversationId: string, effort = 'h
   trigger.type = 'button';
   trigger.setAttribute('data-clf-test-rendered', '1');
   trigger.setAttribute('aria-haspopup', 'menu');
-  trigger.setAttribute('data-clf-picker-route', `/c/${conversationId}`);
-  trigger.setAttribute('data-clf-selected-route', `/c/${conversationId}`);
-  trigger.setAttribute('data-clf-selected-model', 'gpt-5-6-thinking');
-  trigger.setAttribute('data-clf-selected-effort', effort);
+  trigger.setAttribute('data-clf-picker-route-v2', `/c/${conversationId}`);
+  trigger.setAttribute('data-clf-selected-route-v2', `/c/${conversationId}`);
+  trigger.setAttribute('data-clf-selected-model-v2', 'gpt-5-6-thinking');
+  trigger.setAttribute('data-clf-selected-effort-v2', effort);
   document.querySelector('#composer-form')?.append(trigger);
   return trigger;
 }
@@ -1277,6 +1277,30 @@ describe('native approval automation ownership', () => {
     active.document.body.append(card);
     return { card, allow, clicked: () => clicks };
   }
+
+  it.each(['active', 'paused', 'off', 'expired', 'route-changed'] as const)(
+    'routes response-only view recovery through the current elected policy: %s', async mode => {
+      const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+      live = await harness(`https://chatgpt.com/c/${conversationId}`, {
+        activity: () => ({ ok: true, data: { automationPaused: mode === 'paused',
+          goal: { enabled: mode !== 'off', own: true, mode: 'loop' } } })
+      });
+      live.hook.observe(); await live.hook.pullActivity();
+      if (mode === 'expired') live.advance(75_000);
+      if (mode === 'route-changed') live.window.history.pushState(null, '', '/c/bbbbbbbb-cccc-dddd-eeee-ffffffffffff');
+      const section = assistantTurn(live.document, 'native-render-turn', []);
+      const root = live.document.createElement('div'); root.setAttribute('data-dil-message-id', '754061e2-81c4-4102-9b81-d431a314700b');
+      const status = live.document.createElement('div'); status.setAttribute('role', 'status');
+      status.setAttribute('data-dil-render-failed', ''); status.textContent = 'This response couldn’t load';
+      const reload = live.document.createElement('button'); reload.type = 'button'; reload.textContent = 'Reload response';
+      for (const node of [root, status, reload]) node.setAttribute('data-clf-test-rendered', '1');
+      const click = vi.fn(); reload.addEventListener('click', click);
+      root.append(status, reload); section.append(root);
+      const before = live.sent.length;
+      live.hook.observe(); await settle();
+      expect(click).toHaveBeenCalledTimes(mode === 'active' ? 1 : 0);
+      expect(live.sent.slice(before).some(message => ['input_ack', 'goal_ack', 'desktop_input', 'compact'].includes(message.type))).toBe(false);
+    });
 
   it.each(['ready', 'paused', 'expired', 'missing-adapter', 'missing-prompt-guard', 'route-changed'] as const)(
     'reports passive approval health without dispatching a click: %s', async mode => {
@@ -2432,12 +2456,12 @@ describe('desktop input delivery and helper ownership', () => {
       const timer = win.setTimeout;
       win.setTimeout = (fn: () => void, ms: number) => ms === 1500 ? globalThis.setTimeout(fn, ms) : timer(fn, ms);
       win.postMessage = (message: any, origin: string) => {
-        if (message?.source !== 'clf-fiber-ask') return post(message, origin);
+        if (message?.source !== 'clf-fiber-ask-v2') return post(message, origin);
         void Promise.resolve().then(() => {
           const nonce = message.nonce;
-          section.setAttribute('data-clf-fiber-turn', `${nonce}:0`);
+          section.setAttribute('data-clf-fiber-v2-turn', `${nonce}:0`);
           win.dispatchEvent(new win.MessageEvent('message', { source: win, data: {
-            source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 15, scanOk: true, rows: [], turns: [{
+            source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 17, scanOk: true, rows: [], turns: [{
               index: 0, turnId: 'source-turn', conversationId: chatA, endMessageId: 'source-answer', calls: [], activities: [],
               messages: [{ role: 'assistant', messageId: 'source-answer', rawMessageId: 'source-answer', rawText: 'Finished.', stable: true }]
             }]
@@ -2676,12 +2700,12 @@ describe('desktop input delivery and helper ownership', () => {
       live.window.setTimeout = ((fn: TimerHandler, ms?: number) => ms === 1500
         ? globalThis.setTimeout(fn as () => void, ms) : instant(fn, ms)) as typeof live.window.setTimeout;
       live.window.addEventListener('message', event => {
-        if (event.data?.source !== 'clf-fiber-ask') return;
+        if (event.data?.source !== 'clf-fiber-ask-v2') return;
         const nonce = event.data.nonce;
         live!.document.querySelector('[data-turn-id="rotation-source-answer"]')!
-          .setAttribute('data-clf-fiber-turn', `${nonce}:0`);
+          .setAttribute('data-clf-fiber-v2-turn', `${nonce}:0`);
         live!.window.dispatchEvent(new live!.window.MessageEvent('message', { source: live!.window as unknown as Window,
-          data: { source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 15, scanOk: true, rows: [],
+          data: { source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 17, scanOk: true, rows: [],
             turns: [{ index: 0, turnId: 'rotation-source-answer', conversationId: chatA, messages: [], activities: [],
               calls: [{ tool: 'read', messageId: 'completed-local-tool', answered: true }] }] } }));
       });
@@ -2729,7 +2753,7 @@ describe('desktop input delivery and helper ownership', () => {
     if (change === 'stale-shell') {
       const shell = live.document.createElement('main');
       shell.setAttribute('data-app-shell-main-surface', 'true');
-      shell.innerHTML = `<div data-thread-find-target="conversation"><div data-turn-key="direct-source" data-clf-shell-running="${live.window.location.pathname}"><div data-chatgpt-agent-turn-start="true"></div></div></div>`;
+      shell.innerHTML = `<div data-thread-find-target="conversation"><div data-turn-key="direct-source" data-clf-shell-running-v2="${live.window.location.pathname}"><div data-chatgpt-agent-turn-start="true"></div></div></div>`;
       live.document.body.append(shell);
     }
     live.hook.observe(); await live.hook.flush();
@@ -5392,7 +5416,7 @@ describe('desktop input delivery and helper ownership', () => {
     });
     const delivery = live.runtimeMessage({ type: 'clf-desktop-input', id: inputId, conversationId: null });
     await click;
-    user.setAttribute('data-clf-fiber-turn', '0');
+    user.setAttribute('data-clf-fiber-v2-turn', '0');
     await replyFiber([], [{ conversationId: chatA, turnId: 'fast-markdown-user', messages: [{
       role: 'user', stable: true, messageId: 'm-fast-markdown-user', rawMessageId: 'm-fast-markdown-user', rawText: prompt
     }] }], null, true, live, true);
@@ -6827,7 +6851,7 @@ function toolBlock(document: Document, label: string): HTMLElement {
   if (connector) {
     button.setAttribute('aria-label', 'Open tool call list');
     // This harness fakes MAIN-world observation; the real helper proves the row.
-    button.setAttribute('data-clf-fiber', 'fixture:0');
+    button.setAttribute('data-clf-fiber-v2', 'fixture:0');
   }
   const span = document.createElement('span');
   span.className = 'text-start';
@@ -6954,14 +6978,14 @@ async function replyFiber(
   const instant = window.setTimeout;
   window.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms);
   const onAsk = (event: any) => {
-    if (!event.data || event.data.source !== 'clf-fiber-ask') return;
+    if (!event.data || event.data.source !== 'clf-fiber-ask-v2') return;
     const scanToken = event.data.nonce;
     // Tests manually mark the exact DOM↔descriptor joins they intend. Upgrade those legacy
     // numeric fixtures to the shipped scan-token stamp at reply time, matching what fiber.js
     // does synchronously before it posts the descriptor frame.
-    for (const selector of ['[data-clf-fiber]', '[data-clf-fiber-turn]']) {
+    for (const selector of ['[data-clf-fiber-v2]', '[data-clf-fiber-v2-turn]']) {
       for (const node of window.document.querySelectorAll(selector)) {
-        const attr = selector === '[data-clf-fiber]' ? 'data-clf-fiber' : 'data-clf-fiber-turn';
+        const attr = selector === '[data-clf-fiber-v2]' ? 'data-clf-fiber-v2' : 'data-clf-fiber-v2-turn';
         const value = node.getAttribute(attr);
         if (!restamp || !value) continue;
         const split = value.lastIndexOf(':');
@@ -6970,7 +6994,7 @@ async function replyFiber(
         node.setAttribute(attr, `${scanToken}:${Number(rawIndex)}`);
       }
     }
-    // Every shipped v15 MAIN frame includes both inventories; old hand-built
+    // Every shipped v16 MAIN frame includes both inventories; old hand-built
     // fixtures omitted empty arrays. Preserve an explicitly undefined field so
     // regression cases can still emulate a real broken provider projection.
     const indexedTurns = turns.map((turn: any, index) => ({
@@ -6982,7 +7006,7 @@ async function replyFiber(
     window.dispatchEvent(
       new window.MessageEvent('message', {
         data: {
-          source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken, v: 15, scanOk: true,
+          source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken, v: 17, scanOk: true,
           rows, turns: indexedTurns, ...(shellScan === undefined ? {} : { shellScan })
         },
         source: window
@@ -7430,7 +7454,7 @@ describe('naming the agent behind a row', () => {
     live = await harness();
     renderingOn();
     const section = assistantTurn(live.document, 'turn-1', ['Called tool!']);
-    section.querySelector('[aria-label="Open tool call list"]')!.setAttribute('data-clf-fiber', '0');
+    section.querySelector('[aria-label="Open tool call list"]')!.setAttribute('data-clf-fiber-v2', '0');
     // The recorded tool matches the one the row's descriptor names below, as it does for a
     // row that really is these calls — a row only takes a call it does not contradict.
     const entries = ['prime', 'worker-1', 'worker-2'].map((agent, n) =>
@@ -7451,7 +7475,7 @@ describe('naming the agent behind a row', () => {
     }));
     await replyFiber([
       {
-        v: 15,
+        v: 17,
         index: 0,
         tool: 'run_command',
         path: null,
@@ -7490,7 +7514,7 @@ describe('naming the agent behind a row', () => {
  */
 describe('the calls a row folded away', () => {
   const FOLDED = {
-    v: 15,
+    v: 17,
     index: 0,
     tool: 'run_command',
     path: '/TobisComputer/mcp/run_command',
@@ -7509,7 +7533,7 @@ describe('the calls a row folded away', () => {
   async function foldedTurn(): Promise<HTMLElement> {
     renderingOn();
     const section = assistantTurn(live!.document, 'turn-1', ['Called tool!']);
-    section.querySelector('[aria-label="Open tool call list"]')!.setAttribute('data-clf-fiber', '0');
+    section.querySelector('[aria-label="Open tool call list"]')!.setAttribute('data-clf-fiber-v2', '0');
     const calls = [0, 1, 2, 3, 4].map((n) =>
       call({
         turnId: 'turn-1',
@@ -8823,7 +8847,7 @@ describe('canonical Fiber transcript ingestion in 1.8', () => {
     live = await harness();
     startGenerating(live.document);
     const section = assistantTurn(live.document, 'page-turn-unknown-commentary', []);
-    section.setAttribute('data-clf-fiber-turn', '0');
+    section.setAttribute('data-clf-fiber-v2-turn', '0');
     live.hook.observe();
     await settle();
     const localTurn = emitted(live.sent, 'turn_start').at(-1)!.event.turnId as string;
@@ -8922,7 +8946,7 @@ async function bindFiberTurns(
   bindings: Array<{ section: HTMLElement; turn: Record<string, unknown> }>,
   observeOnly = false
 ): Promise<void> {
-  bindings.forEach(({ section }, index) => section.setAttribute('data-clf-fiber-turn', String(index)));
+  bindings.forEach(({ section }, index) => section.setAttribute('data-clf-fiber-v2-turn', String(index)));
   await replyFiber(
     [],
     bindings.map(({ turn }, index) => ({
@@ -12048,7 +12072,7 @@ describe('a stop button that goes missing while the turn is still running', () =
       responseSeen = resolve;
     });
     const onAsk = (event: any) => {
-      if (answered || event.data?.source !== 'clf-fiber-ask') return;
+      if (answered || event.data?.source !== 'clf-fiber-ask-v2') return;
       answered = true;
 
       // The page moves to the next real user turn while the old turn's page-model scan is
@@ -12060,13 +12084,13 @@ describe('a stop button that goes missing while the turn is still running', () =
       assistantTurn(live!.document, 'turn-after-overlap', []);
       live!.hook.observe();
 
-      first.setAttribute('data-clf-fiber-turn', `${event.data.nonce}:0`);
+      first.setAttribute('data-clf-fiber-v2-turn', `${event.data.nonce}:0`);
       window.dispatchEvent(new window.MessageEvent('message', {
         data: {
           source: 'clf-fiber-reply',
           nonce: event.data.nonce,
           scanToken: event.data.nonce,
-          v: 15,
+          v: 17,
           scanOk: true,
           rows: [],
           turns: [{
@@ -12791,7 +12815,7 @@ describe('a stop button that goes missing while the turn is still running', () =
     expect(emitted(live.sent, 'chat_error').map(entry => entry.event.text)).not.toContain(
       'No visible progress for five minutes. The app could not confirm that this turn finished.'
     );
-    section.removeAttribute('data-clf-fiber-turn');
+    section.removeAttribute('data-clf-fiber-v2-turn');
     await replyFiber([], []);
     live.hook.observe();
     await settle();
@@ -12831,7 +12855,7 @@ describe('a stop button that goes missing while the turn is still running', () =
     if (layout === 'stale-shell') {
       const shell = live.document.createElement('main');
       shell.setAttribute('data-app-shell-main-surface', 'true');
-      shell.innerHTML = `<div data-thread-find-target="conversation"><div data-turn-key="turn-stopped" data-clf-shell-running="${live.window.location.pathname}"><div data-chatgpt-agent-turn-start="true"></div></div></div>`;
+      shell.innerHTML = `<div data-thread-find-target="conversation"><div data-turn-key="turn-stopped" data-clf-shell-running-v2="${live.window.location.pathname}"><div data-chatgpt-agent-turn-start="true"></div></div></div>`;
       live.document.body.append(shell);
     }
     live.hook.observe();
@@ -12878,7 +12902,7 @@ describe('a stop button that goes missing while the turn is still running', () =
     assistantTurn(live.document, 'turn-shell-tooling', []);
     const shell = live.document.createElement('main');
     shell.setAttribute('data-app-shell-main-surface', 'true');
-    shell.innerHTML = `<div data-thread-find-target="conversation"><div data-turn-key="turn-shell-tooling" data-clf-shell-running="${live.window.location.pathname}"><div data-chatgpt-agent-turn-start="true"></div></div></div>`;
+    shell.innerHTML = `<div data-thread-find-target="conversation"><div data-turn-key="turn-shell-tooling" data-clf-shell-running-v2="${live.window.location.pathname}"><div data-chatgpt-agent-turn-start="true"></div></div></div>`;
     live.document.body.append(shell);
     live.hook.observe();
     await settle();
@@ -13184,7 +13208,7 @@ describe('a content script reloaded into a turn already in flight', () => {
       live = await harness(undefined, { activity: () => activity(data) }, document => {
         const shell = document.createElement('main');
         shell.setAttribute('data-app-shell-main-surface', 'true');
-        shell.innerHTML = `<div data-thread-find-target="conversation"><div data-turn-key="stopped-exchange" data-clf-shell-running="/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"><div data-content-search-unit-key="fallback-turn-0:0:user" data-message-id="${question}"><div data-user-message-bubble>Continue the original work</div></div><div data-chatgpt-agent-turn-start="true"><div class="markdown">A partial answer, not a terminal result.</div></div></div></div>`;
+        shell.innerHTML = `<div data-thread-find-target="conversation"><div data-turn-key="stopped-exchange" data-clf-shell-running-v2="/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"><div data-content-search-unit-key="fallback-turn-0:0:user" data-message-id="${question}"><div data-user-message-bubble>Continue the original work</div></div><div data-chatgpt-agent-turn-start="true"><div class="markdown">A partial answer, not a terminal result.</div></div></div></div>`;
         document.body.append(shell);
         if (nativeStop) {
           startGenerating(document, { send: false });
@@ -13794,7 +13818,7 @@ describe('a content script reloaded into a turn already in flight', () => {
     const next = assistantTurn(live.document, 'turn-next', []);
     // A terminal Fiber object deliberately latches until the page model proves a newer
     // response exists. DOM Stop alone is not enough, because ChatGPT can leave it stale.
-    next.setAttribute('data-clf-fiber-turn', '0');
+    next.setAttribute('data-clf-fiber-v2-turn', '0');
     await replyFiber(
       [],
       [{
@@ -14767,7 +14791,7 @@ describe('how a turn is recorded as having ended', () => {
       retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
       retry.addEventListener('click', () => {
         clicks += 1;
-        trigger.setAttribute('data-clf-selected-effort', 'medium');
+        trigger.setAttribute('data-clf-selected-effort-v2', 'medium');
       });
       card.append(copy, retry);
       document.body.append(card);
@@ -14828,7 +14852,7 @@ describe('how a turn is recorded as having ended', () => {
       if (layout === 'stale-shell') {
         const shell = document.createElement('main');
         shell.setAttribute('data-app-shell-main-surface', 'true');
-        shell.innerHTML = `<div data-thread-find-target="conversation"><div data-turn-key="failed-turn" data-clf-shell-running="/c/${conversationId}"><div data-chatgpt-agent-turn-start="true"></div></div></div>`;
+        shell.innerHTML = `<div data-thread-find-target="conversation"><div data-turn-key="failed-turn" data-clf-shell-running-v2="/c/${conversationId}"><div data-chatgpt-agent-turn-start="true"></div></div></div>`;
         card.setAttribute('role', 'alert');
         shell.querySelector('[data-turn-key]')!.append(card);
         document.body.append(shell);
@@ -15541,7 +15565,7 @@ describe('a page leaving the screen', () => {
  */
 describe('evidence from the page context', () => {
   const GOOD = {
-    v: 15,
+    v: 17,
     index: 0,
     tool: 'agent_status',
     path: '/TobisComputer/mcp/agent_status',
@@ -15634,7 +15658,7 @@ describe('evidence from the page context', () => {
     live = await harness();
     const section = assistantTurn(live.document, 'turn-1', ['Called tool!']);
     const block = section.querySelector('[aria-label="Open tool call list"]')!;
-    block.setAttribute('data-clf-fiber', '0');
+    block.setAttribute('data-clf-fiber-v2', '0');
     await reply([GOOD]);
     expect(live.hook.fiberFor(block)).toMatchObject({ tool: 'agent_status', hidden: 4 });
   });
@@ -15646,13 +15670,13 @@ describe('evidence from the page context', () => {
 
     // This row survived React churn from an earlier successful scan. The new frame also uses
     // index 0, which is exactly why a bare numeric stamp used to relabel it as the new call.
-    block.setAttribute('data-clf-fiber', 'older-scan:0');
+    block.setAttribute('data-clf-fiber-v2', 'older-scan:0');
     await replyFiber([{ ...GOOD, tool: 'run_command' }], [], null, false);
     expect(live.hook.fiberFor(block)).toBeNull();
 
     // Numeric v9-era stamps are equally unusable against a v10 frame. They have no evidence
     // of which scan produced them, so compatibility here would reintroduce the same bug.
-    block.setAttribute('data-clf-fiber', '0');
+    block.setAttribute('data-clf-fiber-v2', '0');
     expect(live.hook.fiberFor(block)).toBeNull();
   });
 
@@ -15669,7 +15693,7 @@ describe('evidence from the page context', () => {
     // failure mode. The older occurrence still proves its conversation issued a connector
     // request. Only the scan-qualified section stamp can choose between them;
     // a newer array position is not evidence of local generation ownership.
-    if (stamped) section.setAttribute('data-clf-fiber-turn', '1');
+    if (stamped) section.setAttribute('data-clf-fiber-v2-turn', '1');
     await reply([], [
       {
         turnId: 'reused-page-turn',
@@ -15714,7 +15738,7 @@ describe('evidence from the page context', () => {
     const promptSection = assistantTurn(live.document, 'resume-split-prompt', []);
     live.hook.observe();
     await settle();
-    promptSection.setAttribute('data-clf-fiber-turn', '0');
+    promptSection.setAttribute('data-clf-fiber-v2-turn', '0');
 
     await replyFiber([], [
       {
@@ -16390,7 +16414,7 @@ describe('evidence from the page context', () => {
     userTurn(live.document, 'resume-bootstrap', prompt, { sent: false });
     startGenerating(live.document, { send: false });
     const section = assistantTurn(live.document, 'resume-answer', []);
-    section.setAttribute('data-clf-fiber-turn', '0');
+    section.setAttribute('data-clf-fiber-v2-turn', '0');
     live.hook.observe();
     await settle();
 
@@ -16589,7 +16613,7 @@ describe('evidence from the page context', () => {
     // fiber.js stamps the sections it scanned, and that stamp is the anchor that survives.
     const section = assistantTurn(live.document, 'virtualized-live-turn', []);
     section.removeAttribute('data-turn-id');
-    section.setAttribute('data-clf-fiber-turn', '0');
+    section.setAttribute('data-clf-fiber-v2-turn', '0');
     live.hook.observe();
     await settle();
 
@@ -16636,7 +16660,7 @@ describe('evidence from the page context', () => {
     startGenerating(live.document);
     const section = assistantTurn(live.document, 'native-final-turn', []);
     section.removeAttribute('data-turn-id');
-    section.setAttribute('data-clf-fiber-turn', '0');
+    section.setAttribute('data-clf-fiber-v2-turn', '0');
     live.hook.observe();
     await settle();
     const exactTurnId = emitted(live.sent, 'turn_start').at(-1)?.event.turnId;
@@ -16663,7 +16687,7 @@ describe('evidence from the page context', () => {
     startGenerating(live.document);
     const section = assistantTurn(live.document, 'late-turn-ack', []);
     section.removeAttribute('data-turn-id');
-    section.setAttribute('data-clf-fiber-turn', '0');
+    section.setAttribute('data-clf-fiber-v2-turn', '0');
     live.hook.observe();
     await settle();
     const expectedTurn = emitted(live.sent, 'turn_start').at(-1)?.event.turnId;
@@ -17153,14 +17177,14 @@ describe('evidence from the page context', () => {
       answered = resolve;
     });
     const onAsk = (event: any) => {
-      if (!event.data || event.data.source !== 'clf-fiber-ask') return;
+      if (!event.data || event.data.source !== 'clf-fiber-ask-v2') return;
       window.dispatchEvent(
         new window.MessageEvent('message', {
           data: {
             source: 'clf-fiber-reply',
             nonce: event.data.nonce,
             scanToken: event.data.nonce,
-            v: 15,
+            v: 17,
             scanOk: true,
             rows: [],
             turns: [
@@ -17289,7 +17313,7 @@ describe('evidence from the page context', () => {
   it('says nothing about a row the helper did not stamp', async () => {
     live = await harness();
     const section = assistantTurn(live.document, 'turn-1', ['Called tool!']);
-    section.querySelector('[data-clf-fiber]')!.removeAttribute('data-clf-fiber');
+    section.querySelector('[data-clf-fiber-v2]')!.removeAttribute('data-clf-fiber-v2');
     await reply([GOOD]);
     expect(live.hook.fiberFor(section.querySelector('[aria-label="Open tool call list"]')!)).toBeNull();
   });
@@ -17299,7 +17323,7 @@ describe('evidence from the page context', () => {
     live = await harness();
     const section = assistantTurn(live.document, 'turn-1', ['Called tool!']);
     const block = section.querySelector('[aria-label="Open tool call list"]')!;
-    block.setAttribute('data-clf-fiber', '0');
+    block.setAttribute('data-clf-fiber-v2', '0');
     await reply([GOOD, { ...GOOD, tool: 'run_command' }]);
     expect(live.hook.fiberFor(block)).toBeNull();
   });
@@ -17313,7 +17337,7 @@ describe('evidence from the page context', () => {
     live = await harness();
     const section = assistantTurn(live.document, 'turn-1', ['Called tool!']);
     const block = section.querySelector('[aria-label="Open tool call list"]')!;
-    block.setAttribute('data-clf-fiber', '0');
+    block.setAttribute('data-clf-fiber-v2', '0');
     await live.hook.refreshFiber();
     expect(live.hook.fiberFor(block)).toBeNull();
   });
@@ -17322,7 +17346,7 @@ describe('evidence from the page context', () => {
     live = await harness();
     const section = assistantTurn(live.document, 'turn-repair', ['Called tool!']);
     const block = section.querySelector('[aria-label="Open tool call list"]')!;
-    block.setAttribute('data-clf-fiber', '0');
+    block.setAttribute('data-clf-fiber-v2', '0');
     await replyFiber([GOOD]);
     expect(live.hook.fiberFor(block)).toMatchObject({ tool: 'agent_status' });
 
@@ -17335,15 +17359,15 @@ describe('evidence from the page context', () => {
     const instant = window.setTimeout;
     window.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms);
     const onAsk = (event: any) => {
-      if (!repaired || !event.data || event.data.source !== 'clf-fiber-ask') return;
-      block.setAttribute('data-clf-fiber', `${event.data.nonce}:0`);
+      if (!repaired || !event.data || event.data.source !== 'clf-fiber-ask-v2') return;
+      block.setAttribute('data-clf-fiber-v2', `${event.data.nonce}:0`);
       window.dispatchEvent(
         new window.MessageEvent('message', {
           data: {
             source: 'clf-fiber-reply',
             nonce: event.data.nonce,
             scanToken: event.data.nonce,
-            v: 15,
+            v: 17,
             scanOk: true,
             rows: [{ ...GOOD, tool: 'read' }],
             turns: []
@@ -17376,7 +17400,7 @@ describe('evidence from the page context', () => {
     renderingOn();
     const section = assistantTurn(live.document, 'turn-1', ['Called tool!']);
     const row = section.querySelector('[aria-label="Open tool call list"]')!;
-    row.setAttribute('data-clf-fiber', '0');
+    row.setAttribute('data-clf-fiber-v2', '0');
     live.reply.set('activity', () => ({
       ok: true,
       data: {
@@ -17400,7 +17424,7 @@ describe('evidence from the page context', () => {
     live = await harness();
     renderingOn();
     const section = assistantTurn(live.document, 'turn-1', ['Called tool!']);
-    section.querySelector('[aria-label="Open tool call list"]')!.setAttribute('data-clf-fiber', '0');
+    section.querySelector('[aria-label="Open tool call list"]')!.setAttribute('data-clf-fiber-v2', '0');
     const recorded = call({
       turnId: 'turn-1',
       seq: 1,
@@ -17441,7 +17465,7 @@ describe('evidence from the page context', () => {
     live = await harness();
     renderingOn();
     const section = assistantTurn(live.document, 'turn-1', ['Called tool!']);
-    section.querySelector('[aria-label="Open tool call list"]')!.setAttribute('data-clf-fiber', '0');
+    section.querySelector('[aria-label="Open tool call list"]')!.setAttribute('data-clf-fiber-v2', '0');
     const recorded = call({ turnId: 'turn-1', seq: 1, summary: { kind: 'agent', tone: 'neutral', title: 'Step one' } });
     live.reply.set('activity', () => ({
       ok: true,
@@ -17469,7 +17493,7 @@ describe('evidence from the page context', () => {
     live = await harness();
     renderingOn();
     const section = assistantTurn(live.document, 'turn-1', ['Called tool!']);
-    section.querySelector('[aria-label="Open tool call list"]')!.setAttribute('data-clf-fiber', '0');
+    section.querySelector('[aria-label="Open tool call list"]')!.setAttribute('data-clf-fiber-v2', '0');
     const recorded = call({
       turnId: 'turn-1',
       seq: 1,
@@ -17508,6 +17532,52 @@ describe('evidence from the page context', () => {
 });
 
 describe('the activity feed', () => {
+  it.each([
+    ['legacy diagnostic reply', 15, true], ['legacy failed scan', 15, false],
+    ['previous same-wire diagnostic reply', 16, true], ['previous same-wire failed scan', 16, false]
+  ] as const)(
+    'keeps an older helper reply from winning the current diagnostic scan: %s', async (_label, legacyWire, legacyOk) => {
+      live = await harness(undefined, {
+        activity: () => ({ ok: true, data: { entries: [], stream: [], nextSince: 0, pendingTools: 0 } })
+      });
+      await settle();
+      const window = live.window as any, instant = window.setTimeout;
+      window.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms);
+      let nonce = '', settledScan = false;
+      const onAsk = (event: any) => {
+        if (event.data?.source !== 'clf-fiber-ask-v2') return;
+        nonce = event.data.nonce;
+        // The surviving previous helper can answer the same nonce first, without refusal evidence.
+        window.dispatchEvent(new window.MessageEvent('message', { source: window, data: {
+          source: 'clf-fiber-reply', nonce, scanToken: nonce, v: legacyWire, scanOk: legacyOk,
+          rows: [], turns: [], shellScan: { selectorMatches: 0, mapped: 0,
+            rejects: { fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0 } }
+        } }));
+      };
+      window.addEventListener('message', onAsk);
+      onTestFinished(() => { window.removeEventListener('message', onAsk); window.setTimeout = instant; });
+      const scan = live.hook.refreshFiber().then(() => { settledScan = true; });
+      await vi.waitFor(() => expect(nonce).not.toBe(''));
+      await new Promise(resolve => globalThis.setTimeout(resolve, 10));
+      expect(settledScan).toBe(false);
+      window.dispatchEvent(new window.MessageEvent('message', { source: window, data: {
+        source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 17, scanOk: true, rows: [], turns: [],
+        shellScan: { selectorMatches: 1, mapped: 1, rejects: {
+          fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0,
+          identityReasonWorkingTurnMismatch: 1, nativeAnchorPathEmpty: 1, nativeAnchorPrerequisite: 1
+        } }
+      } }));
+      await scan;
+      live.sent.length = 0;
+      await live.hook.pullActivity();
+      expect(live.sent.filter(message => message.type === 'activity').at(-1)?.coreDiagnostic?.shellScan).toMatchObject({
+        selectorMatches: 1, mapped: 1,
+        rejects: { identityReasonWorkingTurnMismatch: 1, nativeAnchorPathEmpty: 1, nativeAnchorPrerequisite: 1 }
+      });
+      expect(live.sent.some(message => message.type === 'reply_browser_decision' || message.type === 'input_ack')).toBe(false);
+    }
+  );
+
   it('publishes only bounded shape-only shell scan diagnostics from a valid Fiber frame', async () => {
     live = await harness(undefined, {
       activity: () => ({ ok: true, data: { entries: [], stream: [], nextSince: 0, pendingTools: 0 } })
@@ -19097,7 +19167,7 @@ describe('the Compact & resume control', () => {
     if (layout === 'cached-shell-only') {
       const shell = live.document.createElement('main');
       shell.setAttribute('data-app-shell-main-surface', 'true');
-      shell.innerHTML = `<div data-thread-find-target="conversation"><div data-turn-key="unconfirmed-stop" data-clf-shell-running="${live.window.location.pathname}"><div data-chatgpt-agent-turn-start="true"></div></div></div>`;
+      shell.innerHTML = `<div data-thread-find-target="conversation"><div data-turn-key="unconfirmed-stop" data-clf-shell-running-v2="${live.window.location.pathname}"><div data-chatgpt-agent-turn-start="true"></div></div></div>`;
       live.document.body.append(shell);
       stopGenerating(live.document);
     }
@@ -19239,7 +19309,7 @@ describe('the Compact & resume control', () => {
       startGenerating(live.document);
       const shell = live.document.createElement('main');
       shell.setAttribute('data-app-shell-main-surface', 'true');
-      shell.innerHTML = `<div data-thread-find-target="conversation"><div data-turn-key="stopped-source" data-clf-fiber-turn="source-scan:0" data-clf-shell-running="${live.window.location.pathname}"><div data-chatgpt-agent-turn-start="true"></div></div></div>`;
+      shell.innerHTML = `<div data-thread-find-target="conversation"><div data-turn-key="stopped-source" data-clf-fiber-v2-turn="source-scan:0" data-clf-shell-running-v2="${live.window.location.pathname}"><div data-chatgpt-agent-turn-start="true"></div></div></div>`;
       live.document.body.append(shell);
       live.hook.observe();
       await settle();
@@ -20633,6 +20703,17 @@ describe('the field above the composer', () => {
       detail: expect.stringContaining('Provider access is restricted'), kind: 'goal-error' });
     expect(result!.stage).not.toContain('activity unknown');
     expect(live.sent.some(row => ['goal_draft', 'goal_prepare', 'goal_ack', 'settings_set', 'desktop_input'].includes(row.type))).toBe(false);
+  });
+
+  it('keeps wrapped native completion refusals in the same evidence status', async () => {
+    live = await harness();
+    const code = 'request_failed: native_completion_unverified: missing-result';
+    for (const state of [{ errorCode: code, error: 'Missing result' },
+      { draft: { stage: 'failed', error: code } }]) {
+      expect(view({ goal: { enabled: true, mode: 'loop', ...state } })).toMatchObject({
+        stage: 'Loop waiting for verified completion · activity unknown', steps: []
+      });
+    }
   });
 
   it('shows unresolved native final evidence as unknown without an active progress segment', async () => {
@@ -24816,13 +24897,13 @@ describe('the context meter and automatic compaction', () => {
       : instant(fn, ms);
     const post = window.postMessage.bind(window);
     window.postMessage = (message: any, origin: string) => {
-      if (message?.source !== 'clf-fiber-ask') return post(message, origin);
+      if (message?.source !== 'clf-fiber-ask-v2') return post(message, origin);
       void Promise.resolve().then(() => {
         const currentCalls = calls();
         const scanToken = message.nonce;
-        if (currentCalls !== null) section.setAttribute('data-clf-fiber-turn', `${scanToken}:0`);
+        if (currentCalls !== null) section.setAttribute('data-clf-fiber-v2-turn', `${scanToken}:0`);
         window.dispatchEvent(new window.MessageEvent('message', { source: window, data: {
-          source: 'clf-fiber-reply', nonce: scanToken, scanToken, v: 15,
+          source: 'clf-fiber-reply', nonce: scanToken, scanToken, v: 17,
           scanOk: currentCalls !== null, rows: [], turns: currentCalls === null ? [] : [{
             index: 0,
             turnId: section.getAttribute('data-turn-id'),
@@ -26016,7 +26097,7 @@ describe('one live isolated-world recorder per document', () => {
     const originalPost = window.postMessage.bind(window);
     let fiberAsks = 0;
     window.postMessage = (message: any, targetOrigin: string) => {
-      if (message && message.source === 'clf-fiber-ask') fiberAsks++;
+      if (message && message.source === 'clf-fiber-ask-v2') fiberAsks++;
       return originalPost(message, targetOrigin);
     };
 
@@ -26351,7 +26432,7 @@ describe('ordinary input native terminal association', () => {
       if (state === 'local-owner') {
         startGenerating(live!.document);
         const section = assistantTurn(live!.document, 'current-refusal-owner', []);
-        section.setAttribute('data-clf-fiber-turn', '1');
+        section.setAttribute('data-clf-fiber-v2-turn', '1');
         live!.hook.observe(); await settle();
         const localTurn = emitted(live!.sent, 'turn_start').at(-1)!.event.turnId as string;
         Object.assign(turns[1]!, { turnId: 'current-refusal-owner' });
@@ -26525,7 +26606,7 @@ describe('ordinary input native terminal association', () => {
     Object.defineProperty(live!.document, 'visibilityState', { configurable: true, value: 'hidden' });
     const user = userTurn(live!.document, userId, 'Continue the exact saved work.', { sent: false });
     user.querySelector('[data-message-id]')!.setAttribute('data-message-id', userId);
-    assistantTurn(live!.document, finalId, []).setAttribute('data-clf-fiber-turn', 'fixture:1');
+    assistantTurn(live!.document, finalId, []).setAttribute('data-clf-fiber-v2-turn', 'fixture:1');
     const turns = pair();
     Object.assign(turns[1]!, { calls: [{ messageId: 'own-preparation-unverified-call', tool: 'read', answered: false }] });
     await replyFiber([], turns);
@@ -26567,11 +26648,11 @@ describe('ordinary input native terminal association', () => {
         coreConnector: TEST_CORE } };
     });
     const feed = (event: any) => {
-      if (event.data?.source !== 'clf-fiber-ask') return;
+      if (event.data?.source !== 'clf-fiber-ask-v2') return;
       const scanToken = event.data.nonce;
-      live!.document.querySelector('[data-clf-fiber-turn]')?.setAttribute('data-clf-fiber-turn', `${scanToken}:1`);
+      live!.document.querySelector('[data-clf-fiber-v2-turn]')?.setAttribute('data-clf-fiber-v2-turn', `${scanToken}:1`);
       live!.window.dispatchEvent(new live!.window.MessageEvent('message', { source: live!.window as unknown as Window,
-        data: { source: 'clf-fiber-reply', nonce: scanToken, scanToken, v: 15, scanOk: true,
+        data: { source: 'clf-fiber-reply', nonce: scanToken, scanToken, v: 17, scanOk: true,
           rows: [], turns: turns.map((turn, index) => ({ ...turn, codeModeCalls: (turn as any).codeModeCalls || [], index })) } }));
     };
     live!.window.addEventListener('message', feed);
@@ -26816,14 +26897,14 @@ describe('ordinary input native terminal association', () => {
       win.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms);
       let scans = 0;
       const onAsk = (event: any) => {
-        if (event.data?.source !== 'clf-fiber-ask') return;
+        if (event.data?.source !== 'clf-fiber-ask-v2') return;
         scans++;
         const next = turns.map((turn: any) => ({
           ...turn, calls: (turn.calls || []).map((call: any) => ({ ...call, answered: true })),
           codeModeCalls: (turn.codeModeCalls || []).map((call: any) => ({ ...call, answered: true }))
         }));
         win.dispatchEvent(new win.MessageEvent('message', { source: win, data: {
-          source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 15,
+          source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 17,
           scanOk: true, rows: [], turns: next.map((turn: any, index: number) => ({ ...turn, index }))
         } }));
       };
@@ -26875,7 +26956,7 @@ describe('ordinary input native terminal association', () => {
     win.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms);
     let scans = 0;
     const onAsk = (event: any) => {
-      if (event.data?.source !== 'clf-fiber-ask') return;
+      if (event.data?.source !== 'clf-fiber-ask-v2') return;
       scans++;
         const next = turns.map((turn: any) => ({
           ...turn, codeModeCalls: turn.codeModeCalls || [], calls: (turn.calls || []).map((call: any, index: number) => ({
@@ -26883,7 +26964,7 @@ describe('ordinary input native terminal association', () => {
         }))
       }));
       win.dispatchEvent(new win.MessageEvent('message', { source: win, data: {
-        source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 15,
+        source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 17,
         scanOk: true, rows: [], turns: next.map((turn: any, index: number) => ({ ...turn, index }))
       } }));
     };
@@ -27155,7 +27236,7 @@ describe('ordinary input native terminal association', () => {
         });
       });
       window.dispatchEvent(new window.MessageEvent('message', {
-        source: window as unknown as Window, data: { source: 'clf-fiber-ask', nonce }
+        source: window as unknown as Window, data: { source: 'clf-fiber-ask-v2', nonce }
       }));
       const result = await frame;
       expect(result.scanOk).toBe(true);
@@ -27882,11 +27963,11 @@ describe('the goal loop', () => {
     const win = live.window as any;
     win.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms);
     win.addEventListener('message', (event: any) => {
-      if (event.data?.source !== 'clf-fiber-ask') return;
+      if (event.data?.source !== 'clf-fiber-ask-v2') return;
       const nonce = event.data.nonce;
-      live!.document.querySelector('[data-turn-id="finished-answer"]')!.setAttribute('data-clf-fiber-turn', `${nonce}:0`);
+      live!.document.querySelector('[data-turn-id="finished-answer"]')!.setAttribute('data-clf-fiber-v2-turn', `${nonce}:0`);
       win.dispatchEvent(new win.MessageEvent('message', { source: win, data: {
-        source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 15, scanOk: true, rows: [], turns: [{
+        source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 17, scanOk: true, rows: [], turns: [{
           index: 0, conversationId: CHAT, turnId: 'finished-answer', endMessageId: 'finished-final', calls: [], activities: [],
           messages: [{ messageId: 'finished-final', rawMessageId: 'finished-final', stable: true, rawText: 'Completed answer.' }]
         }]
@@ -29725,6 +29806,19 @@ describe('the goal loop', () => {
     });
   });
 
+  it('labels an exact rotation slot wait without hiding retained reply or stronger holds', async () => {
+    live = await harness(`https://chatgpt.com/c/${CHAT}`, goalReplies());
+    const goal = { enabled: true, mode: 'loop', phase: 'settling', rotationQueuePosition: 1,
+      pending: { replyId: 'saved-reply' }, wait: { reason: 'pickup', detail: 'Native Send is unconfirmed.' } };
+    const view = live.hook.goalStageView;
+    expect(view(goal)).toMatchObject({ stage: 'Loop queued in rotation · reply retained',
+      detail: expect.stringContaining('Native Send is unconfirmed.') });
+    expect(view({ ...goal, rotationQueuePosition: 0 })?.stage).toBe('Loop continuation pending · reply retained');
+    expect(view({ ...goal, wait: { reason: 'approval' } })?.stage).toBe('ChatGPT approval required · automation held');
+    expect(view({ ...goal, health: { state: 'paused' } })?.stage).toBe('Loop paused · saved work retained');
+    expect(view({ ...goal, wait: { reason: 'evidence' } })?.stage).toContain('activity unknown');
+  });
+
   it.each(['answer', 'idle', 'pickup', 'evidence'])('shows the existing phase clock for a %s wait without claiming execution', async reason => {
     live = await harness(`https://chatgpt.com/c/${CHAT}`, goalReplies());
     const startedAt = Date.now() - 90_000;
@@ -30689,7 +30783,7 @@ describe('the goal loop', () => {
     await live.hook.pullActivity();
     startGenerating(live.document);
     const section = assistantTurn(live.document, 'turn-hidden-goal', []);
-    section.setAttribute('data-clf-fiber-turn', '0');
+    section.setAttribute('data-clf-fiber-v2-turn', '0');
     live.hook.observe();
     await settle();
     const opened = emitted(live.sent, 'turn_start')[0]!.event.turnId as string;
@@ -30705,10 +30799,10 @@ describe('the goal loop', () => {
 
     let scans = 0;
     const onAsk = (event: any) => {
-      if (!event.data || event.data.source !== 'clf-fiber-ask') return;
+      if (!event.data || event.data.source !== 'clf-fiber-ask-v2') return;
       scans++;
       const scanToken = event.data.nonce;
-      section.setAttribute('data-clf-fiber-turn', `${scanToken}:0`);
+      section.setAttribute('data-clf-fiber-v2-turn', `${scanToken}:0`);
       // Once the exact end_turn reply is in flight, restore normal harness timers so the Goal
       // settle loop itself can run instantly. Only the MutationObserver debounce is under test.
       live!.window.setTimeout = instantTimeout;
@@ -30718,7 +30812,7 @@ describe('the goal loop', () => {
             source: 'clf-fiber-reply',
             nonce: event.data.nonce,
             scanToken,
-            v: 15,
+            v: 17,
             scanOk: true,
             rows: [],
             turns: [{
@@ -30787,10 +30881,10 @@ describe('the goal loop', () => {
 
     let scans = 0;
     const onAsk = (event: any) => {
-      if (!event.data || event.data.source !== 'clf-fiber-ask') return;
+      if (!event.data || event.data.source !== 'clf-fiber-ask-v2') return;
       scans++;
       const scanToken = event.data.nonce;
-      section.setAttribute('data-clf-fiber-turn', `${scanToken}:0`);
+      section.setAttribute('data-clf-fiber-v2-turn', `${scanToken}:0`);
       // Goal's own settle loop is not what this regression freezes. Once the terminal Fiber
       // reply was actually requested, restore normal harness timers so the downstream draft can
       // run. Old code never requests it because the Stop mutation is outside the transcript.
@@ -30801,7 +30895,7 @@ describe('the goal loop', () => {
             source: 'clf-fiber-reply',
             nonce: event.data.nonce,
             scanToken,
-            v: 15,
+            v: 17,
             scanOk: true,
             rows: [],
             turns: [{
@@ -30853,7 +30947,7 @@ describe('the goal loop', () => {
     await live.hook.pullActivity();
     startGenerating(live.document);
     const first = assistantTurn(live.document, 'turn-split-stale-copy', []);
-    first.setAttribute('data-clf-fiber-turn', '0');
+    first.setAttribute('data-clf-fiber-v2-turn', '0');
     prose(live.document, first, 'a-split-old', 'Earlier completed-looking prose.');
     const oldCopy = live.document.createElement('button');
     oldCopy.setAttribute('aria-label', 'Copy message');
@@ -30865,7 +30959,7 @@ describe('the goal loop', () => {
     // but it has no completed-message action yet. The old S1 action must not certify S2 merely
     // because both sections share one model turn.
     const second = assistantTurn(live.document, 'turn-split-stale-copy', []);
-    second.setAttribute('data-clf-fiber-turn', '0');
+    second.setAttribute('data-clf-fiber-v2-turn', '0');
     prose(live.document, second, 'a-split-new', 'Newer prose is still not terminal.');
     await replyFiber([], [{
       turnId: 'turn-split-stale-copy',
@@ -30924,7 +31018,7 @@ describe('the goal loop', () => {
     startGenerating(live.document, { send: false });
     live.hook.observe();
     await settle();
-    reused.setAttribute('data-clf-fiber-turn', '0');
+    reused.setAttribute('data-clf-fiber-v2-turn', '0');
     prose(live.document, reused, 'a-reused-current', 'Current retry prose with no new Copy action.');
     await replyFiber([], [{
       turnId: 'turn-reused-copy',
@@ -32170,10 +32264,10 @@ describe('app Stop command uses current native turn proof', () => {
     Object.defineProperty(live.document, 'visibilityState', { configurable: true, value: 'hidden' });
     window.setTimeout = () => 777;
     const answer = (event: any) => {
-      if (event.data?.source !== 'clf-fiber-ask') return;
-      section.setAttribute('data-clf-fiber-turn', `${event.data.nonce}:0`);
+      if (event.data?.source !== 'clf-fiber-ask-v2') return;
+      section.setAttribute('data-clf-fiber-v2-turn', `${event.data.nonce}:0`);
       window.dispatchEvent(new window.MessageEvent('message', { source: window, data: {
-        source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 15, scanOk: true, rows: [],
+        source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 17, scanOk: true, rows: [],
         turns: [{ ...terminal, index: 0, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', messages: [{
           messageId: 'late-final-message', stable: true, rawText: 'First words and the complete final answer.', renderedHtml: '<p>First words and the complete final answer.</p>'
         }] }]
@@ -32205,14 +32299,14 @@ describe('app Stop command uses current native turn proof', () => {
     const instant = window.setTimeout;
     window.setTimeout = (fn: () => void, ms: number) => globalThis.setTimeout(fn, ms === 15000 ? 0 : ms);
     const answer = (event: any) => {
-      if (event.data?.source !== 'clf-fiber-ask') return;
+      if (event.data?.source !== 'clf-fiber-ask-v2') return;
       if (next === 'new-user') {
         userTurn(live!.document, 'new-user-during-probe', 'New request');
         live!.hook.observe();
       }
-      section.setAttribute('data-clf-fiber-turn', `${event.data.nonce}:0`);
+      section.setAttribute('data-clf-fiber-v2-turn', `${event.data.nonce}:0`);
       window.dispatchEvent(new window.MessageEvent('message', { source: window, data: {
-        source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 15, scanOk: true, rows: [],
+        source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 17, scanOk: true, rows: [],
         turns: [{ ...terminal, index: 0, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', endMessageId: next === 'retry' ? null : terminal.endMessageId }]
       } }));
     };

@@ -547,8 +547,15 @@ const handoffAsked = (entry: Continuation): boolean =>
  * safety lease after the source prompt was actually dispatched, so an irrecoverably ambiguous
  * source Send cannot fence the source chat forever.
  */
-const expired = (entry: Continuation, now = Date.now()): boolean =>
-  entry.automatic && entry.askedAt !== null && now - entry.askedAt >= AUTOMATIC_HANDOVER_TTL_MS;
+const expired = (entry: Continuation, now = Date.now()): boolean => {
+  if (!entry.automatic) return false;
+  // An automatic handoff prepared locally can wait for a browser without ever
+  // dispatching either message. Restoring it must not renew that idle window.
+  const awaitingUnsentChat = entry.state === 'awaiting-chat' && !entry.to && !entry.claimedBy &&
+    entry.sourceSend.state === 'not-attempted' && entry.destinationSend.state === 'not-attempted';
+  const since = awaitingUnsentChat ? entry.touchedAt : entry.askedAt;
+  return since !== null && now - since >= AUTOMATIC_HANDOVER_TTL_MS;
+};
 
 const isOpen = (entry: Continuation): boolean =>
   entry.state !== 'committed' && entry.state !== 'aborted' && !expired(entry);

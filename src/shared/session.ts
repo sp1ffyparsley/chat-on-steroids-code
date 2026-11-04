@@ -403,7 +403,7 @@ export type SessionEvent =
        */
       completionEvidence?: { observedAt: number; startedAt: number | null; requestIds: string[] };
     })
-  | (BaseEvent & { kind: 'chat_error'; message: StoredText; recoverable?: boolean; blocking?: boolean; reason?: 'thinking_failed' | 'model_cooldown' | 'conversation_limit' | 'stream_gone' | 'watchdog_stalled' })
+  | (BaseEvent & { kind: 'chat_error'; message: StoredText; recoverable?: boolean; blocking?: boolean; retryAvailable?: true; reason?: 'thinking_failed' | 'model_cooldown' | 'conversation_limit' | 'stream_gone' | 'watchdog_stalled' })
   | (BaseEvent & { kind: 'tool_call'; call: ToolCallRecord; origin?: number })
   /**
    * An app-authored line. `continuation` names the Compact & Resume it is about, so the

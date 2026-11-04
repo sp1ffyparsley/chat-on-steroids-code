@@ -648,7 +648,7 @@ for(const name of ['main/index.js','preload/index.js','renderer/index.html','ren
       // but its old selector cannot stand in for verifying the newer output.
       const newerUnvalidated = invoke('--local-update=renderer', '--review-only',
         '--rebuild', '--json');
-      expect(newerUnvalidated.code).toBe(0);
+      expect(newerUnvalidated.code, JSON.stringify(newerUnvalidated.receipt)).toBe(0);
       expect(newerUnvalidated.receipt.generation).not.toBe(first.receipt.generation);
       expect(newerUnvalidated.receipt.sourceSha256).toBe(first.receipt.sourceSha256);
       const selectedNewer = invoke('--local-update=renderer', '--json');
@@ -3016,7 +3016,9 @@ syncBuiltinESMExports();
 
       const unkillable = run('unkillable');
       expect(unkillable.status).toBe(1);
-      expect(unkillable.elapsedMs).toBeLessThan(2500);
+      // Check the compiler stop deadline separately from Windows launcher startup.
+      expect(unkillable.proof.execution.result.durationMs).toBeLessThan(2500);
+      expect(unkillable.elapsedMs).toBeLessThan(5000);
       expect(unkillable.proof.execution.result).toMatchObject({ timedOut: true,
         processExitObserved: false, outputPipesSettled: false });
       expect(unkillable.proof.failures).toContain('compiler-process-exit-unverified');

@@ -32,7 +32,7 @@ beforeAll(async () => {
   ]);
   backgroundSource = backgroundSource.replace(/\r\n/g, '\n');
   contentSource = contentSource.replace(/\r\n/g, '\n');
-  const projectionStart = contentSource.indexOf('  function goalAnswerReplacesPriorError(goal) {');
+  const projectionStart = contentSource.indexOf('  function isNativeCompletionHold(code) {');
   const projectionEnd = contentSource.indexOf('\n  function goalStageView(goal)', projectionStart);
   if (projectionStart < 0 || projectionEnd < 0) throw new Error('Shipped current-answer projection is missing');
   goalAnswerProjectionSource = contentSource.slice(projectionStart, projectionEnd);

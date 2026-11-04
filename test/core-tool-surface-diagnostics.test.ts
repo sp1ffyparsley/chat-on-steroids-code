@@ -500,7 +500,8 @@ describe('Core tool-surface incident diagnostics', () => {
     ['incomplete', 'inventory-incomplete'], ['document', 'document-changed'],
     ['question', 'question-changed'], ['core-parent', 'parents-changed'], ['code-parent', 'parents-changed'],
     ['missing-source', 'original-source-missing'], ['missing-native', 'original-native-identity-missing'],
-    ['missing-request', 'original-request-identity-missing'], ['open-result', 'native-results-open'],
+    ['missing-request', 'original-request-identity-missing'],
+    ['missing-request-after-navigation', 'original-request-identity-missing'], ['open-result', 'native-results-open'],
     ['candidate', 'durable-proof-required']
   ] as const)('projects the bounded native completion refusal for %s without changing its fence', (variant, reason) => {
     resetCoreBrowserEvidenceForTests();
@@ -513,7 +514,7 @@ describe('Core tool-surface incident diagnostics', () => {
         openCodeCallMessageIds: [], answeredCodeCallMessageIds: ['private-code-parent'] } };
     if (variant === 'missing-source') delete initial.ordinaryFinal.sourceUserMessageId;
     if (variant === 'missing-native') delete initial.ordinaryFinal.coreCallMessageIds;
-    if (variant === 'missing-request') delete initial.ordinaryFinal.allCoreRequestIds;
+    if (variant.startsWith('missing-request')) delete initial.ordinaryFinal.allCoreRequestIds;
     noteCoreBrowserEvidence(initial);
     const final: any = { ...initial.ordinaryFinal, reason: 'associated', openCalls: 0, openRequestIds: [] };
     if (variant === 'question') final.sourceUserMessageId = OTHER;
@@ -522,13 +523,13 @@ describe('Core tool-surface incident diagnostics', () => {
     if (variant === 'incomplete') final.callInventoryComplete = false;
     if (variant === 'open-result') { final.reason = 'open-call'; final.openCalls = 1; }
     noteCoreBrowserEvidence({ ...initial, observedAt: NOW + 1, ordinaryFinal: final,
-      ...(variant === 'document' ? { documentId: 'different-private-document' } : {}) });
+      ...(variant === 'document' || variant === 'missing-request-after-navigation' ? { documentId: 'different-private-document' } : {}) });
     const before = coreBrowserEvidence(TARGET);
     expect(typeof nativeEvidence.nativeCompletionDiagnostic).toBe('function');
     const diagnostic = nativeEvidence.nativeCompletionDiagnostic(TARGET);
     expect(diagnostic).toMatchObject({ reason, retainedCalls: 1, retainedCodeCalls: 1,
       missingOriginalNativeIds: variant === 'missing-native' ? 1 : 0,
-      missingOriginalRequestIds: ['missing-native', 'missing-request'].includes(variant) ? 1 : 0 });
+      missingOriginalRequestIds: (variant === 'missing-native' || variant.startsWith('missing-request')) ? 1 : 0 });
     expect(JSON.stringify(diagnostic)).not.toMatch(/private-|abababab|aaaaaaaa|bbbbbbbb/);
     expect(coreBrowserEvidence(TARGET)).toEqual(before);
     expect(nativeCompletionCandidate(TARGET) !== null).toBe(variant === 'candidate');

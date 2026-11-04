@@ -1728,6 +1728,20 @@ describe('the swarm handover', () => {
 });
 
 describe('restart lifetime recovery', () => {
+  it('expires an untouched automatic browser handoff using its original progress time', async () => {
+    const { sessionId, token } = await readyContinuation();
+    const saved = snapshotContinuations();
+    const entry = saved.entries.find(row => row.token === token)!;
+    entry.automatic = true;
+    entry.touchedAt = Date.now() - AUTOMATIC_HANDOVER_TTL_MS - 60_000;
+    entry.openedAt = entry.touchedAt;
+    entry.askedAt = Date.now();
+    expect(entry.sourceSend?.state).toBe('not-attempted');
+    expect(entry.destinationSend?.state).toBe('not-attempted');
+
+    await restoreContinuations(saved);
+    expect(continuationForSession(sessionId)).toBeNull();
+  });
   it('persists handoff provenance without exposing the continuation token', async () => {
     const { sessionId, token } = await readyContinuation();
     const entry = continuationByToken(token)!;

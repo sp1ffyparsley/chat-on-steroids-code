@@ -22784,6 +22784,18 @@ describe('unattributed activity recovery', () => {
       expect(nativeFinalEvidenceWait(coreBrowserEvidence(OTHER))?.reason).toBe('evidence');
       expect(await maintenance()).toBeNull();
       const target = (await findSessionByConversation(OTHER, { requireUnique: true }))!;
+      const retryCard = { kind: 'chat_error', time: Date.now(), turnId: 'stream-native-404',
+        text: 'Message delivery timed out. Please try again. Retry', recoverable: true, retryAvailable: true };
+      await events(OTHER, [retryCard]);
+      await events(OTHER, [retryCard]);
+      expect((await readEvents(target.id, { kinds: ['chat_error'] })).filter(row =>
+        row.kind === 'chat_error' && row.retryAvailable === true)).toHaveLength(1);
+      await events(OTHER, [{ kind: 'turn_end', time: Date.now(), turnId: 'stream-native-404', outcome: 'failed' }]);
+      await setGoalSwitchNow(OTHER, 'loop', true);
+      expect((await sessionControlsFor(target.id)).goalWait).toMatchObject({
+        reason: 'evidence', detail: expect.stringContaining('Retry was not clicked')
+      });
+      expect(await maintenance()).toBeNull();
       const known = await request('POST', '/correlations', { body: { conversationId: OTHER,
         calls: [{ messageId: nativeCallMessageId, tool: 'read',
           requestId, answered: true }] } });
@@ -22795,7 +22807,7 @@ describe('unattributed activity recovery', () => {
       await report({ ...native.ordinaryFinal, reason: 'associated', openCalls: 0, openRequestIds: [] });
       expect(nativeFinalEvidenceWait(coreBrowserEvidence(OTHER))).toBeNull();
       const recovered = await maintenance();
-      expect(recovered).toMatchObject({ conversationId: OTHER, reason: 'assistant-error' });
+      expect(recovered).toMatchObject({ conversationId: OTHER, reason: 'assistant-error', action: 'retry' });
       expect((await readEvents(target.id, { kinds: ['tool_call'] })).filter(row =>
         row.kind === 'tool_call' && row.call.requestId === requestId)).toHaveLength(1);
     } finally {
@@ -25487,8 +25499,9 @@ describe('unattributed activity recovery', () => {
 
   it.each([
     { mode: 'goal', outcome: 'stopped' }, { mode: 'loop', outcome: 'stopped' },
-    { mode: 'goal', outcome: 'failed' }, { mode: 'loop', outcome: 'failed' }
-  ] as const)('delivers one exact Stop -> Continue through the existing $mode/$outcome outbox without replacing its objective', async ({ mode, outcome }) => {
+    { mode: 'goal', outcome: 'failed' }, { mode: 'loop', outcome: 'failed' },
+    { mode: 'loop', outcome: 'stopped', machineFirst: true }
+  ] as const)('delivers one exact Stop -> Continue through the existing $mode/$outcome outbox without replacing its objective', async ({ mode, outcome, machineFirst }) => {
     await pair();
     const objective = 'Finish the original production task and verify its real output; retain prior work.';
     await setGoalObjectiveNow(PRIME, objective);
@@ -25499,7 +25512,8 @@ describe('unattributed activity recovery', () => {
       { kind: 'user_message', time: Date.now(), messageId: questionId, text: 'Continue the saved task' },
       openTurn(turnId),
       { kind: 'chat_error', time: Date.now(), turnId,
-        text: 'Connection interrupted. Waiting for the complete answer', recoverable: true }
+        ...(machineFirst ? { reason: 'stream_gone', text: 'resume HTTP 404' } :
+          { text: 'Connection interrupted. Waiting for the complete answer' }), recoverable: true }
     ]);
     const repair = await maintenance();
     expect(repair).toMatchObject({ conversationId: PRIME, action: 'continue' });
@@ -25834,19 +25848,25 @@ describe('unattributed activity recovery', () => {
     } finally { vi.useRealTimers(); }
   });
 
-  it.each(['queued', 'offered', 'claimed'] as const)(
-    'upgrades a late native Retry over an unperformed reload at stage %s without stealing a claimed action', async stage => {
+  it.each([['queued', 'reload'], ['offered', 'reload'], ['claimed', 'reload'],
+    ['offered', 'continue'], ['claimed', 'continue']] as const)(
+    'upgrades a late native Retry at stage %s over fallback %s without stealing a claimed action', async (stage, action) => {
       await pair();
+      if (action === 'continue') {
+        await setGoalObjectiveNow(PRIME, 'Finish the retained work');
+        await setGoalSwitchNow(PRIME, 'loop', true, true);
+      }
       const turnId = 'hydrating-native-retry-answer';
       await events(PRIME, [
         { kind: 'user_message', time: Date.now(), messageId: 'hydrating-native-retry-question', text: 'Continue the retained work' },
         openTurn(turnId),
         { kind: 'chat_error', time: Date.now(), turnId,
-          text: 'Message delivery timed out. Please try again.', recoverable: true, retryAvailable: false },
+          text: action === 'continue' ? 'Connection interrupted. Waiting for the complete answer' :
+            'Message delivery timed out. Please try again.', recoverable: true, retryAvailable: false },
         endTurn(turnId, 'failed')
       ]);
       const original = stage === 'queued' ? null : await maintenance();
-      if (original) expect(original).toMatchObject({ conversationId: PRIME, action: 'reload' });
+      if (original) expect(original).toMatchObject({ conversationId: PRIME, action });
       if (stage === 'claimed') {
         expect((await request('POST', '/repairs/claim', { body: { token: original!.token } })).body.allowed).toBe(true);
       }
@@ -25854,7 +25874,10 @@ describe('unattributed activity recovery', () => {
       // Same native occurrence and authored question; only its Retry control hydrated later.
       // The recorder emits this authority upgrade once, so Main cannot discard it merely
       // because a weaker, still-unperformed reload was queued by the preceding observation.
-      await events(PRIME, [{ kind: 'chat_error', time: Date.now(), turnId,
+      const earlierAlert = stage === 'offered' && action === 'reload'
+        ? [{ kind: 'chat_error', time: Date.now(), text: 'Something went wrong.', recoverable: true }]
+        : [];
+      await events(PRIME, [...earlierAlert, { kind: 'chat_error', time: Date.now(), turnId,
         text: 'Message delivery timed out. Please try again. Retry', recoverable: true, retryAvailable: true }]);
       const upgraded = await maintenance();
       if (stage === 'claimed') {

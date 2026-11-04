@@ -28,6 +28,7 @@ interface DomApi {
   noteStopClick(target: Node): boolean;
   clearStoppedTurn(): void;
   retryLatestTransportFailure(current?: () => boolean, beforeRetry?: () => boolean, preserveComposerDraft?: boolean): { status: string; reason?: string };
+  recoverNativeDisplayFailure(current: () => boolean): { status: string; reason?: string };
   sendButton(): HTMLButtonElement | null;
   temporaryChatReady(): boolean;
   confirmTemporaryChatIntroduction(): void;
@@ -1864,7 +1865,7 @@ describe('a workspace page kept mounted behind the current one', () => {
     const page = keptPage();
     const shell = document.createElement('main');
     shell.setAttribute('data-app-shell-main-surface', 'true');
-    shell.innerHTML = `<div data-thread-find-target="conversation"><section data-turn-key="old-turn" data-clf-shell-running="${dom.window.location.pathname}"></section></div>`;
+    shell.innerHTML = `<div data-thread-find-target="conversation"><section data-turn-key="old-turn" data-clf-shell-running-v2="${dom.window.location.pathname}"></section></div>`;
     page.append(shell);
 
     expect(api.generating()).toBe(false);
@@ -1876,7 +1877,7 @@ describe('a workspace page kept mounted behind the current one', () => {
     box.textContent = preparedPrompt('Exact app prompt');
     const shell = document.createElement('main');
     shell.setAttribute('data-app-shell-main-surface', 'true');
-    shell.innerHTML = `<div data-thread-find-target="conversation"><section data-turn-key="stopped-turn" data-clf-shell-running="${dom.window.location.pathname}"><div data-chatgpt-agent-turn-start="true"></div></section></div>`;
+    shell.innerHTML = `<div data-thread-find-target="conversation"><section data-turn-key="stopped-turn" data-clf-shell-running-v2="${dom.window.location.pathname}"><div data-chatgpt-agent-turn-start="true"></div></section></div>`;
     document.body.append(shell);
     expect(api.generating()).toBe(true);
     expect(api.noteStopClick(button)).toBe(false);
@@ -1893,7 +1894,7 @@ describe('a workspace page kept mounted behind the current one', () => {
     button.addEventListener('click', nativeSend);
     expect(await api.send()).toBe(true);
     expect(nativeSend).toHaveBeenCalledOnce();
-    expect(shell.querySelector('[data-turn-key]')!.getAttribute('data-clf-shell-running')).toBe(dom.window.location.pathname);
+    expect(shell.querySelector('[data-turn-key]')!.getAttribute('data-clf-shell-running-v2')).toBe(dom.window.location.pathname);
     // A later real control wins, even if it is disabled or ambiguous.
     stop.disabled = true;
     box.closest('form')!.append(stop);
@@ -1907,7 +1908,7 @@ describe('a workspace page kept mounted behind the current one', () => {
     'keeps witnessed Stop scoped to its exact exchange (%s)', change => {
       const shell = document.createElement('main');
       shell.setAttribute('data-app-shell-main-surface', 'true');
-      shell.innerHTML = `<div data-thread-find-target="conversation"><section data-turn-key="stopped-turn" data-clf-shell-running="${dom.window.location.pathname}" data-clf-fiber-turn="scan-a:0" data-clf-fiber-user="scan-a:0:question-a"><div data-chatgpt-agent-turn-start="true"></div></section></div>`;
+      shell.innerHTML = `<div data-thread-find-target="conversation"><section data-turn-key="stopped-turn" data-clf-shell-running-v2="${dom.window.location.pathname}" data-clf-fiber-v2-turn="scan-a:0" data-clf-fiber-v2-user="scan-a:0:question-a"><div data-chatgpt-agent-turn-start="true"></div></section></div>`;
       document.body.append(shell);
       const turn = shell.querySelector('[data-turn-key]')!;
       const stop = document.createElement('button');
@@ -1920,17 +1921,17 @@ describe('a workspace page kept mounted behind the current one', () => {
 
       if (change === 'same-question-rescan' || change === 'new-question') {
         // MAIN scan tokens are ephemeral: unchanged native question identity must survive.
-        turn.setAttribute('data-clf-fiber-turn', 'scan-b:0');
-        turn.setAttribute('data-clf-fiber-user', `scan-b:0:${change === 'new-question' ? 'question-b' : 'question-a'}`);
+        turn.setAttribute('data-clf-fiber-v2-turn', 'scan-b:0');
+        turn.setAttribute('data-clf-fiber-v2-user', `scan-b:0:${change === 'new-question' ? 'question-b' : 'question-a'}`);
       } else if (change === 'new-turn') turn.setAttribute('data-turn-key', 'later-turn');
       else if (change === 'replacement-shell') turn.replaceWith(turn.cloneNode(true));
       else if (change === 'later-user') user('A new instruction');
       else if (change === 'route') {
         dom.reconfigure({ url: 'https://chatgpt.com/c/other' });
-        turn.setAttribute('data-clf-shell-running', '/c/other');
+        turn.setAttribute('data-clf-shell-running-v2', '/c/other');
         expect(api.generating()).toBe(true);
         dom.reconfigure({ url: 'https://chatgpt.com/' });
-        turn.setAttribute('data-clf-shell-running', '/');
+        turn.setAttribute('data-clf-shell-running-v2', '/');
       } else if (change === 'new-stop') {
         box.closest('form')!.append(stop);
         expect(api.generating()).toBe(true);
@@ -1943,7 +1944,7 @@ describe('a workspace page kept mounted behind the current one', () => {
   it.each(['disabled', 'ambiguous', 'foreign'] as const)('does not witness an ineligible Stop (%s)', change => {
     const shell = document.createElement('main');
     shell.setAttribute('data-app-shell-main-surface', 'true');
-    shell.innerHTML = `<div data-thread-find-target="conversation"><section data-turn-key="unstopped-turn" data-clf-shell-running="${dom.window.location.pathname}"><div data-chatgpt-agent-turn-start="true"></div></section></div>`;
+    shell.innerHTML = `<div data-thread-find-target="conversation"><section data-turn-key="unstopped-turn" data-clf-shell-running-v2="${dom.window.location.pathname}"><div data-chatgpt-agent-turn-start="true"></div></section></div>`;
     document.body.append(shell);
     const stop = document.createElement('button');
     stop.type = 'button';
@@ -1970,7 +1971,7 @@ describe('a workspace page kept mounted behind the current one', () => {
   ])('does not let a stale shell running hint hide the current native failure: %s', (failure) => {
     const shell = document.createElement('main');
     shell.setAttribute('data-app-shell-main-surface', 'true');
-    shell.innerHTML = `<div data-thread-find-target="conversation"><div data-turn-key="failed-turn" data-clf-shell-running="${dom.window.location.pathname}"><aside role="alert"><div>${failure} </div><button>Retry</button></aside></div></div>`;
+    shell.innerHTML = `<div data-thread-find-target="conversation"><div data-turn-key="failed-turn" data-clf-shell-running-v2="${dom.window.location.pathname}"><aside role="alert"><div>${failure} </div><button>Retry</button></aside></div></div>`;
     document.body.append(shell);
     const turn = shell.querySelector('[data-turn-key]')!;
     const notice = turn.querySelector('aside')!;
@@ -2003,7 +2004,7 @@ describe('a workspace page kept mounted behind the current one', () => {
     expect(clicked).toHaveBeenCalledOnce();
     const newer = document.createElement('div');
     newer.setAttribute('data-turn-key', 'newer-turn');
-    newer.setAttribute('data-clf-shell-running', dom.window.location.pathname);
+    newer.setAttribute('data-clf-shell-running-v2', dom.window.location.pathname);
     turn.after(newer);
     expect(api.generating()).toBe(true);
   });
@@ -3057,6 +3058,100 @@ describe('native image readiness', () => {
   });
 });
 
+describe('isolated helper hint stamps', () => {
+  it('does not let a legacy helper claim that the current shell is running', () => {
+    dom.reconfigure({ url: 'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' });
+    const main = document.createElement('main'); main.setAttribute('data-app-shell-main-surface', 'true');
+    const thread = document.createElement('div'); thread.setAttribute('data-thread-find-target', 'conversation');
+    const section = document.createElement('section'); section.setAttribute('data-turn-key', 'native-turn');
+    section.setAttribute(['data-clf', 'shell-running'].join('-'), dom.window.location.pathname);
+    thread.append(section); main.append(thread); document.body.append(main);
+    expect(api.generating()).toBe(false);
+  });
+
+  it('does not borrow legacy model/effort hints from a current native picker trigger', () => {
+    const trigger = document.querySelector('button[aria-haspopup="menu"]')!;
+    trigger.setAttribute('data-clf-picker-route-v2', dom.window.location.pathname);
+    for (const [name, value] of [['model', 'gpt-6-thinking'], ['effort', 'xhigh'], ['route', dom.window.location.pathname]])
+      trigger.setAttribute(`data-clf-selected-${name}`, value!);
+    expect(api.visibleModelSelection()?.model).not.toBe('gpt-6-thinking');
+  });
+});
+
+describe('native response-only render recovery', () => {
+  const messageId = '754061e2-81c4-4102-9b81-d431a314700b';
+  function failedResponse(id = messageId) {
+    const section = document.createElement('section');
+    section.setAttribute('data-testid', 'conversation-turn-2');
+    section.setAttribute('data-turn', 'assistant');
+    section.setAttribute('data-turn-id', 'native-answer');
+    const root = document.createElement('div'); root.setAttribute('data-dil-message-id', id);
+    const notice = document.createElement('div'); notice.setAttribute('role', 'status');
+    notice.setAttribute('data-dil-render-failed', ''); notice.textContent = 'This response couldn’t load';
+    const reload = document.createElement('button'); reload.type = 'button'; reload.textContent = 'Reload response';
+    root.append(notice, reload); section.append(root); document.body.append(section);
+    return { section, root, notice, reload };
+  }
+
+  it('reloads only the exact current response view once and preserves a draft and native work', () => {
+    dom.reconfigure({ url: 'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' });
+    const old = failedResponse('a369616e-c5ca-43df-a66b-86b525e38603');
+    const live = failedResponse();
+    const oldClick = vi.fn(), click = vi.fn(), send = vi.fn(), stop = vi.fn();
+    old.reload.addEventListener('click', oldClick); live.reload.addEventListener('click', click);
+    button.addEventListener('click', send);
+    const stopButton = document.createElement('button'); stopButton.setAttribute('data-testid', 'stop-button');
+    stopButton.addEventListener('click', stop); document.querySelector('form')!.append(stopButton);
+    expect(api.recoverNativeDisplayFailure?.(() => true)).toEqual({ status: 'requested' });
+    expect(click).toHaveBeenCalledOnce(); expect(oldClick).not.toHaveBeenCalled();
+    expect(box.textContent).toBe('Exact app prompt'); expect(send).not.toHaveBeenCalled(); expect(stop).not.toHaveBeenCalled();
+    live.section.remove(); const remount = failedResponse(); const again = vi.fn(); remount.reload.addEventListener('click', again);
+    expect(api.recoverNativeDisplayFailure?.(() => true).status).toBe('held');
+    expect(again).not.toHaveBeenCalled();
+  });
+
+  it('keeps the spent native message across supported adapter reinjection', () => {
+    dom.reconfigure({ url: 'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' });
+    const live = failedResponse(); const click = vi.fn(); live.reload.addEventListener('click', click);
+    expect(api.recoverNativeDisplayFailure(() => true).status).toBe('requested');
+    dom.window.eval(source);
+    api = (dom.window as unknown as { CLF_DOM: DomApi }).CLF_DOM;
+    expect(api.recoverNativeDisplayFailure(() => true).status).toBe('held');
+    expect(click).toHaveBeenCalledOnce();
+  });
+
+  it('avoids transcript-wide error scans when no native render-failure marker exists', () => {
+    dom.reconfigure({ url: 'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' });
+    const scans = vi.spyOn(document, 'querySelectorAll');
+    for (let i = 0; i < 20; i++) api.recoverNativeDisplayFailure(() => true);
+    expect(scans).not.toHaveBeenCalled();
+  });
+
+  it.each(['paused', 'route', 'authored', 'user', 'invalid-id', 'hidden', 'disabled', 'two-controls', 'remounted-during-check', 'newer-response-same-section'])(
+    'keeps response-only recovery closed for %s', boundary => {
+      dom.reconfigure({ url: 'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' });
+      const live = failedResponse(boundary === 'invalid-id' ? 'not-a-native-id' : messageId);
+      const click = vi.fn(); live.reload.addEventListener('click', click);
+      if (boundary === 'authored') live.root.className = 'markdown';
+      if (boundary === 'user') live.section.setAttribute('data-turn', 'user');
+      if (boundary === 'hidden') live.root.hidden = true;
+      if (boundary === 'disabled') live.reload.disabled = true;
+      if (boundary === 'two-controls') live.root.append(live.reload.cloneNode(true));
+      if (boundary === 'newer-response-same-section') {
+        const later = document.createElement('div'); later.setAttribute('data-dil-message-id', '9ff5f548-0f1c-4675-93bc-1504b9fc7307');
+        later.textContent = 'The newer native answer rendered successfully.'; live.section.append(later);
+      }
+      let checks = 0;
+      const current = () => {
+        if (++checks === 2 && boundary === 'route') dom.reconfigure({ url: 'https://chatgpt.com/c/newer-chat' });
+        if (checks === 2 && boundary === 'remounted-during-check') live.root.replaceWith(live.root.cloneNode(true));
+        return boundary !== 'paused';
+      };
+      expect(api.recoverNativeDisplayFailure?.(current)?.status).toBe('held');
+      expect(click).not.toHaveBeenCalled(); expect(box.textContent).toBe('Exact app prompt');
+    });
+});
+
 describe('localized roleless transport cards', () => {
   function card(label = 'Reintentar', message = 'Resume stream unavailable', parent: Element = document.body) {
     const node = document.createElement('div');
@@ -3455,6 +3550,24 @@ describe('conversation length limit', () => {
     ]);
   });
 
+  it('recognizes a non-alert conversation limit card with a native new-chat link', () => {
+    const card = document.createElement('div');
+    card.innerHTML = `<p>${message}</p><a href="/">Start a new chat</a>`;
+    document.body.append(card);
+    expect(api.errors()).toEqual([
+      expect.objectContaining({ reason: 'conversation_limit', recoverable: false, blocking: true, node: card })
+    ]);
+  });
+
+  it.each(['<a href="https://example.com/">Start a new chat</a>', '<a href="/" hidden>Start a new chat</a>'])(
+    'ignores untrusted or hidden new-chat links (%s)', link => {
+      const card = document.createElement('div');
+      card.innerHTML = `<p>${message}</p>${link}`;
+      document.body.append(card);
+      expect(api.errors()).toEqual([]);
+    }
+  );
+
   it('never treats authored user or assistant prose about the same limit as provider chrome', () => {
     user(message);
     const quote = document.createElement('section');
@@ -3528,9 +3641,9 @@ describe('model cooldown fallback', () => {
   function cooldown(effort: string) {
     box.textContent = '';
     const trigger = document.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!;
-    trigger.setAttribute('data-clf-selected-route', dom.window.location.pathname);
-    trigger.setAttribute('data-clf-selected-model', 'gpt-5-6-thinking');
-    trigger.setAttribute('data-clf-selected-effort', effort);
+    trigger.setAttribute('data-clf-selected-route-v2', dom.window.location.pathname);
+    trigger.setAttribute('data-clf-selected-model-v2', 'gpt-5-6-thinking');
+    trigger.setAttribute('data-clf-selected-effort-v2', effort);
     const section = document.createElement('section');
     section.dataset.testid = 'conversation-turn-cooldown';
     section.dataset.turn = 'assistant';
@@ -3573,9 +3686,9 @@ describe('model cooldown fallback', () => {
     ];
     expect(api.nextCooldownSelection({ model: 'gpt-5-6-thinking', reasoningEffort: 'high' }, models)).toBeNull();
     const trigger = document.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!;
-    trigger.setAttribute('data-clf-selected-route', dom.window.location.pathname);
-    trigger.setAttribute('data-clf-selected-model', 'gpt-6-thinking');
-    trigger.setAttribute('data-clf-selected-effort', effort);
+    trigger.setAttribute('data-clf-selected-route-v2', dom.window.location.pathname);
+    trigger.setAttribute('data-clf-selected-model-v2', 'gpt-6-thinking');
+    trigger.setAttribute('data-clf-selected-effort-v2', effort);
     expect(await api.ensurePreferredAutomationModel()).toEqual({
       status: 'ready', model: 'gpt-6-thinking', effort, changed: false
     });
@@ -3583,9 +3696,9 @@ describe('model cooldown fallback', () => {
 
   it('does not certify legacy 5.6 High as the configured production model', async () => {
     const trigger = document.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!;
-    trigger.setAttribute('data-clf-selected-route', dom.window.location.pathname);
-    trigger.setAttribute('data-clf-selected-model', 'gpt-5-6-thinking');
-    trigger.setAttribute('data-clf-selected-effort', 'high');
+    trigger.setAttribute('data-clf-selected-route-v2', dom.window.location.pathname);
+    trigger.setAttribute('data-clf-selected-model-v2', 'gpt-5-6-thinking');
+    trigger.setAttribute('data-clf-selected-effort-v2', 'high');
     vi.useFakeTimers();
     try {
       const check = api.ensurePreferredAutomationModel();
@@ -3596,9 +3709,9 @@ describe('model cooldown fallback', () => {
 
   it.each(['high', 'xhigh'])('does not accept a different native effort for an explicit %s account requirement', async effort => {
     const trigger = document.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!;
-    trigger.setAttribute('data-clf-selected-route', dom.window.location.pathname);
-    trigger.setAttribute('data-clf-selected-model', 'gpt-6-thinking');
-    trigger.setAttribute('data-clf-selected-effort', effort === 'xhigh' ? 'high' : 'pro');
+    trigger.setAttribute('data-clf-selected-route-v2', dom.window.location.pathname);
+    trigger.setAttribute('data-clf-selected-model-v2', 'gpt-6-thinking');
+    trigger.setAttribute('data-clf-selected-effort-v2', effort === 'xhigh' ? 'high' : 'pro');
     vi.useFakeTimers();
     try {
       const check = api.ensurePreferredAutomationModel(() => true, { model: 'gpt-6-thinking', reasoningEffort: effort });

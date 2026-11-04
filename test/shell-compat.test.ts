@@ -532,7 +532,7 @@ async function shellHarness(options: ShellOptions = {}) {
     });
   });
   win.dispatchEvent(new win.MessageEvent('message', {
-    data: { source: 'clf-fiber-ask', nonce, appIds: options.appIds }, source: win
+    data: { source: 'clf-fiber-ask-v2', nonce, appIds: options.appIds }, source: win
   }));
   const fiber = await reply;
   win.eval(domSource);
@@ -551,7 +551,7 @@ async function shellRescan(page: Awaited<ReturnType<typeof shellHarness>>, nonce
     page.win.addEventListener('message', listener);
   });
   page.win.dispatchEvent(new page.win.MessageEvent('message', {
-    data: { source: 'clf-fiber-ask', nonce }, source: page.win
+    data: { source: 'clf-fiber-ask-v2', nonce }, source: page.win
   }));
   return answer;
 }
@@ -580,7 +580,7 @@ describe('alternate shell turn/message provenance', () => {
         .toEqual({ ...EMPTY_USER_PROJECTION, [reason]: 1 });
       if (reason === 'userIdentityInvalid') {
         expect(page.fiber.turns).toEqual([]);
-        expect(page.exchange.hasAttribute('data-clf-fiber-turn')).toBe(false);
+        expect(page.exchange.hasAttribute('data-clf-fiber-v2-turn')).toBe(false);
       } else {
         expect(page.fiber.turns[0].endMessageId).toBe(ASSISTANT);
         expect(page.fiber.turns[0].calls[0].answered).toBe(true);
@@ -668,7 +668,7 @@ describe('alternate shell turn/message provenance', () => {
     const page = await shellHarness({ dilReference: 'exact', status: 'in_progress' });
     try {
       expect(page.api.generating()).toBe(true);
-      expect(page.exchange.getAttribute('data-clf-shell-running')).toBe(`/c/${THREAD}`);
+      expect(page.exchange.getAttribute('data-clf-shell-running-v2')).toBe(`/c/${THREAD}`);
       expect(page.fiber.turns[0].messages.find((message: any) => message.role === 'assistant')?.rawText)
         .toBe('{"action":"continue","reply":"Continue the verified work."}');
     } finally { page.dom.window.close(); }
@@ -754,8 +754,8 @@ describe('alternate shell turn/message provenance', () => {
         { id: USER, role: 'user', text: 'hello shell' },
         { id: ASSISTANT, role: 'assistant', text: 'hello back' }
       ]);
-      expect(page.win.document.getElementById('user-slot')?.getAttribute('data-clf-fiber-message')).toContain(encodeURIComponent(USER));
-      expect(page.win.document.getElementById('assistant-slot')?.getAttribute('data-clf-fiber-message')).toContain(encodeURIComponent(ASSISTANT));
+      expect(page.win.document.getElementById('user-slot')?.getAttribute('data-clf-fiber-v2-message')).toContain(encodeURIComponent(USER));
+      expect(page.win.document.getElementById('assistant-slot')?.getAttribute('data-clf-fiber-v2-message')).toContain(encodeURIComponent(ASSISTANT));
       expect(page.api.firstUserMessage()).toBe(page.win.document.getElementById('user-slot'));
       expect(page.api.turnContainer(page.win.document.getElementById('cot-v5-row'))).toBe(page.exchange);
       expect(page.api.turnMutationRelevant(page.win.document.getElementById('cot-v5-row'))).toBe(true);
@@ -2666,6 +2666,91 @@ describe('alternate shell turn/message provenance', () => {
     } finally { page.dom.window.close(); }
   });
 
+  it.each([false, 'missing'] as const)('recovers a flattened structured native result receipt without exporting output (%s)', async callCompleted => {
+    const witness = 'bc'.repeat(24);
+    const page = await shellHarness({ withCall: true, nativeCallReceipt: true, callCompleted,
+      nativeCallMutation(mapping, entry) {
+        delete entry.turn.items[1].widgetStateSource;
+        mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: JSON.stringify({
+          cosResultReceipt: { version: 1, id: witness }, output: 'PRIVATE_FLATTENED_RESULT'
+        }) };
+      } });
+    try {
+      expect(page.fiber.turns[0].calls[0]).toMatchObject({
+        messageId: CALL, answered: true, requestId: REQUEST, resultReceiptId: witness
+      });
+      expect(JSON.stringify(page.fiber)).not.toContain('PRIVATE_FLATTENED_RESULT');
+    } finally { page.dom.window.close(); }
+  });
+
+  it.each([true, false])('anchors a native request namespace to its exact user without inventing a final (receipt=%s)', async returned => {
+    const page = await shellHarness({ withCall: true, nativeCallReceipt: true, callCompleted: false,
+      assistantCompleted: false, nativeCallMutation(mapping, entry) {
+        entry.turn.status = 'in_progress';
+        delete entry.turn.items.find((item: any) => item.callId === CALL).widgetStateSource;
+        for (const row of Object.values(mapping) as any[])
+          Object.assign(row.message.metadata, {
+            working_turn_id: 'native-working', turn_exchange_id: 'native-exchange', parent_id: row.parent
+          });
+        mapping[RESULT].message.status = returned ? 'finished_successfully' : 'in_progress';
+        mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: JSON.stringify({
+          cosResultReceipt: { version: 1, id: 'bc'.repeat(24) }
+        }) };
+      } });
+    try {
+      expect(page.fiber.turns[0].calls[0]).toMatchObject({ requestId: REQUEST, answered: returned });
+      expect(page.fiber.turns[0].endMessageId).toBeNull();
+    } finally { page.dom.window.close(); }
+  });
+
+  it.each(['partial-user-scope', 'user-scope-getter', 'different-call-scope'] as const)(
+    'refuses an inconsistent native-user namespace (%s)', async fault => {
+    let reads = 0;
+    const page = await shellHarness({ withCall: true, nativeCallReceipt: true, callCompleted: false,
+      assistantCompleted: false, nativeCallMutation(mapping, entry) {
+        entry.turn.status = 'in_progress';
+        delete entry.turn.items.find((item: any) => item.callId === CALL).widgetStateSource;
+        for (const row of Object.values(mapping) as any[])
+          Object.assign(row.message.metadata, {
+            working_turn_id: 'native-working', turn_exchange_id: 'native-exchange', parent_id: row.parent
+          });
+        if (fault === 'partial-user-scope') delete mapping[USER].message.metadata.turn_exchange_id;
+        if (fault === 'user-scope-getter') Object.defineProperty(mapping[USER].message.metadata,
+          'working_turn_id', { get() { reads++; return 'native-working'; } });
+        if (fault === 'different-call-scope') mapping[CALL].message.metadata.working_turn_id = 'foreign-working';
+      } });
+    try {
+      expect(page.fiber.turns[0].calls[0]).toMatchObject({ requestId: null, answered: false });
+      expect(page.fiber.turns[0].endMessageId).toBeNull();
+      expect(reads).toBe(0);
+    } finally { page.dom.window.close(); }
+  });
+
+  it.each(['unfinished', 'no-status', 'invalid-receipt', 'nested', 'mixed-envelope', 'foreign-parent'] as const)(
+    'refuses an unproved flattened native receipt (%s)', async fault => {
+    const witness = 'bc'.repeat(24);
+    const page = await shellHarness({ withCall: true, nativeCallReceipt: true, callCompleted: false,
+      nativeCallMutation(mapping, entry) {
+        delete entry.turn.items[1].widgetStateSource;
+        const message = mapping[RESULT].message;
+        const value: Record<string, unknown> = { cosResultReceipt: { version: 1, id: witness } };
+        if (fault === 'unfinished') message.status = 'in_progress';
+        if (fault === 'no-status') delete message.status;
+        if (fault === 'invalid-receipt') value.cosResultReceipt = { version: 1, id: witness, extra: true };
+        if (fault === 'mixed-envelope') value.content = [];
+        if (fault === 'nested') {
+          delete value.cosResultReceipt;
+          value.output = { cosResultReceipt: { version: 1, id: witness } };
+        }
+        if (fault === 'foreign-parent') message.metadata.parent_id = 'foreign-native-parent';
+        message.content = { content_type: 'code', language: 'json', text: JSON.stringify(value) };
+      } });
+    try {
+      expect(page.fiber.turns[0].calls[0].resultReceiptId).toBeUndefined();
+      expect(page.fiber.turns[0].calls[0].answered).toBe(false);
+    } finally { page.dom.window.close(); }
+  });
+
   it.each([false, true])('proves a returned native MCP envelope independently of its success flag (isError=%s)', async isError => {
     const page = await shellHarness({ withCall: true, nativeCallReceipt: true, callCompleted: false,
       nativeCallMutation(mapping, entry) {
@@ -2818,7 +2903,7 @@ describe('alternate shell turn/message provenance', () => {
     } finally { page.dom.window.close(); }
   });
 
-  it.each(['complete', 'missing', 'pending', 'error', 'scope-conflict', 'unknown-parent', 'unknown-parent-scope-conflict'] as const)(
+  it.each(['complete', 'missing', 'pending', 'error', 'scope-conflict', 'unknown-parent', 'unknown-parent-scope-conflict', 'anchored narration', 'foreign narration'] as const)(
     'keeps omitted shell completion dependent on its exact enclosing Code Mode receipt: %s', async receipt => {
       const page = await shellHarness({ withCall: true, withExec: true, nativeCallReceipt: true, callCompleted: 'missing',
         nativeCallMutation(mapping, entry) {
@@ -2838,6 +2923,15 @@ describe('alternate shell turn/message provenance', () => {
             mapping[ASSISTANT].parent = EXEC_RESULT;
           }
           entry.turn.messageIds = [USER, EXEC, CALL, RESULT, ...(receipt === 'missing' ? [] : [EXEC_RESULT]), ASSISTANT];
+          if (receipt === 'anchored narration' || receipt === 'foreign narration') {
+            mapping[INTERIM] = { id: INTERIM, parent: EXEC, message: { id: INTERIM,
+              author: { role: 'assistant' }, recipient: 'all', channel: 'commentary',
+              metadata: { ...scope, parent_id: EXEC,
+                working_turn_id: receipt === 'foreign narration' ? 'foreign' : TURN } } };
+            mapping[CALL].parent = INTERIM;
+            mapping[CALL].message.metadata.parent_id = INTERIM;
+            Object.assign(mapping[ASSISTANT].message.metadata, { ...scope, parent_id: EXEC_RESULT });
+          }
           if (receipt === 'unknown-parent' || receipt === 'unknown-parent-scope-conflict') {
             mapping[INTERIM] = { id: INTERIM, parent: EXEC, message: { id: INTERIM,
               author: { role: 'assistant' }, recipient: 'all', metadata: { ...scope, parent_id: EXEC } } };
@@ -2849,7 +2943,7 @@ describe('alternate shell turn/message provenance', () => {
           }
         } });
       try {
-        expect(page.fiber.turns[0].calls[0].answered).toBe(receipt === 'complete');
+        expect(page.fiber.turns[0].calls[0].answered).toBe(receipt === 'complete' || receipt === 'anchored narration');
         expect(JSON.stringify(page.fiber)).not.toContain('PRIVATE_TOOL_RESULT');
       } finally { page.dom.window.close(); }
     }
@@ -2970,7 +3064,7 @@ describe('alternate shell turn/message provenance', () => {
   it('uses typed shell running state and recognizes cot-v5 activity without trusting translated Stop text', async () => {
     const running = await shellHarness({ status: 'in_progress' });
     try {
-      expect(running.exchange.getAttribute('data-clf-shell-running')).toBe(`/c/${THREAD}`);
+      expect(running.exchange.getAttribute('data-clf-shell-running-v2')).toBe(`/c/${THREAD}`);
       expect(running.api.generating()).toBe(true);
       const assistant = running.api.turns().find((turn: any) => turn.role === 'assistant');
       expect(running.api.toolBlocks(assistant)).toContain(running.win.document.getElementById('cot-v5-row'));
@@ -2980,7 +3074,7 @@ describe('alternate shell turn/message provenance', () => {
 
     const visualOnly = await shellHarness({ status: 'complete', visualStopText: true });
     try {
-      expect(visualOnly.exchange.hasAttribute('data-clf-shell-running')).toBe(false);
+      expect(visualOnly.exchange.hasAttribute('data-clf-shell-running-v2')).toBe(false);
       expect(visualOnly.api.generating()).toBe(false);
     } finally {
       visualOnly.dom.window.close();
@@ -3011,8 +3105,8 @@ describe('alternate shell turn/message provenance', () => {
       expect(page.fiber.turns).toHaveLength(1);
       expect(page.fiber.turns[0]).toMatchObject({ turnId: TURN, conversationId: THREAD, endMessageId: ASSISTANT });
       expect(page.api.messages().map((message: any) => message.id)).toEqual([USER, ASSISTANT]);
-      expect(page.win.document.getElementById('user-slot')!.getAttribute('data-clf-fiber-message')).toMatch(new RegExp(`:${USER}$`));
-      expect(page.win.document.getElementById('assistant-slot')!.getAttribute('data-clf-fiber-message')).toMatch(new RegExp(`:${ASSISTANT}$`));
+      expect(page.win.document.getElementById('user-slot')!.getAttribute('data-clf-fiber-v2-message')).toMatch(new RegExp(`:${USER}$`));
+      expect(page.win.document.getElementById('assistant-slot')!.getAttribute('data-clf-fiber-v2-message')).toMatch(new RegExp(`:${ASSISTANT}$`));
       expect(page.fiber.turns[0].calls).toHaveLength(withCall ? 1 : 0);
     } finally { page.dom.window.close(); }
   });
@@ -3026,7 +3120,7 @@ describe('alternate shell turn/message provenance', () => {
         conversationId: THREAD,
         endMessageId: ASSISTANT
       });
-      expect(page.exchange.getAttribute('data-clf-fiber-turn')).toBe('shell-scan:0');
+      expect(page.exchange.getAttribute('data-clf-fiber-v2-turn')).toBe('shell-scan:0');
       expect(page.fiber.shellScan).toEqual({
         selectorMatches: 1,
         mapped: 1,
@@ -3051,7 +3145,7 @@ describe('alternate shell turn/message provenance', () => {
         conversationId: THREAD,
         endMessageId: ASSISTANT
       });
-      expect(page.exchange.getAttribute('data-clf-fiber-turn')).toBe('shell-scan:0');
+      expect(page.exchange.getAttribute('data-clf-fiber-v2-turn')).toBe('shell-scan:0');
       expect(page.fiber.shellScan).toEqual({
         selectorMatches: 1,
         mapped: 1,
@@ -3089,7 +3183,7 @@ describe('alternate shell turn/message provenance', () => {
     const page = await shellHarness(options);
     try {
       expect(page.fiber.turns).toEqual([]);
-      expect(page.exchange.hasAttribute('data-clf-fiber-turn')).toBe(false);
+      expect(page.exchange.hasAttribute('data-clf-fiber-v2-turn')).toBe(false);
       expect(page.fiber.shellScan).toEqual({
         selectorMatches: 1,
         mapped: 0,
@@ -3115,8 +3209,8 @@ describe('alternate shell turn/message provenance', () => {
       try {
         expect(page.fiber.turns).toHaveLength(1);
         expect(page.fiber.turns[0]).toMatchObject({ turnId: TURN, endMessageId: ASSISTANT });
-        expect(page.exchange.getAttribute('data-clf-fiber-turn')).toBe('shell-scan:0');
-        expect(page.secondExchange?.hasAttribute('data-clf-fiber-turn')).toBe(secondStamped);
+        expect(page.exchange.getAttribute('data-clf-fiber-v2-turn')).toBe('shell-scan:0');
+        expect(page.secondExchange?.hasAttribute('data-clf-fiber-v2-turn')).toBe(secondStamped);
         expect(page.fiber.shellScan).toEqual({
           selectorMatches: 2,
           mapped,
@@ -3136,8 +3230,8 @@ describe('alternate shell turn/message provenance', () => {
     });
     try {
       expect(page.fiber.turns).toEqual([]);
-      expect(page.exchange.hasAttribute('data-clf-fiber-turn')).toBe(false);
-      expect(page.win.document.getElementById('assistant-slot')!.hasAttribute('data-clf-fiber-message')).toBe(false);
+      expect(page.exchange.hasAttribute('data-clf-fiber-v2-turn')).toBe(false);
+      expect(page.win.document.getElementById('assistant-slot')!.hasAttribute('data-clf-fiber-v2-message')).toBe(false);
       expect(page.fiber.shellScan.rejects).toEqual({
         ...EMPTY_CALL_REJECTS,
         ...EMPTY_CALL_JOINS,
@@ -3193,9 +3287,9 @@ describe('alternate shell turn/message provenance', () => {
   it('names the exact page-model user when ChatGPT draws the exchange without its user slot', async () => {
     const page = await shellHarness({ withoutUserSlot: true });
     try {
-      const stamp = page.exchange.getAttribute('data-clf-fiber-turn');
+      const stamp = page.exchange.getAttribute('data-clf-fiber-v2-turn');
       expect(stamp).toBeTruthy();
-      expect(page.exchange.getAttribute('data-clf-fiber-user'))
+      expect(page.exchange.getAttribute('data-clf-fiber-v2-user'))
         .toBe(`${stamp}:${encodeURIComponent(USER)}`);
       expect(page.api.turns().map((turn: any) => ({ id: turn.id, role: turn.role }))).toEqual([
         { id: TURN, role: 'user' },
@@ -3221,7 +3315,7 @@ describe('alternate shell turn/message provenance', () => {
     const page = await shellHarness({ withoutUserSlot: true });
     try {
       expect(page.api.messages()).toContainEqual(expect.objectContaining({ id: USER, role: 'user' }));
-      page.exchange.setAttribute('data-clf-fiber-user', `foreign-scan:0:${encodeURIComponent(USER)}`);
+      page.exchange.setAttribute('data-clf-fiber-v2-user', `foreign-scan:0:${encodeURIComponent(USER)}`);
       expect(page.api.messages().some((message: any) => message.role === 'user')).toBe(false);
     } finally {
       page.dom.window.close();
@@ -3271,7 +3365,7 @@ describe('alternate shell turn/message provenance', () => {
     const page = await shellHarness({ staleFiber: true });
     try {
       expect(page.fiber.turns).toEqual([]);
-      expect(page.exchange.hasAttribute('data-clf-fiber-turn')).toBe(false);
+      expect(page.exchange.hasAttribute('data-clf-fiber-v2-turn')).toBe(false);
       expect(page.api.messages()).toEqual([]);
     } finally {
       page.dom.window.close();

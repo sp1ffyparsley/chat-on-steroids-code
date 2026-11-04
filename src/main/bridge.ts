@@ -7019,6 +7019,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       // Project the durable lifecycle reason, not a second blocking authority.
       blockDetail: isChatDeleted(id) ? 'retired' : isChatBlocked(id) ? 'manual' : null,
       health,
+      rotationQueuePosition: healthProjection?.rotation?.state === 'queued' ? healthProjection.rotation.position : null,
       // Stable, crash-durable reply still owed one Goal decision. A replacement content
       // script resumes this instead of manufacturing a turn from the rendered transcript.
       // A blocked chat's owed decision is withheld too, so the page cannot pick it up and
@@ -13128,6 +13129,15 @@ async function goalWaitFor(conversationId: string, sessionId: string, now = Date
     nextAction: 'Wait for publication to settle. No Goal/Loop message is being sent from this timer.'
   };
   const pending = goalPendingReplyFor(conversationId);
+  const evidenceWaitForChat = () => {
+    const wait = nativeFinalEvidenceWait(coreBrowserEvidence(conversationId), now);
+    const repair = repairsInFlight.get(conversationId);
+    if (!wait || repair?.sessionId !== sessionId || repair.reason !== 'assistant-error' ||
+        repair.action !== 'retry' || repair.state !== 'queued' || repair.attempts !== 0) return wait;
+    return { ...wait, detail: [wait.detail,
+      'CoS queued ChatGPT’s native Retry, but the unresolved tool results block it. Retry was not clicked.'
+    ].filter(Boolean).join(' ') };
+  };
   if (!pending) {
     const countdowns = await sessionRecoveryCountdowns(sessionId, conversationId);
     const visible = countdowns.find(row => row.kind === 'silence' && (row.visibleAt ?? 0) <= now && row.deadline > now);
@@ -13138,7 +13148,7 @@ async function goalWaitFor(conversationId: string, sessionId: string, now = Date
     if (!live) return { reason: 'chat' };
     if (live.generating || live.activeTurnId) return { reason: 'answer' };
     if (runningToolCalls(conversationId) === 0 && settlingToolCalls(conversationId) === 0 && !chatIsWorking(conversationId)) {
-      const evidenceWait = nativeFinalEvidenceWait(coreBrowserEvidence(conversationId), now);
+      const evidenceWait = evidenceWaitForChat();
       if (evidenceWait) return evidenceWait;
     }
     if (automaticLimit !== null) {
@@ -13179,7 +13189,7 @@ async function goalWaitFor(conversationId: string, sessionId: string, now = Date
     // This is presentation only; inspectOwedGoals/resumeAutomationChats remain the action owners.
     return { reason: 'idle' };
   }
-  const unknownFinal = nativeFinalEvidenceWait(coreBrowserEvidence(conversationId), now);
+  const unknownFinal = evidenceWaitForChat();
   // An old receipt can remain unresolved while a later, positively observed native turn works.
   // Keep that custody intact without letting it describe the current turn as inactive.
   if (unknownFinal && exactAutomaticMainWork(conversationId, sessionId, now)) return {
@@ -14260,11 +14270,11 @@ function queueBrowserRecovery(
   // and the reopen does everything their reload would have done. Neither supersedes `no-tab`
   // itself, which ordinary activity clears and which therefore cannot be the stuck kind.
   // The recorder reports a newly hydrated Retry only once. Replace a weaker reload
-  // while it is positively still unclaimed, or that one stronger observation is lost
+  // or interrupted-stream fallback while it is positively still unclaimed, or that one stronger observation is lost
   // and the page reloads despite exposing its native Retry. A claimed/uncertain action
   // keeps receipt custody; neither a new turn nor another session can borrow this upgrade.
-  const upgradesUnclaimedReload = reason === 'assistant-error' && requestedAction === 'retry' &&
-    held?.reason === 'assistant-error' && held.action === 'reload' &&
+  const upgradesUnclaimedFallback = reason === 'assistant-error' && requestedAction === 'retry' &&
+    held?.reason === 'assistant-error' && held.action !== 'retry' &&
     (held.state === 'queued' || held.state === 'handed') && !held.claimed && !held.receiptUnverified &&
     !repairAttentionBlocked(held) &&
     !pendingContinuations().some(entry => entry.from === conversationId) &&
@@ -14272,7 +14282,7 @@ function queueBrowserRecovery(
     held.assistantSource?.key === assistantSource?.key &&
     held.assistantSource?.turnId === assistantSource?.turnId &&
     held.assistantSource?.completed === assistantSource?.completed;
-  const supersedes = upgradesUnclaimedReload ||
+  const supersedes = upgradesUnclaimedFallback ||
     ((reason === 'silence' || reason === 'no-tab') && TURN_SCOPED_REPAIRS.has(held?.reason as Repair['reason'])) ||
     (reason === 'assistant-error' && requestedAction === 'continue' && held?.reason === 'assistant-error' &&
       held.action === 'reload' && !held.claimed && held.assistantSource?.key === assistantSource?.key);
@@ -15042,9 +15052,13 @@ async function noteRecoveryObservations(
     // A no-Retry interrupted Loop needs Stop -> Continue, not context compaction. Stop's
     // receipt reconciles the existing handoff/reply/outbox before creating one durable input.
     // Workers retain their broker recovery; ordinary unarmed chats are never auto-prompted.
+    // The exact resume 404 can arrive before the native card. Give an armed
+    // Goal/Loop the same recovery path while the page still owns the turn.
+    // The content reader must independently prove the current card before Stop.
+    const interruptedStream = interrupted || item.reason === 'stream_gone';
     const action: Repair['action'] = nativeRetryAvailable && (!sameSpentTurn || !spent.retry)
       ? 'retry'
-      : interrupted && !goalWorkerChat(conversationId) && goalActiveFor(conversationId) &&
+      : interruptedStream && !goalWorkerChat(conversationId) && goalActiveFor(conversationId) &&
           (!sameSpentTurn || !(spent.retry && spent.reload)) ? 'continue'
       : interrupted && !goalWorkerChat(conversationId) && (!sameSpentTurn || !(spent.reload || spent.compact))
         ? 'compact'
@@ -15054,8 +15068,9 @@ async function noteRecoveryObservations(
       queueBrowserRecovery(conversationId, sessionId, episode, 'assistant-error', endedTurns, now, source, action)
     ) {
       logInfo(`bridge: assistant transport failure — asking the browser to recover ${conversationId}`);
+      break;
     }
-    break;
+    // A refused fallback must not hide a later eligible Retry in the same observation batch.
   }
 }
 
@@ -19136,6 +19151,18 @@ function drop(
   return true;
 }
 
+function retireTerminalResumeCommand(command: Command): boolean {
+  if (command.spec.type !== 'resume') return false;
+  const continuation = continuationByToken(command.spec.token);
+  if (!continuation || continuation.state === 'aborted') {
+    retire(command, 'its continuation was cancelled, aborted, or reached its outer lifetime');
+    return true;
+  }
+  if (continuation.state !== 'committed') return false;
+  retire(command, 'its continuation committed through the exact destination message');
+  return true;
+}
+
 /**
  * Retires and expires commands. Run before anything is handed out or delivered.
  */
@@ -19144,17 +19171,7 @@ function tidyCommands(): void {
   const pendingWorkers = new Set(pendingWorkerSpawns().map(worker => `${worker.runId}:${worker.id}`));
   const wakingWorkers = new Set(pendingWorkerRevivals().map(revival => `${revival.runId}:${revival.id}`));
   for (const command of [...commands]) {
-    if (command.spec.type === 'resume') {
-      const continuation = continuationByToken(command.spec.token);
-      if (!continuation || continuation.state === 'aborted') {
-        retire(command, 'its continuation was cancelled, aborted, or reached its outer lifetime');
-        continue;
-      }
-      if (continuation.state === 'committed') {
-        retire(command, 'its continuation committed through the exact destination message');
-        continue;
-      }
-    }
+    if (retireTerminalResumeCommand(command)) continue;
     const workerAgent = command.spec.type === 'worker' ? command.spec.agent : null;
     if ((command.spec.type === 'worker' || command.spec.type === 'revive') && !swarmRunning(command.spec.runId)) {
       // Run turnover is an identity boundary. A command from the retired incarnation is not
@@ -19299,11 +19316,13 @@ export function cancelWorkerCommands(reason: string, agent?: string, runId?: str
 }
 
 /** What the UI shows about work waiting on the browser. */
-export function pendingCommands(): Array<{
+export function pendingCommands(reconcileResumeCommands = false): Array<{
   id: string;
   what: string;
   lastError: string | null;
 }> {
+  // Drain can run without browser polling, so settle terminal resume commands here too.
+  if (reconcileResumeCommands) for (const command of [...commands]) retireTerminalResumeCommand(command);
   return commands.map((command) => ({
     id: command.id,
     what: specKey(command.spec),

@@ -173,7 +173,7 @@ export async function activeProfileWorkCensus(): Promise<ActiveWorkCensus> {
   if (workerCounts.active > 0) blockers.push({ category: 'worker', count: workerCounts.active, detail: 'worker(s) are active, detached, or waking' });
   if (workerCounts.queued > 0) blockers.push({ category: 'worker-bootstrap', count: workerCounts.queued, detail: 'already-created worker(s) are waiting for browser bootstrap' });
 
-  const browserCommands = pendingCommands();
+  const browserCommands = pendingCommands(true);
   if (browserCommands.length > 0) blockers.push({
     category: 'browser-command',
     count: browserCommands.length,

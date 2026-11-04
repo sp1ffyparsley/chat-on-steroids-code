@@ -39,17 +39,21 @@
 (() => {
   'use strict';
 
-  /** Bumped when the descriptor shape changes, so a stale pair cannot half-understand. */
-  const VERSION = 15;
+  /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
+  const VERSION = 17;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
-  // listener. Keep at most one owned listener across protocol versions: rejecting an old
-  // reply does not prevent that old listener from redundantly scanning the whole document.
-  const ACTIVE_HELPER = '__clfFiberHelper';
-  const ASK = 'clf-fiber-ask';
+  // listener. Keep one current owned listener across V2 protocol versions and retire the
+  // legacy owner on reinjection. Separate channels/stamps isolate a late legacy reader:
+  // rejecting its reply alone would not prevent it from overwriting current DOM stamps.
+  const ACTIVE_HELPER = '__clfFiberHelperV2';
+  const LEGACY_HELPER = '__clfFiberHelper';
+  const ASK = 'clf-fiber-ask-v2';
+  const PICKER_ASK = 'clf-picker-ask-v2';
+  const PLUGIN_ASK = 'clf-plugin-ask-v2';
   const REPLY = 'clf-fiber-reply';
   /** Only a successfully described connector row carries this scan reference. */
-  const CONNECTOR = '[data-clf-fiber]';
+  const CONNECTOR = '[data-clf-fiber-v2]';
   /**
    * A runaway guard on the climb, not a claim about how the page is shaped.
    *
@@ -1404,15 +1408,26 @@
       const value = JSON.parse(raw);
       if (!value || typeof value !== 'object' || Array.isArray(value) ||
           (value.isError !== undefined && typeof value.isError !== 'boolean')) return decline('envelope');
-      // Only the provider's OUTER MCP CallToolResult is eligible. Never
-      // recursively parse tool text, content.parts or nested JSON envelopes.
+      const validReceipt = receipt => receipt && typeof receipt === 'object' && !Array.isArray(receipt) &&
+        receipt.version === 1 && typeof receipt.id === 'string' &&
+        /^[a-f0-9]{48}$/.test(receipt.id) && Object.keys(receipt).length === 2;
+      // ChatGPT also serializes structuredContent directly into the native JSON
+      // result. The reserved root field is server-authored after durable commit.
+      // Require the positively finished provider message and reject competing
+      // wrapper shapes. Main still validates this witness against its exact owner.
+      if (own.call(value, 'cosResultReceipt')) {
+        if (!status || status.value !== 'finished_successfully' ||
+            own.call(value, 'content') || own.call(value, 'structuredContent') ||
+            !validReceipt(value.cosResultReceipt)) return decline('receipt');
+        if (shapes) shapes.valid++;
+        return value.cosResultReceipt.id;
+      }
+      // Otherwise require the outer MCP CallToolResult. Never recursively parse
+      // tool text, content.parts or nested JSON envelopes.
       if (!Array.isArray(value.content) || value.content.length > 256 ||
           value.content.some(part => !part || typeof part !== 'object' ||
             typeof part.type !== 'string' ||
             !['text', 'image', 'audio', 'resource', 'resource_link'].includes(part.type))) return decline('envelope');
-      const validReceipt = receipt => receipt && typeof receipt === 'object' && !Array.isArray(receipt) &&
-        receipt.version === 1 && typeof receipt.id === 'string' &&
-        /^[a-f0-9]{48}$/.test(receipt.id) && Object.keys(receipt).length === 2;
       let structuredId = null, resourceId = null;
       if (own.call(value, 'structuredContent')) {
         if (!value.structuredContent || typeof value.structuredContent !== 'object' ||
@@ -1603,7 +1618,7 @@
    * parent id is chronology, not proof that the enclosing native result reached ChatGPT. Resolve
    * that exact enclosing call without exporting code, arguments, output, or other page objects.
    */
-  function codeModeReceipts(messages) {
+  function codeModeReceipts(messages, anchoredNarration = null) {
     const byId = new Map();
     for (const message of messages) {
       const id = str(message && message.id);
@@ -1633,7 +1648,7 @@
         // An earlier completed enclosing call cannot own a later ordinary invocation.
         if (trail.length && role === 'tool' && cursor.author.name === 'functions.exec') break;
         if (owners.has(id)) { owner = owners.get(id); break; }
-        if (!((role === 'assistant' && cursor.recipient === 'api_tool.call_tool') ||
+        if (!(anchoredNarration?.(id) || (role === 'assistant' && cursor.recipient === 'api_tool.call_tool') ||
             (role === 'tool' && cursor.recipient === 'all' &&
               (cursor.author.name === 'api_tool.call_tool' || cursor.author.name === 'functions.exec')))) break;
         trail.push(cursor);
@@ -2153,8 +2168,8 @@
     const typedUserId = typedUsers.length === 1
       ? str(typedUsers[0].messageId) || str(typedUsers[0].serverMessageId) : selectedNativeUser();
     // Rendered entry IDs and native working/exchange IDs can use different namespaces.
-    // Use a native namespace only when an independent, exact current final anchors
-    // the entire mounted selected branch back to this typed native user. This
+    // Use the exact selected native user's own namespace when present. Older
+    // shapes need an independent current final to anchor the selected branch. This
     // recovers request identity only; every result/Code Mode receipt is still
     // checked separately below before a call can become answered.
     // Mounted and folded native narration have the same ancestry role. Neither
@@ -2181,7 +2196,16 @@
       if (!live) { prerequisite('nativeAnchorLiveMissing'); return null; }
       if (!typedUserId) { prerequisite('nativeAnchorUserMissing'); return null; }
       const refuse = reason => { mountedNativeScopeRefusal = reason; return null; };
-      if (entry.turn.status !== 'complete') {
+      const nativeUser = messageAt(typedUserId);
+      const userMeta = nativeField(nativeUser, 'metadata');
+      const hasUserScope = userMeta && typeof userMeta === 'object' &&
+        (own.call(userMeta, 'working_turn_id') || own.call(userMeta, 'turn_exchange_id'));
+      let working = str(nativeField(userMeta, 'working_turn_id'));
+      let exchange = str(nativeField(userMeta, 'turn_exchange_id'));
+      if (hasUserScope && (!working || !exchange ||
+          nativeField(nativeField(nativeUser, 'author'), 'role') !== 'user'))
+        return refuse('nativeScopeBranchConflict');
+      if (!hasUserScope && entry.turn.status !== 'complete') {
         prerequisite('nativeAnchorTurnIncomplete'); return refuse('nativeScopeTurnIncomplete');
       }
       if (!currentPath.length) {
@@ -2194,16 +2218,18 @@
         prerequisite('nativeAnchorUnselectedPath'); return refuse('nativeScopePathUnproved');
       }
       try {
-        const finals = entry.turn.items.filter(item => item?.type === 'assistant-message' && item.phase === 'final_answer');
-        if (finals.length !== 1) return refuse('nativeScopeFinalCount');
-        const finalId = str(finals[0].messageId);
-        if (!finalId || currentPath.at(-1) !== finalId) return refuse('nativeScopeFinalPathMismatch');
-        const terminal = shellProviderTerminalAt(mapping, finalId);
-        if (!terminal || shellItemText(finals[0]) !== terminal.text) return refuse('nativeScopeFinalReceiptUnproved');
-        const finalMeta = nativeField(messageAt(finalId), 'metadata');
-        const working = str(nativeField(finalMeta, 'working_turn_id'));
-        const exchange = str(nativeField(finalMeta, 'turn_exchange_id'));
-        if (!working || !exchange) return refuse('nativeScopeFinalNamespaceMissing');
+        if (!hasUserScope) {
+          const finals = entry.turn.items.filter(item => item?.type === 'assistant-message' && item.phase === 'final_answer');
+          if (finals.length !== 1) return refuse('nativeScopeFinalCount');
+          const finalId = str(finals[0].messageId);
+          if (!finalId || currentPath.at(-1) !== finalId) return refuse('nativeScopeFinalPathMismatch');
+          const terminal = shellProviderTerminalAt(mapping, finalId);
+          if (!terminal || shellItemText(finals[0]) !== terminal.text) return refuse('nativeScopeFinalReceiptUnproved');
+          const finalMeta = nativeField(messageAt(finalId), 'metadata');
+          working = str(nativeField(finalMeta, 'working_turn_id'));
+          exchange = str(nativeField(finalMeta, 'turn_exchange_id'));
+          if (!working || !exchange) return refuse('nativeScopeFinalNamespaceMissing');
+        }
         for (let at = 0; at < currentPath.length; at++) {
           const id = currentPath[at], node = nativeField(mapping, id), message = nativeField(node, 'message');
           if (nativeField(node, 'id') !== id || nativeField(message, 'id') !== id) return refuse('nativeScopeNodeConflict');
@@ -2444,7 +2470,10 @@
       } catch { return refuse('callIdentityNativeUnproved', ['nativeAncestryUnproved']); }
       return refuse('callIdentityParentUnproved', ['nativeAncestryUnproved']);
     };
-    const codeReceipts = codeModeReceipts(currentPath.map(messageAt));
+    // Only the exact terminally anchored mounted branch may carry narration
+    // between Code Mode parents. The receipt still checks the full owner scope.
+    const codeReceipts = codeModeReceipts(currentPath.map(messageAt),
+      mountedNativeScope ? nativeNarration : null);
     const conflictingResultParents = conflictingCoreResultParents(currentPath.map(messageAt));
     const codeContexts = new Map(), openExecutions = [];
     let codeParentsCoherent = true;
@@ -2549,17 +2578,27 @@
     // Recover only a single actual child of this exact invocation on the complete mounted
     // question path. This supplies a pointer to the SAME conjunction below, never completion
     // by request id, tool name, neighboring prose or a scan of unrelated cached branches.
-    for (const call of shell.calls) {
-      const reference = shell.callSources.get(call.messageId);
-      if (!reference || reference.id || !reference.referenceMissing || !live ||
-          !currentIds.has(call.messageId)) continue;
-      const children = currentPath.filter(id => {
+    const resultChildrenByParent = new Map();
+    if (live && missingReferenceCalls.length) {
+      for (const id of currentPath) {
         const node = nativeField(mapping, id), message = nativeField(node, 'message');
-        return nativeField(nativeField(message, 'author'), 'role') === 'tool' &&
-          (nativeField(node, 'parent') === call.messageId ||
-            nativeField(nativeField(message, 'metadata'), 'parent_id') === call.messageId);
-      });
-      if (children.length !== 1 || sourceCounts.has(children[0])) continue;
+        if (nativeField(nativeField(message, 'author'), 'role') !== 'tool') continue;
+        const parentIds = new Set([
+          nativeField(node, 'parent'),
+          nativeField(nativeField(message, 'metadata'), 'parent_id')
+        ]);
+        for (const parentId of parentIds) {
+          if (!currentIds.has(parentId)) continue;
+          const children = resultChildrenByParent.get(parentId) ?? [];
+          children.push(id);
+          resultChildrenByParent.set(parentId, children);
+        }
+      }
+    }
+    for (const call of missingReferenceCalls) {
+      const reference = shell.callSources.get(call.messageId);
+      const children = resultChildrenByParent.get(call.messageId);
+      if (!reference || reference.id || children?.length !== 1 || sourceCounts.has(children[0])) continue;
       // An absent widget is a stronger uncertainty than an omitted completion flag. Require
       // the existing post-commit opaque witness too; Main still owns its durable validation.
       const childNode = nativeField(mapping, children[0]);
@@ -3069,7 +3108,7 @@
     // desired stamp set first, then change only attributes whose value actually differs.
     const desiredTurnStamps = new Map();
     const desiredMessageStamps = new Map();
-    // An exchange whose user slot the shell did not render (see below, `data-clf-fiber-user`).
+    // An exchange whose user slot the shell did not render (see below, `data-clf-fiber-v2-user`).
     const desiredUserStamps = new Map();
     const groups = [];
     for (let at = 0; at < sections.length; at++) {
@@ -3230,9 +3269,9 @@
           }
           // Busy hint only, never a completion receipt or a Stop action target.
           const running = shell.entry.turn.status === 'in_progress' ? location.pathname : null;
-          if (running && section.getAttribute('data-clf-shell-running') !== running)
-            section.setAttribute('data-clf-shell-running', running);
-          else if (!running) section.removeAttribute('data-clf-shell-running');
+          if (running && section.getAttribute('data-clf-shell-running-v2') !== running)
+            section.setAttribute('data-clf-shell-running-v2', running);
+          else if (!running) section.removeAttribute('data-clf-shell-running-v2');
         }
       } catch {
         // One unreadable turn must not cost the others their evidence.
@@ -3250,26 +3289,26 @@
       const section = sections[at];
       try {
         if (!section || !section.getAttribute) continue;
-        for (const node of section.querySelectorAll('[data-clf-fiber-message], [data-content-search-unit-key]')) {
+        for (const node of section.querySelectorAll('[data-clf-fiber-v2-message], [data-content-search-unit-key]')) {
           const wantedMessage = desiredMessageStamps.get(node);
-          const currentMessage = node.getAttribute('data-clf-fiber-message');
+          const currentMessage = node.getAttribute('data-clf-fiber-v2-message');
           if (wantedMessage === undefined) {
-            if (currentMessage !== null) node.removeAttribute('data-clf-fiber-message');
-          } else if (currentMessage !== wantedMessage) node.setAttribute('data-clf-fiber-message', wantedMessage);
+            if (currentMessage !== null) node.removeAttribute('data-clf-fiber-v2-message');
+          } else if (currentMessage !== wantedMessage) node.setAttribute('data-clf-fiber-v2-message', wantedMessage);
         }
-        if (!desiredTurnStamps.has(section)) section.removeAttribute('data-clf-shell-running');
+        if (!desiredTurnStamps.has(section)) section.removeAttribute('data-clf-shell-running-v2');
         const wantedUser = desiredUserStamps.get(section);
-        const currentUser = section.getAttribute('data-clf-fiber-user');
+        const currentUser = section.getAttribute('data-clf-fiber-v2-user');
         if (wantedUser === undefined) {
-          if (currentUser !== null) section.removeAttribute('data-clf-fiber-user');
-        } else if (currentUser !== wantedUser) section.setAttribute('data-clf-fiber-user', wantedUser);
+          if (currentUser !== null) section.removeAttribute('data-clf-fiber-v2-user');
+        } else if (currentUser !== wantedUser) section.setAttribute('data-clf-fiber-v2-user', wantedUser);
         for (const stamped of [section, ...section.querySelectorAll('[data-content-search-unit-key]')]) {
           const wanted = desiredTurnStamps.get(stamped);
-          const current = stamped.getAttribute('data-clf-fiber-turn');
+          const current = stamped.getAttribute('data-clf-fiber-v2-turn');
           if (wanted === undefined) {
-            if (current !== null && stamped.removeAttribute) stamped.removeAttribute('data-clf-fiber-turn');
+            if (current !== null && stamped.removeAttribute) stamped.removeAttribute('data-clf-fiber-v2-turn');
           } else if (current !== wanted && stamped.setAttribute) {
-            stamped.setAttribute('data-clf-fiber-turn', wanted);
+            stamped.setAttribute('data-clf-fiber-v2-turn', wanted);
           }
         }
       } catch {
@@ -3355,7 +3394,7 @@
       // Inspect existing native tool containers, never translated control labels.
       // The row-local Fiber group is the authority; built-in tools fail describe().
       found = [...document.querySelectorAll(TOOL)].filter(row => !row.closest(OWN_SURFACES));
-      for (const old of document.querySelectorAll(CONNECTOR)) old.removeAttribute('data-clf-fiber');
+      for (const old of document.querySelectorAll(CONNECTOR)) old.removeAttribute('data-clf-fiber-v2');
     } catch {
       return post({ source: REPLY, nonce, scanToken, v: VERSION, scanOk: false, rows: [], turns, shellScan }, location.origin);
     }
@@ -3370,7 +3409,7 @@
         descriptor = null;
       }
       try {
-        if (descriptor) row.setAttribute('data-clf-fiber', `${scanToken}:${index}`);
+        if (descriptor) row.setAttribute('data-clf-fiber-v2', `${scanToken}:${index}`);
       } catch {
         // If the page will not take the marker, the descriptor is unusable: drop it
         // rather than let the other side match it to a row by position.
@@ -3417,11 +3456,11 @@
       : (node && node === fallback ? closedPickerSelection(node) : null);
     const provenTrigger = identified?.node || (selected && node === fallback ? fallback : null);
     for (const trigger of triggers) {
-      if (trigger !== provenTrigger) trigger.removeAttribute('data-clf-picker-route');
-      else if (trigger.getAttribute('data-clf-picker-route') !== location.pathname) trigger.setAttribute('data-clf-picker-route', location.pathname);
-      if (trigger !== node) for (const attribute of ['data-clf-selected-model', 'data-clf-selected-effort', 'data-clf-selected-route']) trigger.removeAttribute(attribute);
+      if (trigger !== provenTrigger) trigger.removeAttribute('data-clf-picker-route-v2');
+      else if (trigger.getAttribute('data-clf-picker-route-v2') !== location.pathname) trigger.setAttribute('data-clf-picker-route-v2', location.pathname);
+      if (trigger !== node) for (const attribute of ['data-clf-selected-model-v2', 'data-clf-selected-effort-v2', 'data-clf-selected-route-v2']) trigger.removeAttribute(attribute);
     }
-    for (const [attribute, value] of [['data-clf-selected-model', selected?.id], ['data-clf-selected-effort', selected?.effort], ['data-clf-selected-route', selected && location.pathname]]) {
+    for (const [attribute, value] of [['data-clf-selected-model-v2', selected?.id], ['data-clf-selected-effort-v2', selected?.effort], ['data-clf-selected-route-v2', selected && location.pathname]]) {
       if (!value) node?.removeAttribute(attribute);
       else if (node.getAttribute(attribute) !== value) node.setAttribute(attribute, value);
     }
@@ -3719,7 +3758,7 @@
     const tools = connector.actions.map(action => ({ name: action.name, description: copySchema(action.description_model || action.description, budget), inputSchema: copySchema(action.params, budget) }));
     if (tools.some(tool => !NAME.test(tool.name) || typeof tool.description !== 'string' || !tool.inputSchema || tool.inputSchema.type !== 'object') ||
         new Set(tools.map(tool => tool.name)).size !== tools.length) return null;
-    if (control && control.getAttribute('data-clf-plugin-refresh') !== appId) control.setAttribute('data-clf-plugin-refresh', appId);
+    if (control && control.getAttribute('data-clf-plugin-refresh-v2') !== appId) control.setAttribute('data-clf-plugin-refresh-v2', appId);
     return { appId, connectorName: connector.name.slice(0, 100), versionId: str(connector.app_metadata?.version_id), tools, refreshAvailable: !!control };
   }
 
@@ -3765,7 +3804,7 @@
     if (!result || !observedCard) return null;
     // Stamp only the native button wired to this connector's header action. Never
     // invoke page callbacks; the isolated world still owns the durable claim and click.
-    if (control && control.getAttribute('data-clf-plugin-refresh') !== route[1]) control.setAttribute('data-clf-plugin-refresh', route[1]);
+    if (control && control.getAttribute('data-clf-plugin-refresh-v2') !== route[1]) control.setAttribute('data-clf-plugin-refresh-v2', route[1]);
     return { ...result, refreshAvailable: !!control };
   }
 
@@ -3773,20 +3812,20 @@
     // Only this window, only our own request shape. Anything else is not ours to answer.
     if (event.source !== window) return;
     const data = event.data;
-    if (!data || typeof data !== 'object' || ![ASK, 'clf-picker-ask', 'clf-plugin-ask'].includes(data.source)) return;
+    if (!data || typeof data !== 'object' || ![ASK, PICKER_ASK, PLUGIN_ASK].includes(data.source)) return;
     const nonce = typeof data.nonce === 'string' ? data.nonce.slice(0, 64) : '';
     if (!nonce) return;
     adoptAppIdentity(data.apps, data.appIds);
     const previousPaths = currentPaths;
     currentPaths = new WeakMap();
     try {
-    if (data.source === 'clf-plugin-ask') {
+    if (data.source === PLUGIN_ASK) {
       let plugin = null;
       try { plugin = pluginSnapshot(); } catch { /* Unrecognized installed settings. */ }
       post({ source: 'clf-plugin-reply', nonce, v: 1, plugin }, location.origin);
       return;
     }
-    if (data.source === 'clf-picker-ask') {
+    if (data.source === PICKER_ASK) {
       let picker = null;
       try { picker = pickerSnapshot(); } catch { /* Unknown provider shape fails closed. */ }
       post({ source: 'clf-picker-reply', nonce, v: 1, picker }, location.origin);
@@ -3809,13 +3848,20 @@
   // while its listener did not, so keep the actual listener and always replace it. The prior
   // owned registry spans protocol upgrades; the new reply still carries only this VERSION.
   const prior = window[ACTIVE_HELPER];
-  if (prior && typeof prior.listener === 'function') {
-    try {
-      window.removeEventListener('message', prior.listener);
-    } catch {
-      // Installing the replacement below is still the only useful recovery action.
+  // Same-version reinjection repairs a damaged listener. A valid newer owner must
+  // survive late code from an older worker; legacy code cannot access this slot.
+  if (prior && Number.isSafeInteger(prior.version) && prior.version > VERSION &&
+      typeof prior.listener === 'function') return;
+  for (const owner of [prior, window[LEGACY_HELPER]]) {
+    if (owner && typeof owner.listener === 'function') {
+      try { window.removeEventListener('message', owner.listener); }
+      catch { /* Installing the current bounded reader remains useful. */ }
     }
   }
+  // A later pre-V2 script may recreate its old slot, but cannot remove this listener
+  // or consume/stamp our isolated request channels. The next current injection
+  // retires that legacy owner as well; never suppress unrelated message handlers.
+  try { delete window[LEGACY_HELPER]; } catch { /* Legacy availability is not authority. */ }
   window.addEventListener('message', listener);
   window[ACTIVE_HELPER] = { version: VERSION, listener };
 })();

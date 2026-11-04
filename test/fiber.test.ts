@@ -309,7 +309,7 @@ async function scan(
     const section = document.createElement('section');
     section.setAttribute('data-testid', 'conversation-turn-2');
     if (turn.id) section.setAttribute('data-turn-id', turn.id);
-    if (turn.staleStamp !== undefined) section.setAttribute('data-clf-fiber-turn', turn.staleStamp);
+    if (turn.staleStamp !== undefined) section.setAttribute('data-clf-fiber-v2-turn', turn.staleStamp);
     (section as unknown as Record<string, unknown>)['__reactFiber$qlrmvxwbkkq'] = turnNode(
       turn.messages,
       turn.conversationProps
@@ -355,13 +355,13 @@ async function scan(
   // Dispatched rather than posted: jsdom's own postMessage does not set `source`, and the
   // helper refuses any message that did not come from this window.
   window.dispatchEvent(
-    new window.MessageEvent('message', { data: { source: 'clf-fiber-ask', nonce, ...identity }, source: window })
+    new window.MessageEvent('message', { data: { source: 'clf-fiber-ask-v2', nonce, ...identity }, source: window })
   );
 
   const data = await reply;
-  const stamps = elements.map((row) => row.getAttribute('data-clf-fiber'));
+  const stamps = elements.map((row) => row.getAttribute('data-clf-fiber-v2'));
   const turnStamps = [...document.querySelectorAll('[data-testid^="conversation-turn-"]')].map((section) =>
-    section.getAttribute('data-clf-fiber-turn')
+    section.getAttribute('data-clf-fiber-v2-turn')
   );
   dom.window.close();
   return {
@@ -392,7 +392,7 @@ it.each(['older', 'same'] as const)('retires the %s protocol listener on reinjec
   expect(Number.isSafeInteger(version)).toBe(true);
   const priorVersion = priorProtocol === 'older' ? version - 1 : version;
   const ask = (nonce: string, eventSource: Window | null = window) => window.dispatchEvent(
-    new window.MessageEvent('message', { data: { source: 'clf-fiber-ask', nonce }, source: eventSource })
+    new window.MessageEvent('message', { data: { source: 'clf-fiber-ask-v2', nonce }, source: eventSource })
   );
   try {
     window.eval(source.replace(/const VERSION = \d+;/, `const VERSION = ${priorVersion};`));
@@ -412,6 +412,69 @@ it.each(['older', 'same'] as const)('retires the %s protocol listener on reinjec
       data: { source: 'not-the-fiber-protocol', nonce: 'unrelated-message' }, source: window
     }));
     expect(replies).toEqual([]);
+  } finally { dom.window.close(); }
+});
+
+it.each(['fiber', 'picker', 'plugin'] as const)('keeps a late legacy %s reader from replacing or stamping the current request', kind => {
+  const dom = new JSDOM('<main><div id="stamp"></div></main>', {
+    url: `https://chatgpt.com/c/${THREAD}`, runScripts: 'outside-only'
+  });
+  const win = dom.window as unknown as Window & typeof globalThis & Record<string, any>;
+  const replies: any[] = [];
+  win.postMessage = value => { replies.push(value); };
+  const version = Number(/const VERSION = (\d+);/.exec(source)?.[1]);
+  const name = kind === 'fiber' ? 'ASK' : `${kind.toUpperCase()}_ASK`;
+  const channel = new RegExp(`const ${name} = '([^']+)';`).exec(source)?.[1] || `clf-${kind}-ask`;
+  const legacyChannels = ['fiber', 'picker', 'plugin'].map(value => `clf-${value}-ask`);
+  const stampKind = kind === 'fiber' ? kind : kind === 'picker' ? 'picker-route' : 'plugin-refresh';
+  const legacyStamp = `data-clf-${stampKind}`;
+  const currentStamp = (kind === 'fiber' ? /const CONNECTOR = '\[([^\]]+)\]';/.exec(source)![1]
+    : new RegExp(`setAttribute\\('(data-clf-${stampKind}[^']*)'`).exec(source)![1])!;
+  let legacyScans = 0;
+  try {
+    win.eval(source);
+    // Exact pre-V2 registration semantics: late old code removes whatever the
+    // legacy registry names, then listens on its old request channels.
+    const prior = win.__clfFiberHelper;
+    if (typeof prior?.listener === 'function') win.removeEventListener('message', prior.listener);
+    const legacy = (event: MessageEvent) => {
+      if (event.source !== win || !legacyChannels.includes(event.data?.source)) return;
+      legacyScans++;
+      win.document.getElementById('stamp')!.setAttribute(legacyStamp, 'legacy-clobber');
+      win.postMessage({ source: `clf-${kind}-reply`, nonce: event.data.nonce, v: kind === 'fiber' ? 16 : 1 }, '*');
+    };
+    win.addEventListener('message', legacy);
+    win.__clfFiberHelper = { version: 16, listener: legacy };
+    win.dispatchEvent(new win.MessageEvent('message', { source: win,
+      data: { source: channel, nonce: 'late-legacy' } }));
+    expect(legacyScans).toBe(0);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({ source: `clf-${kind}-reply`, v: kind === 'fiber' ? version : 1 });
+    expect(win.document.getElementById('stamp')!.getAttribute(currentStamp)).not.toBe('legacy-clobber');
+    // A surviving OLD content script can still ask its own old reader to scan.
+    // Its separate nonce must not erase or replace this reader's DOM stamps.
+    win.document.getElementById('stamp')!.setAttribute(currentStamp, 'current-stamp');
+    win.dispatchEvent(new win.MessageEvent('message', { source: win,
+      data: { source: `clf-${kind}-ask`, nonce: 'unrelated-legacy-request' } }));
+    expect(win.document.getElementById('stamp')!.getAttribute(currentStamp)).toBe('current-stamp');
+    expect(legacyScans).toBe(1);
+    win.eval(source); replies.length = 0;
+    win.dispatchEvent(new win.MessageEvent('message', { source: win,
+      data: { source: channel, nonce: 'current-reinjected' } }));
+    expect(replies).toHaveLength(1); expect(legacyScans).toBe(1);
+  } finally { dom.window.close(); }
+});
+
+it('does not let a late older V2 helper downgrade the current reader', () => {
+  const dom = new JSDOM('<main></main>', { url: `https://chatgpt.com/c/${THREAD}`, runScripts: 'outside-only' });
+  const win = dom.window as unknown as Window & typeof globalThis;
+  const replies: any[] = []; win.postMessage = value => { replies.push(value); };
+  const version = Number(/const VERSION = (\d+);/.exec(source)?.[1]);
+  const channel = /const ASK = '([^']+)';/.exec(source)![1];
+  try {
+    win.eval(source); win.eval(source.replace(/const VERSION = \d+;/, `const VERSION = ${version - 1};`));
+    win.dispatchEvent(new win.MessageEvent('message', { source: win, data: { source: channel, nonce: 'no-downgrade' } }));
+    expect(replies).toHaveLength(1); expect(replies[0].v).toBe(version);
   } finally { dom.window.close(); }
 });
 
@@ -446,8 +509,8 @@ describe('reading a row out of the page', () => {
 
   it('keeps the version it was built for on the reply', async () => {
     const { version, rows } = await scan([row([request('req-1', 'read_file')])]);
-    expect(version).toBe(15);
-    expect(rows[0]!.v).toBe(15);
+    expect(version).toBe(17);
+    expect(rows[0]!.v).toBe(17);
   });
   it('counts only TobisComputer requests in the complete turn, not api_tool metadata calls', async () => {
     const mine1 = request('req-1', 'read_file');

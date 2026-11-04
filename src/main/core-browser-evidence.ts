@@ -834,14 +834,14 @@ function nativeCompletionDiagnosticFor(row: CoreBrowserEvidenceSnapshot, now: nu
   if (!pending) return result('no-retained-fence');
   if (pending.reason === 'inventory-incomplete') return result('inventory-incomplete');
   if (!pending.sourceUserMessageId) return result('original-source-missing');
+  if (shape.missingOriginalNativeIds) return result('original-native-identity-missing');
+  if (shape.missingOriginalRequestIds) return result('original-request-identity-missing');
   if (row.documentId !== pending.documentId || row.navigationEpoch !== pending.navigationEpoch) {
     const reobserved = nativeCompletionCandidate(row.conversationId);
     if (!reobserved || reobserved.observedAt !== row.observedAt) return result('document-changed');
   }
   if (final?.sourceUserMessageId && final.sourceUserMessageId !== pending.sourceUserMessageId)
     return result('question-changed');
-  if (shape.missingOriginalNativeIds) return result('original-native-identity-missing');
-  if (shape.missingOriginalRequestIds) return result('original-request-identity-missing');
   const changed = (original: string[] | null, current: string[] | undefined) =>
     !!original?.length && (!current || original.length !== current.length || original.some((id, at) => current[at] !== id));
   if (final && (pending.calls !== final.calls || pending.codeCalls !== final.codeCalls ||

@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 126;
+  const RECORDER_VERSION = 131;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -3427,7 +3427,7 @@
       // `pageTurn` is the live DOM node set, not an id. ChatGPT's virtualized renderer can
       // omit `data-turn-id` entirely, and the post-turn settle window still has to be able
       // to find this generation's Fiber descriptor; the node carries fiber.js's own
-      // `data-clf-fiber-turn` stamp, which is present whether or not the page id is.
+      // `data-clf-fiber-v2-turn` stamp, which is present whether or not the page id is.
       fiberSettled = {
         pageTurnId: ended?.id || null,
         localTurnId: endedTurnId,
@@ -3490,7 +3490,11 @@
     const current = () => nativeApprovalPolicy?.paused === false &&
       nativeApprovalHealth().state === 'ready' && conversationId === forId &&
       epoch === forEpoch && location.pathname === path;
-    try { if (current()) CLF_DOM.autoApproveIfNeeded?.(current); }
+    try {
+      if (current()) CLF_DOM.autoApproveIfNeeded?.(current);
+      const displayCurrent = () => current() && goalConfig?.enabled === true;
+      if (displayCurrent()) CLF_DOM.recoverNativeDisplayFailure?.(displayCurrent);
+    }
     catch { console.warn('[Chat On Steroids] Native approval owner failed; the native card remains pending.'); }
   }
 
@@ -4399,7 +4403,7 @@
    * for that, and it reads the DOM. Everything below therefore re-validates shape, type
    * and length rather than trusting that our own helper is what replied.
    */
-  const FIBER_ASK = 'clf-fiber-ask';
+  const FIBER_ASK = 'clf-fiber-ask-v2';
   const FIBER_REPLY = 'clf-fiber-reply';
   // 3: adds an exact turn-wide TobisComputer call count so folded api_tool metadata calls
   // are not mistaken for local MCP calls. Older descriptors are refused rather than mixed.
@@ -4411,7 +4415,9 @@
   // 11: adds exact enclosing Code Mode result receipts. Automatic compaction uses them to
   //     preserve completed native work until ChatGPT has actually received the result.
   // 12 adds alternate-shell exact message/request provenance and provisional owner gating.
-  const FIBER_VERSION = 15;
+  // Old same-nonce frames can arrive before the replacement MAIN-world listener.
+  // Reject the pre-refusal schema rather than silently losing request-join diagnostics.
+  const FIBER_VERSION = 17;
   const FIBER_TIMEOUT_MS = 1500;
   const FIBER_MAX_ROWS = 400;
   /** Assistant turns whose per-call evidence is accepted from one scan. */
@@ -5303,7 +5309,7 @@
    * request-id -> conversation handshake, and the Fiber-conversation fallback is then
    * stamped onto every call and rejected by the recorder as a disagreement.
    *
-   * fiber.js marks each section it scanned with `data-clf-fiber-turn` = `scanToken:index`,
+   * fiber.js marks each section it scanned with `data-clf-fiber-v2-turn` = `scanToken:index`,
    * so the stamp is an exact, non-positional DOM<->Fiber anchor tied to one descriptor frame
    * whether or not the page id is present. Ambiguity (two nodes of one page turn pointing at
    * different descriptors, or an index shared by two descriptors) still answers null; no
@@ -5323,7 +5329,7 @@
     let found = null;
     for (const node of nodes) {
       if (!node || !node.getAttribute) continue;
-      const stamp = node.getAttribute('data-clf-fiber-turn');
+      const stamp = node.getAttribute('data-clf-fiber-v2-turn');
       if (stamp === null || stamp === '') continue;
       const split = stamp.lastIndexOf(':');
       if (split <= 0 || stamp.slice(0, split) !== scanToken) continue;
@@ -5520,7 +5526,7 @@
     // exact document evidence, so this one turn may survive that temporary provisional mismatch.
     // Historical turns still get no exception.
     // Resolve it from the DOM node, not from `data-turn-id`: the node is what this document
-    // actually owns, and its `data-clf-fiber-turn` stamp names the descriptor exactly even
+    // actually owns, and its `data-clf-fiber-v2-turn` stamp names the descriptor exactly even
     // when the virtualized renderer published no page turn id at all. The page-id match
     // stays as the fallback for a scan whose stamps have not been applied yet.
     const exactOwner = requestedLiveOwner && localGenerationOf(requestedLiveOwner.pageTurn) !== requestedLiveOwner.localTurnId
@@ -6204,7 +6210,7 @@
   /** Fiber turn descriptor stamped onto exactly one rendered assistant section. */
   function fiberTurnForNode(node) {
     if (!fiberPresent || !node || !node.getAttribute) return null;
-    const stamp = node.getAttribute('data-clf-fiber-turn');
+    const stamp = node.getAttribute('data-clf-fiber-v2-turn');
     if (stamp === null || stamp === '') return null;
     const split = stamp.lastIndexOf(':');
     if (split <= 0 || stamp.slice(0, split) !== fiberScanToken) return null;
@@ -10014,7 +10020,8 @@
     // view does not carry because they are this tab's rather than the app's. The draft is
     // deliberately absent — the textarea already holds it, and Save is kept in step by the
     // input listener, so typing a goal repaints nothing.
-    const painted = JSON.stringify([view, menuBusy, objectiveBusy, objectiveError, Boolean(readerRefreshRun), readerRefreshNote]);
+    const nickname = control.nickname.hidden ? '' : control.nickname.textContent;
+    const painted = JSON.stringify([view, nickname, menuBusy, objectiveBusy, objectiveError, Boolean(readerRefreshRun), readerRefreshNote]);
     // Unchanged, so the sheet on screen is already the right sheet. Only its position is
     // still worth re-deciding: the composer it hangs off moves as ChatGPT grows it.
     if (painted === menuPainted && root.firstChild) {
@@ -10040,6 +10047,12 @@
     const readerFocused = document.activeElement === root.querySelector('[data-clf-action="refresh-evidence-reader"]');
     root.textContent = '';
     root.dataset.clfBusy = menuBusy || objectiveBusy ? '1' : '0';
+    if (nickname) {
+      const title = document.createElement('div');
+      title.className = 'clf-menu-chat-name';
+      title.textContent = nickname;
+      root.append(title);
+    }
     renderMenuAccount(root);
     if (accountFocused) root.querySelector('.clf-menu-account-select')?.focus();
 
@@ -10449,6 +10462,7 @@
     const nickname = nicknameOwned && nicknameReadable && composerChat().state === 'chat' ? chatNickname : '';
     control.nickname.textContent = nickname;
     control.nickname.hidden = !nickname;
+    control.nickname.title = nickname;
     control.nickname.setAttribute('data-clf-tip', nickname ? `Chat On Steroids: ${nickname}` : '');
     // Only over the chat it is about: an id-less New Chat route inherits nothing.
     control.blocked.hidden = !(
@@ -10747,13 +10761,18 @@
    */
   const GOAL_STEP_AT = { settling: 0, requesting: 1, drafting: 2, retrying: 2, 'model-wait': 2, sending: 3, failed: 1 };
 
+  // Match the typed forms Main retains, including request-failure wrappers.
+  function isNativeCompletionHold(code) {
+    return typeof code === 'string' && /^(?:request_failed:\s*)?native_completion_unverified(?:$|:)/.test(code);
+  }
+
   /** One presentation rule for both the stage and tab; never clears the old receipt fence. */
   function goalAnswerReplacesPriorError(goal) {
     const draft = goal?.draft;
-    const failedTypedHold = draft?.stage === 'failed' && draft.error === 'native_completion_unverified' &&
+    const failedTypedHold = draft?.stage === 'failed' && isNativeCompletionHold(draft.error) &&
       draft.outboxContinuationOwned !== true;
     return Boolean(goal?.enabled === true && goal.wait?.reason === 'answer' &&
-      (goal.errorCode === 'native_completion_unverified' || (!goal.errorCode && failedTypedHold)) &&
+      (isNativeCompletionHold(goal.errorCode) || (!goal.errorCode && failedTypedHold)) &&
       (!draft || failedTypedHold) && !goal.opening &&
       !['sending', 'model-wait'].includes(goal.phase) &&
       !['paused', 'blocked', 'stalled'].includes(goal.health?.state) &&
@@ -10762,7 +10781,7 @@
 
   /** A current saved/helper draft outranks only the earlier typed completion hold. */
   function goalCurrentDraftReplacesPriorError(goal) {
-    const priorCompletionHold = goal?.errorCode === 'native_completion_unverified' ||
+    const priorCompletionHold = isNativeCompletionHold(goal?.errorCode) ||
       (goal?.wait?.reason === 'evidence' && !goal.errorCode);
     return Boolean(goal && priorCompletionHold && goal.draft && goal.draft.stage !== 'failed' &&
       goal.error !== 'ChatGPT would not send the message' && goal.wait?.reason !== 'approval' &&
@@ -10772,8 +10791,8 @@
   /** A typed completion-evidence hold is current status, not a fresh generic failure. */
   function goalEvidenceHoldReplacesPriorError(goal) {
     const draft = goal?.draft;
-    const failedDraftIsTypedHold = draft?.stage === 'failed' && draft.error === 'native_completion_unverified';
-    const typedError = goal?.errorCode === 'native_completion_unverified' && (!draft || failedDraftIsTypedHold);
+    const failedDraftIsTypedHold = draft?.stage === 'failed' && isNativeCompletionHold(draft.error);
+    const typedError = isNativeCompletionHold(goal?.errorCode) && (!draft || failedDraftIsTypedHold);
     const typedWait = goal?.wait?.reason === 'evidence' && !goal.errorCode && !draft;
     return Boolean(goal && goal.error !== 'ChatGPT would not send the message' &&
       goal.wait?.reason !== 'approval' && !['sending', 'model-wait'].includes(goal.phase) &&
@@ -10832,10 +10851,10 @@
     const bar = (at, done = false) => ({ steps: GOAL_STEPS, at, done });
     const phaseStartedAt = Number.isFinite(goal.phaseStartedAt) ? goal.phaseStartedAt : 0;
     const draftStartedAt = Number.isFinite(draft?.stageStartedAt) ? draft.stageStartedAt : phaseStartedAt;
-    const priorCompletionHold = (goal.errorCode === 'native_completion_unverified' ||
+    const priorCompletionHold = (isNativeCompletionHold(goal.errorCode) ||
       (goal.wait?.reason === 'evidence' && !goal.errorCode)) &&
       goal.error !== 'ChatGPT would not send the message';
-    const otherFailedDraft = draft?.stage === 'failed' && draft.error !== 'native_completion_unverified';
+    const otherFailedDraft = draft?.stage === 'failed' && !isNativeCompletionHold(draft.error);
     const failure = goalCurrentDraftReplacesPriorError(goal) ? '' :
       priorCompletionHold && otherFailedDraft
         ? draft.message || draft.error || goal.error || `${dest} did not answer`
@@ -10883,6 +10902,15 @@
         return { stage: `${automation} needs attention · reply saved`,
           detail: [wait.detail || '', wait.nextAction || ''].filter(Boolean).join(' · '),
           body: '', kind: 'goal-error', steps: ['Reply saved', 'Recovery stopped'], at: 1, done: false };
+      }
+      if (Number.isInteger(goal.rotationQueuePosition) && goal.rotationQueuePosition > 0 &&
+          ['idle', 'chat', 'capacity', 'pickup'].includes(wait?.reason)) {
+        const automation = goal.mode === 'loop' ? 'Loop' : 'Goal';
+        const retained = wait.reason === 'pickup' && goal.pending ? ' · reply retained' : '';
+        return { stage: `${automation} queued in rotation${retained}`,
+          detail: [wait.detail, 'CoS will pick up this chat when a rotation slot opens. No manual Continue is needed.']
+            .filter(Boolean).join(' '),
+          body: '', kind: 'wait', steps: [], at: 0, done: false };
       }
       const seconds = wait?.until ? Math.max(0, Math.ceil((wait.until - Date.now()) / 1000)) : 0;
       const clock = seconds ? `Next recovery check in ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : '';
@@ -12792,7 +12820,7 @@
       if (retrying) goalRetryWaitMs = goalRetryWait();
       // Retain the exact failure enum for the hold banner after this draft is cleared locally.
       // It does not establish a current evidence wait or grant recovery actions.
-      const errorCode = draft.error === 'native_completion_unverified' ? 'native_completion_unverified' : '';
+      const errorCode = isNativeCompletionHold(draft.error) ? 'native_completion_unverified' : '';
       setGoalPhase(retrying ? 'retrying' : 'drafting', why, errorCode, true);
       await ask({ type: 'goal_ack', conversationId, token: draft.token, turnId: draft.turnId, confirmedUnsent: true }).catch(() => undefined);
       // The two answers that end a Goal run are `[no reply]` and words to type. This is

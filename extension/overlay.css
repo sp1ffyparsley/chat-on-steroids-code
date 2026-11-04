@@ -488,6 +488,7 @@
   color: var(--text-primary, inherit);
 }
 .clf-chat-nickname[hidden] { display: none; }
+.clf-menu-chat-name { font-weight: 600; white-space: normal; overflow-wrap: anywhere; }
 
 /*
  * The hover text, built to ChatGPT's own measurements.

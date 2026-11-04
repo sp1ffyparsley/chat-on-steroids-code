@@ -285,7 +285,7 @@ async function syncPicker(): Promise<void> {
       resolve();
     };
     page.window.addEventListener('message', receive as any);
-    page.window.postMessage({ source: 'clf-picker-ask', nonce: 'automation-model' }, page.window.location.origin);
+    page.window.postMessage({ source: 'clf-picker-ask-v2', nonce: 'automation-model' }, page.window.location.origin);
   });
 }
 it('reads localized nested models and future efforts from account state, excludes locked choices, and restores selection', async () => {
@@ -350,8 +350,8 @@ it('does not let a quoted alternate reasoning anchor become picker authority', a
   markdown.append(fake); doc.body.append(markdown);
 
   await syncPicker();
-  expect(fake.getAttribute('data-clf-picker-route')).toBeNull();
-  expect(f.trigger.getAttribute('data-clf-picker-route')).toBe('/');
+  expect(fake.getAttribute('data-clf-picker-route-v2')).toBeNull();
+  expect(f.trigger.getAttribute('data-clf-picker-route-v2')).toBe('/');
   expect(f.api.visibleModelSelection()).toEqual({ model: 'gpt-5-6-pro', reasoningEffort: 'pro' });
 });
 
@@ -393,7 +393,7 @@ it.each(['trigger_missing', 'snapshot_missing'] as const)('classifies one bounde
   if (reason === 'trigger_missing') page.window.document.querySelector('button')!.remove();
   else {
     const post = win.postMessage;
-    win.postMessage = ((data: { source?: string }) => { if (data?.source !== 'clf-picker-ask') post(data, win.location.origin); }) as typeof win.postMessage;
+    win.postMessage = ((data: { source?: string }) => { if (data?.source !== 'clf-picker-ask-v2') post(data, win.location.origin); }) as typeof win.postMessage;
   }
   const failure = vi.fn();
   expect(await f.api.selectModelSettings('gpt-5-6-thinking', 'high', () => true,
@@ -420,7 +420,7 @@ it.each(['trigger_missing', 'snapshot_missing'] as const)('reobserves the actual
   let missing = true;
   if (reason === 'trigger_missing') trigger.remove();
   win.postMessage = ((data: { source?: string; nonce?: string }) => {
-    if (reason === 'snapshot_missing' && missing && data?.source === 'clf-picker-ask' && doc.querySelector('[data-testid="composer-intelligence-picker-content"]')) {
+    if (reason === 'snapshot_missing' && missing && data?.source === 'clf-picker-ask-v2' && doc.querySelector('[data-testid="composer-intelligence-picker-content"]')) {
       queueMicrotask(() => win.dispatchEvent(new win.MessageEvent('message', { source: win as unknown as Window,
         origin: win.location.origin, data: { source: 'clf-picker-reply', v: 1, nonce: data.nonce, picker: null } })));
     } else post(data, win.location.origin);
@@ -440,7 +440,7 @@ it('reports an unclosed native picker as terminal even when its first snapshot w
   const f = fixture(null), win = page.window, nativeTimer = win.setTimeout.bind(win), post = win.postMessage;
   win.setTimeout = ((callback: TimerHandler, ms?: number) => nativeTimer(callback, Math.min(ms ?? 0, ms === 1500 ? 1 : 20))) as typeof win.setTimeout;
   win.postMessage = ((data: { source?: string; nonce?: string }) => {
-    if (data?.source === 'clf-picker-ask' && win.document.querySelector('[data-testid="composer-intelligence-picker-content"]')) {
+    if (data?.source === 'clf-picker-ask-v2' && win.document.querySelector('[data-testid="composer-intelligence-picker-content"]')) {
       queueMicrotask(() => win.dispatchEvent(new win.MessageEvent('message', { source: win as unknown as Window,
         origin: win.location.origin, data: { source: 'clf-picker-reply', v: 1, nonce: data.nonce, picker: null } })));
     } else post(data, win.location.origin);
@@ -678,7 +678,7 @@ it('invalidates mounted selection proof when provider state becomes unrecognized
     await new Promise<void>(resolve => {
       const receive = (event: MessageEvent) => { if (event.data?.source === 'clf-picker-reply') { page.window.removeEventListener('message', receive as any); resolve(); } };
       page.window.addEventListener('message', receive as any);
-      page.window.postMessage({ source: 'clf-picker-ask', nonce: 'fixture' }, page.window.location.origin);
+      page.window.postMessage({ source: 'clf-picker-ask-v2', nonce: 'fixture' }, page.window.location.origin);
     });
     return f.api.visibleModelSelection();
   };
@@ -700,7 +700,7 @@ it('keeps a native 5.6 High lane High when its transport value is standard', asy
       resolve();
     };
     page.window.addEventListener('message', receive as any);
-    page.window.postMessage({ source: 'clf-picker-ask', nonce: 'high-transport-standard' }, page.window.location.origin);
+    page.window.postMessage({ source: 'clf-picker-ask-v2', nonce: 'high-transport-standard' }, page.window.location.origin);
   });
   expect(f.api.visibleModelSelection()).toEqual({ model: 'gpt-5-6-thinking', reasoningEffort: 'high' });
   expect(await f.api.selectModelSettings('gpt-5-6-thinking', 'high')).toBe(true);
@@ -718,7 +718,7 @@ it('observes direct Chrome selection with the picker closed and invalidates anot
   const scan = () => new Promise<void>(resolve => {
     const receive = (event: MessageEvent) => { if (event.data?.source === 'clf-fiber-reply') { page.window.removeEventListener('message', receive as any); resolve(); } };
     page.window.addEventListener('message', receive as any);
-    page.window.postMessage({ source: 'clf-fiber-ask', nonce: 'passive-test' }, page.window.location.origin);
+    page.window.postMessage({ source: 'clf-fiber-ask-v2', nonce: 'passive-test' }, page.window.location.origin);
   });
   await scan();
   expect(page.window.document.querySelector('[data-testid="composer-intelligence-picker-content"]')).toBeNull();
@@ -765,7 +765,7 @@ it('observes the September closed 6 Pro selection without opening or changing a 
   const observe = () => new Promise<void>(resolve => {
     const receive = (event: MessageEvent) => { if (event.data?.source === 'clf-picker-reply') { page.window.removeEventListener('message', receive as any); resolve(); } };
     page.window.addEventListener('message', receive as any);
-    page.window.postMessage({ source: 'clf-picker-ask', nonce: 'closed-selection' }, page.window.location.origin);
+    page.window.postMessage({ source: 'clf-picker-ask-v2', nonce: 'closed-selection' }, page.window.location.origin);
   });
   await observe();
   expect(f.api.visibleModelSelection()).toEqual({ model: 'gpt-6-pro', reasoningEffort: 'pro' });
@@ -807,7 +807,7 @@ it('observes Work grouping ids without changing exact execution ids or merging m
   const read = () => new Promise<any>(resolve => {
     const receive = (event: MessageEvent) => { if (event.data?.source === 'clf-picker-reply') { page.window.removeEventListener('message', receive as any); resolve(event.data.picker); } };
     page.window.addEventListener('message', receive as any);
-    page.window.postMessage({ source: 'clf-picker-ask', nonce: 'work-shape' }, page.window.location.origin);
+    page.window.postMessage({ source: 'clf-picker-ask-v2', nonce: 'work-shape' }, page.window.location.origin);
   });
   const state = await read();
   expect(state?.version).toBe('6 Astra');
@@ -869,7 +869,7 @@ it('does not spend GPT-6 as an automatic fallback when no lower observed rung is
   const read = () => new Promise<void>(resolve => {
     const receive = (event: MessageEvent) => { if (event.data?.source === 'clf-picker-reply') { page.window.removeEventListener('message', receive as any); resolve(); } };
     page.window.addEventListener('message', receive as any);
-    page.window.postMessage({ source: 'clf-picker-ask', nonce: 'cooldown-state' }, page.window.location.origin);
+    page.window.postMessage({ source: 'clf-picker-ask-v2', nonce: 'cooldown-state' }, page.window.location.origin);
   });
   await read();
   const section = doc.createElement('section');
@@ -1001,7 +1001,7 @@ function observePicker() {
       win.removeEventListener('message', receive as any); resolve();
     };
     win.addEventListener('message', receive as any);
-    win.postMessage({ source: 'clf-picker-ask', nonce }, win.location.origin);
+    win.postMessage({ source: 'clf-picker-ask-v2', nonce }, win.location.origin);
   });
 }
 

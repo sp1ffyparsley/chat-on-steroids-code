@@ -18,22 +18,22 @@ $ErrorActionPreference = 'Stop'
 $script:QualifiedCandidate = [pscustomobject]@{
   Version = '2.1.39'
   InstallerFile = 'Chat-On-Steroids-Setup-x64.exe'
-  InstallerSize = [int64]162751156
-  InstallerSha256 = 'f13c5225f8a3b0bfe1a2fca18f2bc6410d0777f0d59c030708bace08fc819b57'
-  InstallerSha512 = '1d2Ez6MRW9V5v9stEP9DJiCmGJa2/cYrjIj4X1Gj57ExYQRGTllGKrK+9joMMQi96yxF4poKnzbLVYKgybxIlQ=='
-  LatestYmlSha256 = '3b4e15379246902808f3ee1c9e2e15ece1a5c297272bc6d6c8ec54ef4999e276'
-  ReleaseDate = '2026-11-02T19:18:56.000Z'
-  AppExecutableSha256 = '403c343fdf9c0c7fc42163040c59f494c6a4003b4432d3a1f8ace12959e294a1'
-  AppAsarSha256 = '97d46a8d347b11f79d61094aba40bfe661c3362887796a9410f3bc8bbbc58974'
-  ExtensionBackgroundSha256 = '531ffe4ebeeaf22535a769acd9bf6069013d023d55b7041c9e3b34edeab0491e'
+  InstallerSize = [int64]162752372
+  InstallerSha256 = 'd0c38fc598531deb5ef1cd4a695e001778988b054e2c030a6771994db19e8d78'
+  InstallerSha512 = 'nnDlemizmVQ2dJoWa+UBoX6ZIRfpwPFOU6d0e4vHz4cRbTe5kQulXLsuqNoyjCRs8UKWBwtDf+0HeRUilxlizA=='
+  LatestYmlSha256 = '302cbd1bf8bb1175e97e65ffc0fef7deb3f67ab6a9b16943ff4f1b33bfddec63'
+  ReleaseDate = '2026-11-04T03:10:05.000Z'
+  AppExecutableSha256 = '657359f000f44a71d46bca2e2485b2783f7215e223ca13c318f052e7bd580add'
+  AppAsarSha256 = '9a6dfab669fb135deaf259449cb916b3e599fb370c9989c3d6cfe8d72248e30c'
+  ExtensionBackgroundSha256 = '26d0e2ff9fa54b43c27ed5e32c487b66fe71f062f0b8fb5bbb1ba796fc1e1ffb'
   FileVersion = '2.1.39'
   ProductVersion = '2.1.39.0'
   CustomBuildText = 'Chat On Steroids local custom build. Update through scripts/update-custom.ps1 and reinstall from this checkout.'
-  SourceProvenanceSha256 = '1a3fa59b678a5b2b8e0f1924b03ea2aaf9bcf44712df8d2422dfa78b5373f795'
+  SourceProvenanceSha256 = 'ab4f966515cc26ad92fe1fb66ee51ed05e5234274f16f8030e716f1cc7e5dba4'
   SourceProvenanceSchema = 2
   GitObjectFormat = 'sha1'
-  GitCommit = 'b748cec4e015f69f212f6d0811bdd0865019e350'
-  GitTree = '2a4643387cc1ebf026580abbf8cce9c8669fa2e6'
+  GitCommit = 'e79e4b6567063f21e07d06debabb3cfd50a84fce'
+  GitTree = '664f6f1665f66d5ade2ddfd77617734a6cbc33ec'
   SourceDirty = $false
   StrictBuild = $true
   PackageJsonSha256 = 'd8732af0620064ae96a51d5a63cb1e93ceaae4a037a696a0e82a21a910af7ae4'
@@ -132,15 +132,15 @@ $script:InstalledUpgradeBaseline = [pscustomobject]@{
   Version = '2.1.39'
   SafeCloseForUpdate = $true
   FileCount = 291
-  TotalBytes = 575413439
-  TreeSha256 = 'dd2d46ce737220615d7f44d761983b548aab42ac41702dba574279bd348d0aa6'
+  TotalBytes = 575420791
+  TreeSha256 = '2855a844e36894680183264b1b38d217d05caf78981cae1b3cfdf40ac8b0920f'
   FileVersion = '2.1.39'
   ProductVersion = '2.1.39.0'
-  ExeSha256 = 'a5c452483f2b0a23f882257a50ed6fefcaa0d00cf23b109d7d9adbade9547415'
-  AppAsarSha256 = 'b8d66cee2293760ad313400e88c5443f2b8013a49c8ae4a7cd77be93022b4b2e'
+  ExeSha256 = '657359f000f44a71d46bca2e2485b2783f7215e223ca13c318f052e7bd580add'
+  AppAsarSha256 = '9a6dfab669fb135deaf259449cb916b3e599fb370c9989c3d6cfe8d72248e30c'
   ExtensionVersion = '2.1.39'
-  ExtensionBackgroundSha256 = '32905eb8ff30178daada202eda6dfb15c3cd17276cab3de3975acc75752f7674'
-  SourceProvenanceSha256 = 'c86f849f9072857a179d8f26cf07a627a86a71a924bdef007c27fc702702d1c1'
+  ExtensionBackgroundSha256 = '26d0e2ff9fa54b43c27ed5e32c487b66fe71f062f0b8fb5bbb1ba796fc1e1ffb'
+  SourceProvenanceSha256 = 'ab4f966515cc26ad92fe1fb66ee51ed05e5234274f16f8030e716f1cc7e5dba4'
   CustomBuildText = 'Chat On Steroids local custom build. Update through scripts/update-custom.ps1 and reinstall from this checkout.'
 }
 
@@ -190,6 +190,7 @@ function Invoke-NativeStateBackupCheckpoint {
     [string]$ExpectedManifestDigest,
     [scriptblock]$ProcessRunner
   )
+  $checkpointTimer = [Diagnostics.Stopwatch]::StartNew()
   $Mode = $Mode.ToLowerInvariant()
   $fullPath = {
     param([string]$Value)
@@ -355,6 +356,7 @@ function Invoke-NativeStateBackupCheckpoint {
     throw "Native state checkpoint final receipt does not match the manifest; inspect $stdoutPath"
   }
   if ((Get-FileHashHex -Path $manifestPath) -cne $checked.Digest) { throw 'Native state checkpoint manifest digest changed before publication.' }
+  Write-Host "[custom-install][timing] nativeStateMode=$Mode checkpointMs=$($checkpointTimer.ElapsedMilliseconds)"
   Write-Host "[custom-install] native state $Mode accepted; files=$($checked.Manifest.fileCount) bytes=$($checked.Manifest.totalBytes) manifest=$($checked.Digest)"
   return [pscustomobject]@{ Mode = $Mode; ManifestPath = $manifestPath; ManifestSha256 = $checked.Digest;
     FileCount = $checked.Manifest.fileCount; TotalBytes = $checked.Manifest.totalBytes; TreeSha256 = $checked.Manifest.treeSha256;
@@ -2175,29 +2177,35 @@ function Invoke-QualifiedInstallerTransaction {
     throw "Installed program files are still held open by: $description. Save that application's work and close it normally before retrying. No capture/installer runner or successor was started; no owner was stopped."
   }
   Write-Host '[custom-install] installed-file lock census clear; installing the exact preflight-qualified candidate'
-  $exitCode = [int](& $InstallerRunner $Qualified.InstallerPath)
+  $activationTimer = [System.Diagnostics.Stopwatch]::StartNew()
+  try { $exitCode = [int](& $InstallerRunner $Qualified.InstallerPath) }
+  finally { Write-Host "[custom-install][timing] nsisMs=$($activationTimer.ElapsedMilliseconds)" }
   if ($exitCode -ne 0) {
     throw "The silent installer exited with code $exitCode. The installed state was not accepted; no resume was launched. Rollback is a separate deliberate action and was not run automatically."
   }
 
   # Do not trust NSIS exit status or an EXE's existence. The installed application and paired
   # companion must match the payload hashes that were qualified before shutdown.
+  $activationTimer.Restart()
   try {
     $installed = Assert-InstalledQualifiedBuild -InstallRoot $InstallRoot -Candidate $Candidate
   } catch {
     throw "The installer returned success, but the installed state was not accepted as the qualified $($Candidate.Version) build. No resume or companion reload was requested. Rollback is a separate deliberate action and was not run automatically. $($_.Exception.Message)"
   }
+  finally { Write-Host "[custom-install][timing] installedVerifyMs=$($activationTimer.ElapsedMilliseconds)" }
   Write-Host '[custom-install] installed payload matches the exact qualified candidate.' -ForegroundColor Green
   Write-Host "[custom-install] installed executable SHA-256: $($installed.AppExecutableSha256)"
   if ($installed.SourceProvenanceSha256) {
     Write-Host "[custom-install] installed source provenance: $($installed.SourceProvenanceSha256) (commit $($installed.GitCommit), tree $($installed.GitTree))"
   }
 
+  $activationTimer.Restart()
   try {
     & $SuccessorLauncher $installed.InstalledApp
   } catch {
     throw "The qualified $($Candidate.Version) installation was accepted and remains installed, but the automatic reopen/resume step failed or could not be confirmed. Do not rerun the installer based on this error. Rollback remains a separate deliberate action and was not run automatically. Reopen error: $($_.Exception.Message)"
   }
+  finally { Write-Host "[custom-install][timing] successorLaunchMs=$($activationTimer.ElapsedMilliseconds)" }
   Write-Host '[custom-install] update installed. Chat On Steroids is reopening with the same user data.' -ForegroundColor Green
   Write-Host '[custom-install] updated successors will reconcile stable Chrome inventory and resume only durable missing Goal/Loop work.' -ForegroundColor Green
   Write-Host '[custom-install] Chrome stays open; the paired companion reload is requested through the successor --updated startup.' -ForegroundColor Green
@@ -3614,6 +3622,7 @@ function Invoke-CustomInstall {
       return $qualified
     }
 
+    $boundaryTimer = [System.Diagnostics.Stopwatch]::StartNew()
     $usedLifecycleSafeClosePath = $false
     if ($WaitForSafeQuit) {
       if (Test-InstalledSafeCloseCapability -Baseline $installedBaselineAuthority) {
@@ -3627,10 +3636,13 @@ function Invoke-CustomInstall {
     } else {
       Assert-AppNotRunning -ProcessProbe $ProcessProbe -Context 'qualified activation preflight'
     }
+    Write-Host "[custom-install][timing] drainMs=$($boundaryTimer.ElapsedMilliseconds) waitForSafeQuit=$WaitForSafeQuit"
+    $boundaryTimer.Restart()
     # The normal-quit window can be long. Rehash both immutable authorities immediately before
     # installer invocation so a post-preflight replacement cannot cross the mutation boundary.
     $qualified = Assert-QualifiedPrebuiltCandidate -ReleaseDirectory $ReleaseDirectory -RepoRoot $RepoRoot
     $rollbackProof = Assert-RollbackArchive -ArchivePath $RollbackArchivePath -Baseline $RollbackBaseline
+    Write-Host "[custom-install][timing] boundaryRehashMs=$($boundaryTimer.ElapsedMilliseconds)"
     Write-Host '[custom-install] candidate and rollback artifact revalidated at install boundary.' -ForegroundColor Green
     Assert-AppNotRunning -ProcessProbe $ProcessProbe -Context 'qualified installer' -LifecycleOwned:$usedLifecycleSafeClosePath
     return Invoke-QualifiedInstallerTransaction -Qualified $qualified -InstallRoot $InstallRoot -InstallerRunner $InstallerRunner -SuccessorLauncher $SuccessorLauncher

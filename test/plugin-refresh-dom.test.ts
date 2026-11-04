@@ -195,7 +195,7 @@ it.each(['/settings/plugins-settings/plugin_asdk_app_synthetic', '/plugins/plugi
   const view = await api.pluginRefreshView('Chat On Steroids Core', [tool]);
   expect(view).toMatchObject({ appId: 'asdk_app_synthetic', versionId: 'asdk_app_v_synthetic', tools: [tool] });
   expect(view.refresh.id).toBe('refresh');
-  expect(dom.window.document.querySelectorAll('[data-clf-plugin-refresh]')).toHaveLength(1);
+  expect(dom.window.document.querySelectorAll('[data-clf-plugin-refresh-v2]')).toHaveLength(1);
 });
 it.each(['/settings/plugins-settings/plugin_asdk_app_synthetic', '/plugins/plugin_asdk_app_synthetic'])('reads the page description at %s when the model description is empty, and prefers a set one', async path => {
   const { api, connector } = settingsPage(path);
@@ -210,7 +210,7 @@ it('never offers a destructive control as the page refresh, and refuses an ambig
   set('refresh', { color: 'secondary', onClick() {} }); set('delete', { color: 'danger', loading: false, onClick() {} });
   set('edit', { color: 'ghost', loading: false, 'aria-haspopup': 'menu' });
   expect((await api.pluginRefreshView('Chat On Steroids Core', [tool]))?.refresh).toBeNull();
-  expect(dom.window.document.querySelector('[data-clf-plugin-refresh]')).toBeNull();
+  expect(dom.window.document.querySelector('[data-clf-plugin-refresh-v2]')).toBeNull();
   set('refresh', { loading: false }); set('edit', { loading: false });
   expect(await api.pluginRefreshView('Chat On Steroids Core', [tool])).toBeNull();
 });

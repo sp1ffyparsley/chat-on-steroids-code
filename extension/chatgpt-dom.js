@@ -39,7 +39,7 @@ var CLF_DOM = (() => {
   const TOOL = `${TOOL_LEGACY}, div.pointer-events-none.contents, ${STATUS_V5}`;
   // MAIN-world scan stamps only a row whose own message group proves api_tool.
   // A translated label or a generic built-in tool button never establishes identity.
-  const CONNECTOR = '[data-clf-fiber]';
+  const CONNECTOR = '[data-clf-fiber-v2]';
   const STOP =
     'button[data-testid="stop-button"], button[data-testid="composer-stop-button"], ' +
     'button[aria-label="Stop streaming"], button[aria-label="Stop generating"], button[aria-label="Stop answering"]';
@@ -557,6 +557,12 @@ var CLF_DOM = (() => {
   /** A non-alert terminal card anchored by its provider-owned New Chat control. */
   function conversationLimitCard(button) {
     return safe(() => {
+      if (button.closest('[hidden], [inert], [aria-hidden="true"], [contenteditable], pre, code, blockquote')) return null;
+      if (button.tagName === 'A') {
+        const destination = new URL(button.getAttribute('href'), location.href);
+        if (destination.origin !== location.origin || destination.pathname !== '/' ||
+            destination.search || destination.hash || destination.username || destination.password) return null;
+      }
       // Most page buttons are unrelated. Reject them from cheap attributes/textContent before
       // forcing a rendered-text read; retryFailure() shares this button scan below.
       const quick = (button.getAttribute('aria-label') || button.getAttribute('title') || button.textContent || '')
@@ -806,8 +812,8 @@ var CLF_DOM = (() => {
     'data-turn-key',
     'data-content-search-turn-key',
     'data-content-search-unit-key',
-    'data-clf-fiber-turn',
-    'data-clf-fiber-message'
+    'data-clf-fiber-v2-turn',
+    'data-clf-fiber-v2-message'
   ];
 
   function invalidateFrom(record) {
@@ -891,9 +897,9 @@ var CLF_DOM = (() => {
     if (explicit) return explicit;
     // A shell unit key is a layout key, not a provider message id. Trust only the exact
     // same-scan MAIN stamp produced from the typed shell item.
-    const section = node?.closest?.(SHELL_TURN), turn = section?.getAttribute('data-clf-fiber-turn');
-    const stamp = node?.getAttribute?.('data-clf-fiber-message');
-    if (!turn || node?.getAttribute?.('data-clf-fiber-turn') !== turn || !stamp?.startsWith(`${turn}:`)) return null;
+    const section = node?.closest?.(SHELL_TURN), turn = section?.getAttribute('data-clf-fiber-v2-turn');
+    const stamp = node?.getAttribute?.('data-clf-fiber-v2-message');
+    if (!turn || node?.getAttribute?.('data-clf-fiber-v2-turn') !== turn || !stamp?.startsWith(`${turn}:`)) return null;
     try { return decodeURIComponent(stamp.slice(turn.length + 1)) || null; } catch { return null; }
   }
 
@@ -928,12 +934,12 @@ var CLF_DOM = (() => {
   /**
    * The exact page-model user id of a shell exchange whose user slot is not rendered.
    *
-   * MAIN names it with `data-clf-fiber-user` (fiber.js) only when the page model holds exactly
+   * MAIN names it with `data-clf-fiber-v2-user` (fiber.js) only when the page model holds exactly
    * one user message for the exchange. It counts only under the exchange's current turn stamp,
    * like every other MAIN stamp: a stale or foreign one reads as no user message at all.
    */
   function unrenderedUserIdOf(section) {
-    const turn = section?.getAttribute?.('data-clf-fiber-turn'), stamp = section?.getAttribute?.('data-clf-fiber-user');
+    const turn = section?.getAttribute?.('data-clf-fiber-v2-turn'), stamp = section?.getAttribute?.('data-clf-fiber-v2-user');
     if (!turn || !stamp?.startsWith(`${turn}:`)) return null;
     try { return decodeURIComponent(stamp.slice(turn.length + 1)) || null; } catch { return null; }
   }
@@ -1933,7 +1939,7 @@ var CLF_DOM = (() => {
         !node.closest(`${OWN_SURFACES},.markdown,[data-markdown-text-style],[data-message-author-role="user"],[contenteditable],[hidden],[inert],[aria-hidden="true"]`) &&
         node.closest(SHELL_TURN) === latest && displayed(node) &&
         transportFailure(node.innerText || node.textContent || '', node))) return false;
-      return latest?.getAttribute('data-clf-shell-running') === location.pathname;
+      return latest?.getAttribute('data-clf-shell-running-v2') === location.pathname;
     }, false);
   }
 
@@ -2786,10 +2792,10 @@ var CLF_DOM = (() => {
     return safe(() => {
       if (!block) return null;
       const marked =
-        (block.closest && block.closest('[data-clf-fiber]')) ||
-        (block.querySelector && block.querySelector('[data-clf-fiber]'));
+        (block.closest && block.closest('[data-clf-fiber-v2]')) ||
+        (block.querySelector && block.querySelector('[data-clf-fiber-v2]'));
       if (!marked) return null;
-      const value = marked.getAttribute('data-clf-fiber');
+      const value = marked.getAttribute('data-clf-fiber-v2');
       if (!value) return null;
       const split = value.lastIndexOf(':');
       if (split <= 0 || split === value.length - 1) return null;
@@ -2986,10 +2992,10 @@ var CLF_DOM = (() => {
       // The current full-width failure card has no alert role. Its exact Retry control is
       // the stable semantic anchor; retryFailure() accepts only the nearest complete notice
       // whose whole text is already in the narrow transport-failure vocabulary above.
-      for (const button of document.querySelectorAll('button')) {
-        const failure = retryFailure(button);
+      for (const control of document.querySelectorAll('button, a[href]')) {
+        const failure = control.tagName === 'BUTTON' ? retryFailure(control) : null;
         if (failure) addOccurrence({ ...failure, turnId: null, recoverable: failure.recoverable !== false });
-        const terminal = conversationLimitCard(button);
+        const terminal = conversationLimitCard(control);
         if (!terminal) continue;
         addOccurrence({ ...terminal, turnId: null, recoverable: false, blocking: true, reason: 'conversation_limit' });
       }
@@ -3921,7 +3927,7 @@ var CLF_DOM = (() => {
         if (event.source === window && event.origin === location.origin && data?.source === 'clf-plugin-reply' && data.nonce === nonce && data.v === 1) finish(data.plugin);
       };
       const timer = setTimeout(() => finish(null), 1500);
-      window.addEventListener('message', receive); window.postMessage({ source: 'clf-plugin-ask', nonce, apps: connectorNames(), appIds: connectorApps() }, location.origin);
+      window.addEventListener('message', receive); window.postMessage({ source: 'clf-plugin-ask-v2', nonce, apps: connectorNames(), appIds: connectorApps() }, location.origin);
     });
     const route = /^#settings\/Plugins\/plugin_(asdk_app_[a-zA-Z0-9_-]+)$/.exec(location.hash) ||
       (!location.hash ? /^\/(?:settings\/plugins-settings|plugins)\/plugin_(asdk_app_[a-zA-Z0-9_-]+)$/.exec(location.pathname) : null);
@@ -3929,7 +3935,7 @@ var CLF_DOM = (() => {
         !Array.isArray(snapshot.tools) || (snapshot.tools.length < 1 && !externalPlugins) || snapshot.tools.length > (externalPlugins ? 257 : 64) || JSON.stringify(snapshot.tools).length > 300000 ||
         snapshot.tools.some(tool => !tool || typeof tool.name !== 'string' || !/^[a-z][a-z0-9_]{0,79}$/.test(tool.name) || typeof tool.description !== 'string' || tool.inputSchema?.type !== 'object') ||
         new Set(snapshot.tools.map(tool => tool.name)).size !== snapshot.tools.length) return null;
-    const buttons = [...document.querySelectorAll('button[data-clf-plugin-refresh]')].filter(button => button.getAttribute('data-clf-plugin-refresh') === snapshot.appId && button.getClientRects().length > 0);
+    const buttons = [...document.querySelectorAll('button[data-clf-plugin-refresh-v2]')].filter(button => button.getAttribute('data-clf-plugin-refresh-v2') === snapshot.appId && button.getClientRects().length > 0);
     return typeof snapshot.refreshAvailable === 'boolean' && buttons.length === (snapshot.refreshAvailable ? 1 : 0) ? { appId: snapshot.appId, connectorName: snapshot.connectorName, versionId: typeof snapshot.versionId === 'string' ? snapshot.versionId.slice(0, 200) : null,
       tools: snapshot.tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })), refresh: buttons[0] || null } : null;
   }
@@ -4061,7 +4067,7 @@ var CLF_DOM = (() => {
       };
       const timer = setTimeout(() => finish(null), 1500);
       window.addEventListener('message', receive);
-      window.postMessage({ source: 'clf-picker-ask', nonce, apps: connectorNames(), appIds: connectorApps() }, location.origin);
+      window.postMessage({ source: 'clf-picker-ask-v2', nonce, apps: connectorNames(), appIds: connectorApps() }, location.origin);
     });
   }
   /** UI only transports a requested selection. Provider state proves identity and availability. */
@@ -4071,7 +4077,7 @@ var CLF_DOM = (() => {
       ...document.querySelectorAll(reported)])]
       .filter(node => node.matches('button,[role="button"]') && !node.closest(`${OWN_SURFACES},[data-testid^="conversation-turn"],[data-message-author-role],.markdown,[contenteditable],[hidden],[aria-hidden="true"],[inert]`) && node.getClientRects().length > 0 &&
         node.id !== 'composer-plus-btn' && node.getAttribute('data-testid') !== 'composer-plus-btn');
-    const observed = candidates.filter(node => node.getAttribute('data-clf-picker-route') === location.pathname);
+    const observed = candidates.filter(node => node.getAttribute('data-clf-picker-route-v2') === location.pathname);
     // Alternate native anchors are actionable only after MAIN identified their model owner.
     return observed.length === 1 ? observed[0] : candidates.length === 1 && !candidates[0].matches(reported) ? candidates[0] : null;
   }
@@ -4232,8 +4238,8 @@ var CLF_DOM = (() => {
   // The route stamp prevents a retained composer from lending another chat proof.
   function visibleModelSelection() {
     const node = document.querySelector(PICKER) || modelPickerTrigger();
-    if (node?.getAttribute('data-clf-selected-route') !== location.pathname) return null;
-    const model = node?.getAttribute('data-clf-selected-model'), reasoningEffort = node?.getAttribute('data-clf-selected-effort');
+    if (node?.getAttribute('data-clf-selected-route-v2') !== location.pathname) return null;
+    const model = node?.getAttribute('data-clf-selected-model-v2'), reasoningEffort = node?.getAttribute('data-clf-selected-effort-v2');
     return model && /^[a-zA-Z0-9._-]{1,80}$/.test(model) && ['none','minimal','low','medium','high','xhigh','max','ultra','pro'].includes(reasoningEffort)
       ? { model, reasoningEffort } : null;
   }
@@ -4596,6 +4602,50 @@ var CLF_DOM = (() => {
    * failure, or more than one eligible current control all fail closed.
    */
   const retriedTransportControls = new WeakSet();
+  // A render reload fetches the existing response view; it never retries a prompt,
+  // stops a stream, or supplies a result receipt. Keep the exact native message
+  // spent across React remounts, with a document-local hard bound and no timer.
+  const reloadedDisplayMessages = approvalAutomation.displayMessages ||= new Set();
+  function recoverNativeDisplayFailure(stillCurrent) {
+    const held = reason => ({ status: 'held', reason });
+    // This runs on the existing observer. Ordinary streaming pages must not pay
+    // for a transcript/error scan when there is no native display error at all.
+    if (!document.querySelector('[data-dil-render-failed][role="status"]')) return held('no-render-failure');
+    if (typeof stillCurrent !== 'function' || !stillCurrent()) return held('policy-unverified');
+    const path = location.pathname, chat = conversationId();
+    if (!chat) return held('conversation-unverified');
+    const candidate = () => {
+      const failures = errors().filter(error => error.displayFailure === true);
+      if (failures.length !== 1) return null;
+      const error = failures[0], root = error.node.parentElement;
+      const id = root?.getAttribute('data-dil-message-id');
+      const section = root?.closest(TURN);
+      const lastNative = [...(section?.querySelectorAll('[data-dil-message-id]') || [])]
+        .filter(node => node.closest(TURN) === section).at(-1);
+      if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id || '') ||
+          lastNative !== root ||
+          root.closest(TURN) !== error.node.closest(TURN) ||
+          root.querySelectorAll('[data-dil-render-failed][role="status"]').length !== 1) return null;
+      const buttons = [...root.querySelectorAll('button')];
+      if (buttons.length !== 1 || buttons[0].parentElement !== root || buttons[0].type !== 'button' ||
+          !/^reload response$/i.test((buttons[0].textContent || '').trim()) || !retryControlReady(buttons[0])) return null;
+      return { root, node: error.node, button: buttons[0], key: `${chat}:${id}` };
+    };
+    try {
+      const found = candidate();
+      if (!found || reloadedDisplayMessages.has(found.key) || reloadedDisplayMessages.size >= 200)
+        return held('view-unavailable-or-spent');
+      if (!stillCurrent() || location.pathname !== path || conversationId() !== chat) return held('page-changed');
+      const final = candidate();
+      if (!final || final.root !== found.root || final.node !== found.node || final.button !== found.button ||
+          final.key !== found.key || !stillCurrent() || location.pathname !== path) return held('page-changed');
+      // Spend before React dispatch. A failed/intercepted click is not another grant.
+      reloadedDisplayMessages.add(found.key);
+      found.button.click();
+      console.info('[Chat On Steroids] native response view reload requested; no prompt or tool receipt supplied');
+      return { status: 'requested' };
+    } catch { return held('view-reload-failed'); }
+  }
   /** Diagnostic visibility is deliberately permissive; a Retry action needs rendered evidence. */
   function retryControlReady(control) {
     return safe(() => {
@@ -5154,6 +5204,7 @@ var CLF_DOM = (() => {
     ensurePreferredAutomationModel,
     recoverModelCooldown,
     retryLatestTransportFailure,
+    recoverNativeDisplayFailure,
     interruptedTransportFailure,
     conversationLoadRetryControl,
     resubmitExactResumeMessage,

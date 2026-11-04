@@ -2970,7 +2970,9 @@ async function recordChatObservationsNow(
         const text = (item.text ?? '').replace(/\s+/g, ' ').trim();
         const question = item.recoverable === true ? await readLatestUserMessage(sessionId) : undefined;
         const recent = await readRecentEvents(sessionId, 32, { kinds: ['chat_error'], maxBytes: 256 * 1024 });
-        if (recent.some(event => event.kind === 'chat_error' &&
+        const retryAvailable = item.retryAvailable === true && item.recoverable === true && item.blocking !== true &&
+          item.reason !== 'stream_gone' && item.reason !== 'watchdog_stalled';
+        const matching = recent.filter(event => event.kind === 'chat_error' &&
             ((question && event.recoverable === true && event.seq > (question.origin ?? question.seq)) ||
             ((Math.abs(item.time - event.time) <= (item.blocking === true ? 10 * 60_000 : 30_000) ||
               (item.reason && event.reason === item.reason && event.turnId === item.turnId)) &&
@@ -2978,16 +2980,24 @@ async function recordChatObservationsNow(
             (!question || event.seq > (question.origin ?? question.seq)))) &&
             (event.message.text.replace(/\s+/g, ' ').trim() === text ||
               (item.recoverable === true && event.recoverable === true &&
-                (item.reason === 'stream_gone' || event.reason === 'stream_gone'))))) continue;
+                (item.reason === 'stream_gone' || event.reason === 'stream_gone'))));
+        // The visible native control adds diagnostic evidence to the same failure.
+        // Keep that upgrade once without treating it as fresh work or as permission
+        // to replay the action from this journal after reload.
+        if (matching.length && (!retryAvailable || matching.some(event =>
+          event.kind === 'chat_error' && event.retryAvailable === true))) continue;
         await appendEvent(sessionId, {
           ...base,
           kind: 'chat_error',
           ...(item.reason ? { reason: item.reason } : {}),
           ...(typeof item.recoverable === 'boolean' ? { recoverable: item.recoverable } : {}),
           ...(typeof item.blocking === 'boolean' ? { blocking: item.blocking } : {}),
+          ...(retryAvailable ? { retryAvailable: true as const } : {}),
           message: await storeText(sessionId, item.text ?? '', 2000)
         });
-        activity.meaningful = true; activity.at = Math.max(activity.at ?? 0, item.time);
+        if (!matching.length) {
+          activity.meaningful = true; activity.at = Math.max(activity.at ?? 0, item.time);
+        }
         break;
       }
       case 'turn_start':

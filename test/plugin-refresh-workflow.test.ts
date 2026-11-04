@@ -3,7 +3,8 @@ import vm from 'node:vm';
 import { JSDOM } from 'jsdom';
 import { afterEach, expect, it, vi } from 'vitest';
 
-const source = readFileSync(new URL('../extension/content.js', import.meta.url), 'utf8');
+// Source extraction must work in both LF and Windows CRLF working trees.
+const source = readFileSync(new URL('../extension/content.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const domSource = readFileSync(new URL('../extension/chatgpt-dom.js', import.meta.url), 'utf8');
 const section = source.slice(source.indexOf('  let pluginRefreshBusy = false;'), source.indexOf('  function catalogPageReady('));
 const askSectionStart = source.indexOf('  async function ask(');

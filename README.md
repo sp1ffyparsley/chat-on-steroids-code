@@ -1,20 +1,36 @@
 # Chat On Steroids - code research mirror
 
-## Update126 installed and independently accepted
+## Update131 installed; current code and unresolved reliability boundaries
 
-The exact qualified source b748cec4e015f69f212f6d0811bdd0865019e350 (tree2a4643387cc1ebf026580abbf8cce9c8669fa2e6; private provenance, not public Git refs) was installed November2 at20:24UTC. The installer and NSIS exited0. All130,400protected files/6,397,907,702bytes matched before successor startup. All291installed program files/575,415,358bytes matched treea01a24011a06229109d18881f036a1af13c043a1e1fded14bd8366b7d5b211c9, independently rechecked November3 at00:23UTC. Sixteen critical configuration/Input files and all eight Input/native delivery projections remained exact. The package label remains2.1.39; current page recorder126 was observed on one existing route in each of six profile cohorts. This is not every route or executing background-worker byte verification.
+This is a sanitized source mirror for engineering research. The original repository remains private. Personal prompts, account/workspace identifiers, stores, credentials, browser data, transcripts, private journals, deployment backups and installers are excluded. Private source hashes below are provenance, not public Git references. Use this repository's actual commit SHA for immutable code citations.
 
-Canonical qualification passed96preliminary and13,153Main checks with62existing skips in714.14seconds;33post-pin checks and readiness passed. Prior failed runs remain failed. The first launcher run recorded65passes/5process-census failures; its isolated case and whole70case launcher suite passed without concurrent app-control activity before unchanged-source canonical retry2 passed. No guard or assertion was weakened. Focused counts overlap canonical totals.
+Recorder131 was independently installed and accepted on November4 at07:26UTC from private qualified source c256758d6cf9184fee79eaed6e6ee3d27d120308 (tree50a24338959fec7efe7ea4f8dc4eb0502dd6c360; private receipt02de9825ceccfc867fb8facbb0e81a050ac912c8). Canonical qualification passed96preliminary +13,206Main checks with62conditional skips, followed by33post-pin checks and readiness. Prior cancelled/failed runs remain recorded separately. These are private release results, not a claim that this sanitized mirror's entire suite or a public installer was qualified.
 
-The new completion path accepts an original final reobserved after navigation only with a fresh inactive final for the same original question and full ordered original Core/request/Code parents. It never rebinds an old fence or fills missing original request identities. Main still requires every integrity-checked durable terminal result and the existing exact checkpoint commit before clearing a hold. This candidate alone grants no Send or replay authority.
+The accepted installation preserved133,596protected files/6,543,446,422bytes before eight successor applications. All291installed program files matched the qualified package. Current-page console checks verified recorder131 on15current routes across five profile cohorts. Correct installed/stable files and a page-reader label do not independently verify executing background-worker bytes or sustained autonomy.
 
-Upstream PR2041 guidance uses the existing per-chat Goal draft: normal helper output is requested under10,000characters; an actual reply_too_long failure adds under6,000character guidance on that chat’s next request and clears after a fitting decision. Strict JSON, hard caps, retry budgets and source/model/security checks remain. No global retry cache or replacement owner was added.
+### Implemented in131
 
-Current limitations:24of25 inspected workstreams still lack their original request bindings; the remaining task has no published native evidence. One cleanup task retains18nativeparents but no exact original request-half or durable per-parent correlation. These historical gaps cannot be treated as completed results from a fresh page, timer, empty inventory or finished helper alone. Five previous unpaused settings were restored through the application; restricted profiles remain held. No new useful automatic work-and-successor cycle was independently certified for126. Useful sustained autonomy remains unverified.
+- All three MAIN-world Fiber evidence/model/plugin request channels, their DOM stamps and the monotonic V2 listener registry share one isolated generation (wire17). Older listeners cannot replace the current owner; same-version reinjection can repair it. This closes the reproduced legacy same-nonce reply and stamp races without weakening original request/result checks.
+- The existing observer handles the exact latest native DIL response-load failure and unique enabled Reload response control under current elected unpaused Goal/Loop ownership. One-shot custody survives React and adapter reinjection. The ordinary no-error path avoids a full history scan. This reloads a response view; it grants no prompt Retry, Send, approval or terminal-result authority.
+- The export also includes reviewed changes since126: flattened native result-envelope compatibility, prepared scope/delivery reconciliation, source-bound local expiry and associated diagnostics/tests. Existing exact source, ordered parent, namespace, result witness, native ACK, durable checkpoint, model and pause contracts remain required.
 
-Latest live upstream review November3 at00:23UTC: [544eda20](https://github.com/totec448-spec/chat-on-steroids/commit/544eda208bbfc778af36441a6863717e8f9522f4), latest releasev2.1.49. PR2042 changes desktop chat-row CSS and its validation, not Loop attribution; it is deferred beyond this reliability cut. The original repository stays private. This mirror excludes prompts, account/workspace records, stores, credentials, browser data, private journals/history, installers and backups.
+### What still needs evidence
 
-Historical checkpoints below are superseded by accepted126.
+The post-install snapshot had3responding chats,8result-verification holds and4helper-model confirmation errors. Four automatic native after-turn delivery ACKs were observed on two eligible profiles. These are delivery-positive observations, not certification of every prior tool result, complete original task acceptance or a sustained soak.
+
+One current case has37request IDs and37returned result witnesses but lacks verified original namespace ancestry. Console reasons include working-turn mismatch, turn-exchange mismatch and native-scope path refusal. Detailed fixed counters appear in the page console but remain absent from the raw application controls response. Read-only inspection of installed Main proves that all88common keys and both normalization/operator projection loops are present, so a stale Main allowlist is disproved. The first differing accepted-frame/content/worker/Main boundary and the executing worker generation still require evidence; no guessed patch or fabricated completion was applied.
+
+Provider model unavailability, missing historical request halves, native approvals and unknown Send effects remain distinct boundaries. Preserve current work, existing ownership, user pauses, drafts, spent budgets and excluded profiles. A fresh observation, smaller inventory, visible response or successful Send cannot settle old result debt.
+
+### Research and update discipline
+
+Use exact current source and the existing tests. Report verified code, supplied runtime observations, hypotheses and missing evidence separately. If GitHub retrieval is blocked, continue from supplied excerpts or upstream as a labelled comparator; a DNS/crawler failure does not prove repository privacy. Do not waste a report on an access-only verdict.
+
+Latest reviewed upstream release is [v2.1.50](https://github.com/totec448-spec/chat-on-steroids/releases/tag/v2.1.50). Local backports are selective: compare actual ownership and dependency contracts before proposing an import. Do not wholesale replace this customized branch.
+
+Measured private capture took1,675,118ms and independent post-install verification188,796ms. The install wrapper's nsisMs includes these checkpoints and is not pure NSIS runtime. Release acceleration must preserve checksum, rollback, positive drain and data-compatibility proof. There is no public installer in this mirror.
+
+Historical checkpoints below are retained for comparison and do not override131.
 
 ## Historical update125 installation
 
