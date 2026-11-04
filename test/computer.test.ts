@@ -28,6 +28,8 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
     fixtureDirectory = await makeTempDir('cos-native-contract-');
     const title = 'CoS native contract ' + randomUUID();
     const closeFile = path.join(fixtureDirectory, 'close');
+    const paintFile = path.join(fixtureDirectory, 'paint');
+    const paintedFile = path.join(fixtureDirectory, 'painted');
     const psQuote = (value: string) => "'" + value.replaceAll("'", "''") + "'";
     const script = [
       "$ErrorActionPreference='Stop'",
@@ -46,7 +48,14 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
       '$button.Location=New-Object System.Drawing.Point(24,36)',
       '$button.Size=New-Object System.Drawing.Size(160,48)', '$form.Controls.Add($button)',
       '$timer=New-Object System.Windows.Forms.Timer; $timer.Interval=100',
-      '$timer.Add_Tick({ if(Test-Path -LiteralPath ' + psQuote(closeFile) + '){ $form.Close() } })',
+      '$script:paintSequence=0',
+      '$timer.Add_Tick({ if(Test-Path -LiteralPath ' + psQuote(closeFile) + '){ $form.Close(); return }; ' +
+        'if(Test-Path -LiteralPath ' + psQuote(paintFile) + '){ ' +
+        '$request=[IO.File]::ReadAllText(' + psQuote(paintFile) + '); $script:paintSequence++; ' +
+        '$button.BackColor=if($script:paintSequence % 2){ [Drawing.Color]::CornflowerBlue }else{ [Drawing.Color]::MediumSeaGreen }; ' +
+        '$script:fixturePainted=$false; $form.Refresh(); $button.Refresh(); ' +
+        'if($script:fixturePainted){ [IO.File]::WriteAllText(' + psQuote(paintedFile) + ', ' +
+        '(@{request=$request; sequence=$script:paintSequence; paintedAt=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress)) } } })',
       '$form.Add_Paint({ $script:fixturePainted=$true })',
       "$form.Add_Shown({ $form.Refresh(); $button.Refresh(); if(-not $script:fixturePainted){ throw 'Owned native fixture did not paint' }; [Console]::WriteLine('READY'); $timer.Start() })",
       'try { [System.Windows.Forms.Application]::Run($form) } finally { $timer.Dispose(); $form.Dispose() }'
@@ -313,55 +322,75 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
     // A competing capture is fired while get_window_state is mid-acquisition. The state
     // it returns must describe one moment: centres computed against its own screenshot,
     // never against the frame the interloper installed.
-    let checked = 0;
-    const captureDiagnostics: unknown[] = [];
-    const { windows } = await listWindows();
-    const candidates = windows.filter(window => window.id === fixtureWindow);
-    for (const candidate of candidates) {
-      try {
-        const statePromise = getWindowState({ window: candidate.id, includeScreenshot: true, maxWidth: 640, maxElements: 12 });
-        const interloper = screenshot({ window: fixtureWindow, maxWidth: 320 });
-        const [state, other] = await Promise.all([statePromise, interloper]);
-        expect(state.screenshot).not.toBeNull();
-        const shot = state.screenshot!;
-        captureDiagnostics.push({ fixture: candidate.id, captureMode: shot.captureMode, region: shot.region, width: shot.width, height: shot.height, elements: state.elements.map(element => ({ name: element.name, bounds: element.bounds, imageBounds: element.imageBounds })) });
-        expect(shot.frameId).not.toBe(other.frameId);
-        for (const element of state.elements) {
-          // Eligibility is derived from raw desktop bounds/capture metadata, never from
-          // imageBounds/imageCenter: an all-null mapping regression must still fail.
-          const inside = element.bounds.x >= shot.region.x && element.bounds.y >= shot.region.y &&
-            element.bounds.x + element.bounds.width <= shot.region.x + shot.region.width &&
-            element.bounds.y + element.bounds.height <= shot.region.y + shot.region.height;
-          if (shot.captureMode === 'screen_fallback' || !inside) {
-            expect(element.imageBounds).toBeNull();
-            expect(element.imageCenter).toBeNull();
-            continue;
+    // Earlier assertions exercise static surfaces. This alignment assertion needs an
+    // actively painted native target through both real captures, including after a long
+    // sequence of screen-only observations. The existing fixture timer owns this phase.
+    const paintFile = path.join(fixtureDirectory, 'paint');
+    const paintedFile = path.join(fixtureDirectory, 'painted');
+    const paintRequest = randomUUID();
+    let paintAcknowledgement: { request: string; sequence: number; paintedAt: number } | null = null;
+    await fs.writeFile(paintFile, paintRequest);
+    try {
+      await expect.poll(async () => {
+        try {
+          const value = JSON.parse(await fs.readFile(paintedFile, 'utf8'));
+          if (value.request === paintRequest && Number.isInteger(value.sequence) && value.sequence > 0 &&
+              Number.isFinite(value.paintedAt) && value.paintedAt <= Date.now()) paintAcknowledgement = value;
+        } catch { /* The owned writer may be replacing its bounded acknowledgement. */ }
+        return paintAcknowledgement?.request;
+      }, { timeout: 2000, interval: 20 }).toBe(paintRequest);
+      let checked = 0;
+      const captureDiagnostics: unknown[] = [];
+      const { windows } = await listWindows();
+      const candidates = windows.filter(window => window.id === fixtureWindow);
+      for (const candidate of candidates) {
+        try {
+          const statePromise = getWindowState({ window: candidate.id, includeScreenshot: true, maxWidth: 640, maxElements: 12 });
+          const interloper = screenshot({ window: fixtureWindow, maxWidth: 320 });
+          const [state, other] = await Promise.all([statePromise, interloper]);
+          expect(state.screenshot).not.toBeNull();
+          const shot = state.screenshot!;
+          captureDiagnostics.push({ fixture: candidate.id, captureMode: shot.captureMode, region: shot.region, width: shot.width, height: shot.height, elements: state.elements.map(element => ({ name: element.name, bounds: element.bounds, imageBounds: element.imageBounds })) });
+          expect(shot.frameId).not.toBe(other.frameId);
+          for (const element of state.elements) {
+            // Eligibility is derived from raw desktop bounds/capture metadata, never from
+            // imageBounds/imageCenter: an all-null mapping regression must still fail.
+            const inside = element.bounds.x >= shot.region.x && element.bounds.y >= shot.region.y &&
+              element.bounds.x + element.bounds.width <= shot.region.x + shot.region.width &&
+              element.bounds.y + element.bounds.height <= shot.region.y + shot.region.height;
+            if (shot.captureMode === 'screen_fallback' || !inside) {
+              expect(element.imageBounds).toBeNull();
+              expect(element.imageCenter).toBeNull();
+              continue;
+            }
+            const left = Math.round((element.bounds.x - shot.region.x) * shot.width / shot.region.width);
+            const top = Math.round((element.bounds.y - shot.region.y) * shot.height / shot.region.height);
+            const right = Math.round((element.bounds.x + element.bounds.width - shot.region.x) * shot.width / shot.region.width);
+            const bottom = Math.round((element.bounds.y + element.bounds.height - shot.region.y) * shot.height / shot.region.height);
+            expect(element.imageBounds).toEqual({ x: left, y: top, width: right - left, height: bottom - top });
+            if (right <= left || bottom <= top) {
+              expect(element.imageCenter).toBeNull();
+              continue;
+            }
+            expect(element.imageCenter).toEqual({
+              x: Math.min(right - 1, Math.round((left + right) / 2)),
+              y: Math.min(bottom - 1, Math.round((top + bottom) / 2))
+            });
+            expect(right).toBeLessThanOrEqual(shot.width);
+            expect(bottom).toBeLessThanOrEqual(shot.height);
+            checked++;
           }
-          const left = Math.round((element.bounds.x - shot.region.x) * shot.width / shot.region.width);
-          const top = Math.round((element.bounds.y - shot.region.y) * shot.height / shot.region.height);
-          const right = Math.round((element.bounds.x + element.bounds.width - shot.region.x) * shot.width / shot.region.width);
-          const bottom = Math.round((element.bounds.y + element.bounds.height - shot.region.y) * shot.height / shot.region.height);
-          expect(element.imageBounds).toEqual({ x: left, y: top, width: right - left, height: bottom - top });
-          if (right <= left || bottom <= top) {
-            expect(element.imageCenter).toBeNull();
-            continue;
-          }
-          expect(element.imageCenter).toEqual({
-            x: Math.min(right - 1, Math.round((left + right) / 2)),
-            y: Math.min(bottom - 1, Math.round((top + bottom) / 2))
-          });
-          expect(right).toBeLessThanOrEqual(shot.width);
-          expect(bottom).toBeLessThanOrEqual(shot.height);
-          checked++;
+          if (checked > 0) break;
+        } catch (error) {
+          captureDiagnostics.push({ fixture: candidate.id, error: error instanceof Error ? error.message : String(error) });
+          if (!/CAPTURE_FAILED:|WINDOW_NOT_FOUND:/.test(error instanceof Error ? error.message : String(error))) throw error;
         }
-        if (checked > 0) break;
-      } catch (error) {
-        captureDiagnostics.push({ fixture: candidate.id, error: error instanceof Error ? error.message : String(error) });
-        if (!/CAPTURE_FAILED:|WINDOW_NOT_FOUND:/.test(error instanceof Error ? error.message : String(error))) throw error;
       }
-    }
-    // The owned Form has a real button; missing eligible controls is a failure, never a skip.
-    expect(checked, JSON.stringify({ fixtureWindow, candidates: candidates.length, captureDiagnostics })).toBeGreaterThan(0);
+      // The owned Form has a real button; missing eligible controls is a failure, never a skip.
+      expect(checked, JSON.stringify({ fixtureWindow, fixturePid: fixtureProcess?.pid,
+        fixtureExitCode: fixtureProcess?.exitCode, paintAcknowledgement,
+        candidates: candidates.length, captureDiagnostics })).toBeGreaterThan(0);
+    } finally { await fs.rm(paintFile, { force: true }); }
   });
 
   it('refuses a ref minted before the desktop helper restarted', async () => {
