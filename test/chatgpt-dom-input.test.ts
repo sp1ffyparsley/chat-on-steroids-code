@@ -839,7 +839,7 @@ describe('one native HTML edit for prepared text', () => {
     expect(api.insertPrompt('replacement')).toBe(false);
     expect(nativeEdit).not.toHaveBeenCalled();
   });
-  it.each(['D', 'hello', 'word', '123', 'abc def', 'abc def ghi', 'three stray words'])('replaces authorized short residue without appending it (%s)', text => {
+  it.each(['D', 'F', 'A', ' D ', ' f ', 'hello', 'word', '123', 'abc def', 'abc def ghi', 'three stray words'])('replaces authorized short residue without appending it (%s)', text => {
     box.textContent = text;
     expect(api.insertPrompt('Exact saved task')).toBe(true);
     expect(box.textContent).toBe('Exact saved task');

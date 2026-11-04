@@ -1827,7 +1827,7 @@ describe('alternate shell turn/message provenance', () => {
         callIdentitySelectedWithheld: 1
       });
       const trace = diagnosticLogs.find(line => line.includes('native result-reference recovery diagnostic'))!;
-      expect(trace).toContain('version=4');
+      expect(trace).toContain('version=5');
       expect(trace).toContain('missing=0');
       expect(trace).toContain('identityRefusals=1');
       expect(trace).toContain('turnExchangeMismatch:1');
@@ -2043,6 +2043,10 @@ describe('alternate shell turn/message provenance', () => {
       expect(accessorReads).toBe(0);
       const trace = diagnosticLogs.find(line => line.includes('native result-reference recovery diagnostic'))!;
       expect(trace).toContain(`${expectedReason}:1`);
+      if (variant === 'unselected path before a bad final') {
+        expect(trace).toContain('anchorMember=core-result');
+        expect(trace).toContain('anchorMemberTerminal=true');
+      }
       for (const value of [USER, CALL, RESULT, REQUEST, APP, LINK, 'PRIVATE_ANCHOR_WORKING', 'PRIVATE_ANCHOR_EXCHANGE',
         'PRIVATE_OTHER_WORKING', 'PRIVATE_SCOPE_GETTER', 'PRIVATE_TOOL_RESULT']) expect(trace).not.toContain(value);
     } finally { page.dom.window.close(); }
@@ -2451,7 +2455,7 @@ describe('alternate shell turn/message provenance', () => {
       const reasonKey = 'identityReason' + expectedReason[0]!.toUpperCase() + expectedReason.slice(1);
       expect(page.fiber.shellScan.rejects[reasonKey]).toBe(1);
       const trace = diagnosticLogs.find(line => line.includes('native result-reference recovery diagnostic'))!;
-      expect(trace).toContain('version=4');
+      expect(trace).toContain('version=5');
       expect(trace).toContain('identityRefusals=1');
       expect(trace).toContain(`${expectedReason}:1`);
       if (requestIds === 'present') expect(trace).toContain('requestIdPresent=1 requestIdMissing=0');
@@ -2749,7 +2753,7 @@ describe('alternate shell turn/message provenance', () => {
       } });
     try {
       const trace = diagnosticLogs.find(line => line.includes('native result-reference recovery diagnostic'))!;
-      expect(trace).toContain('version=4');
+      expect(trace).toContain('version=5');
       expect(trace).toContain(`missingWithChild=${variant === 'absent' ? 0 : 1}`);
       expect(trace).toContain(`missingWithWitness=${variant === 'returned-with-witness' ? 1 : 0}`);
       expect(trace).toContain(`witnessedResults=${variant === 'returned-with-witness' ? 1 : 0}`);
@@ -2775,7 +2779,7 @@ describe('alternate shell turn/message provenance', () => {
       }});
       try {
         const trace=diagnosticLogs.find(line=>line.includes('native result-reference recovery diagnostic'))!;
-        expect(trace).toContain('version=4');
+        expect(trace).toContain('version=5');
         expect(trace).toMatch(new RegExp('resultShapes=.*'+variant+':1'));
         expect(trace).not.toMatch(/PRIVATE_SHAPE_SENTINEL|a{48}/);
         expect(page.fiber.turns[0].calls[0].resultReceiptId).toBeUndefined();

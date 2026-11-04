@@ -2278,6 +2278,7 @@
     // Fixed diagnostic only: older workers may drop additive anchor counters.
     // Retain the first failed prerequisite in the existing bounded console trace.
     let nativeAnchorReason = 'none';
+    let nativeAnchorMember = 'none', nativeAnchorMemberTerminal = false, nativeAnchorMemberTyped = false;
     const mountedNativeScope = (() => {
       // No independent mounted anchor was attempted without these prerequisites.
       // A diagnostic failure never changes the namespace or any acceptance predicate.
@@ -2313,6 +2314,22 @@
         prerequisite('nativeAnchorUserPathMismatch'); return refuse('nativeScopePathUnproved');
       }
       if (!currentPath.every(id => selected.has(id) || nativeNarration(id) || stagedResultMembers.has(id) || stagedExecutionMembers.has(id))) {
+        // Diagnose the first refused member without exporting its ID, text, tool
+        // arguments, arbitrary names or namespace. This never grants membership.
+        try {
+          const id = currentPath.find(id => !selected.has(id) && !nativeNarration(id) &&
+            !stagedResultMembers.has(id) && !stagedExecutionMembers.has(id));
+          const message = nativeField(nativeField(mapping, id), 'message');
+          const author = nativeField(message, 'author'), role = nativeField(author, 'role');
+          const recipient = nativeField(message, 'recipient'), name = nativeField(author, 'name');
+          nativeAnchorMember = role === 'assistant'
+            ? recipient === 'functions.exec' ? 'code-call' : recipient === 'api_tool.call_tool' ? 'core-call' : 'assistant-other'
+            : role === 'tool'
+              ? name === 'functions.exec' ? 'code-result' : name === 'api_tool.call_tool' ? 'core-result' : 'other-tool-result'
+              : role === 'user' ? 'user' : 'other';
+          nativeAnchorMemberTerminal = nativeField(message, 'status') === 'finished_successfully';
+          nativeAnchorMemberTyped = shell.executionIds.includes(id) || shell.calls.some(call => call.messageId === id);
+        } catch { /* Missing diagnostics do not change the original refusal. */ }
         prerequisite('nativeAnchorUnselectedPath'); return refuse('nativeScopePathUnproved');
       }
       try {
@@ -2629,7 +2646,7 @@
           }
           const missingWithChild = missing.filter(call => resultParents.has(call.messageId)).length;
           const missingWithWitness = missing.filter(call => resultParents.get(call.messageId)?.witnesses === 1).length;
-          const shape = { diagnosticVersion: 4, typedCalls: shell.calls.length,
+          const shape = { diagnosticVersion: 5, typedCalls: shell.calls.length,
             missingReferences: missing.length, liveMapping: Boolean(live), currentPathNodes: currentPath.length,
             selectedMissingCalls: missing.filter(call => selected.has(call.messageId)).length,
             nativeMissingCalls: nativeCalls, typedUserPresent: Boolean(typedUserId),
@@ -2639,18 +2656,19 @@
           const key = [shape.typedCalls, shape.missingReferences, shape.liveMapping, shape.currentPathNodes,
             shape.selectedMissingCalls, shape.nativeMissingCalls, shape.typedUserPresent, shape.typedUserSelected,
             selectedRequestIdsPresent, selectedRequestIdsMissing, identityRefusalCalls,
-            nativeAnchorReason, ...Object.values(identityRefusalReasons), selectedToolResults, witnessedToolResults,
+            nativeAnchorReason, nativeAnchorMember, nativeAnchorMemberTerminal, nativeAnchorMemberTyped, ...Object.values(identityRefusalReasons), selectedToolResults, witnessedToolResults,
             missingWithChild, missingWithWitness, ...Object.values(resultShapes)].join(':');
           if (!nativeReferenceTraceKeys.has(key) && nativeReferenceTraceKeys.size < MAX_TURNS) {
             nativeReferenceTraceKeys.add(key);
             console.info('[Chat On Steroids] native result-reference recovery diagnostic' +
-              ` version=4 calls=${shape.typedCalls} missing=${shape.missingReferences}` +
+              ` version=5 calls=${shape.typedCalls} missing=${shape.missingReferences}` +
               ` liveMapping=${shape.liveMapping} pathNodes=${shape.currentPathNodes}` +
               ` selectedCalls=${shape.selectedMissingCalls} nativeCalls=${shape.nativeMissingCalls}` +
               ` typedUser=${shape.typedUserPresent} selectedUser=${shape.typedUserSelected}` +
               ` requestIdPresent=${selectedRequestIdsPresent} requestIdMissing=${selectedRequestIdsMissing}` +
               ` identityRefusals=${identityRefusalCalls} nativeScope=${Boolean(mountedNativeScope)}` +
-              ` anchorReason=${nativeAnchorReason}` +
+              ` anchorReason=${nativeAnchorReason} anchorMember=${nativeAnchorMember}` +
+              ` anchorMemberTerminal=${nativeAnchorMemberTerminal} anchorMemberTyped=${nativeAnchorMemberTyped}` +
               ` identityReasons=${Object.entries(identityRefusalReasons).map(([kind, count]) => kind + ":" + count).join(',')}` +
               ` selectedResults=${selectedToolResults} witnessedResults=${witnessedToolResults}` +
               ` missingWithChild=${missingWithChild} missingWithWitness=${missingWithWitness}` +
