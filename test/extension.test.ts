@@ -9849,13 +9849,30 @@ describe('extension observation journal', () => {
     ]);
   });
 
+  it('stamps the worker reader stage while retaining only upstream shape witnesses', () => {
+    const start = backgroundSource.indexOf('function shellScanDiagnostic(');
+    const end = backgroundSource.indexOf('\n}', start) + 2;
+    const project = (reader: unknown) => vm.runInNewContext(
+      `${backgroundSource.slice(start, end)}; shellScanDiagnostic(raw);`,
+      { SHELL_SCAN_MAX: 400, PAGE_RECORDER_VERSION: 133, raw: { selectorMatches: 0, mapped: 0,
+        rejects: { fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0 }, reader } });
+    expect(project({ fiberWire: 17, fiberKeys: 88, contentRecorder: 132, contentKeys: 88,
+      workerRecorder: 999, workerKeys: 399, mainKeys: 399 }).reader).toEqual({
+      fiberWire: 17, fiberKeys: 88, contentRecorder: 132, contentKeys: 88, workerRecorder: 133, workerKeys: 4 });
+    expect(project(undefined).reader).toEqual({ workerRecorder: 133, workerKeys: 4 });
+    let reads = 0;
+    expect(project(Object.defineProperty({}, 'fiberWire', { get() { reads++; return 17; } })).reader)
+      .toEqual({ workerRecorder: 133, workerKeys: 4 });
+    expect(reads).toBe(0);
+  });
+
   it('forwards only bounded optional veto receipt diagnostics without inspecting private fields', () => {
     const start = backgroundSource.indexOf('function shellScanDiagnostic(');
     const end = backgroundSource.indexOf('\n}', start) + 2;
     expect(start).toBeGreaterThanOrEqual(0);
     const project = (rejects: unknown) => vm.runInNewContext(
       `${backgroundSource.slice(start, end)}; shellScanDiagnostic(raw);`,
-      { SHELL_SCAN_MAX: 400, raw: { selectorMatches: 1, mapped: 1, rejects } });
+      { SHELL_SCAN_MAX: 400, PAGE_RECORDER_VERSION: 133, raw: { selectorMatches: 1, mapped: 1, rejects } });
     const base = { fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0 };
     expect(project({ ...base, callVetoReceiptChecked: 400, callVetoReceiptMatched: 1,
       assistantTerminalReceiptChecked: 2, assistantTerminalReceiptMatched: 1,
@@ -9892,7 +9909,7 @@ describe('extension observation journal', () => {
     const end = backgroundSource.indexOf('\n}', start) + 2;
     expect(start).toBeGreaterThanOrEqual(0);
     expect(vm.runInNewContext(`${backgroundSource.slice(start, end)}; shellScanDiagnostic(raw);`,
-      { SHELL_SCAN_MAX: 400, raw: { selectorMatches: 1, mapped: 1, rejects: {
+      { SHELL_SCAN_MAX: 400, PAGE_RECORDER_VERSION: 133, raw: { selectorMatches: 1, mapped: 1, rejects: {
         fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0, ...pair } } })).toBeNull();
   });
 
@@ -9905,7 +9922,7 @@ describe('extension observation journal', () => {
     const end = backgroundSource.indexOf('\n}', start) + 2;
     expect(start).toBeGreaterThanOrEqual(0);
     expect(vm.runInNewContext(`${backgroundSource.slice(start, end)}; shellScanDiagnostic(raw);`,
-      { SHELL_SCAN_MAX: 400, raw: { selectorMatches: 1, mapped: 1, rejects: {
+      { SHELL_SCAN_MAX: 400, PAGE_RECORDER_VERSION: 133, raw: { selectorMatches: 1, mapped: 1, rejects: {
         fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0, ...pair } } })).toBeNull();
   });
 

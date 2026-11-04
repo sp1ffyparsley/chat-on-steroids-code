@@ -2343,6 +2343,7 @@ export type SessionControlsView = {
       selectorMatches: number | null;
       mapped: number | null;
       rejects: import('./core-browser-evidence.js').CoreShellScanRejects | null;
+      reader?: import('./core-browser-evidence.js').CoreReaderDiagnostic;
       /** Current observation's reasons only; never claims the retained source matched. */
       identityRefusalSummary?: ReturnType<typeof nativeIdentityRefusalSummary>;
     };
@@ -2574,6 +2575,7 @@ export async function sessionControlsFor(sessionId: string): Promise<SessionCont
         // a selector/UI change must not become unexplainable at Work status.
         // These numbers grant no native result, Send or Loop authority.
         rejects: native.shellScan ? { ...native.shellScan.rejects } : null,
+        ...(native.shellScan?.reader ? { reader: { ...native.shellScan.reader } } : {}),
         identityRefusalSummary: nativeIdentityRefusalSummary(native)
       }
     } : null,

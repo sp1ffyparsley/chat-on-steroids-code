@@ -1250,6 +1250,35 @@ describe('Core tool-surface incident diagnostics', () => {
     expect(classifyCoreToolSurfaceFailure(evidence)).toMatchObject({ kind: 'zero_core_ingress', boundary: 'ingress' });
   });
 
+  it('traces reader diagnostic stages without accepting a page-authored Main stamp or completion proof', () => {
+    resetCoreBrowserEvidenceForTests();
+    const rejects = { fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0 };
+    const project = (reader: unknown) => {
+      noteCoreBrowserEvidence({ conversationId: TARGET, documentId: 'doc-reader-stages', navigationEpoch: 1,
+        observedAt: NOW, shell: 'alternate', shellDiscovery: 'compatible', requestIds: [], turnId: null,
+        shellScan: { selectorMatches: 0, mapped: 0, rejects, reader } });
+      return coreBrowserEvidence(TARGET);
+    };
+    const reader = { fiberWire: 17, fiberKeys: 88, contentRecorder: 133, contentKeys: 88,
+      workerRecorder: 132, workerKeys: 53, mainKeys: 399, privateText: 'PRIVATE_FRAME' };
+    const observed = project(reader);
+    expect((observed?.shellScan as any)?.reader).toEqual({ fiberWire: 17, fiberKeys: 88,
+      contentRecorder: 133, contentKeys: 88, workerRecorder: 132, workerKeys: 53, mainKeys: 4 });
+    expect(observed?.ordinaryFinal).toBeNull();
+    expect(JSON.stringify(observed)).not.toContain('PRIVATE_FRAME');
+    (observed!.shellScan as any).reader.fiberKeys = 1;
+    expect((coreBrowserEvidence(TARGET)?.shellScan as any)?.reader.fiberKeys).toBe(88);
+    for (const invalid of [-1, 401, 1.5, '88', null]) {
+      expect((project({ ...reader, fiberKeys: invalid })?.shellScan as any)?.reader).toEqual({ mainKeys: 4 });
+    }
+    let reads = 0;
+    const accessor = Object.defineProperty({}, 'fiberWire', { get() { reads++; return 17; } });
+    expect((project(accessor)?.shellScan as any)?.reader).toEqual({ mainKeys: 4 });
+    expect(reads).toBe(0);
+    expect((project(undefined)?.shellScan as any)?.reader).toEqual({ mainKeys: 4 });
+    resetCoreBrowserEvidenceForTests();
+  });
+
   it('retains only bounded completion veto diagnostics without promoting them to live tool proof', () => {
     resetCoreBrowserEvidenceForTests();
     const details = { callVetoReceiptChecked: 1, callVetoReceiptMatched: 1,

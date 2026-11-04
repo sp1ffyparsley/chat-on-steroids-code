@@ -150,7 +150,7 @@ it('returns actual hash-verified, permissioned captured pixels on an exact incid
 
 it.each(['switch', 'roundtrip'])(
   'never publishes an earlier account incident index from a multi-await Core JPEG response after %s', async transition => {
-    const first = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const first = 'profile-5555555a-555a-4555-8555-555555555555';
     setLogProfileContext(first);
     initLogFile(path.join(directory, 'app.log'));
     const sharp = (await import('sharp')).default;
@@ -174,7 +174,7 @@ it.each(['switch', 'roundtrip'])(
     const pending = reg.call('session', { action: 'incidents', incident_id: id, include_image: true });
     await entered;
     try {
-      setLogProfileContext('profile-8bc4db29-9172-4c9a-876d-6d52d81866a7');
+      setLogProfileContext('profile-6666666a-666a-4666-8666-666666666666');
       if (transition === 'roundtrip') setLogProfileContext(first);
       resume();
       const result = await pending;

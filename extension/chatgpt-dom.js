@@ -4629,7 +4629,7 @@ var CLF_DOM = (() => {
       const buttons = [...root.querySelectorAll('button')];
       if (buttons.length !== 1 || buttons[0].parentElement !== root || buttons[0].type !== 'button' ||
           !/^reload response$/i.test((buttons[0].textContent || '').trim()) || !retryControlReady(buttons[0])) return null;
-      return { root, node: error.node, button: buttons[0], key: `${chat}:${id}` };
+      return { root, section, node: error.node, button: buttons[0], key: `${chat}:${id}` };
     };
     try {
       const found = candidate();
@@ -4639,6 +4639,9 @@ var CLF_DOM = (() => {
       const final = candidate();
       if (!final || final.root !== found.root || final.node !== found.node || final.button !== found.button ||
           final.key !== found.key || !stillCurrent() || location.pathname !== path) return held('page-changed');
+      // The policy callback can synchronously publish a later section, even reusing
+      // this logical turn id. Recheck physical ownership after that final callback.
+      if (final.section !== turnNodes(turns().at(-1)).at(-1)) return held('page-changed');
       // Spend before React dispatch. A failed/intercepted click is not another grant.
       reloadedDisplayMessages.add(found.key);
       found.button.click();

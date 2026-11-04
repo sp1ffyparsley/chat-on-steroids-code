@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 131;
+  const RECORDER_VERSION = 133;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -4671,10 +4671,26 @@
     const assistantReceiptMatched = Object.getOwnPropertyDescriptor(rejects, 'assistantTerminalReceiptMatched')?.value;
     if ((assistantReceiptChecked === undefined) !== (assistantReceiptMatched === undefined) ||
         assistantReceiptMatched > assistantReceiptChecked) return null;
+    // Shape-only stage witness. Each owner stamps itself; page-authored later stages are ignored.
+    let reader = {};
+    try {
+      const upstream = Object.getOwnPropertyDescriptor(raw, 'reader')?.value;
+      if (upstream && typeof upstream === 'object' && !Array.isArray(upstream)) {
+        for (const key of ['fiberWire', 'fiberKeys']) {
+          const descriptor = Object.getOwnPropertyDescriptor(upstream, key);
+          if (!descriptor) continue;
+          const value = descriptor.value;
+          if (!('value' in descriptor) || !Number.isInteger(value) || value < 0 ||
+              value > (key.endsWith('Keys') ? FIBER_MAX_ROWS : 1_000_000)) { reader = {}; break; }
+          reader[key] = value;
+        }
+      }
+    } catch { reader = {}; }
     return {
       selectorMatches,
       mapped,
-      rejects
+      rejects,
+      reader: { ...reader, contentRecorder: RECORDER_VERSION, contentKeys: Object.keys(rejects).length }
     };
   }
 
@@ -6201,7 +6217,8 @@
         ...(Array.isArray(scan.answeredCodeCallMessageIds) ? { answeredCodeCallMessageIds: scan.answeredCodeCallMessageIds } : {})
       } : null,
       shellScan: input.shellScan ? { selectorMatches: input.shellScan.selectorMatches,
-        mapped: input.shellScan.mapped, rejects: { ...input.shellScan.rejects } } : null,
+        mapped: input.shellScan.mapped, rejects: { ...input.shellScan.rejects },
+        ...(input.shellScan.reader ? { reader: { ...input.shellScan.reader } } : {}) } : null,
       requestIds: input.requestIds,
       turnId: input.turnId
     };
@@ -16411,6 +16428,7 @@
       if (!intoRunningTurn()) {
         await stage('model:start');
         let confirmed = false;
+        let modelRefusal = null;
         if (temporary && input.purpose === 'decision' && !target) {
           // One elected, empty helper owns this claim before Send. A missing native trigger
           // or snapshot may be shell hydration, not a denied model. Split the original 15s
@@ -16439,13 +16457,17 @@
           };
           const first = await attempt('first', 7500);
           confirmed = first.ok;
+          modelRefusal = first.reason;
           if (!confirmed && ['trigger_missing', 'snapshot_missing'].includes(first.reason) && current() &&
               CLF_DOM.temporaryChatReady() && CLF_DOM.composerVisible() && CLF_DOM.composerWritable()) {
             // A read-only stage ACK reproves the same durable input owner. It authorizes
             // no Send and cannot revive a cancelled/reassigned claim while hydration waits.
             const retry = await stage('model:retry', DESKTOP_INPUT_PRECLICK_REPLY_MS);
-            if (retry?.data?.ok === true && current())
-              confirmed = (await attempt('retry', Math.max(0, deadline - Date.now()))).ok;
+            if (retry?.data?.ok === true && current()) {
+              const repeated = await attempt('retry', Math.max(0, deadline - Date.now()));
+              confirmed = repeated.ok;
+              modelRefusal = repeated.reason;
+            }
           }
         } else {
           // Ordinary retained chats need the same bounded refusal evidence as helpers.
@@ -16459,11 +16481,15 @@
                 'owner_changed', 'preparation_expired'].includes(code)) refusal ??= code;
             } });
           if (!confirmed && refusal) await stage(`model:ordinary:${refusal}`);
+          modelRefusal = refusal;
         }
         if (!confirmed) {
           const limit = providerLimitation() || CLF_DOM.accessNoticeSince?.(choosingStartedAt);
+          // A denied exact native pair is definitive unavailability, not a quota
+          // inference or another transient missing snapshot. Preserve only its
+          // fixed reason; Main still owns positive pre-Send failure classification.
           return fail(limit || 'Requested model or reasoning could not be confirmed',
-            !limit && onTarget() ? 'model-unconfirmed' : undefined);
+            !limit && onTarget() ? modelRefusal === 'choice_denied' ? 'model-choice-denied' : 'model-unconfirmed' : undefined);
         }
         await stage('model:confirmed');
       }

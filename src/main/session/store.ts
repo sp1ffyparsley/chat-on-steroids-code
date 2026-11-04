@@ -1046,11 +1046,21 @@ async function flushSessionEntry(entry: OpenSession): Promise<void> {
 
 // ----------------------------------------------------------------- create
 
+/** A caller's synchronous ownership guard changed before any new session was published. */
+export class SessionCreationDeferredError extends Error {
+  constructor() {
+    super('Session creation ownership changed before publication');
+    this.name = 'SessionCreationDeferredError';
+  }
+}
+
 export async function createSession(options: {
   title?: string;
   titleSource?: SessionSummary['titleSource'];
   conversationId?: string | null;
   origin?: SessionOrigin | null;
+  /** Synchronous only: runs after inherited-source reads, before live/filesystem publication. */
+  beforePublish?: () => boolean;
 }): Promise<SessionSummary> {
   const id = `${new Date().toISOString().slice(0, 10)}-${randomUUID().slice(0, 8)}`;
   const summary = emptySummary(id, options.title?.trim() || 'ChatGPT session', options.conversationId ?? null);
@@ -1060,6 +1070,7 @@ export async function createSession(options: {
     const source = await getSession(options.origin.fromSessionId);
     if (source?.projectId) summary.projectId = source.projectId;
   }
+  if (options.beforePublish && !options.beforePublish()) throw new SessionCreationDeferredError();
   // Invalidate before exposing the in-flight live entry. A cached miss must never hide a
   // session that this process has started creating, even while its first durable write awaits.
   if (summary.conversationId) missingCurrentConversations.delete(summary.conversationId);

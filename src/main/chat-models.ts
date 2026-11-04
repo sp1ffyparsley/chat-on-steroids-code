@@ -60,6 +60,19 @@ function expire(): void {
 export function getChatModels(): ChatModelCatalog {
   expire(); return structuredClone(catalog);
 }
+/** Fresh positive evidence for one unchanged native pair, never a fallback or a retry timer. */
+export function exactChatModelAvailableAfter(model: string | null | undefined,
+  effort: string | null | undefined, deniedAt: number): boolean {
+  const current = getChatModels(), now = Date.now();
+  if (!model || !effort || !Number.isFinite(deniedAt) || current.state !== 'ready' || current.error ||
+      current.observedAt === null || current.observedAt <= deniedAt || current.observedAt > now ||
+      now - current.observedAt >= MODEL_AVAILABILITY_REFRESH_MS) return false;
+  const choices = current.models.filter(choice => choice.id === model || choice.aliases?.includes(model));
+  const evidence = current.availability?.filter(row => row.model === model && row.effort === effort);
+  return choices.length === 1 && choices[0]!.efforts.some(value => value === effort) &&
+    evidence?.length === 1 && evidence[0]!.status === 'available' &&
+    (evidence[0]!.retryAt === undefined || evidence[0]!.retryAt <= current.observedAt);
+}
 export function requestChatModels(allowOpen = true): ChatModelCatalog {
   expire();
   if (!request) {
@@ -138,10 +151,15 @@ export function observeChatModels(raw: unknown): boolean {
     : 'ChatGPT model choices could not be read. Open ChatGPT in the selected browser and check its model picker, then retry.';
   if (models) {
     const observedAt = Date.now();
-    availabilityRefreshNeeded = false;
+    // Partial inspection may retain useful labels, but a failed restoration/close
+    // cannot publish positive availability or persist it as fresh restart evidence.
+    const verifiedAvailability = parsed.data.error ? undefined : availability;
+    availabilityRefreshNeeded = Boolean(parsed.data.error);
     catalog = { state: 'ready', requestedAt: catalog.requestedAt, models, observedAt,
-      ...(availability ? { availability } : {}) };
-    writeDurableSoon('chat-models', { observedAt, models, ...(availability ? { availability } : {}) });
+      ...(verifiedAvailability ? { availability: verifiedAvailability } : {}),
+      ...(parsed.data.error ? { error } : {}) };
+    writeDurableSoon('chat-models', { observedAt, models,
+      ...(verifiedAvailability ? { availability: verifiedAvailability } : {}) });
   } else failed(error);
   request = null;
   if (deadline) clearTimeout(deadline); deadline = null;

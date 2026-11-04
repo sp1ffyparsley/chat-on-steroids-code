@@ -57,7 +57,7 @@ import type { GoalBackend } from '../shared/types.js';
 import { createHash, randomInt } from 'node:crypto';
 import { assertOperatorPromptEnvelope, operatorPromptBody, operatorPromptOverhead, prepareOperatorPrompt } from '../shared/operator-prompt.mjs';
 import { getActiveInstanceRuntime, getConfig } from './config.js';
-import { getChatModels, refreshForUnoffered } from './chat-models.js';
+import { getChatModels, refreshForUnoffered, exactChatModelAvailableAfter } from './chat-models.js';
 import { readDurableStrict, writeDurableNow, writeDurableSoon } from './durable.js';
 import { logInfo, logWarn } from './logger.js';
 import { getSecret, profileProviderSecretSlot } from './secrets.js';
@@ -250,6 +250,11 @@ const SETTLED_FAILURE = /^(?:auth_rejected|out_of_credit|unknown_model|no_api_ke
 const NATIVE_COMPLETION_WAIT = /^(?:request_failed:\s*)?native_completion_unverified(?:$|:)/;
 
 function retryableGoalFailure(error: string, draft?: GoalDraft): boolean {
+  // A positively unavailable exact native choice is not a transient picker miss.
+  // Input emits this only before authorization/receipt; preserve the same reply and
+  // requested model without spending three replacement helpers or selecting fallback.
+  if (error === 'goal_browser_model_choice_denied') return !!draft &&
+    exactChatModelAvailableAfter(draft.helper?.model, draft.helper?.reasoningEffort, draft.settledAt);
   // Repeating a decision cannot supply a missing native receipt. Reuse the
   // existing reader/retry owner only after that exact completion fence clears.
   if (NATIVE_COMPLETION_WAIT.test(error)) return !!draft && finiteNativeCompletionReady(draft);

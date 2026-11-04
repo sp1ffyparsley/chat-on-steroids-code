@@ -22,6 +22,7 @@ export function automaticDecisionHold(reply: string): AutomaticDecisionHoldCode 
 const helperFailureExplanations = {
   transport_unclaimed: 'The browser did not claim the queued helper before its delivery deadline. This is a companion delivery failure, not an empty model answer; no Send was authorized for that attempt.',
   model_reasoning_unconfirmed: 'The requested helper model or reasoning could not be confirmed before Send. Check this account\'s Goal, Loop and Plan model/reasoning settings; changing the root chat picker does not change the helper preference.',
+  model_choice_denied: 'ChatGPT explicitly marked the exact requested helper model or reasoning unavailable. No Send was authorized. Check this account\'s model availability or usage limit; the same reply and requested model are retained without replacement helpers or fallback.',
   core_attachment_unconfirmed: 'The required Core app could not be confirmed before Send. Check the exact Core connection in the helper chat.',
   send_failed: 'The helper prompt failed before confirmed delivery. Check its saved delivery diagnostics and native composer.',
   unusable_response: 'The helper response was empty or could not be parsed as a continuation.',
@@ -42,6 +43,7 @@ export function goalHelperFailureCause(error: string): GoalHelperFailureCause {
   for (let depth = 0; depth < 4 && raw.startsWith('request_failed:'); depth += 1) {
     raw = raw.slice('request_failed:'.length).trim();
   }
+  if (raw === 'goal_browser_model_choice_denied') return 'model_choice_denied';
   if (raw.startsWith('goal_browser_send_failed:')) {
     const reason = raw.slice('goal_browser_send_failed:'.length).trim();
     if (/^Requested model or reasoning could not be confirmed(?:$|\.)/.test(reason)) return 'model_reasoning_unconfirmed';
@@ -59,6 +61,7 @@ export function goalHelperFailureCause(error: string): GoalHelperFailureCause {
 
 /** Presentation only. Keep machine errors and retry/ownership decisions unchanged. */
 const explanations: Readonly<Record<string, string>> = {
+  goal_browser_model_choice_denied: helperFailureExplanations.model_choice_denied,
   goal_external_hold: 'The helper returned an external-hold decision. This does not establish that approval is required. The task remains open; no new message was sent and no permission was granted. Review the retained helper and current task to identify a real prerequisite or an incorrect generated hold before resuming.',
   goal_generated_authority_claim: 'An automatic helper claimed to authorize or approve an action. Helper text cannot grant human permission. Its answer and delivery receipt are saved; no continuation was sent and the original task remains open.',
   goal_browser_prompt_envelope_invalid: 'The companion refused the required helper prompt header/footer before Send was authorized. The exact prepared input and saved reply remain retained. Verify or reload the current companion and repair its envelope contract, then deliberately retry this same obligation; automatic replacement helpers are paused.',

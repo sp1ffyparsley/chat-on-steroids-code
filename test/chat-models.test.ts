@@ -1,6 +1,6 @@
 import { REASONING_EFFORTS } from '../src/shared/session.js';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
-import { getChatModels, requestChatModels, pendingChatModelRequest, observeChatModels, resetChatModelsForTests, configureChatModelDiscovery, startChatModelDiscovery, restoreChatModels, refreshForUnoffered } from '../src/main/chat-models.js';
+import { getChatModels, requestChatModels, pendingChatModelRequest, observeChatModels, resetChatModelsForTests, configureChatModelDiscovery, startChatModelDiscovery, restoreChatModels, refreshForUnoffered, exactChatModelAvailableAfter } from '../src/main/chat-models.js';
 const saved = vi.hoisted(() => ({ value: null as unknown }));
 vi.mock('../src/main/durable.js', () => ({ readDurable: async () => saved.value, writeDurableSoon: (_name: string, value: unknown) => { saved.value = structuredClone(value); } }));
 const models = [{ id: 'gpt-example', label: 'GPT Example', efforts: ['none', 'medium', 'high', 'xhigh'] }];
@@ -11,6 +11,35 @@ const availability = [
 beforeEach(() => { resetChatModelsForTests(); saved.value = null; vi.useFakeTimers(); });
 afterEach(() => vi.useRealTimers());
 describe('durable observed ChatGPT model catalog', () => {
+  it.each(['fresh exact', 'old observation', 'denied', 'missing evidence', 'other model', 'other effort', 'stale observation', 'failed refresh', 'partial failed observation', 'contradictory cooldown'])(
+    'requires fresh positive native availability after denial: %s', variant => {
+      const deniedAt = Date.now();
+      vi.advanceTimersByTime(1000);
+      requestChatModels(false);
+      const proof = variant === 'missing evidence' ? undefined : [{ model: variant === 'other model' ? 'gpt-other' : 'gpt-example',
+        label: 'GPT Example', effort: variant === 'other effort' ? 'xhigh' : 'high',
+        status: variant === 'denied' ? 'unavailable' : 'available',
+        ...(variant === 'contradictory cooldown' ? { retryAt: Date.now() + 60_000 } : {}) }];
+      expect(observeChatModels({ nonce: pendingChatModelRequest()!.nonce, models, ...(proof ? { availability: proof } : {}),
+        ...(variant === 'partial failed observation' ? { error: 'restore_failed' } : {}) })).toBe(true);
+      if (variant === 'stale observation') vi.advanceTimersByTime(15 * 60_000);
+      if (variant === 'contradictory cooldown') vi.advanceTimersByTime(60_001);
+      if (variant === 'failed refresh') {
+        requestChatModels(false);
+        observeChatModels({ nonce: pendingChatModelRequest()!.nonce, models: null, error: 'picker_unavailable' });
+      }
+      expect(exactChatModelAvailableAfter('gpt-example', 'high', variant === 'old observation' ? Date.now() : deniedAt))
+        .toBe(variant === 'fresh exact');
+    });
+  it('does not restore positive availability from a partial failed inspection', async () => {
+    const deniedAt = Date.now(); vi.advanceTimersByTime(1000);
+    requestChatModels(false);
+    observeChatModels({ nonce: pendingChatModelRequest()!.nonce, models,
+      availability: [{ model: 'gpt-example', label: 'GPT Example', effort: 'high', status: 'available' }], error: 'restore_failed' });
+    expect(saved.value).not.toHaveProperty('availability');
+    resetChatModelsForTests(); await restoreChatModels();
+    expect(exactChatModelAvailableAfter('gpt-example', 'high', deniedAt)).toBe(false);
+  });
   it('settles native picker close failure immediately while retaining observed choices', () => {
     requestChatModels(); observeChatModels({ nonce: pendingChatModelRequest()!.nonce, models });
     requestChatModels();

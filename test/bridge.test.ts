@@ -36262,7 +36262,9 @@ describe('diagnostic-only original scope reasons', () => {
       shell: 'alternate', shellDiscovery: 'compatible', observedAt: Date.now(),
       documentId: 'diagnostic-document', navigationEpoch: 7, requestIds: [],
       turnId: 'provider-turn-not-current',
-      shellScan: { selectorMatches: 1, mapped: 1, rejects: {
+      shellScan: { selectorMatches: 1, mapped: 1,
+        reader: { fiberWire: 17, fiberKeys: 88, contentRecorder: 133, contentKeys: 88,
+          workerRecorder: 131, workerKeys: 53, mainKeys: 399, privateText: 'PRIVATE_FRAME' }, rejects: {
         fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0, ...reasons
       } }
     };
@@ -36271,9 +36273,12 @@ describe('diagnostic-only original scope reasons', () => {
     expect(providerUI).toMatchObject({
       currentTurnMatched: false,
       rejects: { identityReasonWorkingTurnMismatch: 46 },
+      reader: { fiberWire: 17, fiberKeys: 88, contentRecorder: 133, contentKeys: 88,
+        workerRecorder: 131, workerKeys: 53, mainKeys: Object.keys(reasons).length + 4 },
       identityRefusalSummary: null
     });
     expect(JSON.stringify(providerUI)).not.toContain('provider-user-message');
+    expect(JSON.stringify(providerUI)).not.toContain('PRIVATE_FRAME');
     resetCoreBrowserEvidenceForTests();
   });
 });

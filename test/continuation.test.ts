@@ -2288,6 +2288,209 @@ describe('the window in which a replacement chat is expected', () => {
     }
   });
 
+  it.each(['superseded-lookup', 'origin-title', 'pending-claim'] as const)(
+    'keeps a real resume committed during %s in its original recorder and retains destination lifecycle', async boundary => {
+      const { sessionId, token } = await readyContinuation();
+      const destination = boundary === 'superseded-lookup'
+        ? '92929292-2222-4333-8444-555555555555'
+        : boundary === 'origin-title' ? '92929292-3333-4444-8555-666666666666'
+        : '92929292-4444-4555-8666-777777777777';
+      const recorder = await import('../src/main/session/recorder.js');
+      if (boundary === 'origin-title') await recorder.noteChatOrigin(destination,
+        { kind: 'resume', fromSessionId: sessionId, agentId: null, task: '' });
+      let entered!: () => void;
+      let release!: () => void;
+      const atBoundary = new Promise<void>(resolve => { entered = resolve; });
+      const preparation = new Promise<void>(resolve => { release = resolve; });
+      let enteredGate!: () => void;
+      const atGate = new Promise<void>(resolve => { enteredGate = resolve; });
+      if (boundary === 'pending-claim') {
+        const gates = await import('../src/main/session/resume-gate.js');
+        const original = gates.resumeOpeningWait;
+        vi.spyOn(gates, 'resumeOpeningWait').mockImplementation(() => {
+          const waiting = original();
+          enteredGate();
+          return waiting;
+        });
+      }
+      if (boundary !== 'origin-title') {
+        const original = store.conversationWasSuperseded;
+        let lookups = 0;
+        vi.spyOn(store, 'conversationWasSuperseded').mockImplementation(async conversation => {
+          // recordChatObservations first checks superseded lineage. Hold the later
+          // initializer lookup, after its original destination/catalog miss.
+          if (conversation === destination && ++lookups === 2) { entered(); await preparation; }
+          return original(conversation);
+        });
+      } else {
+        const original = store.getSession;
+        let held = false;
+        vi.spyOn(store, 'getSession').mockImplementation(async id => {
+          if (id === sessionId && !held) { held = true; entered(); await preparation; }
+          return original(id);
+        });
+      }
+      const now = Date.now();
+      const observed = recordChatObservations(destination, [
+        { kind: 'turn_start', time: now, turnId: 'exact-destination-turn' },
+        { kind: 'assistant_message', time: now + 1, turnId: 'exact-destination-turn',
+          messageId: 'exact-destination-final', text: 'Completed the existing work', state: 'final' },
+        { kind: 'turn_end', time: now + 2, turnId: 'exact-destination-turn', outcome: 'completed' }
+      ]);
+      try {
+        await atBoundary;
+        expect(await claimContinuationNow(token, 'late-preparation-command')).toBeTruthy();
+        if (boundary === 'pending-claim') {
+          release();
+          // A late claim must use the existing finite owner before creation, not let
+          // the browser batch settle into a new shadow while commit is still pending.
+          expect(await Promise.race([atGate.then(() => true), observed.then(() => false)])).toBe(true);
+        }
+        expect(await commitContinuation(token, destination)).toBe(true);
+      } finally { release(); }
+      const recorded = await observed;
+      expect(recorded.sessionId).toBe(sessionId);
+      expect((await store.listSessions()).filter(session => session.conversationId === destination)
+        .map(session => session.id)).toEqual([sessionId]);
+      expect(await store.readEvents(sessionId, { kinds: ['turn_start', 'turn_end'] })).toEqual([
+        expect.objectContaining({ kind: 'turn_start', turnId: 'exact-destination-turn' }),
+        expect.objectContaining({ kind: 'turn_end', turnId: 'exact-destination-turn', outcome: 'completed' })
+      ]);
+      expect(continuationByToken(token)?.state).toBe('committed');
+      expect((await getSession(sessionId))?.conversationId).toBe(destination);
+    }
+  );
+
+  it('does not publish a resume shadow when the real commit lands inside origin-project inheritance', async () => {
+    const { sessionId, token } = await readyContinuation();
+    const destination = '92929292-5555-4666-8777-888888888888';
+    const recorder = await import('../src/main/session/recorder.js');
+    await recorder.noteChatOrigin(destination,
+      { kind: 'resume', fromSessionId: sessionId, agentId: null, task: '' });
+    await store.flushSessions();
+    resetSessionStoreForTests();
+    const before = await fs.readdir(sessionsRoot());
+    let entered!: () => void;
+    let release!: () => void;
+    const atInheritance = new Promise<void>(resolve => { entered = resolve; });
+    const inheritance = new Promise<void>(resolve => { release = resolve; });
+    const gates = await import('../src/main/session/resume-gate.js');
+    const wait = gates.resumeOpeningWait;
+    let enteredGate!: () => void;
+    const atGate = new Promise<void>(resolve => { enteredGate = resolve; });
+    vi.spyOn(gates, 'resumeOpeningWait').mockImplementation(() => {
+      const waiting = wait();
+      enteredGate();
+      return waiting;
+    });
+    let creating = false;
+    let held = false;
+    const create = store.createSession;
+    vi.spyOn(store, 'createSession').mockImplementation(options => {
+      creating = true;
+      return create(options);
+    });
+    const read = fs.readFile.bind(fs);
+    vi.spyOn(fs, 'readFile').mockImplementation(async (file, ...args) => {
+      if (creating && !held && String(file) === path.join(sessionsRoot(), sessionId, 'meta.json')) {
+        held = true;
+        entered();
+        await inheritance;
+      }
+      return read(file, ...args);
+    });
+    const now = Date.now();
+    const observed = recordChatObservations(destination, [
+      { kind: 'turn_start', time: now, turnId: 'inherited-destination-turn' },
+      { kind: 'assistant_message', time: now + 1, turnId: 'inherited-destination-turn',
+        messageId: 'inherited-destination-final', text: 'Existing task completed', state: 'final' },
+      { kind: 'turn_end', time: now + 2, turnId: 'inherited-destination-turn', outcome: 'completed' }
+    ]);
+    let waited = false;
+    let committed = false;
+    try {
+      await atInheritance;
+      expect(await claimContinuationNow(token, 'inherited-project-command')).toBeTruthy();
+      // The commit reads this same cold source. Release its shared read first, then
+      // distinguish the existing claim wait from premature shadow publication.
+      release();
+      waited = await Promise.race([atGate.then(() => true), observed.then(() => false)]);
+      committed = await commitContinuation(token, destination);
+    } finally { release(); }
+    const recorded = await observed;
+    expect(waited).toBe(true);
+    expect(committed).toBe(true);
+    expect(recorded.sessionId).toBe(sessionId);
+    expect((await fs.readdir(sessionsRoot())).sort()).toEqual(before.sort());
+    expect((await store.listSessions()).filter(session => session.conversationId === destination)
+      .map(session => session.id)).toEqual([sessionId]);
+    expect(await store.readEvents(sessionId, { kinds: ['turn_start', 'turn_end'] })).toEqual([
+      expect.objectContaining({ kind: 'turn_start', turnId: 'inherited-destination-turn' }),
+      expect.objectContaining({ kind: 'turn_end', turnId: 'inherited-destination-turn', outcome: 'completed' })
+    ]);
+    expect(continuationByToken(token)?.state).toBe('committed');
+  });
+
+  it.each(['allowed', 'refused', 'throws'] as const)(
+    'keeps origin-project creation publication synchronous and side-effect-free when its guard %s', async outcome => {
+      const source = await createSession({ title: 'inherited project source' });
+      const projectId = '11111111-2222-4333-8444-555555555555';
+      await store.bindSessionProject(source.id, projectId);
+      const before = await fs.readdir(sessionsRoot());
+      const conversationId = `guarded-origin-${outcome}`;
+      const failure = new Error('test publication owner failed');
+      const guard = vi.fn(() => {
+        if (outcome === 'throws') throw failure;
+        return outcome === 'allowed';
+      });
+      const created = createSession({ conversationId,
+        origin: { kind: 'resume', fromSessionId: source.id, agentId: null, task: '' }, beforePublish: guard });
+      if (outcome === 'allowed') {
+        const summary = await created;
+        expect(summary).toMatchObject({ conversationId, projectId,
+          origin: { kind: 'resume', fromSessionId: source.id } });
+        expect(await getSession(summary.id)).toMatchObject({ conversationId, projectId });
+      } else {
+        if (outcome === 'refused') await expect(created).rejects.toBeInstanceOf(store.SessionCreationDeferredError);
+        else await expect(created).rejects.toBe(failure);
+        expect((await fs.readdir(sessionsRoot())).sort()).toEqual(before.sort());
+        expect(await store.findSessionByConversation(conversationId)).toBeNull();
+      }
+      expect(guard).toHaveBeenCalledOnce();
+    }
+  );
+
+  it('bounds repeated creation deferral under the same recorder owner and leaves the exact batch retryable', async () => {
+    const destination = '92929292-6666-4777-8888-999999999999';
+    const before = await fs.readdir(sessionsRoot());
+    const gates = await import('../src/main/session/resume-gate.js');
+    const create = store.createSession;
+    let attempts = 0;
+    const spy = vi.spyOn(store, 'createSession').mockImplementation(options => create({ ...options,
+      beforePublish: () => {
+        const token = `creation-deferral-${++attempts}`;
+        gates.noteResumeOpening(token);
+        queueMicrotask(() => gates.endResumeClaim(token));
+        return options.beforePublish?.() ?? true;
+      }
+    }));
+    const now = Date.now();
+    const batch = [
+      { kind: 'turn_start' as const, time: now, turnId: 'deferred-native-turn' },
+      { kind: 'turn_end' as const, time: now + 1, turnId: 'deferred-native-turn', outcome: 'failed' as const }
+    ];
+    await expect(recordChatObservations(destination, batch)).rejects.toBeInstanceOf(store.SessionCreationDeferredError);
+    expect(attempts).toBe(2);
+    expect((await fs.readdir(sessionsRoot())).sort()).toEqual(before.sort());
+    expect(await store.findSessionByConversation(destination)).toBeNull();
+    spy.mockRestore();
+    const recorded = await recordChatObservations(destination, batch);
+    expect(await store.readEvents(recorded.sessionId!, { kinds: ['turn_start', 'turn_end'] })).toEqual([
+      expect.objectContaining({ kind: 'turn_start', turnId: 'deferred-native-turn' }),
+      expect.objectContaining({ kind: 'turn_end', turnId: 'deferred-native-turn', outcome: 'failed' })
+    ]);
+  });
+
   it('re-arms destination ownership when native Send follows a slow post-claim setup', async () => {
     const { sessionId, token } = await readyContinuation();
     const destination = '93939393-2222-4333-8444-555555555555';

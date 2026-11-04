@@ -229,7 +229,7 @@ describe('inactive profile worker summaries', () => {
     const start = source.indexOf('async function installedManagedInstanceProcessRunning');
     const end = source.indexOf('\ninterface BridgePortRepairOptions', start);
     const executable = 'C:\\test apps\\Chat On Steroids.exe';
-    const id = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const id = 'profile-5555555a-555a-4555-8555-555555555555';
     const exec = promisify(execFile);
     for (const [commandLine, running, pathValue] of [
       [`"${executable}" --cos-instance-runtime=${id} --background`, true, executable],
@@ -304,7 +304,7 @@ describe('inactive profile worker summaries', () => {
           return { stdout: result };
         } });
       vm.runInContext(stripTypeScriptTypes(source.slice(start, end)), context);
-      await expect(vm.runInContext("installedManagedInstanceProcessRunning('profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa')", context))
+      await expect(vm.runInContext("installedManagedInstanceProcessRunning('profile-5555555a-555a-4555-8555-555555555555')", context))
         .rejects.toThrow(/Could not prove account.*stopped/);
     }
   });

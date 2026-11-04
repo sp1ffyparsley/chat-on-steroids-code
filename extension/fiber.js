@@ -2184,18 +2184,87 @@
         (recipient === undefined || recipient === 'all') &&
         ['analysis', 'commentary'].includes(nativeField(message, 'channel'));
     };
+    const requestPaths = new WeakMap();
+    const nativeRequestPath = message => {
+      if (!message || typeof message !== 'object') return null;
+      if (requestPaths.has(message)) return requestPaths.get(message);
+      const path = requestPath(nativeField(nativeField(message, 'content'), 'text'));
+      requestPaths.set(message, path);
+      return path;
+    };
+    const missingReferenceCalls = shell.calls.filter(call => {
+      const reference = shell.callSources.get(call.messageId);
+      return reference && !reference.id && reference.referenceMissing;
+    });
+    const resultChildrenByParent = new Map();
+    if (live && missingReferenceCalls.length) {
+      for (const id of currentPath) {
+        const node = nativeField(mapping, id), message = nativeField(node, 'message');
+        if (nativeField(nativeField(message, 'author'), 'role') !== 'tool') continue;
+        const parentIds = new Set([nativeField(node, 'parent'),
+          nativeField(nativeField(message, 'metadata'), 'parent_id')]);
+        for (const parentId of parentIds) {
+          if (!currentIds.has(parentId)) continue;
+          const children = resultChildrenByParent.get(parentId) ?? [];
+          children.push(id);
+          resultChildrenByParent.set(parentId, children);
+        }
+      }
+    }
+    // A committed native child may outlive both its widget pointer and its rendered ID.
+    // Stage membership only: the independent user/final namespace and every path/cache
+    // check below must still succeed, then ordinary identity/result recovery owns all
+    // publication. Never derive the namespace from this candidate or a fallback turn ID.
+    const stagedResultMembers = new Set();
+    if (live && typedUserId && selected.has(typedUserId)) for (const call of missingReferenceCalls) {
+      const children = resultChildrenByParent.get(call.messageId);
+      if (!selected.has(call.messageId) || children?.length !== 1 || selected.has(children[0]) || sourceCounts.has(children[0])) continue;
+      try {
+        const askedNode = nativeField(mapping, call.messageId), returnedNode = nativeField(mapping, children[0]);
+        const asked = nativeField(askedNode, 'message'), returned = nativeField(returnedNode, 'message');
+        const askedMeta = nativeField(asked, 'metadata'), returnedMeta = nativeField(returned, 'metadata');
+        const resourceMeta = nativeField(returnedMeta, 'invoked_resource');
+        const resource = { app: str(nativeField(resourceMeta, 'app_name')), resource: str(nativeField(resourceMeta, 'resource_uri')) };
+        const path = nativeRequestPath(asked), server = ownServerName(shell.callSources.get(call.messageId)?.server);
+        const parent = str(nativeField(askedNode, 'parent')), content = nativeField(returned, 'content');
+        if (nativeField(askedNode, 'id') !== call.messageId || nativeField(asked, 'id') !== call.messageId ||
+            nativeField(returnedNode, 'id') !== children[0] || nativeField(returned, 'id') !== children[0] ||
+            nativeField(nativeField(asked, 'author'), 'role') !== 'assistant' || nativeField(asked, 'recipient') !== 'api_tool.call_tool' ||
+            nativeField(nativeField(returned, 'author'), 'role') !== 'tool' ||
+            nativeField(nativeField(returned, 'author'), 'name') !== 'api_tool.call_tool' || nativeField(returned, 'recipient') !== 'all' ||
+            nativeField(asked, 'status') !== 'finished_successfully' || nativeField(returned, 'status') !== 'finished_successfully' ||
+            !parent || nativeField(askedMeta, 'parent_id') !== parent ||
+            nativeField(returnedNode, 'parent') !== call.messageId || nativeField(returnedMeta, 'parent_id') !== call.messageId ||
+            !path || !server || !ourPath(path) || !nativeRequestServerMatches(path, server) || toolName(path) !== call.tool ||
+            !ownResult(resource) || ownServerName(resource.app) !== server || toolName(resource.resource) !== call.tool ||
+            !linkIdOf(path) || linkIdOf(path) !== linkIdOf(resource.resource) ||
+            (appIdOf(path) && appIdOf(path) !== appIdOf(resource.resource)) ||
+            !['request_id', 'working_turn_id', 'turn_exchange_id'].every(key =>
+              str(nativeField(askedMeta, key)) && nativeField(askedMeta, key) === nativeField(returnedMeta, key)) ||
+            nativeField(content, 'content_type') !== 'code' || nativeField(content, 'language') !== 'json' || !coreResultReceipt(returned)) continue;
+        stagedResultMembers.add(children[0]);
+      } catch { /* An unsupported native shape cannot add selected-path membership. */ }
+    }
     let mountedNativeScopeRefusal = null;
+    // Fixed diagnostic only: older workers may drop additive anchor counters.
+    // Retain the first failed prerequisite in the existing bounded console trace.
+    let nativeAnchorReason = 'none';
     const mountedNativeScope = (() => {
       // No independent mounted anchor was attempted without these prerequisites.
       // A diagnostic failure never changes the namespace or any acceptance predicate.
       const prerequisite = reason => {
+        nativeAnchorReason = reason;
         shellDiagnostic(rejects, 'nativeAnchorPrerequisite');
         shellDiagnostic(rejects, reason);
       };
       if (!shell.calls.length) return null;
       if (!live) { prerequisite('nativeAnchorLiveMissing'); return null; }
       if (!typedUserId) { prerequisite('nativeAnchorUserMissing'); return null; }
-      const refuse = reason => { mountedNativeScopeRefusal = reason; return null; };
+      const refuse = reason => {
+        mountedNativeScopeRefusal = reason;
+        if (nativeAnchorReason === 'none') nativeAnchorReason = reason;
+        return null;
+      };
       const nativeUser = messageAt(typedUserId);
       const userMeta = nativeField(nativeUser, 'metadata');
       const hasUserScope = userMeta && typeof userMeta === 'object' &&
@@ -2214,7 +2283,7 @@
       if (currentPath[0] !== typedUserId) {
         prerequisite('nativeAnchorUserPathMismatch'); return refuse('nativeScopePathUnproved');
       }
-      if (!currentPath.every(id => selected.has(id) || nativeNarration(id))) {
+      if (!currentPath.every(id => selected.has(id) || nativeNarration(id) || stagedResultMembers.has(id))) {
         prerequisite('nativeAnchorUnselectedPath'); return refuse('nativeScopePathUnproved');
       }
       try {
@@ -2256,16 +2325,6 @@
     const expectedWorkingTurn = mountedNativeScope?.working || shell.turnId;
     const expectedTurnExchange = mountedNativeScope?.exchange || typedUserId;
     const typedExecIds = new Set(shell.executionIds);
-    // A parent can be visited by many selected calls. Cache only its allowlisted path
-    // during this synchronous scan, never args or a result across provider mutations.
-    const requestPaths = new WeakMap();
-    const nativeRequestPath = message => {
-      if (!message || typeof message !== 'object') return null;
-      if (requestPaths.has(message)) return requestPaths.get(message);
-      const path = requestPath(nativeField(nativeField(message, 'content'), 'text'));
-      requestPaths.set(message, path);
-      return path;
-    };
     // Per-scan, bounded reason counts for the existing result-reference diagnostic. These
     // values are fixed enum names/counts only; the native IDs stay local to this scan.
     const identityRefusalReasons = {
@@ -2504,10 +2563,6 @@
         return descriptor ? own.call(descriptor, 'value') : !(key in object);
       }); } catch { return false; }
     };
-    const missingReferenceCalls = shell.calls.filter(call => {
-      const reference = shell.callSources.get(call.messageId);
-      return reference && !reference.id && reference.referenceMissing;
-    });
     const traceNativeReferenceRecovery = () => {
       try {
         const missing = missingReferenceCalls;
@@ -2555,7 +2610,7 @@
           const key = [shape.typedCalls, shape.missingReferences, shape.liveMapping, shape.currentPathNodes,
             shape.selectedMissingCalls, shape.nativeMissingCalls, shape.typedUserPresent, shape.typedUserSelected,
             selectedRequestIdsPresent, selectedRequestIdsMissing, identityRefusalCalls,
-            ...Object.values(identityRefusalReasons), selectedToolResults, witnessedToolResults,
+            nativeAnchorReason, ...Object.values(identityRefusalReasons), selectedToolResults, witnessedToolResults,
             missingWithChild, missingWithWitness, ...Object.values(resultShapes)].join(':');
           if (!nativeReferenceTraceKeys.has(key) && nativeReferenceTraceKeys.size < MAX_TURNS) {
             nativeReferenceTraceKeys.add(key);
@@ -2566,6 +2621,7 @@
               ` typedUser=${shape.typedUserPresent} selectedUser=${shape.typedUserSelected}` +
               ` requestIdPresent=${selectedRequestIdsPresent} requestIdMissing=${selectedRequestIdsMissing}` +
               ` identityRefusals=${identityRefusalCalls} nativeScope=${Boolean(mountedNativeScope)}` +
+              ` anchorReason=${nativeAnchorReason}` +
               ` identityReasons=${Object.entries(identityRefusalReasons).map(([kind, count]) => kind + ":" + count).join(',')}` +
               ` selectedResults=${selectedToolResults} witnessedResults=${witnessedToolResults}` +
               ` missingWithChild=${missingWithChild} missingWithWitness=${missingWithWitness}` +
@@ -2578,23 +2634,6 @@
     // Recover only a single actual child of this exact invocation on the complete mounted
     // question path. This supplies a pointer to the SAME conjunction below, never completion
     // by request id, tool name, neighboring prose or a scan of unrelated cached branches.
-    const resultChildrenByParent = new Map();
-    if (live && missingReferenceCalls.length) {
-      for (const id of currentPath) {
-        const node = nativeField(mapping, id), message = nativeField(node, 'message');
-        if (nativeField(nativeField(message, 'author'), 'role') !== 'tool') continue;
-        const parentIds = new Set([
-          nativeField(node, 'parent'),
-          nativeField(nativeField(message, 'metadata'), 'parent_id')
-        ]);
-        for (const parentId of parentIds) {
-          if (!currentIds.has(parentId)) continue;
-          const children = resultChildrenByParent.get(parentId) ?? [];
-          children.push(id);
-          resultChildrenByParent.set(parentId, children);
-        }
-      }
-    }
     for (const call of missingReferenceCalls) {
       const reference = shell.callSources.get(call.messageId);
       const children = resultChildrenByParent.get(call.messageId);
@@ -3396,6 +3435,7 @@
       found = [...document.querySelectorAll(TOOL)].filter(row => !row.closest(OWN_SURFACES));
       for (const old of document.querySelectorAll(CONNECTOR)) old.removeAttribute('data-clf-fiber-v2');
     } catch {
+      shellScan.reader = { fiberWire: VERSION, fiberKeys: Object.keys(shellScan.rejects).length };
       return post({ source: REPLY, nonce, scanToken, v: VERSION, scanOk: false, rows: [], turns, shellScan }, location.origin);
     }
     const limit = Math.min(found.length, MAX_ROWS);
@@ -3424,6 +3464,7 @@
       turns = [];
       scanOk = false;
     }
+    shellScan.reader = { fiberWire: VERSION, fiberKeys: Object.keys(shellScan.rejects).length };
     post({ source: REPLY, nonce, scanToken, v: VERSION, scanOk, rows, turns, shellScan }, location.origin);
   }
 

@@ -50,6 +50,7 @@ import {
   observeSessionModel,
   conversationAttachment,
   createSession,
+  SessionCreationDeferredError,
   conversationWasSuperseded,
   endSession,
   findSessionByConversation,
@@ -287,7 +288,8 @@ async function settleResumeCommit(): Promise<void> {
 
 async function initializeSessionForConversation(
   conversationId: string | null,
-  title?: string
+  title?: string,
+  creationDeferred = false
 ): Promise<string | null> {
   if (!recordingEnabled()) return null;
   if (!conversationId) return ensureUnattributedSession();
@@ -334,14 +336,37 @@ async function initializeSessionForConversation(
   // A chat this app opened is named for the command that opened it. The alternative —
   // the first thing said in the chat — is this app's own bootstrap prompt.
   const origin = pendingOrigins.get(conversationId) ?? null;
-  const summary =
-    known ??
-    (await createSession({
+  const preparedTitle = !known ? (origin ? await titleForOrigin(origin) : title) : undefined;
+  if (!known) {
+    // Both the superseded lookup and origin naming await durable reads after the first
+    // catalog miss/gate check. A Resume may have claimed or committed B during either
+    // read. Honor its existing finite claim, then re-resolve B before inventing a session;
+    // otherwise the stale miss can overwrite the just-published A→B live recorder.
+    known = await findSessionByConversation(conversationId);
+    if (!known && resumeOpeningChat()) await settleResumeCommit();
+    const moved = conversations.get(conversationId);
+    if (moved) {
+      lastActiveSessionId = moved.sessionId;
+      return moved.sessionId;
+    }
+    if (isChatDeleted(conversationId)) return null;
+  }
+  let summary: SessionSummary;
+  try {
+    summary = known ?? await createSession({
       conversationId,
-      title: origin ? await titleForOrigin(origin) : title,
+      title: preparedTitle,
       origin,
-      titleSource: origin?.kind === 'desktop' && origin.nickname ? 'manual' : 'fallback'
-    }));
+      titleSource: origin?.kind === 'desktop' && origin.nickname ? 'manual' : 'fallback',
+      beforePublish: () => !isChatDeleted(conversationId) && !conversations.has(conversationId) && !resumeOpeningChat()
+    });
+  } catch (error) {
+    if (!(error instanceof SessionCreationDeferredError) || creationDeferred) throw error;
+    // Stay under the original single-flight initialization promise. Calling the public
+    // sessionForConversation here would await ourselves; a second refusal instead leaves
+    // the browser journal unacknowledged for its incumbent transport retry.
+    return initializeSessionForConversation(conversationId, title, true);
+  }
   if (origin && !known) pendingOrigins.delete(conversationId);
   // Reopening a chat that was closed earlier makes its session live again. Appending
   // to a session still stamped with an end time left the UI showing a finished session

@@ -41,7 +41,7 @@ function input(id: string) {
 
 describe('account-scoped operator input', () => {
   it('transports an exclusive nickname rename and delegates to the existing exact-profile owner', async () => {
-    const id = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const id = 'profile-5555555a-555a-4555-8555-555555555555';
     const argv = ['app.exe', `--cos-rename-profile=${id}`, '--cos-profile-nickname= Delta ', '--background'];
     expect(operatorProfileRenameRequest(argv)).toEqual({ id, nickname: 'Delta' });
     expect(operatorProfileCreationRequest(argv)).toBeNull();
@@ -59,7 +59,7 @@ describe('account-scoped operator input', () => {
   });
 
   it('refuses malformed, duplicate, split, isolated and mixed nickname controls before their owner', async () => {
-    const id = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const id = 'profile-5555555a-555a-4555-8555-555555555555';
     const base = [`--cos-rename-profile=${id}`, '--cos-profile-nickname=Delta'];
     const rename = vi.fn();
     for (const args of [
@@ -69,7 +69,7 @@ describe('account-scoped operator input', () => {
       [base[0]!, '--cos-profile-nickname=Ti\\mothy'], [base[0]!, '--cos-profile-nickname=Ti\nmothy'],
       [base[0]!, '--cos-profile-nickname=Ti\u2028mothy'], [base[0]!, '--cos-profile-nickname=Ti\u2029mothy'],
       [base[0]!, '--cos-profile-nickname=Delta', 'tail'], ['--cos-rename-profile-unknown=never-log', base[1]!],
-      ...['local-instance', id.toUpperCase(), `${id} `, id.replace('-42a6-', '-52a6-'), '../bad']
+      ...['local-instance', id.toUpperCase(), `${id} `, id.replace('-4555-', '-5555-'), '../bad']
         .map(value => [`--cos-rename-profile=${value}`, base[1]!]),
       ...[base[0]!, base[1]!, '--background', '--cos-create-profile=New', '--cos-profile-browser=Profile 6',
         `--cos-set-profile-browser=${id}`, `--cos-instance-runtime=${id}`, '--pause-automation', '--resume-automation',
@@ -86,7 +86,7 @@ describe('account-scoped operator input', () => {
   });
 
   it('rejects nickname envelope tampering and missing transport without interpreting raw argv', () => {
-    const id = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const id = 'profile-5555555a-555a-4555-8555-555555555555';
     const argv = [`--cos-rename-profile=${id}`, '--cos-profile-nickname=Delta'];
     const valid = operatorProfileCreationAdditionalData(argv)!;
     if (!('cosProfileRename' in valid)) throw new Error('Expected nickname envelope');
@@ -105,7 +105,7 @@ describe('account-scoped operator input', () => {
   });
 
   it('transports only bounded read-only session inspection through exact second-instance receipts', () => {
-    const id = 'profile-7a25c7a4-3452-4c79-8e67-f968852d90b4', receipt = randomUUID();
+    const id = 'profile-4444444a-444a-4444-8444-444444444444', receipt = randomUUID();
     for (const operation of [['list', '--cos-sessions-limit=20'], ['controls', '--cos-sessions-session=2026-10-13-839d5152']]) {
       const args = [`--cos-sessions-action=${operation[0]}`, `--cos-sessions-profile=${id}`,
         `--cos-sessions-receipt=${receipt}`, operation[1]!, `--cos-instance-runtime=${id}`, '--background'];
@@ -136,6 +136,8 @@ describe('account-scoped operator input', () => {
     const providerUI: any = variant === 'null-entry' ? null : {
       observedAt: 1000, shell: 'alternate', discovery: 'compatible', currentTurnMatched: false,
       selectorMatches: variant === 'unknown-code' ? null : 400, mapped: variant === 'unknown-code' ? null : 0,
+      reader: { fiberWire: 17, fiberKeys: 88, contentRecorder: 133, contentKeys: 88,
+        workerRecorder: 131, workerKeys: 53, mainKeys: 53, privatePayload: 'private reader payload' },
       rejects: { fiberMissing: 0, callRequestIdPresent: 3, callRequestIdMissing: 0,
         callIdentityScopeUnproved: 2, privatePayload: 'private provider metadata',
         callReceiptMissing: 401, callReceiptConflict: -1, callNativePending: 0.5 },
@@ -206,6 +208,8 @@ describe('account-scoped operator input', () => {
             inventoryIncomplete: true, inventoryCurrentTurnMatched: false,
             providerUI: ['null-entry', 'accessor'].includes(variant) ? null : {
               observedAt: 1000, shell: 'alternate', discovery: 'compatible', currentTurnMatched: false,
+              reader: { fiberWire: 17, fiberKeys: 88, contentRecorder: 133, contentKeys: 88,
+                workerRecorder: 131, workerKeys: 53, mainKeys: 53 },
               selectorMatches: variant === 'unknown-code' ? null : 400, mapped: variant === 'unknown-code' ? null : 0,
               rejects: { fiberMissing: 0, callRequestIdPresent: 3,
                 callRequestIdMissing: 0, callIdentityScopeUnproved: 2 },
@@ -249,7 +253,7 @@ describe('account-scoped operator input', () => {
       await expect(processOperatorSessionInspection(args.map(arg => arg === '--cos-sessions-profile=local-instance'
         ? '--cos-sessions-profile=other-account' : arg), root)).rejects.toThrow(/account/);
       await expect(processOperatorSessionInspection(args, path.join(root, 'foreign'))).rejects.toThrow(/runtime/);
-      const id = 'profile-7a25c7a4-3452-4c79-8e67-f968852d90b4';
+      const id = 'profile-4444444a-444a-4444-8444-444444444444';
       runtime.mockReturnValue({ profile: { id, state: { mode: 'isolated', root } } } as ReturnType<typeof config.getActiveInstanceRuntime>);
       await expect(processOperatorSessionInspection(args.map(arg => arg === '--cos-sessions-profile=local-instance'
         ? `--cos-sessions-profile=${id}` : arg), path.join(root, 'runtime'))).rejects.toThrow(/routing/);
@@ -333,7 +337,7 @@ describe('account-scoped operator input', () => {
     } finally { runtime.mockRestore(); page.mockRestore(); }
   });
   it('refuses shared-account controls mixed with any settings or connection action before an owner runs', async () => {
-    const id = 'profile-7a25c7a4-3452-4c79-8e67-f968852d90b4';
+    const id = 'profile-4444444a-444a-4444-8444-444444444444';
     const receipt = randomUUID(), controller = vi.fn();
     const shared = ['enable', 'disable', 'inspect'].map(action => [`--cos-shared-accounts=${action}`]);
     const local = [
@@ -356,7 +360,7 @@ describe('account-scoped operator input', () => {
     expect(controller).not.toHaveBeenCalled();
   });
   it('rejects mixed structured shared/local envelopes while preserving separate exact-profile controls', () => {
-    const id = 'profile-7a25c7a4-3452-4c79-8e67-f968852d90b4';
+    const id = 'profile-4444444a-444a-4444-8444-444444444444';
     const shared = operatorProfileCreationAdditionalData(['--cos-shared-accounts=inspect', '--background'])!;
     for (const action of ['status', 'setup', 'connect', 'disconnect']) {
       const argv = [`--cos-connection-action=${action}`, `--cos-connection-profile=${id}`,
@@ -378,7 +382,7 @@ describe('account-scoped operator input', () => {
       .toEqual({ action: 'inspect', drives: [], dryRun: false });
   });
   it('transports settings read/update by exact account and opaque receipt without command payloads', () => {
-    const id = 'profile-7a25c7a4-3452-4c79-8e67-f968852d90b4', receipt = randomUUID();
+    const id = 'profile-4444444a-444a-4444-8444-444444444444', receipt = randomUUID();
     for (const action of ['read', 'update']) {
       const args = [`--cos-settings-action=${action}`, `--cos-settings-profile=${id}`,
         `--cos-settings-receipt=${receipt}`, `--cos-instance-runtime=${id}`, '--background'];
@@ -491,7 +495,7 @@ describe('account-scoped operator input', () => {
     } finally { runtime.mockRestore(); snapshot.mockRestore(); paths.mockRestore(); status.mockRestore(); }
   });
   it('transports exact-profile connection controls through Chromium argv mutation', () => {
-    const id = 'profile-7a25c7a4-3452-4c79-8e67-f968852d90b4', receipt = randomUUID();
+    const id = 'profile-4444444a-444a-4444-8444-444444444444', receipt = randomUUID();
     const argv = [`--cos-connection-action=configure`, `--cos-connection-profile=${id}`,
       `--cos-connection-receipt=${receipt}`, '--cos-connection-kind=cloudflared', `--cos-instance-runtime=${id}`, '--background'];
     const payload = operatorProfileCreationAdditionalData(argv);
@@ -523,7 +527,7 @@ describe('account-scoped operator input', () => {
   });
 
   it('shared-account setup refuses mixed, split, duplicate and malformed control arguments', () => {
-    const id = 'profile-7a25c7a4-3452-4c79-8e67-f968852d90b4';
+    const id = 'profile-4444444a-444a-4444-8444-444444444444';
     for (const args of [
       ['--cos-shared-accounts'], ['--cos-shared-accounts=invalid'],
       ['--cos-shared-accounts=enable', '--cos-shared-accounts=inspect'],
@@ -583,7 +587,7 @@ describe('account-scoped operator input', () => {
   });
 
   it('transports one canonical profile browser-binding request and delegates only to its existing owner', async () => {
-    const id = 'profile-7a25c7a4-3452-4c79-8e67-f968852d90b4';
+    const id = 'profile-4444444a-444a-4444-8444-444444444444';
     const original = ['app.exe', `--cos-set-profile-browser=${id}`, '--cos-profile-browser=Profile 8', '--background'];
     expect(operatorProfileBrowserBindingRequest(original)).toEqual({ id, browserProfileDirectory: 'Profile 8' });
     const payload = operatorProfileCreationAdditionalData(original);
@@ -634,13 +638,13 @@ describe('account-scoped operator input', () => {
     }
   });
   it('refuses malformed, conflicting or unapproved browser-binding controls without calling its owner', async () => {
-    const id = 'profile-7a25c7a4-3452-4c79-8e67-f968852d90b4';
+    const id = 'profile-4444444a-444a-4444-8444-444444444444';
     const setter = vi.fn();
     const base = [`--cos-set-profile-browser=${id}`, '--cos-profile-browser=Profile 8'];
     for (const args of [
       [`--cos-set-profile-browser=${id}`], ['--cos-set-profile-browser', '--cos-profile-browser=Profile 8'],
-      ...['local-instance', 'profile-example', id.toUpperCase(), `${id} `, id.replace('-4c79-', '-5c79-'),
-        id.replace('-8e67-', '-7e67-'), '../bad'].map(value => [`--cos-set-profile-browser=${value}`, '--cos-profile-browser=Profile 8']),
+      ...['local-instance', 'profile-example', id.toUpperCase(), `${id} `, id.replace('-4444-', '-5444-'),
+        id.replace('-8444-', '-7444-'), '../bad'].map(value => [`--cos-set-profile-browser=${value}`, '--cos-profile-browser=Profile 8']),
       [...base, `--cos-set-profile-browser=${id}`], [...base, '--cos-profile-browser=Profile 8'],
       [...base, '--cos-create-profile=Gamma'], [...base, '--background', '--background'],
       ['--cos-set-profile-browser-unknown=never-log', '--cos-profile-browser=Profile 8'],
@@ -664,7 +668,7 @@ describe('account-scoped operator input', () => {
   });
 
   it('refuses tampered browser-binding envelopes and never falls through to unrelated controls', () => {
-    const id = 'profile-7a25c7a4-3452-4c79-8e67-f968852d90b4';
+    const id = 'profile-4444444a-444a-4444-8444-444444444444';
     const argv = ['app.exe', `--cos-set-profile-browser=${id}`, '--cos-profile-browser=Profile 8'];
     const valid = operatorProfileCreationAdditionalData(argv)!;
     if (!('cosProfileBrowserBinding' in valid)) throw new Error('Expected a browser-binding envelope');
@@ -961,14 +965,14 @@ describe('account-scoped operator input', () => {
 
 
 it('round-trips exact external route config and refuses duplicate, malformed and foreign-action arguments', () => {
-  const profile = 'profile-7a25c7a4-3452-4c79-8e67-f968852d90b4';
+  const profile = 'profile-4444444a-444a-4444-8444-444444444444';
   const argv = ['app.exe', '--cos-connection-action=configure', `--cos-connection-profile=${profile}`,
     `--cos-connection-receipt=${randomUUID()}`, '--cos-connection-kind=manual',
-    '--cos-connection-origin=https://Delta.example.com', '--cos-connection-port=9770', `--cos-instance-runtime=${profile}`, '--background'];
+    '--cos-connection-origin=https://delta.example.com', '--cos-connection-port=9770', `--cos-instance-runtime=${profile}`, '--background'];
   const payload = operatorProfileCreationAdditionalData(argv);
   expect(operatorProfileCreationSecondInstanceArgs(['app.exe'], payload)).toEqual(argv.slice(1));
   for (const patch of [{ manualPort: -1 }, { manualPort: '9770' }, { manualPort: 80 },
-    { manualPublicOrigin: 'https://user:secret@example.com' }, { manualPublicOrigin: ['https://Delta.example.com'] },
+    { manualPublicOrigin: 'https://user:secret@example.com' }, { manualPublicOrigin: ['https://delta.example.com'] },
     { action: 'connect' }, { extra: 'unrecognized' }]) {
     const data = payload as { cosConnectionControl: { request: Record<string, unknown> } };
     expect(() => operatorProfileCreationSecondInstanceArgs(['app.exe'], { ...data,
@@ -1009,12 +1013,12 @@ it('keeps external route receipt identity while setup bearers remain only in the
   initDurableStore(root);
   const receipt = randomUUID();
   const args = ['--cos-connection-action=configure', '--cos-connection-profile=local-instance',
-    '--cos-connection-kind=manual', '--cos-connection-origin=https://Delta.example.com', '--cos-connection-port=9770',
+    '--cos-connection-kind=manual', '--cos-connection-origin=https://delta.example.com', '--cos-connection-port=9770',
     `--cos-connection-receipt=${receipt}`];
-  const controller = vi.fn(async () => ({ url: 'https://Delta.example.com/mcp/core/private-test-bearer' }));
+  const controller = vi.fn(async () => ({ url: 'https://delta.example.com/mcp/core/private-test-bearer' }));
   await processOperatorConnectionControl(args, controller, root);
   const audit = await readDurableStrict('connection-control');
-  expect(audit).toMatchObject([{ manualPublicOrigin: 'https://Delta.example.com', manualPort: 9770, state: 'completed' }]);
+  expect(audit).toMatchObject([{ manualPublicOrigin: 'https://delta.example.com', manualPort: 9770, state: 'completed' }]);
   expect(JSON.stringify(audit)).not.toContain('private-test-bearer');
   expect(await readFile(operatorControlResponsePath(root, receipt, 'connection'), 'utf8')).toContain('private-test-bearer');
   await processOperatorConnectionControl(args, controller, root);

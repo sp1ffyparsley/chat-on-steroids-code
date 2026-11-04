@@ -70,6 +70,8 @@ describe('Goal failure explanations', () => {
     expect(goalErrorMessage('goal_browser_signed_out')).not.toContain('Three helper attempts');
   });
   it.each([
+    ['goal_browser_model_choice_denied', 'model_choice_denied'],
+    ['request_failed: goal_browser_model_choice_denied', 'model_choice_denied'],
     ['goal_browser_queued_unclaimed_timeout', 'transport_unclaimed'],
     ['goal_browser_queued_unclaimed_transport', 'transport_unclaimed'],
     ['goal_browser_send_failed: Requested model or reasoning could not be confirmed', 'model_reasoning_unconfirmed'],

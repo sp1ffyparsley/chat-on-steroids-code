@@ -33,7 +33,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
     reason: 'stream_gone', errors: 1, runningTools: 0, automationPaused: true, screenEnabled: true };
 
   it('restores real profile-owned incidents after a cold logger reset without exposing log credentials', async () => {
-    const profile = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const profile = 'profile-5555555a-555a-4555-8555-555555555555';
     setLogProfileContext(profile);
     const file = await logFile();
     const secret = 'sk-private-owner-roundtrip123456789';
@@ -69,9 +69,9 @@ describe('bounded asynchronous diagnostic mirror', () => {
     expect(saved).not.toContain('private tool body');
   });
 
-  it.each(['profile-8bc4db29-9172-4c9a-876d-6d52d81866a7', '***', null, { injected: 'private-owner' }])(
+  it.each(['profile-6666666a-666a-4666-8666-666666666666', '***', null, { injected: 'private-owner' }])(
     'preserves an occupied incident slot with unverified profile ownership %j and writes only a free slot', async storedProfile => {
-      const profile = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+      const profile = 'profile-5555555a-555a-4555-8555-555555555555';
       setLogProfileContext(profile);
       const file = await logFile();
       await noteLocalIncident({ source: 'app', reason: 'retained_older_evidence' });
@@ -100,8 +100,8 @@ describe('bounded asynchronous diagnostic mirror', () => {
   );
 
   it('refuses a profile-context switch while the incident folder still belongs to the original account', async () => {
-    const first = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
-    const other = 'profile-8bc4db29-9172-4c9a-876d-6d52d81866a7';
+    const first = 'profile-5555555a-555a-4555-8555-555555555555';
+    const other = 'profile-6666666a-666a-4666-8666-666666666666';
     setLogProfileContext(first);
     const file = await logFile();
     expect(await noteLocalIncident({ source: 'app', reason: 'owned_initial' })).toBe(true);
@@ -122,8 +122,8 @@ describe('bounded asynchronous diagnostic mirror', () => {
 
   it.each(['switch', 'roundtrip', 'reinitialize'])(
     'does not reveal an old incident read or its directory after a %s during disk IO', async transition => {
-      const owner = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
-      const different = 'profile-8bc4db29-9172-4c9a-876d-6d52d81866a7';
+      const owner = 'profile-5555555a-555a-4555-8555-555555555555';
+      const different = 'profile-6666666a-666a-4666-8666-666666666666';
       setLogProfileContext(owner);
       const file = await logFile();
       expect(await noteLocalIncident({ source: 'app', reason: 'private_original_incident' })).toBe(true);
@@ -159,7 +159,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
   );
 
   it('does not acknowledge a cached fingerprint after a foreign record replaced its owned slot', async () => {
-    const first = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const first = 'profile-5555555a-555a-4555-8555-555555555555';
     setLogProfileContext(first);
     const file = await logFile();
     const fingerprint = 'a'.repeat(64);
@@ -167,7 +167,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
     const folder = path.join(path.dirname(file), 'local-incidents');
     const slot = path.join(folder, 'incident-0.json');
     const foreign = { ...JSON.parse(await fs.readFile(slot, 'utf8')),
-      profileId: 'profile-8bc4db29-9172-4c9a-876d-6d52d81866a7', reason: 'foreign_failure' };
+      profileId: 'profile-6666666a-666a-4666-8666-666666666666', reason: 'foreign_failure' };
     const preserved = JSON.stringify(foreign);
     await fs.writeFile(slot, preserved);
 
@@ -182,7 +182,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
   });
 
   it('never overwrites a formerly empty cached slot filled by another writer', async () => {
-    const first = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const first = 'profile-5555555a-555a-4555-8555-555555555555';
     setLogProfileContext(first);
     const file = await logFile();
     expect(await noteLocalIncident({ source: 'app', reason: 'first_saved' })).toBe(true);
@@ -190,7 +190,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
     const original = JSON.parse(await fs.readFile(path.join(folder, 'incident-0.json'), 'utf8'));
     const slot = path.join(folder, 'incident-1.json');
     const protectedRow = JSON.stringify({ ...original, id: 'bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee',
-      profileId: 'profile-8bc4db29-9172-4c9a-876d-6d52d81866a7', reason: 'foreign_after_scan' });
+      profileId: 'profile-6666666a-666a-4666-8666-666666666666', reason: 'foreign_after_scan' });
     await fs.writeFile(slot, protectedRow);
 
     expect(await noteLocalIncident({ source: 'app', reason: 'second_saved' })).toBe(false);
@@ -201,7 +201,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
   });
 
   it('does not finish a queued old-profile incident after the active account switches during disk IO', async () => {
-    const first = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const first = 'profile-5555555a-555a-4555-8555-555555555555';
     setLogProfileContext(first);
     const file = await logFile();
     let writing!: () => void, release!: () => void;
@@ -215,7 +215,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
     });
     const pending = noteLocalIncident({ source: 'app', reason: 'old_owner_pending' });
     await started;
-    setLogProfileContext('profile-8bc4db29-9172-4c9a-876d-6d52d81866a7');
+    setLogProfileContext('profile-6666666a-666a-4666-8666-666666666666');
     try {
       release();
       expect(await pending).toBe(false);
@@ -229,7 +229,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
   });
 
   it('invalidates an in-flight incident even if a foreign profile briefly replaces and restores the same id', async () => {
-    const owner = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const owner = 'profile-5555555a-555a-4555-8555-555555555555';
     setLogProfileContext(owner);
     const file = await logFile();
     let writing!: () => void, release!: () => void;
@@ -241,7 +241,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
     });
     const pending = noteLocalIncident({ source: 'app', reason: 'before_account_roundtrip' });
     await started;
-    setLogProfileContext('profile-8bc4db29-9172-4c9a-876d-6d52d81866a7');
+    setLogProfileContext('profile-6666666a-666a-4666-8666-666666666666');
     setLogProfileContext(owner);
     try {
       release();
@@ -253,7 +253,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
   });
 
   it('does not commit an old pending write after the incident owner is reinitialized under the same profile', async () => {
-    const owner = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const owner = 'profile-5555555a-555a-4555-8555-555555555555';
     setLogProfileContext(owner);
     const file = await logFile();
     let writing!: () => void, release!: () => void;
@@ -276,7 +276,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
   });
 
   it('refuses a cached same-id incident changed without a timestamp or identity change', async () => {
-    setLogProfileContext('profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa');
+    setLogProfileContext('profile-5555555a-555a-4555-8555-555555555555');
     const file = await logFile();
     const fingerprint = 'b'.repeat(64);
     expect(await noteLocalIncident({ source: 'app', reason: 'same_id_changed_body', fingerprint })).toBe(true);
@@ -292,7 +292,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
   });
 
   it('preserves a substituted unresolved incident that reused the id of an expired resolved slot', async () => {
-    const owner = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const owner = 'profile-5555555a-555a-4555-8555-555555555555';
     setLogProfileContext(owner);
     const file = await logFile();
     const startedAt = Date.now();
@@ -309,7 +309,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
   });
 
   it('recovers free incident capacity on an explicit read after externally restored custody', async () => {
-    const owner = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const owner = 'profile-5555555a-555a-4555-8555-555555555555';
     setLogProfileContext(owner);
     const file = await logFile();
     expect(await noteLocalIncident({ source: 'app', reason: 'initial_masked_record' })).toBe(true);
@@ -331,7 +331,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
   });
 
   it('refuses a full masked-ownership incident ring without overwriting retained evidence', async () => {
-    const profile = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const profile = 'profile-5555555a-555a-4555-8555-555555555555';
     setLogProfileContext(profile);
     const file = await logFile();
     await noteLocalIncident({ source: 'app', reason: 'retained_older_evidence' });
@@ -356,7 +356,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
   });
 
   it('durably reports bounded privacy-safe incident capture loss when every slot has protected ownership', async () => {
-    const profile = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const profile = 'profile-5555555a-555a-4555-8555-555555555555';
     setLogProfileContext(profile);
     const file = await logFile();
     expect(await noteLocalIncident({ source: 'app', reason: 'original_protected_incident' })).toBe(true);
@@ -419,7 +419,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
   });
 
   it('recovers bounded capacity beyond sixteen protected original incident slots without adopting or rewriting any masked account history', async () => {
-    const profile = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const profile = 'profile-5555555a-555a-4555-8555-555555555555';
     setLogProfileContext(profile);
     const file = await logFile();
     expect(await noteLocalIncident({ source: 'app', reason: 'protected_original' })).toBe(true);
@@ -472,7 +472,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
 
   it.each(['sk-private-profile-context123456789', 'x'.repeat(64), '***'])(
     'refuses an unverified profile context without persisting or exposing it', async context => {
-      setLogProfileContext('profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa');
+      setLogProfileContext('profile-5555555a-555a-4555-8555-555555555555');
       const file = await logFile();
       await noteLocalIncident({ source: 'app', reason: 'retained_current_profile' });
       const slot = path.join(path.dirname(file), 'local-incidents', 'incident-0.json');
@@ -514,7 +514,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
   });
 
   it('archives verified unresolved evidence before admitting a thirty-third incident and restores lookup after restart', async () => {
-    const profile = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const profile = 'profile-5555555a-555a-4555-8555-555555555555';
     setLogProfileContext(profile);
     const file = await logFile();
     for (let i = 0; i < LOCAL_INCIDENT_SLOTS; i++) {
@@ -586,7 +586,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
 
   it.each(['slot-change', 'account-change'])(
     'rechecks %s after archival IO before replacing any original hot incident', async change => {
-      const profile = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+      const profile = 'profile-5555555a-555a-4555-8555-555555555555';
       setLogProfileContext(profile);
       const file = await logFile();
       for (let i = 0; i < LOCAL_INCIDENT_SLOTS; i++) {
@@ -609,7 +609,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
       const changed = change === 'slot-change'
         ? JSON.stringify({ ...JSON.parse(before), reason: 'later_original_evidence' }) : before;
       if (change === 'slot-change') await fs.writeFile(hot, changed);
-      else setLogProfileContext('profile-8bc4db29-9172-4c9a-876d-6d52d81866a7');
+      else setLogProfileContext('profile-6666666a-666a-4666-8666-666666666666');
       release();
       expect(await pending).toBe(false);
       expect(await fs.readFile(hot, 'utf8')).toBe(changed);
@@ -623,7 +623,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
   );
 
   it('keeps corrupt or foreign archived records out of diagnostic readback', async () => {
-    const profile = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const profile = 'profile-5555555a-555a-4555-8555-555555555555';
     setLogProfileContext(profile);
     const file = await logFile();
     for (let i = 0; i <= LOCAL_INCIDENT_SLOTS; i++) {
@@ -633,7 +633,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
     const names = await fs.readdir(folder), archived = path.join(folder, names[0]!);
     const original = JSON.parse(await fs.readFile(archived, 'utf8'));
     await fs.writeFile(archived, JSON.stringify({ ...original,
-      profileId: 'profile-8bc4db29-9172-4c9a-876d-6d52d81866a7', reason: 'foreign_private_evidence' }));
+      profileId: 'profile-6666666a-666a-4666-8666-666666666666', reason: 'foreign_private_evidence' }));
     const read = await listLocalIncidents(original.id);
     expect(read).toMatchObject({ status: 'storage_unavailable', incidents: [] });
     expect(JSON.stringify(read)).not.toContain('foreign_private_evidence');
@@ -1301,7 +1301,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
   });
 
   it('refuses a hash-matching screenshot sidecar reassigned to another profile', async () => {
-    const originalProfile = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const originalProfile = 'profile-5555555a-555a-4555-8555-555555555555';
     setLogProfileContext(originalProfile);
     const file = await logFile();
     const sharp = (await import('sharp')).default;
@@ -1315,7 +1315,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
     const sidecar = JSON.parse(await fs.readFile(filename, 'utf8'));
     expect(sidecar.profileId).toBe(originalProfile);
     const foreignSidecar = JSON.stringify({
-      ...sidecar, profileId: 'profile-8bc4db29-9172-4c9a-876d-6d52d81866a7'
+      ...sidecar, profileId: 'profile-6666666a-666a-4666-8666-666666666666'
     });
     await fs.writeFile(filename, foreignSidecar);
     expect((await listLocalIncidents(incident.id)).incidents[0]?.capture).toBe('expired');
@@ -1324,7 +1324,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
   });
 
   it('refuses to publish an incident image after its profile switches during image IO', async () => {
-    const owner = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const owner = 'profile-5555555a-555a-4555-8555-555555555555';
     setLogProfileContext(owner);
     await logFile();
     const sharp = (await import('sharp')).default;
@@ -1345,7 +1345,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
     const pending = readLocalIncidentImage(incident.id);
     await started;
     try {
-      setLogProfileContext('profile-8bc4db29-9172-4c9a-876d-6d52d81866a7');
+      setLogProfileContext('profile-6666666a-666a-4666-8666-666666666666');
       resume();
       expect(await pending).toEqual({ status: 'not_found', data: null });
     } finally {
@@ -1371,13 +1371,13 @@ describe('bounded asynchronous diagnostic mirror', () => {
 
   it.each(['different-profile', 'profile-roundtrip'])(
     'rejects a delayed screenshot offer after %s without writing pixels', async transition => {
-      const first = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+      const first = 'profile-5555555a-555a-4555-8555-555555555555';
       setLogProfileContext(first);
       const file = await logFile();
       const sharp = (await import('sharp')).default;
       const jpg = await sharp({ create: { width: 8, height: 8, channels: 3, background: '#123456' } }).jpeg().toBuffer();
       const offer = offerBrowserDebugCapture({ ...debugInput, turnId: 'old_capture_offer' })!;
-      setLogProfileContext('profile-8bc4db29-9172-4c9a-876d-6d52d81866a7');
+      setLogProfileContext('profile-6666666a-666a-4666-8666-666666666666');
       if (transition === 'profile-roundtrip') setLogProfileContext(first);
       try {
         expect(browserDebugCaptureOwner(offer.id)).toBeNull();
@@ -1391,7 +1391,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
   );
 
   it('blocks image persistence when the offered profile changes during decoding', async () => {
-    const first = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const first = 'profile-5555555a-555a-4555-8555-555555555555';
     setLogProfileContext(first);
     const file = await logFile();
     const sharp = (await import('sharp')).default;
@@ -1407,7 +1407,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
     const pending = completeBrowserDebugCapture(offer.id, `data:image/jpeg;base64,${jpg.toString('base64')}`, 'captured', allowed);
     await arrived;
     try {
-      setLogProfileContext('profile-8bc4db29-9172-4c9a-876d-6d52d81866a7');
+      setLogProfileContext('profile-6666666a-666a-4666-8666-666666666666');
       setLogProfileContext(first);
       resume();
       expect(await pending).toBe(false);

@@ -260,7 +260,7 @@ describe('native window activation', () => {
     const start = source.indexOf('const hasSingleInstanceLock = app.requestSingleInstanceLock(startupProfileCreationData);');
     const end = source.indexOf('function createWindow(): void', start);
     const guard = stripTypeScriptTypes(source.slice(start, end));
-    for (const id of ['local-instance', 'profile-7a25c7a4-3452-4c79-8e67-f968852d90b4']) {
+    for (const id of ['local-instance', 'profile-4444444a-444a-4444-8444-444444444444']) {
       const argv = ['app.exe', '--cos-sessions-action=list', `--cos-sessions-profile=${id}`,
         '--cos-sessions-receipt=4aaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '--cos-sessions-limit=20',
         ...(id.startsWith('profile-') ? [`--cos-instance-runtime=${id}`] : []), '--background'];
@@ -333,7 +333,7 @@ describe('native window activation', () => {
       operatorProfileCreationSecondInstanceArgs, acceptOperatorInputArgs: inspect,
       acceptExplicitAutomationControlArgs: automation, safeCloseForUpdate: { accept: close },
       windowActivation: { request: focus }, isBackgroundLaunch, logWarn: warn });
-    const id = 'profile-7a25c7a4-3452-4c79-8e67-f968852d90b4';
+    const id = 'profile-4444444a-444a-4444-8444-444444444444';
     for (const operation of [['list', '--cos-sessions-limit=20'], ['controls', '--cos-sessions-session=2026-10-13-839d5152']]) {
       const args = [`--cos-sessions-action=${operation[0]}`, `--cos-sessions-profile=${id}`,
         '--cos-sessions-receipt=4aaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', operation[1]!, `--cos-instance-runtime=${id}`, '--background'];
@@ -511,9 +511,9 @@ describe('Windows login startup', () => {
       ['app.exe', '--cos-create-profile=Gamma'], ['app.exe', '--cos-create-unknown=Gamma'],
       ['app.exe', '--cos-create-profile=Gamma', '--cos-profile-browser=Profile', '8'],
       ['app.exe', '8', '--cos-create-profile=Gamma', '--cos-profile-browser=Profile 8'],
-      ['app.exe', '--cos-set-profile-browser=profile-7a25c7a4-3452-4c79-8e67-f968852d90b4', '--cos-profile-browser=Profile 8', '--cos-instance-runtime=profile-example'],
-      ['app.exe', '--cos-set-profile-browser=profile-7a25c7a4-3452-4c79-8e67-f968852d90b4', '--cos-profile-browser=Profile 8', '--pause-automation'],
-      ['app.exe', '--cos-set-profile-browser=profile-7a25c7a4-3452-4c79-8e67-f968852d90b4', '--cos-profile-browser=Profile 8', '--api-key=secret-never-log'],
+      ['app.exe', '--cos-set-profile-browser=profile-4444444a-444a-4444-8444-444444444444', '--cos-profile-browser=Profile 8', '--cos-instance-runtime=profile-example'],
+      ['app.exe', '--cos-set-profile-browser=profile-4444444a-444a-4444-8444-444444444444', '--cos-profile-browser=Profile 8', '--pause-automation'],
+      ['app.exe', '--cos-set-profile-browser=profile-4444444a-444a-4444-8444-444444444444', '--cos-profile-browser=Profile 8', '--api-key=secret-never-log'],
       ['app.exe', '--cos-set-profile-browser=local-instance', '--cos-profile-browser=Profile 8']
     ]) {
       const enteredRuntime = vi.fn(), error = vi.fn();
@@ -618,7 +618,7 @@ describe('Windows login startup', () => {
       operatorProfileLifecycle: null, quitting: false, shutdownStarted: false
     });
     vm.runInContext(stripTypeScriptTypes(source.slice(start, end)), context);
-    const argv = ['app.exe', '--cos-set-profile-browser=profile-7a25c7a4-3452-4c79-8e67-f968852d90b4', '--cos-profile-browser=Profile 8'];
+    const argv = ['app.exe', '--cos-set-profile-browser=profile-4444444a-444a-4444-8444-444444444444', '--cos-profile-browser=Profile 8'];
     context.args = argv;
     vm.runInContext('acceptOperatorInputArgs(args)', context);
     await Promise.resolve();
@@ -626,8 +626,8 @@ describe('Windows login startup', () => {
     vm.runInContext("operatorProfileLifecycle={profileId:'local-instance'}; operatorInputRuntimeReady=true; for (const argv of pendingOperatorInputArgv.splice(0)) acceptOperatorInputArgs(argv);", context);
     await vm.runInContext('operatorInputSerial', context);
     expect(setBrowser).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ profileId: 'local-instance' }),
-      'profile-7a25c7a4-3452-4c79-8e67-f968852d90b4', 'Profile 8');
-    expect(logInfo).toHaveBeenCalledWith(expect.stringContaining('browser binding: saved profile-7a25c7a4'));
+      'profile-4444444a-444a-4444-8444-444444444444', 'Profile 8');
+    expect(logInfo).toHaveBeenCalledWith(expect.stringContaining('browser binding: saved profile-4444444a'));
     expect(create).not.toHaveBeenCalled();
     expect(delivery).not.toHaveBeenCalled();
     expect(configureSharedAccountSettings).not.toHaveBeenCalled();
@@ -655,7 +655,7 @@ describe('Windows login startup', () => {
     expect(nativeIpc).toContain('renameManagedInstanceProfile(requireProfileLifecycle(), request.id, request.nickname)');
     const rename = vi.fn(async () => ({ profiles: [] }));
     const otherOwner = vi.fn(), logInfo = vi.fn(), logWarn = vi.fn();
-    const id = 'profile-f481290d-e54c-42a6-be5d-c8a19b35f0aa';
+    const id = 'profile-5555555a-555a-4555-8555-555555555555';
     const original = ['app.exe', `--cos-rename-profile=${id}`, '--cos-profile-nickname=Delta', '--background'];
     const args = operatorProfileCreationSecondInstanceArgs(['app.exe', '--enable-features=ChromiumOwned'],
       operatorProfileCreationAdditionalData(original));
@@ -712,7 +712,7 @@ describe('Windows login startup', () => {
     expect(gate.accept(args)).toBe(true);
     await Promise.resolve();
     expect(shutdown).not.toHaveBeenCalled();
-    for (const binding of ['--cos-set-profile-browser=profile-7a25c7a4-3452-4c79-8e67-f968852d90b4',
+    for (const binding of ['--cos-set-profile-browser=profile-4444444a-444a-4444-8444-444444444444',
       '--cos-set-profile-browser', '--cos-set-profile-unknown=never-log']) {
       const mixed = args.slice(0, 4).concat(binding);
       expect(() => coldSafeCloseForUpdateProfileId(mixed, null)).toThrow(/cannot share a launch/);
@@ -764,7 +764,7 @@ describe('Windows login startup', () => {
     expect(focus).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledTimes(4);
     expect(JSON.stringify(warn.mock.calls)).not.toContain('never-log');
-    const bindingArgv = ['app.exe', '--cos-set-profile-browser=profile-7a25c7a4-3452-4c79-8e67-f968852d90b4', '--cos-profile-browser=Profile 8', '--background'];
+    const bindingArgv = ['app.exe', '--cos-set-profile-browser=profile-4444444a-444a-4444-8444-444444444444', '--cos-profile-browser=Profile 8', '--background'];
     const bindingData = operatorProfileCreationAdditionalData(bindingArgv)!;
     received({}, [...bindingArgv, '--original-process-start-time=123456789'], 'C:\\', bindingData);
     expect(input).toHaveBeenLastCalledWith(bindingArgv.slice(1));

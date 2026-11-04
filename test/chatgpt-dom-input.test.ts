@@ -3127,7 +3127,31 @@ describe('native response-only render recovery', () => {
     expect(scans).not.toHaveBeenCalled();
   });
 
-  it.each(['paused', 'route', 'authored', 'user', 'invalid-id', 'hidden', 'disabled', 'two-controls', 'remounted-during-check', 'newer-response-same-section'])(
+  it.each(['same-logical-answer', 'later-answer', 'later-user'] as const)(
+    'rechecks the physical response owner after the final policy callback: %s', boundary => {
+      dom.reconfigure({ url: 'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' });
+      const live = failedResponse();
+      const click = vi.fn(); live.reload.addEventListener('click', click);
+      const later = document.createElement('section');
+      later.setAttribute('data-testid', 'conversation-turn-3');
+      later.setAttribute('data-turn', boundary === 'later-user' ? 'user' : 'assistant');
+      later.setAttribute('data-turn-id', boundary === 'same-logical-answer' ? 'native-answer' : 'later-turn');
+      later.textContent = 'A newer physical turn now owns the page.';
+      let checks = 0;
+      const current = () => {
+        if (++checks === 3) document.body.append(later);
+        return true;
+      };
+      expect(api.recoverNativeDisplayFailure(current)).toEqual({ status: 'held', reason: 'page-changed' });
+      expect(click).not.toHaveBeenCalled();
+      expect(box.textContent).toBe('Exact app prompt');
+      later.remove();
+      // A refused stale view did not consume this native message's one reload grant.
+      expect(api.recoverNativeDisplayFailure(() => true)).toEqual({ status: 'requested' });
+      expect(click).toHaveBeenCalledOnce();
+    });
+
+  it.each(['paused', 'route', 'authored', 'user', 'invalid-id', 'hidden', 'disabled', 'two-controls', 'remounted-during-check', 'newer-response-same-section', 'newer-physical-same-logical-turn', 'newer-user-turn'])(
     'keeps response-only recovery closed for %s', boundary => {
       dom.reconfigure({ url: 'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' });
       const live = failedResponse(boundary === 'invalid-id' ? 'not-a-native-id' : messageId);
@@ -3140,6 +3164,13 @@ describe('native response-only render recovery', () => {
       if (boundary === 'newer-response-same-section') {
         const later = document.createElement('div'); later.setAttribute('data-dil-message-id', '9ff5f548-0f1c-4675-93bc-1504b9fc7307');
         later.textContent = 'The newer native answer rendered successfully.'; live.section.append(later);
+      }
+      if (boundary === 'newer-physical-same-logical-turn' || boundary === 'newer-user-turn') {
+        const later = document.createElement('section');
+        later.setAttribute('data-testid', 'conversation-turn-3');
+        later.setAttribute('data-turn', boundary === 'newer-user-turn' ? 'user' : 'assistant');
+        later.setAttribute('data-turn-id', 'native-answer');
+        later.textContent = 'A newer native turn owns the page.'; document.body.append(later);
       }
       let checks = 0;
       const current = () => {

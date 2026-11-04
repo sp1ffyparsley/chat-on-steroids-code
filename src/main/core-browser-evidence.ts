@@ -96,10 +96,30 @@ export type CoreShellScanRejects = {
   itemsOverLimit: number;
 } & Partial<Record<CoreShellCallRejectionKey, number>>;
 
+/** Self-reported shape diagnostics only. Missing stages are unknown, never a generation or receipt proof. */
+export type CoreReaderDiagnostic = Partial<Record<'fiberWire' | 'fiberKeys' | 'contentRecorder' | 'contentKeys' |
+  'workerRecorder' | 'workerKeys' | 'mainKeys', number>>;
+export function coreReaderDiagnostic(raw: unknown, includeMain = false): CoreReaderDiagnostic {
+  const result: CoreReaderDiagnostic = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return result;
+  try {
+    for (const key of ['fiberWire', 'fiberKeys', 'contentRecorder', 'contentKeys', 'workerRecorder', 'workerKeys',
+      ...(includeMain ? ['mainKeys'] as const : [])] as (keyof CoreReaderDiagnostic)[]) {
+      const descriptor = Object.getOwnPropertyDescriptor(raw, key);
+      if (!descriptor) continue;
+      const value = descriptor.value;
+      if (!('value' in descriptor) || !Number.isInteger(value) || value < 0 ||
+          value > (key.endsWith('Keys') ? 400 : 1_000_000)) return {};
+      result[key] = value;
+    }
+    return result;
+  } catch { return {}; }
+}
 export interface CoreShellScanDiagnostic {
   selectorMatches: number;
   mapped: number;
   rejects: CoreShellScanRejects;
+  reader?: CoreReaderDiagnostic;
 }
 export interface OrdinaryFinalDiagnostic {
   /** Optional diagnostic witness in the exact same order as coreCallMessageIds. Never authority. */
@@ -429,7 +449,9 @@ function shellScanDiagnostic(raw: unknown): CoreShellScanDiagnostic | null {
   return {
     selectorMatches: selectorMatches!,
     mapped: mapped!,
-    rejects: normalizedRejects
+    rejects: normalizedRejects,
+    reader: { ...coreReaderDiagnostic(Object.getOwnPropertyDescriptor(source, 'reader')?.value),
+      mainKeys: Object.keys(normalizedRejects).length }
   };
 }
 /** Only complete per-parent diagnostics qualify; never infer them from page-wide counters. */
@@ -884,7 +906,8 @@ export function coreBrowserEvidence(conversation: string): CoreBrowserEvidenceSn
   const row = snapshots.get(conversation);
   return row ? {
     ...row,
-    shellScan: row.shellScan ? { ...row.shellScan, rejects: { ...row.shellScan.rejects } } : null,
+    shellScan: row.shellScan ? { ...row.shellScan, rejects: { ...row.shellScan.rejects },
+      ...(row.shellScan.reader ? { reader: { ...row.shellScan.reader } } : {}) } : null,
     // The returned snapshot is observational. Neither a renderer nor a
     // diagnostic caller may mutate the retained identity arrays while Main
     // is awaiting a durable MCP result on a separate HTTP request.

@@ -5,7 +5,7 @@ import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 const state = vi.hoisted(() => ({
-  id: 'profile-7a25c7a4-3452-4c79-8e67-f968852d90b4',
+  id: 'profile-4444444a-444a-4444-8444-444444444444',
   config: { tunnel: { kind: 'openai', tunnelId: 'keep-id', binaryPath: 'keep-path' }, ui: { automationPaused: true }, roots: ['keep-root'] },
   blockers: [] as object[]
 }));
@@ -154,11 +154,11 @@ describe('exact-account connection control', () => {
 
 
 it('configures one external manual route while preserving pause, roots and existing tunnel identity', async () => {
-  await controlConnection({ instanceId: state.id, action: 'configure', kind: 'manual', manualPublicOrigin: 'https://Delta.example.com/', manualPort: 9770 });
-  expect(state.config.tunnel).toMatchObject({ kind: 'manual', manualPublicOrigin: 'https://Delta.example.com', manualPort: 9770, tunnelId: 'keep-id' });
+  await controlConnection({ instanceId: state.id, action: 'configure', kind: 'manual', manualPublicOrigin: 'https://delta.example.com/', manualPort: 9770 });
+  expect(state.config.tunnel).toMatchObject({ kind: 'manual', manualPublicOrigin: 'https://delta.example.com', manualPort: 9770, tunnelId: 'keep-id' });
   expect(state.config.ui.automationPaused).toBe(true);
   expect(state.config.roots).toEqual(['keep-root']);
-  expect(getConnectionControlStatus()).toMatchObject({ externalOrigin: 'https://Delta.example.com', localOrigin: null, httpHostHeader: '127.0.0.1' });
+  expect(getConnectionControlStatus()).toMatchObject({ externalOrigin: 'https://delta.example.com', localOrigin: null, httpHostHeader: '127.0.0.1' });
   expect(JSON.stringify(getConnectionControlStatus())).not.toContain('secret');
   await expect(controlConnection({ instanceId: state.id, action: 'configure', kind: 'manual', manualPort: 8770 })).rejects.toThrow(/distinct/);
   expect(updateConfig).toHaveBeenCalledTimes(1);
@@ -166,7 +166,7 @@ it('configures one external manual route while preserving pause, roots and exist
 
 it('refuses malformed or misplaced external controls before any settings mutation', async () => {
   for (const request of [
-    { action: 'status', manualPublicOrigin: 'https://Delta.example.com' },
+    { action: 'status', manualPublicOrigin: 'https://delta.example.com' },
     { action: 'configure', kind: 'cloudflared', manualPort: 9770 },
     { action: 'configure', kind: 'manual', manualPublicOrigin: 'http://Delta.example.com' },
     { action: 'configure', kind: 'manual', manualPublicOrigin: 'https://user:secret@Delta.example.com' },
@@ -184,7 +184,7 @@ it('does not replay a completed local connection receipt with a different extern
     initDurableStore(root);
     const receipt = randomUUID();
     const argv = ['--cos-connection-action=configure', `--cos-connection-profile=${state.id}`, `--cos-connection-receipt=${receipt}`,
-      '--cos-connection-kind=manual', '--cos-connection-origin=https://Delta.example.com', '--cos-connection-port=9770'];
+      '--cos-connection-kind=manual', '--cos-connection-origin=https://delta.example.com', '--cos-connection-port=9770'];
     const controller = vi.fn(async () => ({ state: 'disconnected' }));
     await processOperatorConnectionControl(argv, controller, root);
     await processOperatorConnectionControl(argv, controller, root);

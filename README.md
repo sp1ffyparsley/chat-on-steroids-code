@@ -1,5 +1,16 @@
 # Chat On Steroids - code research mirror
 
+## Candidate133 source: original-parent join and recovery repairs
+
+The exported production/test source now includes private source checkpoint `3771e8a5b3ca642b2177245dc3cafc0854a0455a`. This is source provenance, not a public Git ref. The final Windows package is still being qualified; the independently accepted installed baseline below remains131. A public source update is not installation or live-autonomy proof.
+
+- A reproduced circular prerequisite could reject a unique finished, witnessed native tool child when both its widget result pointer and rendered selected ID disappeared under a distinct native namespace. Exact child membership is now staged before independent namespace validation; original question, full parent/cache/branch, connector/request/result and Code Mode checks still own publication. Pending, unwitnessed, ambiguous, foreign, explicit unselected widget and conflicting results remain refused. Two real failure-first positives and22negative controls pass;479shell +136Fiber checks passed.
+- A bounded `shellScan.reader` diagnostic follows key counts through Fiber, content, worker and Main. Each boundary stamps itself and ignores forged downstream fields. Missing is unknown; zero is retained. These self-reported fields prove neither executing bytes nor tool completion. Three actual failures reproduced the missing transport fields; controls/operator propagation is covered.
+- Exact native model-choice denial now reaches Input/Goal without creating three replacement helpers or changing models. A restored denial requires later successful evidence that the same requested model/reasoning pair is available, or the existing deliberate bounded retry action. Failed, stale, partial and uncertain-Send evidence cannot release it.
+- Recorder destination creation rechecks Resume ownership after awaited preparation and immediately before store publication. Exact destination turn history stays with the elected existing session. Response-view reload also rechecks the latest physical response after the final policy callback.
+
+The wider affected run passed5496checks with one obsolete diagnostic-shape assertion; the corrected focused33checks passed. Intermediate132's full private qualification passed96preliminary +13234Main checks with62conditional skips, but132 was not installed. Candidate133's first build was deliberately cancelled to incorporate the reproduced join repair; it is not a qualification. Final qualification and real useful automatic successor acceptance remain separate.
+
 ## Update131 installed; current code and unresolved reliability boundaries
 
 This is a sanitized source mirror for engineering research. The original repository remains private. Personal prompts, account/workspace identifiers, stores, credentials, browser data, transcripts, private journals, deployment backups and installers are excluded. Private source hashes below are provenance, not public Git references. Use this repository's actual commit SHA for immutable code citations.

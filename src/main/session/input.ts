@@ -23,6 +23,7 @@ import { assignSessionProject, getProject, projectWorkspace, getSessionProject }
 import { isChatBlocked } from './blocked-chats.js';
 import { wakeBrowserWork } from '../browser-wake.js';
 import { logEvent, logInfo, logWarn } from '../logger.js';
+import { exactChatModelAvailableAfter } from '../chat-models.js';
 import { noteChatOrigin } from './recorder.js';
 import { isAstraModel, isProModel } from '../../shared/chat-models.js';
 import { inFlightToolCalls } from '../mcp/call-context.js';
@@ -3533,7 +3534,8 @@ export function authorizeBrowserHelperRetry(
         // Explicit recovery of a repaired deterministic envelope may replace
         // this exact positively unsent helper; ordinary polling cannot grant it.
         (entry.state === 'failed' && entry.lifetime === 'temporary-planner' &&
-          (entry.error === 'goal_browser_prompt_envelope_invalid' || entry.error === NATIVE_PROMPT_ENVELOPE_REFUSAL) &&
+          (entry.error === 'goal_browser_prompt_envelope_invalid' || entry.error === NATIVE_PROMPT_ENVELOPE_REFUSAL ||
+            entry.error === 'goal_browser_model_choice_denied') &&
           entry.requiresAuthorization === true && entry.sendAuthorizedAt === undefined &&
           entry.messageId === undefined && entry.deliveredAt === undefined &&
           entry.deliveredSessionId === undefined && entry.response === undefined &&
@@ -3547,6 +3549,14 @@ export function authorizeBrowserHelperRetry(
       entry.state === 'cancelled' && !helperConfirmedUnsent(entry)))) {
       logInfo('browser helper bulk retry held: source retains uncertain or native Send custody');
       return false;
+    }
+    if (row.state === 'failed' && row.error === 'goal_browser_model_choice_denied') {
+      // Spend this explicit per-helper action in the incumbent outbox. A stale
+      // Goal explicitActivation bit is not a new user retry after native denial.
+      const reason = 'User authorized one fresh helper after exact model-choice denial';
+      await commit(current.map(entry => entry === row ? { ...entry, error: reason,
+        ...addRecoveryTransition(entry, 'pre_send_preparation', reason, 'failed') } : entry));
+      return true;
     }
     if (row.state === 'sent' || row.state === 'failed') return true;
     let retired = 0;
@@ -3722,15 +3732,20 @@ export async function failBrowserInput(id: string, owner: string, error: string,
     if (options.confirmedUnsent === true &&
         (!exactPreSendRelease ||
          (options.conversationId !== undefined && entry.conversationId !== options.conversationId))) return false;
-    // This deterministic adapter refusal cannot improve by opening another helper.
+    // A native exact-choice denial is distinct from an unreadable/hydrating picker.
+    // Only its elected, positively unsent decision owner can settle this obligation.
+    // Provider availability may mean quota, entitlement or retirement; do not guess which.
+    const deniedModelChoice = options.detail === 'model-choice-denied' &&
+      error === 'Requested model or reasoning could not be confirmed';
+    // These deterministic adapter refusals cannot improve by opening another helper.
     // Classify only while this exact delivery owner still positively precedes every
     // native Send/receipt boundary. Authorized or uncertain outcomes keep their
     // existing ambiguous handling even if they report the same presentation text.
-    if (entry.purpose === 'decision' && error === NATIVE_PROMPT_ENVELOPE_REFUSAL && entry.requiresAuthorization === true &&
+    if (entry.purpose === 'decision' && (error === NATIVE_PROMPT_ENVELOPE_REFUSAL || deniedModelChoice) && entry.requiresAuthorization === true &&
         entry.sendAuthorizedAt === undefined && entry.messageId === undefined &&
         entry.deliveredAt === undefined && entry.deliveredSessionId === undefined &&
         entry.response === undefined && entry.toolReceiptUncertain !== true) {
-      const code = 'goal_browser_prompt_envelope_invalid';
+      const code = deniedModelChoice ? 'goal_browser_model_choice_denied' : 'goal_browser_prompt_envelope_invalid';
       const failure = classifyProviderRecoveryFailure({ confirmedUnsent: true, state: 'browser',
         sendAuthorized: false, messageIdPresent: false, deliveredAtPresent: false, error: code });
       await commit(current.map(row => sameDelivery(entry, row) ? {
@@ -4141,6 +4156,19 @@ export async function requestBrowserDecision(text: string, signal: AbortSignal, 
           row.decisionSourceSessionId === options.sourceSessionId &&
           row.decisionSourceTurnId === options.sourceTurnId);
         if (sameTurn.some(row => row.goalSourceSuperseded)) throw new Error('goal_browser_source_superseded');
+        // A cold restart must not forget a definitive, positively unsent denial.
+        // Only a later native catalogue proving this SAME exact pair available can
+        // release automatic preparation. Ordinary claim/source/Send gates still apply.
+        const requestedModel = options.model === undefined ? 'gpt-6-thinking' : options.model;
+        const requestedEffort = options.reasoningEffort === undefined ? 'high' : options.reasoningEffort;
+        const denied = [...sameTurn].reverse().find(row => row.state === 'failed' &&
+          row.error === 'goal_browser_model_choice_denied' &&
+          row.model === requestedModel && row.reasoningEffort === requestedEffort);
+        if (denied && (!helperConfirmedUnsent(denied) || denied.toolReceiptUncertain === true))
+          throw new Error('goal_browser_send_unconfirmed');
+        if (denied && !exactChatModelAvailableAfter(denied.model, denied.reasoningEffort,
+              denied.recoveryTransitions?.at(-1)?.at ?? Infinity))
+          throw new Error('goal_browser_model_choice_denied');
         // A collected safety hold is not transport weather. Keep this exact source
         // parked across restart; only the existing one-shot explicit reconciliation
         // authority or a genuinely different source may request another decision.

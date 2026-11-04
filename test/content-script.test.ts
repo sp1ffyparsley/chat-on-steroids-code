@@ -3564,7 +3564,8 @@ describe('desktop input delivery and helper ownership', () => {
       expect(api.selectModelSettings).toHaveBeenCalledOnce();
       expect(live.sent.filter(message => message.type === 'desktop_input' && (message.authorize || message.ack)))
         .toHaveLength(0);
-      expect(live.sent.find(message => message.type === 'desktop_input' && message.fail)?.detail).toBe('model-unconfirmed');
+      expect(live.sent.find(message => message.type === 'desktop_input' && message.fail)?.detail)
+        .toBe(reason === 'choice_denied' ? 'model-choice-denied' : 'model-unconfirmed');
       const stages = live.sent.filter(message => message.stage).map(message => message.stage);
       expect(stages).toContain(`model:ordinary:${reason === 'unknown' ? 'selection_unconfirmed' : reason}`);
       expect(stages.filter(stage => stage.startsWith('model:ordinary:'))).toHaveLength(1);
@@ -3597,7 +3598,7 @@ describe('desktop input delivery and helper ownership', () => {
   });
 
   it.each(['trigger_missing', 'snapshot_missing', 'unknown', 'choice_unavailable', 'choice_denied', 'owner-lost', 'navigation',
-    'draft', 'attachment', 'auth', 'approval', 'stopped', 'expired', 'twice-missing'] as const)(
+    'draft', 'attachment', 'auth', 'approval', 'stopped', 'expired', 'twice-missing', 'retry-choice-denied'] as const)(
     'reobserves only one transient first helper picker failure under its original owner and deadline (%s)', async cause => {
       const succeeds = cause === 'trigger_missing' || cause === 'snapshot_missing';
       live = await harness(`https://chatgpt.com/?temporary-chat=true&cos-input=${inputId}`, {
@@ -3619,6 +3620,7 @@ describe('desktop input delivery and helper ownership', () => {
         if (detail) deadlines.push(detail.deadline);
         if (attempts > 1) {
           if (cause === 'twice-missing') { detail?.failure?.('snapshot_missing'); return false; }
+          if (cause === 'retry-choice-denied') { detail?.failure?.('choice_denied'); return false; }
           return current();
         }
         if (cause === 'navigation') { live!.dom.reconfigure({ url: `https://chatgpt.com/c/${chatB}` }); live!.hook.observe(); }
@@ -3643,7 +3645,7 @@ describe('desktop input delivery and helper ownership', () => {
       const result = await live.runtimeMessage({ type: 'clf-desktop-input', id: inputId,
         conversationId: null, lifetime: 'temporary-planner' });
       expect(result).toEqual({ ok: succeeds });
-      expect(attempts).toBe(succeeds || cause === 'twice-missing' ? 2 : 1);
+      expect(attempts).toBe(succeeds || ['twice-missing', 'retry-choice-denied'].includes(cause) ? 2 : 1);
       expect(send).toHaveBeenCalledTimes(succeeds ? 1 : 0);
       expect(live.sent.filter(message => message.type === 'desktop_input' && message.requiresAuthorization)).toHaveLength(1);
       expect(live.sent.filter(message => message.type === 'desktop_input' && message.authorize)).toHaveLength(succeeds ? 1 : 0);
@@ -3654,6 +3656,11 @@ describe('desktop input delivery and helper ownership', () => {
       if (cause !== 'unknown') expect(stages).toContain(`model:first:${['choice_unavailable', 'choice_denied'].includes(cause) ? cause
         : cause === 'snapshot_missing' ? cause : 'trigger_missing'}`);
       expect(JSON.stringify(stages)).not.toContain('Private accidental draft');
+      if (['choice_denied', 'retry-choice-denied', 'choice_unavailable', 'twice-missing', 'unknown'].includes(cause)) {
+        const failure = live.sent.find(message => message.type === 'desktop_input' && message.fail);
+        expect(failure).toMatchObject({ id: inputId, error: 'Requested model or reasoning could not be confirmed',
+          detail: ['choice_denied', 'retry-choice-denied'].includes(cause) ? 'model-choice-denied' : 'model-unconfirmed' });
+      }
     });
 
   it.each(['recovered', 'navigation', 'return-new-chat', 'restriction', 'mode-gone', 'model-unconfirmed', 'model-changed-before-send',
@@ -17602,6 +17609,7 @@ describe('the activity feed', () => {
     expect(valid?.coreDiagnostic?.shellScan).toEqual({
       selectorMatches: 3,
       mapped: 1,
+      reader: { contentRecorder: 133, contentKeys: 4 },
       rejects: {
         fiberMissing: 1,
         ownerMissing: 1,
@@ -17644,6 +17652,23 @@ describe('the activity feed', () => {
       turnId: 'core-diagnostic-turn'
     });
     domApi.shellKind = originalShellKind;
+  });
+
+  it('stamps the content reader stage without trusting downstream stamps from the page', async () => {
+    live = await harness(undefined, {
+      activity: () => ({ ok: true, data: { entries: [], stream: [], nextSince: 0, pendingTools: 0 } })
+    });
+    const reader = { fiberWire: 17, fiberKeys: 88, contentRecorder: 999, contentKeys: 399,
+      workerRecorder: 999, mainKeys: 399, privateText: 'PRIVATE_FRAME' };
+    await replyFiber([], [], null, true, null, false, { selectorMatches: 0, mapped: 0,
+      rejects: { fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0 }, reader });
+    live.sent.length = 0;
+    await live.hook.pullActivity();
+    const scan = live.sent.filter(message => message.type === 'activity').at(-1)?.coreDiagnostic?.shellScan;
+    expect(scan?.reader).toEqual({ fiberWire: 17, fiberKeys: 88,
+      contentRecorder: expect.any(Number), contentKeys: 4 });
+    expect(scan?.reader.contentRecorder).toBeGreaterThanOrEqual(132);
+    expect(JSON.stringify(scan)).not.toContain('PRIVATE_FRAME');
   });
 
   it('preserves bounded completion veto diagnostics and rejects malformed optional counts', async () => {

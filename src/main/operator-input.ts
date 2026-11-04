@@ -15,7 +15,7 @@ import { logInfo, logWarn } from './logger.js';
 import type { SharedAccountSettingsRequest } from './config.js';
 import { instanceProfileSchema } from '../shared/instance-profile.js';
 import type { SessionControlsView } from './bridge.js';
-import { CORE_NATIVE_IDENTITY_REFUSAL_KEYS, CORE_SHELL_CALL_REJECTION_KEYS, type NativeRequestIdentityDiagnostic,
+import { CORE_NATIVE_IDENTITY_REFUSAL_KEYS, CORE_SHELL_CALL_REJECTION_KEYS, coreReaderDiagnostic, type NativeRequestIdentityDiagnostic,
   type NativeCompletionDiagnostic } from './core-browser-evidence.js';
 
 const ARG_PREFIX = '--cos-enqueue-input=';
@@ -260,7 +260,9 @@ function inspectedProviderUI(raw: unknown) {
     const summary = own(raw, 'identityRefusalSummary'), calls = own(summary, 'calls');
     const reasons = count(calls) && calls <= 200 ? completionRefusalCounts(own(summary, 'reasons'), calls) : null;
     const identityRefusalSummary = reasons ? { calls, reasons } : null;
-    return { observedAt, shell, discovery, currentTurnMatched, selectorMatches, mapped, rejects, identityRefusalSummary };
+    const reader = coreReaderDiagnostic(own(raw, 'reader'), true);
+    return { observedAt, shell, discovery, currentTurnMatched, selectorMatches, mapped, rejects, identityRefusalSummary,
+      ...(Object.keys(reader).length ? { reader } : {}) };
   } catch { return null; }
 }
 /** Project only fixed owner fields. Text, helper answers, tokens and arbitrary errors never enter this lane. */

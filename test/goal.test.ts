@@ -2837,6 +2837,142 @@ describe('native browser Loop stop rejection custody', () => {
     return goal.snapshotGoalReplies().replies.find(row => row.conversationId === source.conversationId)!;
   }
 
+  it.each(['exact denied choice', 'transient picker', 'authorized send', 'unrelated failure'] as const)(
+    'does not spend replacement helpers on a proven unavailable exact choice: %s', async variant =>
+      withIsolatedNativeInputOutbox(async () => {
+        const source = await seed(`exact-model-denial-${variant}`);
+        goal.startGoalDraft({ conversationId: source.conversationId, sessionId: source.sessionId, turnId: source.sourceTurnId });
+        let helper: InputEntry | undefined;
+        await vi.waitFor(async () => {
+          helper = (await browserInput.listInputs()).find(row => row.purpose === 'decision' &&
+            row.decisionSourceSessionId === source.sessionId && row.state === 'queued');
+          expect(helper).toBeDefined();
+        });
+        const owner = `denied-model-document-${variant}`;
+        expect(await browserInput.claimBrowserInput(helper!.id, owner, null, true)).not.toBeNull();
+        if (variant === 'authorized send')
+          expect(await browserInput.authorizeBrowserInput(helper!.id, owner, null)).toBe(true);
+        expect(await browserInput.failBrowserInput(helper!.id, owner,
+          variant === 'unrelated failure' ? 'Composer unavailable' : 'Requested model or reasoning could not be confirmed',
+          { detail: variant === 'transient picker' ? 'model-unconfirmed' : 'model-choice-denied' })).toBe(true);
+        const denied = variant === 'exact denied choice';
+        const draft = await settled(source.conversationId);
+        expect(draft).toMatchObject({ stage: 'failed', retryable: !denied });
+        expect(draft.error).toBe(denied ? 'goal_browser_model_choice_denied' :
+          `goal_browser_send_failed: ${variant === 'unrelated failure' ? 'Composer unavailable' : 'Requested model or reasoning could not be confirmed'}`);
+        expect(await goal.ackGoalDraftNow(source.conversationId, draft.token)).toBe(true);
+        const reply = goal.snapshotGoalReplies().replies.find(row => row.conversationId === source.conversationId)!;
+        expect(reply.state).toBe('pending');
+        expect(reply.helperFailureCount ?? 0).toBe(denied ? 0 : 1);
+        const rows = (await browserInput.listInputs()).filter(row => row.decisionSourceSessionId === source.sessionId);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ id: helper!.id, state: 'failed' });
+        expect(rows[0]!.messageId).toBeUndefined();
+        expect(rows[0]!.deliveredAt).toBeUndefined();
+        if (denied) expect(rows[0]!.sendAuthorizedAt).toBeUndefined();
+        expect((await browserInput.listInputs()).some(row => row.sourceHelperId === helper!.id)).toBe(false);
+      }));
+
+  it('retains exact choice denial after cold Input restore and releases only after later native availability', async () =>
+    withIsolatedNativeInputOutbox(async () => {
+      const catalog = await import('../src/main/chat-models.js');
+      catalog.resetChatModelsForTests();
+      const source = await seed('cold-exact-choice-denial');
+      goal.startGoalDraft({ conversationId: source.conversationId, sessionId: source.sessionId, turnId: source.sourceTurnId });
+      let helper: InputEntry | undefined;
+      await vi.waitFor(async () => {
+        helper = (await browserInput.listInputs()).find(row => row.purpose === 'decision' &&
+          row.decisionSourceSessionId === source.sessionId && row.state === 'queued');
+        expect(helper).toBeDefined();
+      });
+      expect(await browserInput.claimBrowserInput(helper!.id, 'cold-denied-owner', null, true)).not.toBeNull();
+      expect(await browserInput.failBrowserInput(helper!.id, 'cold-denied-owner',
+        'Requested model or reasoning could not be confirmed', { detail: 'model-choice-denied' })).toBe(true);
+      const draft = await settled(source.conversationId);
+      expect(draft).toMatchObject({ error: 'goal_browser_model_choice_denied', retryable: false });
+      expect(await goal.ackGoalDraftNow(source.conversationId, draft.token)).toBe(true);
+      browserInput.resetInputForTests();
+      const options = { lifetime: 'temporary-planner' as const,
+        sourceSessionId: source.sessionId, sourceTurnId: source.sourceTurnId,
+        model: helper!.model, reasoningEffort: helper!.reasoningEffort };
+      await expect(browserInput.requestBrowserDecision('Same original obligation', new AbortController().signal, options))
+        .rejects.toThrow('goal_browser_model_choice_denied');
+      const staleActivation = new AbortController();
+      const staleRequest = browserInput.requestBrowserDecision('Same original obligation', staleActivation.signal,
+        { ...options, allowAmbiguousRetry: true }).catch(error => (error as Error).message);
+      try {
+        expect(await Promise.race([staleRequest,
+          new Promise(resolve => setTimeout(() => resolve('unexpected retained activation bypass'), 100))]))
+          .toBe('goal_browser_model_choice_denied');
+      } finally { staleActivation.abort(); await staleRequest; }
+      expect((await browserInput.listInputs()).filter(row => row.decisionSourceSessionId === source.sessionId)).toHaveLength(1);
+      const saved = await browserInput.listInputs();
+      for (const uncertain of [{ toolReceiptUncertain: true }, { sendAuthorizedAt: Date.now() }]) {
+        await writeDurableNow('session-input', saved.map(row => row.id === helper!.id ? { ...row, ...uncertain } : row));
+        browserInput.resetInputForTests();
+        await expect(browserInput.requestBrowserDecision('Same original obligation', new AbortController().signal,
+          { ...options, allowAmbiguousRetry: true })).rejects.toThrow('goal_browser_send_unconfirmed');
+      }
+      await writeDurableNow('session-input', saved);
+      browserInput.resetInputForTests();
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 1000);
+      const abort = new AbortController();
+      try {
+        catalog.requestChatModels(false);
+        expect(catalog.observeChatModels({ nonce: catalog.pendingChatModelRequest()!.nonce,
+          models: [{ id: helper!.model, label: 'Pinned helper', efforts: [helper!.reasoningEffort] }],
+          availability: [{ model: helper!.model, label: 'Pinned helper', effort: helper!.reasoningEffort, status: 'available' }] })).toBe(true);
+        expect(goal.goalDraftNeedsIntervention(source.conversationId)).toBe(false);
+        expect(goal.goalDraftRetryPending(source.conversationId)).toBe(true);
+        const preparing = browserInput.requestBrowserDecision('Same original obligation', abort.signal, options);
+        const cancelled = expect(preparing).rejects.toBeDefined();
+        await vi.waitFor(async () => {
+          const rows = (await browserInput.listInputs()).filter(row => row.decisionSourceSessionId === source.sessionId);
+          expect(rows).toHaveLength(2);
+          expect(rows[1]).toMatchObject({ state: 'queued', model: helper!.model, reasoningEffort: helper!.reasoningEffort });
+          expect(rows[1]!.sendAuthorizedAt).toBeUndefined();
+        });
+        abort.abort();
+        await cancelled;
+      } finally {
+        abort.abort(); clock.mockRestore(); catalog.resetChatModelsForTests();
+      }
+    }));
+
+  it('spends an explicit model-denial retry in the exact existing unsent outbox owner', async () =>
+    withIsolatedNativeInputOutbox(async () => {
+      const source = await seed('explicit-model-denial-retry');
+      goal.startGoalDraft({ conversationId: source.conversationId, sessionId: source.sessionId, turnId: source.sourceTurnId });
+      let helper: InputEntry | undefined;
+      await vi.waitFor(async () => {
+        helper = (await browserInput.listInputs()).find(row => row.purpose === 'decision' &&
+          row.decisionSourceSessionId === source.sessionId && row.state === 'queued');
+        expect(helper).toBeDefined();
+      });
+      expect(await browserInput.claimBrowserInput(helper!.id, 'explicit-denied-owner', null, true)).not.toBeNull();
+      expect(await browserInput.failBrowserInput(helper!.id, 'explicit-denied-owner',
+        'Requested model or reasoning could not be confirmed', { detail: 'model-choice-denied' })).toBe(true);
+      await settled(source.conversationId);
+      expect(await browserInput.authorizeBrowserHelperRetry(helper!.id, source.sessionId, 'foreign-turn')).toBe(false);
+      expect(await browserInput.authorizeBrowserHelperRetry(helper!.id, source.sessionId, source.sourceTurnId)).toBe(true);
+      const row = (await browserInput.listInputs()).find(entry => entry.id === helper!.id)!;
+      expect(row).toMatchObject({ id: helper!.id, state: 'failed',
+        error: 'User authorized one fresh helper after exact model-choice denial' });
+      expect(row.recoveryTransitions?.at(-1)?.reason).toContain('exact model-choice denial');
+      expect(row.sendAuthorizedAt).toBeUndefined();
+      expect(row.messageId).toBeUndefined();
+      expect(row.deliveredAt).toBeUndefined();
+      const abort = new AbortController();
+      const pending = browserInput.requestBrowserDecision('Same original obligation', abort.signal,
+        { lifetime: 'temporary-planner', sourceSessionId: source.sessionId, sourceTurnId: source.sourceTurnId,
+          model: helper!.model, reasoningEffort: helper!.reasoningEffort });
+      const cancelled = expect(pending).rejects.toBeDefined();
+      try {
+        await vi.waitFor(async () => expect((await browserInput.listInputs())
+          .filter(entry => entry.decisionSourceSessionId === source.sessionId)).toHaveLength(2));
+      } finally { abort.abort(); await cancelled; }
+    }));
+
   it.each([
     ['pending', 1], ['pending', 2], ['pending', 3],
     ['handled', 1], ['handled', 2], ['handled', 3]

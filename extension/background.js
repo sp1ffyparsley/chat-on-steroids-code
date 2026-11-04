@@ -140,10 +140,25 @@ function shellScanDiagnostic(raw) {
   const assistantReceiptMatched = Object.getOwnPropertyDescriptor(rejects, 'assistantTerminalReceiptMatched')?.value;
   if ((assistantReceiptChecked === undefined) !== (assistantReceiptMatched === undefined) ||
       assistantReceiptMatched > assistantReceiptChecked) return null;
+  let reader = {};
+  try {
+    const upstream = Object.getOwnPropertyDescriptor(raw, 'reader')?.value;
+    if (upstream && typeof upstream === 'object' && !Array.isArray(upstream)) {
+      for (const key of ['fiberWire', 'fiberKeys', 'contentRecorder', 'contentKeys']) {
+        const descriptor = Object.getOwnPropertyDescriptor(upstream, key);
+        if (!descriptor) continue;
+        const value = descriptor.value;
+        if (!('value' in descriptor) || !Number.isInteger(value) || value < 0 ||
+            value > (key.endsWith('Keys') ? SHELL_SCAN_MAX : 1_000_000)) { reader = {}; break; }
+        reader[key] = value;
+      }
+    }
+  } catch { reader = {}; }
   return {
     selectorMatches,
     mapped,
-    rejects
+    rejects,
+    reader: { ...reader, workerRecorder: PAGE_RECORDER_VERSION, workerKeys: Object.keys(rejects).length }
   };
 }
 /** Terminal diagnostics retain only a fixed shape plus exact, bounded native custody
@@ -10581,7 +10596,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 131;
+const PAGE_RECORDER_VERSION = 133;
 
 let deferredRecoveryWork = null;
 

@@ -2080,8 +2080,9 @@ describe('alternate shell turn/message provenance', () => {
     ['missing live wins first', false, 'in_progress', 'missing-native-node', 'nativeAnchorLiveMissing'],
     ['incomplete turn wins before path', true, 'in_progress', 'missing-native-node', 'nativeAnchorTurnIncomplete']
   ] as const)('narrows the native anchor prerequisite without granting identity: %s', async (_label, live, status, current, reason) => {
+    const diagnosticLogs: string[] = [];
     const page = await shellHarness({ withCall: true, nativeCallReceipt: true, nativeCallLive: live,
-      status, nativeCurrentNode: current, callCompleted: false, assistantCompleted: false,
+      status, nativeCurrentNode: current, callCompleted: false, assistantCompleted: false, diagnosticLogs,
       nativeCallMutation(mapping, entry) {
         delete entry.turn.items[1].widgetStateSource;
         entry.turn.messageIds = [USER, CALL, RESULT, ASSISTANT];
@@ -2094,6 +2095,10 @@ describe('alternate shell turn/message provenance', () => {
       const rejects = page.fiber.shellScan.rejects;
       expect(rejects.nativeAnchorPrerequisite).toBe(1);
       expect(rejects[reason]).toBe(1);
+      // The console must retain the first failed anchor when a legacy transport
+      // drops additive counters. Its fixed code cannot supply missing identity.
+      expect(diagnosticLogs.find(line => line.includes('native result-reference recovery diagnostic')))
+        .toContain(`anchorReason=${reason}`);
       const reasons = ['nativeAnchorLiveMissing', 'nativeAnchorUserMissing', 'nativeAnchorTurnIncomplete',
         'nativeAnchorPathEmpty', 'nativeAnchorUserPathMismatch', 'nativeAnchorUnselectedPath'];
       expect(reasons.reduce((total, key) => total + (rejects[key] ?? 0), 0)).toBe(1);
@@ -2104,6 +2109,74 @@ describe('alternate shell turn/message provenance', () => {
       expect(JSON.stringify(page.fiber)).not.toContain('PRIVATE_TOOL_RESULT');
     } finally { page.dom.window.close(); }
   });
+
+  it.each(['terminal native anchor', 'scoped native user', 'explicit widget pointer', 'pending result',
+    'pending invocation', 'missing witness', 'ambiguous result children', 'foreign request', 'foreign working turn',
+    'foreign exchange', 'wrong result parent', 'foreign resource connector', 'foreign resource link',
+    'foreign resource tool', 'foreign invocation connector', 'cached conflict', 'foreign final namespace',
+    'nonterminal final', 'unselected user', 'unselected invocation', 'unselected final', 'no mounted mapping',
+    'shared result reference', 'result namespace accessor'] as const)(
+    'recovers only an exact unselected missing-pointer result under an independent native namespace: %s', async variant => {
+      const accepted = variant === 'terminal native anchor' || variant === 'scoped native user';
+      let accessorReads = 0;
+      const page = await shellHarness({ withCall: true, nativeCallReceipt: true,
+        nativeCallLive: variant !== 'no mounted mapping', nativeCallCacheConflict: variant === 'cached conflict',
+        callCompleted: false, assistantCompleted: false,
+        nativeCallMutation(mapping, entry) {
+          if (variant !== 'explicit widget pointer') delete entry.turn.items[1].widgetStateSource;
+          entry.turn.messageIds = [USER, CALL, ASSISTANT];
+          for (const id of [CALL, RESULT, ASSISTANT]) Object.assign(mapping[id].message.metadata, {
+            working_turn_id: 'native-recovered-working', turn_exchange_id: 'native-recovered-exchange',
+            parent_id: mapping[id].parent
+          });
+          mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: JSON.stringify({
+            content: [{ type: 'text', text: 'PRIVATE_UNSELECTED_TOOL_RESULT' }],
+            structuredContent: { cosResultReceipt: { version: 1, id: 'a'.repeat(48) } } }) };
+          if (variant === 'scoped native user') {
+            Object.assign(mapping[USER].message.metadata, { working_turn_id: 'native-recovered-working',
+              turn_exchange_id: 'native-recovered-exchange' });
+            mapping[ASSISTANT].message.status = 'in_progress';
+          }
+          if (variant === 'pending result') mapping[RESULT].message.status = 'in_progress';
+          if (variant === 'pending invocation') mapping[CALL].message.status = 'in_progress';
+          if (variant === 'missing witness') mapping[RESULT].message.content = { parts: ['PRIVATE_UNSELECTED_TOOL_RESULT'] };
+          if (variant === 'ambiguous result children') {
+            const second = 'ambiguous-native-result';
+            mapping[second] = { id: second, parent: RESULT, message: { ...mapping[RESULT].message,
+              id: second, metadata: { ...mapping[RESULT].message.metadata, parent_id: CALL } } };
+            mapping[ASSISTANT].parent = second;
+            mapping[ASSISTANT].message.metadata.parent_id = second;
+          }
+          if (variant === 'foreign request') mapping[RESULT].message.metadata.request_id = 'foreign-request';
+          if (variant === 'foreign working turn') mapping[RESULT].message.metadata.working_turn_id = 'foreign-working';
+          if (variant === 'foreign exchange') mapping[RESULT].message.metadata.turn_exchange_id = 'foreign-exchange';
+          if (variant === 'wrong result parent') mapping[RESULT].message.metadata.parent_id = USER;
+          if (variant === 'foreign resource connector') mapping[RESULT].message.metadata.invoked_resource.app_name = 'Gmail';
+          if (variant === 'foreign resource link') mapping[RESULT].message.metadata.invoked_resource.resource_uri = `/${ASDK}/link_foreign/read`;
+          if (variant === 'foreign resource tool') mapping[RESULT].message.metadata.invoked_resource.resource_uri = `/${ASDK}/${LINK}/write`;
+          if (variant === 'foreign invocation connector') mapping[CALL].message.content.text = '{"path":"/Gmail/private/read"}';
+          if (variant === 'foreign final namespace') mapping[ASSISTANT].message.metadata.turn_exchange_id = 'foreign-final';
+          if (variant === 'nonterminal final') mapping[ASSISTANT].message.status = 'in_progress';
+          if (variant === 'unselected user') entry.turn.messageIds = [CALL, ASSISTANT];
+          if (variant === 'unselected invocation') entry.turn.messageIds = [USER, ASSISTANT];
+          if (variant === 'unselected final') entry.turn.messageIds = [USER, CALL];
+          if (variant === 'shared result reference') entry.turn.items.splice(2, 0, {
+            ...entry.turn.items[1], callId: 'another-typed-call', widgetStateSource: { messageId: RESULT } });
+          if (variant === 'result namespace accessor') Object.defineProperty(mapping[RESULT].message.metadata, 'working_turn_id', {
+            get() { accessorReads++; throw new Error('PRIVATE_RESULT_AUTHOR_GETTER'); }
+          });
+        } });
+      try {
+        const turn = page.fiber.turns[0];
+        expect(turn.calls[0]).toMatchObject({ requestId: accepted ? REQUEST : null, answered: accepted });
+        expect(turn.calls[0].resultReceiptId).toBe(accepted ? 'a'.repeat(48) : undefined);
+        expect(turn.requests.some((row: any) => row.requestId === REQUEST && row.messageId === CALL)).toBe(accepted);
+        if (variant !== 'terminal native anchor') expect(turn.endMessageId).toBeNull();
+        expect(accessorReads).toBe(0);
+        expect(JSON.stringify(page.fiber)).not.toContain('PRIVATE_UNSELECTED_TOOL_RESULT');
+        expect(JSON.stringify(page.fiber)).not.toContain('PRIVATE_RESULT_AUTHOR_GETTER');
+      } finally { page.dom.window.close(); }
+    });
 
   it.each([
     ['identity only', true, false],
@@ -3122,6 +3195,7 @@ describe('alternate shell turn/message provenance', () => {
       });
       expect(page.exchange.getAttribute('data-clf-fiber-v2-turn')).toBe('shell-scan:0');
       expect(page.fiber.shellScan).toEqual({
+        reader: { fiberWire: 17, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
         selectorMatches: 1,
         mapped: 1,
         rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
@@ -3147,6 +3221,7 @@ describe('alternate shell turn/message provenance', () => {
       });
       expect(page.exchange.getAttribute('data-clf-fiber-v2-turn')).toBe('shell-scan:0');
       expect(page.fiber.shellScan).toEqual({
+        reader: { fiberWire: 17, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
         selectorMatches: 1,
         mapped: 1,
         rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
@@ -3166,6 +3241,7 @@ describe('alternate shell turn/message provenance', () => {
       expect(page.fiber.turns).toHaveLength(1);
       expect(page.fiber.turns[0]).toMatchObject({ turnId: TURN, endMessageId: ASSISTANT });
       expect(page.fiber.shellScan).toEqual({
+        reader: { fiberWire: 17, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
         selectorMatches: 1,
         mapped: 1,
         rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
@@ -3185,6 +3261,7 @@ describe('alternate shell turn/message provenance', () => {
       expect(page.fiber.turns).toEqual([]);
       expect(page.exchange.hasAttribute('data-clf-fiber-v2-turn')).toBe(false);
       expect(page.fiber.shellScan).toEqual({
+        reader: { fiberWire: 17, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
         selectorMatches: 1,
         mapped: 0,
         rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
@@ -3212,6 +3289,7 @@ describe('alternate shell turn/message provenance', () => {
         expect(page.exchange.getAttribute('data-clf-fiber-v2-turn')).toBe('shell-scan:0');
         expect(page.secondExchange?.hasAttribute('data-clf-fiber-v2-turn')).toBe(secondStamped);
         expect(page.fiber.shellScan).toEqual({
+        reader: { fiberWire: 17, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
           selectorMatches: 2,
           mapped,
           rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
