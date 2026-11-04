@@ -115,7 +115,7 @@ it.each(['exec_command', 'write_stdin'] as const)('delivers terminal corrections
     notices.mockRestore();
     expect(response.result.isError).not.toBe(true);
     expect(response.result.structuredContent).toEqual({ ...plain.result.structuredContent,
-      cosResultReceipt: { version: 1, id: expect.stringMatching(/^[a-f0-9]{48}$/) },
+      cosResultReceipt: { version: 2, id: expect.stringMatching(/^[a-f0-9]{48}$/), invocationSha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
       supplemental_context: expect.stringContaining('ACK_G7391_CORRECTION') });
     expect(response.result.structuredContent.cosResultReceipt.id).not.toBe(plain.result.structuredContent.cosResultReceipt.id);
     expect(response.result.structuredContent.output).toBe('');
@@ -126,7 +126,7 @@ it.each(['exec_command', 'write_stdin'] as const)('delivers terminal corrections
     expect((await listInputs()).find(row => row.id === input.id)?.state).toBe('tool');
     const receipt = await send();
     expect(receipt.result.structuredContent).toEqual({ ...plain.result.structuredContent,
-      cosResultReceipt: { version: 1, id: expect.stringMatching(/^[a-f0-9]{48}$/) } });
+      cosResultReceipt: { version: 2, id: expect.stringMatching(/^[a-f0-9]{48}$/), invocationSha256: expect.stringMatching(/^[a-f0-9]{64}$/) } });
     expect(new Set([plain, response, receipt].map(row => row.result.structuredContent.cosResultReceipt.id)).size).toBe(3);
     expect(text(receipt)).not.toContain('ACK_G7391_CORRECTION');
     expect((await listInputs()).find(row => row.id === input.id)?.state).toBe('sent');
@@ -172,12 +172,12 @@ it('projects corrections for other Core structured results without changing the 
     await enqueueInput({ id: randomUUID(), sessionId: who.session.id, text: 'CORE_STATUS_CORRECTION', mode: 'auto', dueAt: 0, model: null, reasoningEffort: null });
     const delivered = await status();
     expect(delivered.result.structuredContent).toEqual({ ...before.result.structuredContent,
-      cosResultReceipt: { version: 1, id: expect.stringMatching(/^[a-f0-9]{48}$/) },
+      cosResultReceipt: { version: 2, id: expect.stringMatching(/^[a-f0-9]{48}$/), invocationSha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
       supplemental_context: expect.stringContaining('CORE_STATUS_CORRECTION') });
     expect(text(delivered).match(/CORE_STATUS_CORRECTION/g)).toHaveLength(1);
     const after = await status();
     expect(after.result.structuredContent).toEqual({ ...before.result.structuredContent,
-      cosResultReceipt: { version: 1, id: expect.stringMatching(/^[a-f0-9]{48}$/) } });
+      cosResultReceipt: { version: 2, id: expect.stringMatching(/^[a-f0-9]{48}$/), invocationSha256: expect.stringMatching(/^[a-f0-9]{64}$/) } });
     expect(new Set([before, delivered, after].map(row => row.result.structuredContent.cosResultReceipt.id)).size).toBe(3);
   } finally {
     await status();
@@ -376,8 +376,8 @@ it('rechecks live permissions and approved roots between awaited children', asyn
     const direct = await rpc('tools/call', { name: 'read', arguments: { paths: ['/workspace/beta.txt'] } }, who.requestId);
     const directPayload = structuredClone(direct.result);
     if (directPayload.structuredContent?.cosResultReceipt) {
-      expect(directPayload.structuredContent.cosResultReceipt).toEqual({ version: 1,
-        id: expect.stringMatching(/^[a-f0-9]{48}$/) });
+      expect(directPayload.structuredContent.cosResultReceipt).toEqual({ version: 2,
+        id: expect.stringMatching(/^[a-f0-9]{48}$/), invocationSha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
       const resource = directPayload.content.filter((part: any) => part.type === 'resource');
       expect(resource).toEqual([]);
       delete directPayload.structuredContent.cosResultReceipt;

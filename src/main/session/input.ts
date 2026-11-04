@@ -3735,7 +3735,7 @@ export async function failBrowserInput(id: string, owner: string, error: string,
     // A native exact-choice denial is distinct from an unreadable/hydrating picker.
     // Only its elected, positively unsent decision owner can settle this obligation.
     // Provider availability may mean quota, entitlement or retirement; do not guess which.
-    const deniedModelChoice = options.detail === 'model-choice-denied' &&
+    const deniedModelChoice = (options.detail === 'model-choice-denied' || options.detail === 'model-choice-unavailable') &&
       error === 'Requested model or reasoning could not be confirmed';
     // These deterministic adapter refusals cannot improve by opening another helper.
     // Classify only while this exact delivery owner still positively precedes every
@@ -3750,7 +3750,7 @@ export async function failBrowserInput(id: string, owner: string, error: string,
         sendAuthorized: false, messageIdPresent: false, deliveredAtPresent: false, error: code });
       await commit(current.map(row => sameDelivery(entry, row) ? {
         ...row, state: 'failed' as const, error: code, recoveryFailure: failure,
-        ...addRecoveryTransition(row, failure.phase, failure.detail, 'failed')
+        ...addRecoveryTransition(row, failure.phase, deniedModelChoice ? options.detail! : failure.detail, 'failed')
       } : row));
       logWarn(`input ${id}: ${code}; pre-Send obligation retained, automatic helper replacement requires repair`);
       rejectDecision(code);

@@ -26,7 +26,8 @@ export interface InboundTiming {
   phases: Record<InboundPhase, number>;
   coreResultReceipts: Record<CoreResultReceiptOutcome, number>;
 }
-const store = new AsyncLocalStorage<{ requestId: string | null; timing?: InboundTiming; publication?: OutputPublication }>();
+export interface InboundInvocationProof { tool: string; digest: string | null }
+const store = new AsyncLocalStorage<{ requestId: string | null; timing?: InboundTiming; publication?: OutputPublication; invocation?: InboundInvocationProof }>();
 
 /** Fixed-size, process-local numbers only: no payload, credential, path or chat identity. */
 export function createInboundTiming(): InboundTiming {
@@ -76,8 +77,16 @@ export function formatInboundTiming(timing: InboundTiming): string {
 }
 
 /** Runs `body` with the request id of the HTTP request currently being served. */
-export function withInboundRequestId<T>(requestId: string | null, body: () => T, timing?: InboundTiming, publication?: OutputPublication): T {
-  return store.run({ requestId, timing, publication }, body);
+export function withInboundRequestId<T>(requestId: string | null, body: () => T, timing?: InboundTiming, publication?: OutputPublication, invocation?: InboundInvocationProof): T {
+  return store.run({ requestId, timing, publication, invocation }, body);
+}
+
+/** Original wire arguments, before SDK defaults/transforms. This is NOT a
+ * workflow, native parent or completion witness. Undefined means in-process;
+ * null means HTTP input did not provide this exact bounded invocation proof. */
+export function inboundInvocationDigest(tool: string): string | null | undefined {
+  const context = store.getStore();
+  return context ? context.invocation?.tool === tool ? context.invocation.digest : null : undefined;
 }
 
 /** Shared by calls in one HTTP response; socket completion alone is not a remote receipt. */

@@ -24,7 +24,7 @@ import { WINDOWS_COMPUTER_STATE_INPUT_METHODS } from '../../shared/windows-compu
 
 import { rawPromises as fs } from '../rawfs.js';
 import { randomBytes } from 'node:crypto';
-import { beginToolTiming, inboundRequestId, inboundPublication, noteInboundCoreResultReceipt,
+import { beginToolTiming, inboundRequestId, inboundPublication, inboundInvocationDigest, noteInboundCoreResultReceipt,
   type CoreResultReceiptOutcome } from './inbound.js';
 import { McpServer, type ServerContext } from '@modelcontextprotocol/server';
 import { z } from 'zod';
@@ -96,7 +96,7 @@ import {
   recordToolCall,
   recordingEnabled
 } from '../session/recorder.js';
-import { requestCorrelation } from '../session/correlation.js';
+import { invocationArgumentsDigest, requestCorrelation } from '../session/correlation.js';
 import { BLOCKED_CHAT_REFUSAL, anyChatBlocked, isChatBlocked } from '../session/blocked-chats.js';
 import { anyContinuationOpen, compactingConversation } from '../session/continuation.js';
 import { acknowledgeBackgroundExecOutput, backgroundExecRecoveryNotices, offerBackgroundExecOutput } from '../codex/ownership.js';
@@ -619,6 +619,9 @@ async function dispatchTracked(
   // answered, and "was this connector ever actually used from ChatGPT" is a per-connector
   // question the setup screen has to answer honestly.
   const dispatchAt = Date.now();
+  const wireInvocationSha256 = inboundInvocationDigest(name);
+  const frozenInvocationSha256 = surface === 'core' && !nested
+    ? wireInvocationSha256 === undefined ? invocationArgumentsDigest(name, args) : wireInvocationSha256 : null;
   surfaceToolCallAt.set(surface, dispatchAt);
   if (!nested) noteServedRequest(requestId, surface, dispatchAt);
   toolDispatchEvidence.push({ surface, at: dispatchAt, requestId });
@@ -1029,7 +1032,7 @@ async function dispatchTracked(
   let coreReceiptOutcome: CoreResultReceiptOutcome = 'not_eligible';
   const recording = recordToolCall({
     tool: name,
-    ...(resultReceiptId ? { resultReceiptId } : {}),
+    ...(resultReceiptId ? { resultReceiptId, ...(frozenInvocationSha256 ? { invocationSha256: frozenInvocationSha256 } : {}) } : {}),
     args: surface === 'plugins' ? pluginManager.redact(args) : args,
     content: delivered.content,
     ...(surface === 'plugins'
@@ -1056,7 +1059,10 @@ async function dispatchTracked(
   const publishCommittedReceipt = (recorded: Awaited<typeof recording> | undefined): boolean => {
     if (!resultReceiptId || recorded?.resultReceiptId !== resultReceiptId ||
         !['unattributed', 'request_id'].includes(recorded.attributionMethod)) return false;
-    const receipt = { version: 1, id: resultReceiptId };
+    const digest = frozenInvocationSha256;
+    if (digest && recorded.invocationSha256 !== digest) return false;
+    const receipt = digest ? { version: 2, id: resultReceiptId, invocationSha256: digest }
+      : { version: 1, id: resultReceiptId };
     delivered = { ...delivered,
       // A receipt is execution metadata, not a file to materialize. Preserve
       // content byte-for-byte and fail closed if the host drops this carrier.

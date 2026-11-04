@@ -11,6 +11,7 @@ import {
   unsetSessionRootForTests
 } from '../src/main/session/store.js';
 import {
+  invocationArgumentsDigest,
   observeRequestCorrelation,
   observeRequestCorrelations,
   commitRequestCorrelations,
@@ -897,5 +898,25 @@ describe('request correlation ownership', () => {
       resetDurableForTests();
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+
+describe('bounded canonical invocation identity', () => {
+  it('uses exact tool and recursively sorted JSON arguments without changing array order', async () => {
+    const { createHash } = await import('node:crypto');
+    const expected = createHash('sha256').update('["read",{"a":{"x":1,"z":2},"paths":["one","two"]}]').digest('hex');
+    expect(invocationArgumentsDigest('read', { paths: ['one', 'two'], a: { z: 2, x: 1 } })).toBe(expected);
+    expect(invocationArgumentsDigest('read', { a: { x: 1, z: 2 }, paths: ['one', 'two'] })).toBe(expected);
+    expect(invocationArgumentsDigest('read', { paths: ['two', 'one'], a: { x: 1, z: 2 } })).not.toBe(expected);
+    expect(invocationArgumentsDigest('exec', { paths: ['one', 'two'], a: { x: 1, z: 2 } })).not.toBe(expected);
+  });
+  it('refuses getters, cycles, sparse/non-JSON values and oversized proofs', () => {
+    let reads = 0;
+    const getter = Object.defineProperty({}, 'x', { enumerable: true, get() { reads++; throw new Error('private'); } });
+    const cycle: any = {}; cycle.self = cycle;
+    for (const value of [getter, cycle, [undefined], new Array(2), { n: Infinity }, new Date(), { text: 'x'.repeat(512 * 1024) }])
+      expect(invocationArgumentsDigest('read', value)).toBeNull();
+    expect(reads).toBe(0);
   });
 });

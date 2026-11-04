@@ -75,6 +75,7 @@ import {
 } from './store.js';
 import {
   awaitRequestCorrelation,
+  invocationArgumentsDigest,
   commitRequestCorrelations,
   correlationCommitPending,
   observeRequestCorrelations,
@@ -1426,14 +1427,15 @@ export async function receiptUnattributedSourceClear(resultReceiptId: string): P
 
 /** Retain a transport header as data, never promote it over an established native owner. */
 function receiptTransportHeaderCompatible(requestId: string | null, scope: {
-  conversationId: string | null; sessionId: string; nativeCallMessageId: string;
+  conversationId: string | null; sessionId: string; nativeCallMessageId: string; invocationSha256?: string;
 }): boolean {
   if (requestId === null) return true;
   if (!requestId || !scope.conversationId) return false;
   const owner = requestCorrelation(requestId);
   return !owner || (owner.conversationId === scope.conversationId &&
-    owner.sessionId === scope.sessionId && owner.nativeCallAmbiguous !== true &&
-    (owner.nativeCallMessageId ?? owner.messageId) === scope.nativeCallMessageId);
+    owner.sessionId === scope.sessionId && (
+      /^[a-f0-9]{64}$/.test(scope.invocationSha256 ?? '') || owner.nativeCallAmbiguous !== true &&
+      (owner.nativeCallMessageId ?? owner.messageId) === scope.nativeCallMessageId));
 }
 
 /** An owned per-execution witness does not erase a workflow's sibling ambiguity.
@@ -1480,7 +1482,7 @@ export async function receiptDurableOwnerUnique(
               ? ownedReceiptHeaderCompatible(event.call, targetSessionId)
               : event.call.attributionMethod === 'result_receipt' && receiptTransportHeaderCompatible(event.call.requestId, {
               conversationId: retainedHistorical ? event.call.conversationId : summary.conversationId,
-              sessionId: targetSessionId, nativeCallMessageId })) ||
+              sessionId: targetSessionId, nativeCallMessageId, invocationSha256: event.call.invocationSha256 })) ||
             (expectedCallId && event.call.callId !== expectedCallId)) return false;
         owned = event;
       }
@@ -1520,7 +1522,7 @@ export async function receiptDurableOwnerUnique(
 async function receiptTransferCustodyExact(input: {
   resultReceiptId: string; originalSessionId: string; targetSessionId: string;
   callId: string; nativeCallMessageId: string; tool: string; conversationId: string;
-  targetCopied: boolean; transportRequestId: string | null;
+  targetCopied: boolean; transportRequestId: string | null; invocationSha256?: string;
 }): Promise<boolean> {
   try {
     const folderIds = async () => (await fs.readdir(sessionsRoot()))
@@ -1541,9 +1543,10 @@ async function receiptTransferCustodyExact(input: {
         if (event.source !== 'mcp' || call.callId !== input.callId ||
             call.tool !== input.tool || !isReturnedToolOutcome(call.outcome) ||
             call.requestId !== input.transportRequestId ||
+            input.invocationSha256 !== undefined && call.invocationSha256 !== input.invocationSha256 ||
             !receiptTransportHeaderCompatible(call.requestId, {
               conversationId: input.conversationId, sessionId: input.targetSessionId,
-              nativeCallMessageId: input.nativeCallMessageId }) ||
+              nativeCallMessageId: input.nativeCallMessageId, invocationSha256: input.invocationSha256 }) ||
             (call.process && !call.process.completedAt)) return false;
         if (summary.id === input.originalSessionId &&
             summary.conversationId === null && summary.title === 'Unattributed activity' &&
@@ -1573,10 +1576,11 @@ async function receiptTransferCustodyExact(input: {
 
 export async function attachNativeCoreResultReceipt(input: {
   conversationId: string; sessionId: string; requestId: string;
-  nativeCallMessageId: string; tool: string; resultReceiptId: string;
+  nativeCallMessageId: string; tool: string; resultReceiptId: string; invocationSha256?: string;
 }): Promise<boolean> {
   if (!recordingEnabled() || !/^[a-f0-9]{48}$/.test(input.resultReceiptId) ||
-      !input.nativeCallMessageId || !input.tool) return false;
+      !input.nativeCallMessageId || !input.tool || input.invocationSha256 !== undefined &&
+      !/^[a-f0-9]{64}$/.test(input.invocationSha256)) return false;
   const attach = async (): Promise<boolean> => {
     const target = await findSessionByConversation(input.conversationId, { requireUnique: true });
     if (!target || target.id !== input.sessionId ||
@@ -1596,7 +1600,8 @@ export async function attachNativeCoreResultReceipt(input: {
     const owned = sameReceipt.length === 1 && sameReceipt[0]?.kind === 'tool_call' &&
       sameReceipt[0].call.attributionMethod === 'request_id' ? sameReceipt[0] : null;
     if (owned) {
-      if (owned.source !== 'mcp' || owned.call.tool !== input.tool || !isReturnedToolOutcome(owned.call.outcome) ||
+      if (input.invocationSha256 !== undefined && owned.call.invocationSha256 !== input.invocationSha256 ||
+          owned.source !== 'mcp' || owned.call.tool !== input.tool || !isReturnedToolOutcome(owned.call.outcome) ||
           owned.call.requestId !== input.requestId ||
           owned.call.conversationId !== input.conversationId ||
           !ownedReceiptHeaderCompatible(owned.call, input.sessionId) ||
@@ -1618,16 +1623,19 @@ export async function attachNativeCoreResultReceipt(input: {
       notifyChanged();
       return true;
     }
-    // The existing Unattributed copy/rewrite path retains its stricter single
-    // native-call workflow gate. An owned witness never relaxes this fallback.
-    if (correlation.nativeCallAmbiguous === true ||
-        (correlation.nativeCallMessageId ?? correlation.messageId) !== input.nativeCallMessageId) return false;
+    // Legacy witnesses retain the single-native-call workflow gate. A v2
+    // invocation-bound witness may identify a workflow sibling only after its
+    // exact frozen digest is verified against the unique original below.
+    if (!input.invocationSha256 && (correlation.nativeCallAmbiguous === true ||
+        (correlation.nativeCallMessageId ?? correlation.messageId) !== input.nativeCallMessageId)) return false;
     const existing = sameReceipt.length === 1 && sameNative.length === 1 &&
       sameReceipt[0] === sameNative[0] && sameReceipt[0]?.kind === 'tool_call' &&
       sameReceipt[0].call.attributionMethod === 'result_receipt' &&
       sameReceipt[0].call.conversationId === input.conversationId &&
       receiptTransportHeaderCompatible(sameReceipt[0].call.requestId, input) &&
-      sameReceipt[0].call.tool === input.tool ? sameReceipt[0] : null;
+      sameReceipt[0].call.tool === input.tool &&
+      (input.invocationSha256 === undefined || sameReceipt[0].call.invocationSha256 === input.invocationSha256)
+      ? sameReceipt[0] : null;
     if ((sameReceipt.length || sameNative.length) && !existing) return false;
 
     const matches: Array<{
@@ -1665,7 +1673,8 @@ export async function attachNativeCoreResultReceipt(input: {
     if (matches.length !== 1) return false;
     const { summary, event, events, unknown, throughSeq } = matches[0]!;
     const call = event.call;
-    if (event.source !== 'mcp' || !receiptTransportHeaderCompatible(call.requestId, input) ||
+    if (input.invocationSha256 !== undefined && call.invocationSha256 !== input.invocationSha256 ||
+        event.source !== 'mcp' || !receiptTransportHeaderCompatible(call.requestId, input) ||
         call.attributionMethod !== 'unattributed' || call.conversationId !== null ||
         call.tool !== input.tool || !isReturnedToolOutcome(call.outcome) ||
         (call.process && !call.process.completedAt)) return false;
@@ -1692,7 +1701,8 @@ export async function attachNativeCoreResultReceipt(input: {
     const transfer = { resultReceiptId: input.resultReceiptId,
       originalSessionId: summary.id, targetSessionId: input.sessionId,
       callId: call.callId, nativeCallMessageId: input.nativeCallMessageId,
-      tool: input.tool, conversationId: input.conversationId, transportRequestId: call.requestId };
+      tool: input.tool, conversationId: input.conversationId, transportRequestId: call.requestId,
+      ...(input.invocationSha256 ? { invocationSha256: input.invocationSha256 } : {}) };
     // An original Core receipt was recorded before a browser owner was known.
     // Sync it before any destructive rewrite and do not silently promote an
     // unsynced copy into the only remaining durable execution record.
@@ -1876,6 +1886,8 @@ export interface ToolCallInput {
   tool: string;
   /** Per-execution server witness for unowned Core calls, never from a caller's arguments. */
   resultReceiptId?: string;
+  /** Frozen internally at Core ingress, before executing the handler. */
+  invocationSha256?: string;
   args: unknown;
   content: readonly ToolContentPart[];
   /** External MCP responses can carry structured results and resource blocks alongside text. */
@@ -2147,6 +2159,8 @@ async function fileToolCall(input: ToolCallInput, target: Target): Promise<ToolC
       if (summary.tone !== 'bad') summary.tone = 'warn';
     }
 
+    const invocationSha256 = input.resultReceiptId
+      ? input.invocationSha256 ?? invocationArgumentsDigest(input.tool, input.args) : null;
     const call: ToolCallRecord = {
       ...(target.attribution === 'request_id' && target.conversationId && evidence.processCompletion && evidence.processSessionId && input.tool === 'exec_command'
         ? { process: { sessionId: evidence.processSessionId } } : {}),
@@ -2154,6 +2168,7 @@ async function fileToolCall(input: ToolCallInput, target: Target): Promise<ToolC
       callId: randomUUID(),
       ...(input.resultReceiptId && (target.attribution === 'unattributed' || target.attribution === 'request_id')
         ? { resultReceiptId: input.resultReceiptId } : {}),
+      ...(invocationSha256 && /^[a-f0-9]{64}$/.test(invocationSha256) ? { invocationSha256 } : {}),
       tool: input.tool,
       attribution: target.attribution,
       requestId: input.requestId ?? null,
@@ -2539,6 +2554,7 @@ export interface PageCallEvidence {
   /** Opaque Core server witness read from this invocation's native result
    * after strict result/parent/tool/link checks. Never a guessed workflow id. */
   resultReceiptId?: string;
+  invocationSha256?: string;
   createTime?: number | null;
 }
 

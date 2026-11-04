@@ -2485,6 +2485,8 @@ export async function readEvents(sessionId: string, options: ReadOptions = {}): 
           !['request_id', 'result_receipt', 'unattributed', 'superseded'].includes(call.attributionMethod) ||
           (call.resultReceiptId !== undefined &&
             (typeof call.resultReceiptId !== 'string' || !/^[a-f0-9]{48}$/.test(call.resultReceiptId))) ||
+          (call.invocationSha256 !== undefined &&
+            (typeof call.invocationSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(call.invocationSha256))) ||
           (call.nativeCallMessageId !== undefined &&
             (typeof call.nativeCallMessageId !== 'string' ||
               call.nativeCallMessageId.length === 0 || call.nativeCallMessageId.length > 200)) ||

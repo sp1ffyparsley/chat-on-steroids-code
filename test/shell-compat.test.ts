@@ -6,6 +6,7 @@
  */
 
 import { promises as fs } from 'node:fs';
+import { createHash, webcrypto } from 'node:crypto';
 import path from 'node:path';
 import { JSDOM } from 'jsdom';
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -88,6 +89,7 @@ interface ShellOptions {
   nativeCallCacheConflict?: boolean;
   nativeAssistantCacheConflict?: boolean;
   nativeCallMutation?: (mapping: Record<string, any>, entry: any) => void;
+  nativeDigestSettled?: () => void;
   identitySightings?: boolean;
   outsideResult?: boolean;
   withExec?: boolean;
@@ -505,6 +507,10 @@ async function shellHarness(options: ShellOptions = {}) {
     pretendToBeVisual: true
   });
   const win = dom.window as any;
+  Object.defineProperty(win.crypto, 'subtle', { value: { digest: async (...args: Parameters<typeof webcrypto.subtle.digest>) => {
+    const digest = await webcrypto.subtle.digest(...args); options.nativeDigestSettled?.(); return digest;
+  } } });
+  win.TextEncoder = TextEncoder;
   if (options.diagnosticLogs) win.console.info = (...args: unknown[]) => options.diagnosticLogs!.push(args.map(String).join(' '));
   const exchange = win.document.getElementById('exchange')!;
   installFiber(exchange, options, primaryEntry);
@@ -2182,6 +2188,129 @@ describe('alternate shell turn/message provenance', () => {
       } finally { page.dom.window.close(); }
     });
 
+  it.each(['exact canonical group', 'pending canonical group', 'pending header mismatch', 'missing system header', 'visible system header', 'foreign header scope',
+    'unfinished execution', 'unfinished execution result', 'foreign retained parent', 'cached conflict',
+    'unselected call', 'missing live branch', 'system accessor'] as const)(
+    'recovers folded native execution ownership from an exact provider group: %s', async variant => {
+      let getterReads = 0;
+      const HEADER = 'native-group-header';
+      const page = await shellHarness({ withCall: true, withExec: true, nativeCallReceipt: true,
+        status: variant.startsWith('pending ') ? 'in_progress' : 'complete',
+        nativeCurrentNode: variant.startsWith('pending ') ? CALL : ASSISTANT,
+        nativeCallLive: variant !== 'missing live branch', nativeCallCacheConflict: variant === 'cached conflict',
+        callCompleted: false, assistantCompleted: false,
+        nativeCallMutation(mapping, entry) {
+          completeExecBeforeCall(mapping, entry);
+          entry.turn.items = entry.turn.items.filter((item: any) => item.callId !== EXEC);
+          delete entry.turn.items.find((item: any) => item.callId === CALL).widgetStateSource;
+          const scope = { request_id: REQUEST, working_turn_id: 'native-group-working', turn_exchange_id: 'native-group-exchange' };
+          mapping[HEADER] = { id: HEADER, parent: USER, message: { id: HEADER, author: { role: 'system' },
+            recipient: 'all', status: 'finished_successfully', content: { content_type: 'text', parts: ['PRIVATE_SYSTEM_TEXT'] },
+            metadata: { ...scope, parent_id: 'retired-header-parent', is_visually_hidden_from_conversation: true,
+              message_type: 'next', rebase_developer_message: false } } };
+          mapping[EXEC].parent = HEADER;
+          mapping[EXEC].message.metadata.parent_id = 'retired-exec-parent';
+          mapping[CALL].parent = EXEC;
+          mapping[CALL].message.metadata.parent_id = EXEC;
+          mapping[EXEC_RESULT].parent = RESULT;
+          mapping[EXEC_RESULT].message.metadata.parent_id = RESULT;
+          mapping[ASSISTANT].parent = EXEC_RESULT;
+          mapping[ASSISTANT].message.metadata.parent_id = EXEC_RESULT;
+          entry.turn.messageIds = [USER, CALL, ASSISTANT];
+          for (const [id, row] of Object.entries(mapping) as [string, any][]) if (id !== USER)
+            Object.assign(row.message.metadata, scope);
+          mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: JSON.stringify({
+            content: [{ type: 'text', text: 'PRIVATE_TOOL_RESULT' }],
+            structuredContent: { cosResultReceipt: { version: 1, id: 'a'.repeat(48) } } }) };
+          if (variant.startsWith('pending ')) { entry.turn.messageIds = [USER, CALL]; mapping[CALL].message.status = 'in_progress'; }
+          if (variant === 'pending header mismatch') mapping[HEADER].message.metadata.working_turn_id = 'foreign';
+          if (variant === 'missing system header') { mapping[EXEC].parent = USER; delete mapping[HEADER]; }
+          if (variant === 'visible system header') mapping[HEADER].message.metadata.is_visually_hidden_from_conversation = false;
+          if (variant === 'foreign header scope') mapping[HEADER].message.metadata.working_turn_id = 'foreign';
+          if (variant === 'unfinished execution') mapping[EXEC].message.status = 'in_progress';
+          if (variant === 'unfinished execution result') mapping[EXEC_RESULT].message.status = 'in_progress';
+          if (variant === 'foreign retained parent') mapping[EXEC].message.metadata.parent_id = USER;
+          if (variant === 'unselected call') entry.turn.messageIds = [USER, ASSISTANT];
+          if (variant === 'system accessor') Object.defineProperty(mapping[HEADER].message.metadata,
+            'is_visually_hidden_from_conversation', { get() { getterReads++; throw new Error('PRIVATE_SYSTEM_GETTER'); } });
+        } });
+      try {
+        const accepted = variant === 'exact canonical group';
+        expect(page.fiber.turns[0].calls[0]).toMatchObject({
+          requestId: accepted || variant === 'pending canonical group' ? REQUEST : null, answered: accepted });
+        if (accepted || variant === 'pending canonical group')
+          expect(page.fiber.turns[0].requests.filter((row: any) => row.requestId === REQUEST)).toEqual([expect.objectContaining({ messageId: EXEC })]);
+        expect(getterReads).toBe(0);
+        expect(JSON.stringify(page.fiber)).not.toMatch(/PRIVATE_SYSTEM_TEXT|PRIVATE_SYSTEM_GETTER|retired-header-parent|retired-exec-parent/);
+      } finally { page.dom.window.close(); }
+    });
+
+  it.each(['exact reordered batch', 'wrong invocation digest', 'duplicate argument owners', 'legacy batch receipts',
+    'foreign result resource', 'pending result', 'duplicate receipt token', 'source changes while hashing', 'arguments change while hashing'] as const)(
+    'binds serialized repeated-tool results only by committed invocation proof: %s', async variant => {
+      const HEADER = 'proof-header', CALL2 = 'proof-call-two', RESULT2 = 'proof-result-two';
+      let liveMapping: any, mutated = false;
+      const digest = (file: string) => createHash('sha256').update(JSON.stringify(['read', { paths: [file] }])).digest('hex');
+      const receipt = (id: string, hash: string) => JSON.stringify({ content: [{ type: 'text', text: 'PRIVATE_RESULT' }],
+        structuredContent: { cosResultReceipt: variant === 'legacy batch receipts' ? { version: 1, id }
+          : { version: 2, id, invocationSha256: hash } } });
+      const page = await shellHarness({ withCall: true, withExec: true, nativeCallReceipt: true,
+        callCompleted: false, assistantCompleted: false,
+        nativeDigestSettled() {
+          if (mutated) return; mutated = true;
+          if (variant === 'source changes while hashing') liveMapping[HEADER].message.metadata.working_turn_id = 'foreign';
+          if (variant === 'arguments change while hashing') liveMapping[CALL].message.metadata.connector_tool_payload = JSON.stringify({ paths: ['changed'] });
+        },
+        nativeCallMutation(mapping, entry) {
+          liveMapping = mapping;
+          completeExecBeforeCall(mapping, entry);
+          entry.turn.items = entry.turn.items.filter((item: any) => item.callId !== EXEC);
+          const call = entry.turn.items.find((item: any) => item.callId === CALL);
+          delete call.widgetStateSource;
+          entry.turn.items.splice(2, 0, { ...call, callId: CALL2 });
+          const scope = { request_id: REQUEST, working_turn_id: 'proof-working', turn_exchange_id: 'proof-exchange' };
+          mapping[HEADER] = { id: HEADER, parent: USER, message: { id: HEADER, author: { role: 'system' }, recipient: 'all',
+            status: 'finished_successfully', metadata: { ...scope, parent_id: 'retired-header',
+              is_visually_hidden_from_conversation: true, message_type: 'next', rebase_developer_message: false } } };
+          mapping[EXEC].parent = HEADER; mapping[EXEC].message.metadata.parent_id = 'retired-execution';
+          mapping[CALL].parent = EXEC; mapping[CALL].message.metadata.parent_id = EXEC;
+          mapping[CALL].message.metadata.connector_tool_payload = JSON.stringify({ paths: ['one'] });
+          mapping[CALL2] = { id: CALL2, parent: CALL, message: { ...mapping[CALL].message, id: CALL2,
+            metadata: { ...scope, parent_id: CALL, connector_tool_payload: JSON.stringify({ paths: [variant === 'duplicate argument owners' ? 'one' : 'two'] }) } } };
+          mapping[RESULT].parent = CALL2;
+          mapping[RESULT].message.metadata.parent_id = CALL2;
+          mapping[RESULT].message.content = { content_type: 'code', language: 'json',
+            text: receipt('a'.repeat(48), variant === 'wrong invocation digest' ? 'f'.repeat(64) : digest('one')) };
+          mapping[RESULT2] = { id: RESULT2, parent: RESULT, message: { ...mapping[RESULT].message, id: RESULT2,
+            metadata: { ...mapping[RESULT].message.metadata, parent_id: RESULT },
+            content: { content_type: 'code', language: 'json', text: receipt(variant === 'duplicate receipt token' ? 'a'.repeat(48) : 'b'.repeat(48), digest('two')) } } };
+          mapping[EXEC_RESULT].parent = RESULT2; mapping[EXEC_RESULT].message.metadata.parent_id = RESULT2;
+          mapping[ASSISTANT].parent = EXEC_RESULT; mapping[ASSISTANT].message.metadata.parent_id = EXEC_RESULT;
+          for (const [id, row] of Object.entries(mapping) as [string, any][]) if (id !== USER) Object.assign(row.message.metadata, scope);
+          entry.turn.messageIds = [USER, CALL, CALL2, ASSISTANT];
+          if (variant === 'foreign result resource') mapping[RESULT].message.metadata.invoked_resource = {
+            app_name: APP, resource_uri: '/' + ASDK + '/link_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/read' };
+          if (variant === 'pending result') mapping[RESULT].message.status = 'in_progress';
+        } });
+      try {
+        if (variant === 'exact reordered batch') expect(page.fiber.turns[0].calls.map((call: any) => call.answered)).toEqual([true, true]);
+        let observed = page.fiber;
+        for (let tries = 0; tries < 8 && !observed.turns[0]?.calls.some((call: any) => call.invocationSha256); tries++) {
+          await new Promise(resolve => setTimeout(resolve, 1));
+          observed = await shellRescan(page, 'proof-scan-' + tries);
+        }
+        const calls = observed.turns[0].calls;
+        const expected = variant === 'exact reordered batch' ? [true, true]
+          : ['wrong invocation digest', 'foreign result resource', 'arguments change while hashing'].includes(variant) ? [false, true] : [false, false];
+        expect(calls.map((call: any) => call.answered)).toEqual(expected);
+        if (variant === 'exact reordered batch') {
+          expect(calls[0]).toMatchObject({ requestId: REQUEST, resultReceiptId: 'a'.repeat(48), invocationSha256: digest('one') });
+          expect(calls[1]).toMatchObject({ requestId: REQUEST, resultReceiptId: 'b'.repeat(48), invocationSha256: digest('two') });
+        }
+        expect(JSON.stringify(observed)).not.toMatch(/PRIVATE_RESULT|connector_tool_payload|"paths"/);
+      } finally { page.dom.window.close(); }
+    });
+
   it.each(['prior execution', 'enclosing execution', 'folded prior execution', 'folded enclosing execution',
     'pending execution', 'pending execution result',
     'foreign execution scope', 'wrong execution parent', 'foreign typed execution', 'untyped execution',
@@ -3264,7 +3393,7 @@ describe('alternate shell turn/message provenance', () => {
       });
       expect(page.exchange.getAttribute('data-clf-fiber-v2-turn')).toBe('shell-scan:0');
       expect(page.fiber.shellScan).toEqual({
-        reader: { fiberWire: 18, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
+        reader: { fiberWire: 19, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
         selectorMatches: 1,
         mapped: 1,
         rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
@@ -3290,7 +3419,7 @@ describe('alternate shell turn/message provenance', () => {
       });
       expect(page.exchange.getAttribute('data-clf-fiber-v2-turn')).toBe('shell-scan:0');
       expect(page.fiber.shellScan).toEqual({
-        reader: { fiberWire: 18, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
+        reader: { fiberWire: 19, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
         selectorMatches: 1,
         mapped: 1,
         rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
@@ -3310,7 +3439,7 @@ describe('alternate shell turn/message provenance', () => {
       expect(page.fiber.turns).toHaveLength(1);
       expect(page.fiber.turns[0]).toMatchObject({ turnId: TURN, endMessageId: ASSISTANT });
       expect(page.fiber.shellScan).toEqual({
-        reader: { fiberWire: 18, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
+        reader: { fiberWire: 19, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
         selectorMatches: 1,
         mapped: 1,
         rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
@@ -3330,7 +3459,7 @@ describe('alternate shell turn/message provenance', () => {
       expect(page.fiber.turns).toEqual([]);
       expect(page.exchange.hasAttribute('data-clf-fiber-v2-turn')).toBe(false);
       expect(page.fiber.shellScan).toEqual({
-        reader: { fiberWire: 18, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
+        reader: { fiberWire: 19, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
         selectorMatches: 1,
         mapped: 0,
         rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
@@ -3358,7 +3487,7 @@ describe('alternate shell turn/message provenance', () => {
         expect(page.exchange.getAttribute('data-clf-fiber-v2-turn')).toBe('shell-scan:0');
         expect(page.secondExchange?.hasAttribute('data-clf-fiber-v2-turn')).toBe(secondStamped);
         expect(page.fiber.shellScan).toEqual({
-        reader: { fiberWire: 18, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
+        reader: { fiberWire: 19, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
           selectorMatches: 2,
           mapped,
           rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,

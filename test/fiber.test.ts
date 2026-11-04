@@ -509,8 +509,8 @@ describe('reading a row out of the page', () => {
 
   it('keeps the version it was built for on the reply', async () => {
     const { version, rows } = await scan([row([request('req-1', 'read_file')])]);
-    expect(version).toBe(18);
-    expect(rows[0]!.v).toBe(18);
+    expect(version).toBe(19);
+    expect(rows[0]!.v).toBe(19);
   });
   it('counts only TobisComputer requests in the complete turn, not api_tool metadata calls', async () => {
     const mine1 = request('req-1', 'read_file');
@@ -1672,7 +1672,7 @@ describe('what may leave the page', () => {
     ]);
     expect(turns[0]!.calls[0]).not.toHaveProperty('resultReceiptId');
   });
-  it('exports a Core-owned committed result witness only for its exact native result parent, not a workflow sibling or private payload', async () => {
+  it.each([1, 2])('exports a Core-owned committed result witness only for its exact native result parent, not a workflow sibling or private payload (v%s)', async version => {
     const witness = 'ab'.repeat(24);
     const first = request('native-one', 'read');
     const sibling = request('native-two', 'read');
@@ -1680,7 +1680,7 @@ describe('what may leave the page', () => {
     result.author.name = 'api_tool.call_tool';
     result.content!.text = JSON.stringify({
       content: [{ type: 'text', text: 'Private tool output must stay on the page.' }],
-      structuredContent: { cosResultReceipt: { version: 1, id: witness },
+      structuredContent: { cosResultReceipt: { version, id: witness, ...(version === 2 ? { invocationSha256: 'c'.repeat(64) } : {}) },
         args: { authorization: 'private-result-auth-sentinel', access_token: 'private-result-token-sentinel' } }
     });
     const messages = [first, sibling, result];
@@ -1689,7 +1689,8 @@ describe('what may leave the page', () => {
     const calls = turns[0]?.calls ?? [];
     expect(calls).toMatchObject([
       { messageId: 'native-one', answered: false },
-      { messageId: 'native-two', answered: true, resultReceiptId: witness }
+      { messageId: 'native-two', answered: true, resultReceiptId: witness,
+        ...(version === 2 ? { invocationSha256: 'c'.repeat(64) } : {}) }
     ]);
     expect(calls[0]).not.toHaveProperty('resultReceiptId');
     expect(JSON.stringify(turns)).not.toContain('Private tool output');

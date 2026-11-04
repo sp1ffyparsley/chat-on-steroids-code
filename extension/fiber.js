@@ -40,7 +40,7 @@
   'use strict';
 
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
-  const VERSION = 18;
+  const VERSION = 19;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -1383,7 +1383,7 @@
    * installed provider proves preservation of one of the exact carriers.
    * Nothing except this bounded opaque witness may leave this page context.
    */
-  function coreResultReceipt(message, shapes = null) {
+  function coreResultReceipt(message, shapes = null, proof = null) {
     // Fixed reason counts stay in the existing bounded diagnostic lane. They
     // are observations of this reader, not a claim that the provider dropped data.
     const decline = reason => { if (shapes) shapes[reason]++; return null; };
@@ -1409,8 +1409,14 @@
       if (!value || typeof value !== 'object' || Array.isArray(value) ||
           (value.isError !== undefined && typeof value.isError !== 'boolean')) return decline('envelope');
       const validReceipt = receipt => receipt && typeof receipt === 'object' && !Array.isArray(receipt) &&
-        receipt.version === 1 && typeof receipt.id === 'string' &&
-        /^[a-f0-9]{48}$/.test(receipt.id) && Object.keys(receipt).length === 2;
+        typeof receipt.id === 'string' && /^[a-f0-9]{48}$/.test(receipt.id) &&
+        (receipt.version === 1 && Object.keys(receipt).length === 2 ||
+          receipt.version === 2 && Object.keys(receipt).length === 3 &&
+          typeof receipt.invocationSha256 === 'string' && /^[a-f0-9]{64}$/.test(receipt.invocationSha256));
+      const remember = receipt => {
+        if (proof && receipt?.version === 2) proof.invocationSha256 = receipt.invocationSha256;
+        return receipt.id;
+      };
       // ChatGPT also serializes structuredContent directly into the native JSON
       // result. The reserved root field is server-authored after durable commit.
       // Require the positively finished provider message and reject competing
@@ -1420,7 +1426,7 @@
             own.call(value, 'content') || own.call(value, 'structuredContent') ||
             !validReceipt(value.cosResultReceipt)) return decline('receipt');
         if (shapes) shapes.valid++;
-        return value.cosResultReceipt.id;
+        return remember(value.cosResultReceipt);
       }
       // Otherwise require the outer MCP CallToolResult. Never recursively parse
       // tool text, content.parts or nested JSON envelopes.
@@ -1428,13 +1434,14 @@
           value.content.some(part => !part || typeof part !== 'object' ||
             typeof part.type !== 'string' ||
             !['text', 'image', 'audio', 'resource', 'resource_link'].includes(part.type))) return decline('envelope');
-      let structuredId = null, resourceId = null;
+      let structuredId = null, resourceId = null, structuredReceipt = null;
       if (own.call(value, 'structuredContent')) {
         if (!value.structuredContent || typeof value.structuredContent !== 'object' ||
             Array.isArray(value.structuredContent)) return decline('structured');
         if (own.call(value.structuredContent, 'cosResultReceipt')) {
           if (!validReceipt(value.structuredContent.cosResultReceipt)) return decline('receipt');
-          structuredId = value.structuredContent.cosResultReceipt.id;
+          structuredReceipt = value.structuredContent.cosResultReceipt;
+          structuredId = structuredReceipt.id;
         }
       }
       for (const part of value.content) {
@@ -1450,7 +1457,7 @@
             !reservedUri || !reservedMime || typeof resource.text !== 'string' || resource.text.length > 128)
           return decline('receipt');
         const receipt = JSON.parse(resource.text);
-        if (!validReceipt(receipt) || resource.uri !== 'urn:cos:result-receipt:v1:' + receipt.id)
+        if (!validReceipt(receipt) || receipt.version !== 1 || resource.uri !== 'urn:cos:result-receipt:v1:' + receipt.id)
           return decline('receipt');
         resourceId = receipt.id;
       }
@@ -1458,11 +1465,53 @@
       const receiptId = structuredId || resourceId;
       if (!receiptId) return decline(own.call(value, 'structuredContent') ? 'receipt' : 'structured');
       if (shapes) shapes.valid++;
+      if (structuredReceipt) remember(structuredReceipt);
       return receiptId;
     } catch {
       return decline('json');
     }
   }
+  // The native batch graph orders messages, not individual repeated-tool results.
+  // Hash only its complete original connector arguments with the browser's native
+  // SHA-256. No argument/body leaves MAIN. Pending/unsupported hashing holds the
+  // existing scan; normal observer scans can consume the completed immutable key.
+  const nativeInvocationDigests = new WeakMap();
+  let nativeDigestJobs = null;
+  function nativeInvocationDigest(message, tool) {
+    const ownValue = (object, key) => object && typeof object === 'object'
+      ? Object.getOwnPropertyDescriptor(object, key)?.value : undefined;
+    const payload = ownValue(ownValue(message, 'metadata'), 'connector_tool_payload');
+    if (typeof payload !== 'string' || payload.length > 512 * 1024 || !NAME.test(tool)) return null;
+    const cached = nativeInvocationDigests.get(message);
+    if (cached && cached.payload === payload && cached.tool === tool) {
+      if (cached.pending) nativeDigestJobs?.add(cached.pending);
+      return cached.digest;
+    }
+    const entry = { payload, tool, digest: null };
+    nativeInvocationDigests.set(message, entry);
+    try {
+      let budget = 20_000;
+      const normalize = (value, depth) => {
+        if (--budget < 0 || depth > 32) throw new Error('Invocation proof budget exceeded');
+        if (value === null || typeof value === 'boolean' || typeof value === 'string') return value;
+        if (typeof value === 'number' && Number.isFinite(value)) return value;
+        if (!value || typeof value !== 'object') throw new Error('Unsupported invocation proof');
+        if (Array.isArray(value)) return value.map(item => normalize(item, depth + 1));
+        const result = Object.create(null);
+        for (const key of Object.keys(value).sort()) result[key] = normalize(value[key], depth + 1);
+        return result;
+      };
+      const canonical = JSON.stringify([tool, normalize(JSON.parse(payload), 0)]);
+      const bytes = new TextEncoder().encode(canonical);
+      if (bytes.length > 512 * 1024 || !crypto?.subtle?.digest) return null;
+      entry.pending = crypto.subtle.digest('SHA-256', bytes).then(value => {
+        entry.digest = [...new Uint8Array(value)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+      }, () => { /* Failed proof remains unavailable; no weak hash or retry owner. */ }).finally(() => { entry.pending = null; });
+      nativeDigestJobs?.add(entry.pending);
+    } catch { /* Truncated/malformed arguments never become an identity digest. */ }
+    return null;
+  }
+
   /** Exact number of this app's own invocations represented by the whole turn, or null. */
   function localCountOf(messages) {
     if (!Array.isArray(messages)) return null;
@@ -1618,7 +1667,7 @@
    * parent id is chronology, not proof that the enclosing native result reached ChatGPT. Resolve
    * that exact enclosing call without exporting code, arguments, output, or other page objects.
    */
-  function codeModeReceipts(messages, anchoredNarration = null, admittedExecutions = null) {
+  function codeModeReceipts(messages, anchoredNarration = null, admittedExecutions = null, canonicalParents = null) {
     const byId = new Map();
     for (const message of messages) {
       const id = str(message && message.id);
@@ -1653,7 +1702,7 @@
             (role === 'tool' && cursor.recipient === 'all' &&
               (cursor.author.name === 'api_tool.call_tool' || cursor.author.name === 'functions.exec')))) break;
         trail.push(cursor);
-        cursor = byId.get(str(cursor.metadata && cursor.metadata.parent_id));
+        cursor = byId.get(canonicalParents ? canonicalParents.get(id) : str(cursor.metadata && cursor.metadata.parent_id));
       }
       for (let index = trail.length - 1; index >= 0; index--) {
         if (owner) owner = { ...owner, valid: owner.valid && scope(trail[index]) === owner.scope };
@@ -1715,7 +1764,7 @@
     const seen = new Set();
     const answered = new Set();
     const unfinishedResults = new Set();
-    const receipts = new Map(), requests = new Map();
+    const receipts = new Map(), invocationDigests = new Map(), requests = new Map();
     const conflictingResultParents = conflictingCoreResultParents(messages);
     for (const message of messages) {
       const call = requestOf(message);
@@ -1766,9 +1815,11 @@
               /^[a-z0-9_-]{1,100}$/i.test(request.value)) asked.requestId = request.value;
         }
       }
-      const receipt = coreResultReceipt(message);
-      if (receipt && !conflictingResultParents.has(parent))
+      const proof = {}, receipt = coreResultReceipt(message, null, proof);
+      if (receipt && !conflictingResultParents.has(parent)) {
         receipts.set(parent, receipts.has(parent) ? null : receipt);
+        if (proof.invocationSha256) invocationDigests.set(parent, proof.invocationSha256);
+      }
     }
 
     const duplicated = new Set();
@@ -1800,7 +1851,8 @@
         // is a poll tick and jitters per tab; these are the only values on either side that
         // say which request this is and when it was actually issued.
         requestId: request.requestId || (hasResult ? requests.get(id)?.requestId : null) || null,
-        ...(hasResult && receipts.get(id) ? { resultReceiptId: receipts.get(id) } : {}),
+        ...(hasResult && receipts.get(id) ? { resultReceiptId: receipts.get(id),
+          ...(invocationDigests.has(id) ? { invocationSha256: invocationDigests.get(id) } : {}) } : {}),
         createTime: request.createTime
       });
     }
@@ -2123,7 +2175,7 @@
     if (!mapping || typeof mapping !== 'object') return noMetadata('callLiveMappingMissing');
     const selected = new Set(ids), invocationIds = new Set(), unprovedInvocations = new Set(), sourceCounts = new Map();
     const currentPath = shellCurrentPath(live, entry), currentIds = new Set(currentPath), completed = new Set();
-    const resultReceipts = new Map();
+    const resultReceipts = new Map(), resultInvocationDigests = new Map();
     for (const reference of shell.callSources.values()) if (reference.id)
       sourceCounts.set(reference.id, (sourceCounts.get(reference.id) || 0) + 1);
     const nativeField = (object, key) => {
@@ -2132,7 +2184,8 @@
       return descriptor && own.call(descriptor, 'value') ? descriptor.value : undefined;
     };
     const messageAt = id => {
-      const node = id && Object.getOwnPropertyDescriptor(mapping, id)?.value;
+      if (typeof id !== 'string' || !id) return null;
+      const node = Object.getOwnPropertyDescriptor(mapping, id)?.value;
       return node?.id === id && node.message?.id === id ? node.message : null;
     };
     // Diagnose the selected provider invocation independently of its widget/result.
@@ -2304,7 +2357,8 @@
       if (hasUserScope && (!working || !exchange ||
           nativeField(nativeField(nativeUser, 'author'), 'role') !== 'user'))
         return refuse('nativeScopeBranchConflict');
-      if (!hasUserScope && entry.turn.status !== 'complete') {
+      if (!hasUserScope && entry.turn.status !== 'complete' &&
+          nativeField(nativeField(messageAt(currentPath[1]), 'author'), 'role') !== 'system') {
         prerequisite('nativeAnchorTurnIncomplete'); return refuse('nativeScopeTurnIncomplete');
       }
       if (!currentPath.length) {
@@ -2312,6 +2366,89 @@
       }
       if (currentPath[0] !== typedUserId) {
         prerequisite('nativeAnchorUserPathMismatch'); return refuse('nativeScopePathUnproved');
+      }
+      // The provider's grouped execution shell can omit every typed exec item and
+      // retain pre-rebase metadata parents. Its live canonical graph is a separate
+      // source of ancestry, never a reason to overwrite those retained metadata.
+      // Admit that representation only under its exact hidden native turn header,
+      // original selected user, independently mounted terminal final and complete
+      // closed execution groups. A conflicting parent still present in the graph,
+      // foreign cached edge, missing typed Core call or unfinished group refuses it.
+      const header = messageAt(currentPath[1]);
+      if (nativeField(nativeField(header, 'author'), 'role') === 'system') {
+        try {
+          const headerMeta = nativeField(header, 'metadata');
+          const headerWorking = str(nativeField(headerMeta, 'working_turn_id'));
+          const headerExchange = str(nativeField(headerMeta, 'turn_exchange_id'));
+          if (!headerWorking || !headerExchange || hasUserScope && (working !== headerWorking || exchange !== headerExchange) ||
+              nativeField(header, 'recipient') !== 'all' || nativeField(header, 'status') !== 'finished_successfully' ||
+              nativeField(headerMeta, 'is_visually_hidden_from_conversation') !== true ||
+              nativeField(headerMeta, 'message_type') !== 'next' || nativeField(headerMeta, 'rebase_developer_message') !== false)
+            return refuse('nativeScopeBranchConflict');
+          working = headerWorking; exchange = headerExchange;
+          const pending = entry.turn.status === 'in_progress';
+          if (!pending) {
+            if (entry.turn.status !== 'complete') return refuse('nativeScopeTurnIncomplete');
+            const finals = entry.turn.items.filter(item => item?.type === 'assistant-message' && item.phase === 'final_answer');
+            const finalId = finals.length === 1 ? str(finals[0].messageId) : null;
+            const terminal = finalId && shellProviderTerminalAt(mapping, finalId);
+            if (!finalId || currentPath.at(-1) !== finalId || !terminal || shellItemText(finals[0]) !== terminal.text)
+              return refuse('nativeScopeFinalReceiptUnproved');
+            const finalMeta = nativeField(messageAt(finalId), 'metadata');
+            if (str(nativeField(finalMeta, 'working_turn_id')) !== working || str(nativeField(finalMeta, 'turn_exchange_id')) !== exchange)
+              return refuse('nativeScopeBranchConflict');
+          }
+          const canonicalParents = new Map(), executionIds = new Set(), nativeCalls = new Set(), executionGroups = new Map(), receiptIds = new Set();
+          let execution = null;
+          for (let at = 1; at < currentPath.length; at++) {
+            const id = currentPath[at], node = nativeField(mapping, id), message = nativeField(node, 'message');
+            const author = nativeField(message, 'author'), metadata = nativeField(message, 'metadata');
+            const role = nativeField(author, 'role'), recipient = nativeField(message, 'recipient');
+            const parent = nativeField(node, 'parent'), retainedParent = str(nativeField(metadata, 'parent_id'));
+            if (nativeField(node, 'id') !== id || nativeField(message, 'id') !== id || parent !== currentPath[at - 1] ||
+                !retainedParent || retainedParent !== parent && own.call(mapping, retainedParent) ||
+                str(nativeField(metadata, 'working_turn_id')) !== working || str(nativeField(metadata, 'turn_exchange_id')) !== exchange ||
+                !(nativeField(message, 'status') === 'finished_successfully' || pending && role === 'assistant' &&
+                  nativeField(message, 'status') === 'in_progress')) return refuse('nativeScopeBranchConflict');
+            const cachedNode = nativeField(nativeField(data, 'mapping'), id);
+            if (cachedNode && cachedNode !== node) {
+              const cachedMessage = nativeField(cachedNode, 'message'), cachedMeta = nativeField(cachedMessage, 'metadata');
+              if (nativeField(cachedNode, 'id') !== id || nativeField(cachedMessage, 'id') !== id ||
+                  nativeField(cachedNode, 'parent') !== parent || ['parent_id', 'working_turn_id', 'turn_exchange_id', 'request_id'].some(key =>
+                    nativeField(cachedMeta, key) !== nativeField(metadata, key))) return refuse('nativeScopeCacheConflict');
+            }
+            canonicalParents.set(id, parent);
+            if (at === 1) { if (role !== 'system') return refuse('nativeScopeBranchConflict'); continue; }
+            if (role === 'assistant' && recipient === 'functions.exec') {
+              const request = str(nativeField(metadata, 'request_id'));
+              if (execution || !request) return refuse('nativeScopeBranchConflict');
+              execution = { id, request, calls: [], results: [], closed: false }; executionIds.add(id);
+            } else if (role === 'tool' && nativeField(author, 'name') === 'functions.exec' && recipient === 'all') {
+              if (!execution || str(nativeField(metadata, 'request_id')) !== execution.request ||
+                  execution.calls.length !== execution.results.length) return refuse('nativeScopeBranchConflict');
+              execution.closed = true; execution = null;
+            } else if (role === 'assistant' && recipient === 'api_tool.call_tool') {
+              const call = shell.calls.find(call => call.messageId === id), path = nativeRequestPath(message);
+              const server = ownServerName(shell.callSources.get(id)?.server);
+              if (!execution || !selected.has(id) || !call || !path || !server || !ourPath(path) ||
+                  !nativeRequestServerMatches(path, server) || toolName(path) !== call.tool ||
+                  str(nativeField(metadata, 'request_id')) !== execution.request) return refuse('nativeScopeBranchConflict');
+              nativeCalls.add(id); execution.calls.push(id); executionGroups.set(id, execution);
+            } else if (role === 'tool' && nativeField(author, 'name') === 'api_tool.call_tool' && recipient === 'all') {
+              const resource = nativeField(metadata, 'invoked_resource');
+              if (!execution || str(nativeField(metadata, 'request_id')) !== execution.request || !coreResultReceipt(message) ||
+                  !ownResult({ app: str(nativeField(resource, 'app_name')), resource: str(nativeField(resource, 'resource_uri')) }))
+                return refuse('nativeScopeBranchConflict');
+              const receiptId = coreResultReceipt(message);
+              if (receiptIds.has(receiptId)) return refuse('nativeScopeBranchConflict');
+              receiptIds.add(receiptId); execution.results.push(id);
+            } else if (!(role === 'assistant' && recipient === 'all')) return refuse('nativeScopeBranchConflict');
+          }
+          if (execution && !pending || !executionIds.size || nativeCalls.size !== shell.calls.length ||
+              shell.calls.some(call => !nativeCalls.has(call.messageId)) || ids.some(id => !currentIds.has(id)))
+            return refuse('nativeScopePathUnproved');
+          return { working, exchange, canonicalParents, executionIds, executionGroups };
+        } catch { return refuse('nativeScopeUnsupported'); }
       }
       if (!currentPath.every(id => selected.has(id) || nativeNarration(id) || stagedResultMembers.has(id) || stagedExecutionMembers.has(id))) {
         // Diagnose the first refused member without exporting its ID, text, tool
@@ -2370,7 +2507,7 @@
     })();
     const expectedWorkingTurn = mountedNativeScope?.working || shell.turnId;
     const expectedTurnExchange = mountedNativeScope?.exchange || typedUserId;
-    const typedExecIds = new Set(shell.executionIds);
+    const typedExecIds = new Set([...shell.executionIds, ...(mountedNativeScope?.executionIds ?? [])]);
     // Per-scan, bounded reason counts for the existing result-reference diagnostic. These
     // values are fixed enum names/counts only; the native IDs stay local to this scan.
     const identityRefusalReasons = {
@@ -2481,6 +2618,12 @@
         if (workingTurn !== expectedWorkingTurn) scopeReasons.push(workingTurn ? 'workingTurnMismatch' : 'workingTurnMissing');
         if (turnExchange !== expectedTurnExchange) scopeReasons.push(turnExchange ? 'turnExchangeMismatch' : 'turnExchangeMissing');
         if (scopeReasons.length) return refuse('callIdentityScopeUnproved', scopeReasons);
+        if (mountedNativeScope?.canonicalParents) {
+          // Every edge and typed Core member of this exact branch was checked
+          // above. This publishes workflow identity only, never a result pair.
+          shellDiagnostic(rejects, 'callIdentityRecovered');
+          return true;
+        }
         // Later calls can follow a *previous* native tool result, whose parent is
         // its own invocation. This does not establish either call's completion: it
         // establishes only that the new call belongs to the same exact user turn.
@@ -2578,7 +2721,7 @@
     // Only the exact terminally anchored mounted branch may carry narration
     // between Code Mode parents. The receipt still checks the full owner scope.
     const codeReceipts = codeModeReceipts(currentPath.map(messageAt),
-      mountedNativeScope ? nativeNarration : null);
+      mountedNativeScope ? nativeNarration : null, null, mountedNativeScope?.canonicalParents ?? null);
     const conflictingResultParents = conflictingCoreResultParents(currentPath.map(messageAt));
     const codeContexts = new Map(), openExecutions = [];
     let codeParentsCoherent = true;
@@ -2587,7 +2730,8 @@
       const asked = message?.author?.role === 'assistant' && message.recipient === 'functions.exec';
       const returned = message?.author?.role === 'tool' && message.author.name === 'functions.exec' && message.recipient === 'all';
       if (asked || returned) codeParentsCoherent = codeParentsCoherent &&
-        !!str(node.parent) && str(message.metadata?.parent_id) === node.parent;
+        !!str(node.parent) && (mountedNativeScope?.canonicalParents
+          ? mountedNativeScope.canonicalParents.get(id) === node.parent : str(message.metadata?.parent_id) === node.parent);
       if (asked) openExecutions.push(id);
       // Only a concretely received enclosing result before the child can close this
       // structural context. Unknown intermediates or conflicting scopes do not make
@@ -2678,12 +2822,38 @@
       } catch { /* Optional diagnostics cannot change completion or inspect an unsupported getter. */ }
     };
     // A folded widget can omit its result pointer after the provider committed the result.
+    const fingerprintedPairs = new Map();
+    if (mountedNativeScope?.executionGroups) for (const call of shell.calls) {
+      const group = mountedNativeScope.executionGroups.get(call.messageId);
+      const digest = group && nativeInvocationDigest(messageAt(call.messageId), call.tool);
+      if (!group?.closed || !digest || group.calls.filter(id => {
+        const member = shell.calls.find(call => call.messageId === id);
+        return member && nativeInvocationDigest(messageAt(id), member.tool) === digest;
+      }).length !== 1) continue;
+      const reference = shell.callSources.get(call.messageId), invocation = messageAt(call.messageId);
+      const path = nativeRequestPath(invocation), server = ownServerName(reference?.server);
+      const candidates = group.results.filter(id => {
+        const result = messageAt(id), proof = {}, resource = resultOf(result);
+        if (!coreResultReceipt(result, null, proof) || proof.invocationSha256 !== digest || !path || !server || !resource)
+          return false;
+        return ownResult(resource) && ownServerName(resource.app) === server && toolName(resource.resource) === call.tool &&
+          linkIdOf(path) && linkIdOf(path) === linkIdOf(resource.resource) &&
+          (!appIdOf(path) || appIdOf(path) === appIdOf(resource.resource));
+      });
+      if (!reference || candidates.length !== 1 || reference.id && reference.id !== candidates[0] ||
+          (!reference.id && sourceCounts.has(candidates[0])) || !unreferencedInvocation(call)) continue;
+      reference.id = candidates[0];
+      sourceCounts.set(reference.id, 1); selected.add(reference.id);
+      fingerprintedPairs.set(call.messageId, { resultId: reference.id, digest });
+    }
     // Recover only a single actual child of this exact invocation on the complete mounted
     // question path. This supplies a pointer to the SAME conjunction below, never completion
     // by request id, tool name, neighboring prose or a scan of unrelated cached branches.
     for (const call of missingReferenceCalls) {
       const reference = shell.callSources.get(call.messageId);
       const children = resultChildrenByParent.get(call.messageId);
+      // A serialized multi-call batch's first result parent is chronology only.
+      if ((mountedNativeScope?.executionGroups?.get(call.messageId)?.calls.length ?? 0) > 1) continue;
       if (!reference || reference.id || children?.length !== 1 || sourceCounts.has(children[0])) continue;
       // An absent widget is a stronger uncertainty than an omitted completion flag. Require
       // the existing post-commit opaque witness too; Main still owns its durable validation.
@@ -2733,8 +2903,12 @@
         server && resource && ownResult(resource) && sameNativeApp && path && ourPath(path) &&
         serverName(resource.app) === server && toolName(resource.resource) === call.tool &&
         linkIdOf(path) && linkIdOf(path) === linkIdOf(resource.resource) &&
-        resultNode.parent === call.messageId && str(result.metadata?.parent_id) === call.messageId &&
-        invocationNode.parent && str(invocation.metadata?.parent_id) === invocationNode.parent &&
+        (fingerprintedPairs.get(call.messageId)?.resultId === reference.id ||
+          (mountedNativeScope?.executionGroups?.get(call.messageId)?.calls.length ?? 0) <= 1 &&
+          resultNode.parent === call.messageId && str(result.metadata?.parent_id) === call.messageId) &&
+        invocationNode.parent && (mountedNativeScope?.canonicalParents
+          ? mountedNativeScope.canonicalParents.get(call.messageId) === invocationNode.parent
+          : str(invocation.metadata?.parent_id) === invocationNode.parent) &&
         ['request_id', 'working_turn_id', 'turn_exchange_id'].every(key =>
           str(invocation.metadata?.[key]) && invocation.metadata[key] === result.metadata?.[key]) &&
         codeParentsCoherent && enclosing.every(id => codeReceipts.get(id) === true) &&
@@ -2752,7 +2926,11 @@
         const nativeReceipt = exactFinishedReceipt ? coreResultReceipt(result) : null;
         if ((completionReasons.get(call.messageId) !== 'callCompletionVeto' || reference.completionRecoverable) &&
             exactFinishedReceipt) {
-          if (nativeReceipt) resultReceipts.set(call.messageId, nativeReceipt);
+          if (nativeReceipt) {
+            resultReceipts.set(call.messageId, nativeReceipt);
+            const proof = {}; coreResultReceipt(result, null, proof);
+            if (proof.invocationSha256) resultInvocationDigests.set(call.messageId, proof.invocationSha256);
+          }
         }
       if (completionReasons.get(call.messageId) === 'callCompletionVeto') {
         if (dataFields(invocation, ['status', 'recipient', 'metadata']) && dataFields(result, ['status', 'author', 'recipient', 'metadata']) &&
@@ -2810,7 +2988,11 @@
     // Once the exact native branch is independently anchored, use its chronology
     // first. A folded execution must not change a shared workflow request's
     // original parent from functions.exec to its first rendered child.
-    for (const id of new Set([...(mountedNativeScope ? currentPath : []), ...ids, ...invocationIds, ...shellCurrentPath(live, entry)])) {
+    const originalRequestOrder = mountedNativeScope?.canonicalParents ? currentPath.filter(id => {
+      const message = messageAt(id);
+      return message?.author?.role === 'assistant' && ['functions.exec', 'api_tool.call_tool'].includes(message.recipient);
+    }) : currentPath;
+    for (const id of new Set([...(mountedNativeScope ? originalRequestOrder : []), ...ids, ...invocationIds, ...shellCurrentPath(live, entry)])) {
       // A selected native ID can precede its widget. Selection proves which
       // native row exists, not that the row belongs to this typed user: keep
       // its request key private until the same ancestry proof that admits the
@@ -2849,6 +3031,7 @@
       if (completed.has(call.messageId)) call.answered = true;
       // Publish neither completion nor its staged witness if a later mapping/cache check refuses.
       if (resultReceipts.has(call.messageId)) call.resultReceiptId = resultReceipts.get(call.messageId);
+      if (resultInvocationDigests.has(call.messageId)) call.invocationSha256 = resultInvocationDigests.get(call.messageId);
     }
     report();
     return out;
@@ -3414,7 +3597,10 @@
    * agree on which descriptor belongs to which row without relying on both querying the
    * DOM at the same instant — React can re-render between the two.
    */
-  function scan(nonce) {
+  function scan(nonce, afterDigest = false) {
+    const previousJobs = nativeDigestJobs, digestJobs = new Set();
+    nativeDigestJobs = digestJobs;
+    try {
     // The existing scan also refreshes mounted-picker evidence; no new poll timer.
     try { pickerSnapshot(); } catch { /* An unknown picker cannot affect recording. */ }
     // The request nonce already uniquely names this scan across the two worlds. Reuse it as
@@ -3515,7 +3701,23 @@
       scanOk = false;
     }
     shellScan.reader = { fiberWire: VERSION, fiberKeys: Object.keys(shellScan.rejects).length };
+    if (digestJobs.size && !afterDigest) {
+      // Do not publish a provisional final and depend on a later UI mutation to
+      // rerun it. The original reader request already owns the bounded timeout.
+      // After native hashing, re-read every source/epoch/parent field, not the
+      // pre-await descriptor. A replaced helper may never publish this reply.
+      void Promise.allSettled([...digestJobs]).then(() => {
+        if (window[ACTIVE_HELPER]?.listener !== listener) return;
+        const previousPaths = currentPaths;
+        currentPaths = new WeakMap();
+        try { scan(nonce, true); }
+        catch { post({ source: REPLY, nonce, scanToken: nonce, v: VERSION, scanOk: false, rows: [], turns: [] }, location.origin); }
+        finally { currentPaths = previousPaths; }
+      });
+      return;
+    }
     post({ source: REPLY, nonce, scanToken, v: VERSION, scanOk, rows, turns, shellScan }, location.origin);
+    } finally { nativeDigestJobs = previousJobs; }
   }
 
   /** Picker data is account-evaluated state, never a scraped English announcement.

@@ -26,8 +26,46 @@
  * landed in Unattributed activity. First proof wins, and it keeps winning.
  */
 
+import { createHash } from 'node:crypto';
 import { readDurableStrict, writeDurableNow, writeDurableSnapshotSoon } from '../durable.js';
 import { indexedSessions, readRecentEvents } from './store.js';
+
+/** Canonical JSON invocation identity; only the digest crosses the browser bridge.
+ * Refuse unsupported/oversized values rather than truncate a supposedly exact proof. */
+export function invocationArgumentsDigest(tool: string, args: unknown): string | null {
+  if (!/^[a-z0-9_.-]{1,64}$/i.test(tool)) return null;
+  let budget = 20_000;
+  const active = new Set<object>();
+  const normalize = (value: unknown, depth: number): unknown => {
+    if (--budget < 0 || depth > 32) throw new Error('Invocation proof budget exceeded');
+    if (value === null || typeof value === 'boolean' || typeof value === 'string') return value;
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (!value || typeof value !== 'object' || active.has(value)) throw new Error('Unsupported invocation proof');
+    active.add(value);
+    try {
+      if (Array.isArray(value) && value.length > budget) throw new Error('Invocation array budget exceeded');
+      if (Array.isArray(value)) return Array.from({ length: value.length }, (_, index) => {
+        const field = Object.getOwnPropertyDescriptor(value, String(index));
+        if (!field || !('value' in field)) throw new Error('Unsupported invocation array');
+        return normalize(field.value, depth + 1);
+      });
+      const proto = Object.getPrototypeOf(value);
+      if (proto !== Object.prototype && proto !== null) throw new Error('Unsupported invocation object');
+      const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+      for (const key of Object.keys(value).sort()) {
+        const field = Object.getOwnPropertyDescriptor(value, key);
+        if (!field || !('value' in field)) throw new Error('Unsupported invocation field');
+        result[key] = normalize(field.value, depth + 1);
+      }
+      return result;
+    } finally { active.delete(value); }
+  };
+  try {
+    const canonical = JSON.stringify([tool, normalize(args, 0)]);
+    if (Buffer.byteLength(canonical, 'utf8') > 512 * 1024) return null;
+    return createHash('sha256').update(canonical, 'utf8').digest('hex');
+  } catch { return null; }
+}
 
 export interface RequestCorrelation {
   requestId: string;

@@ -194,23 +194,26 @@ const excludeFolderPattern = z
 
 const unifiedExecOutputSchema = z
   .object({
-    chunk_id: z.string().optional().describe('Output chunk identifier.'),
-    wall_time_seconds: z.number().describe('Seconds spent waiting for output.'),
-    exit_code: z.number().optional().describe('Process exit code when the command finished during this call.'),
+    chunk_id: z.string().optional().describe('Output chunk ID.'),
+    wall_time_seconds: z.number().describe('Seconds waiting for output.'),
+    exit_code: z.number().optional().describe('Exit code, if the process finished in this call.'),
     session_id: z
       .number()
       .optional()
-      .describe('Session identifier to pass to write_stdin when the process is still running.'),
-    original_token_count: z.number().optional().describe('Approximate token count before output truncation.'),
-    output: z.string().describe('Command output text, possibly truncated.'),
+      .describe('Use with write_stdin while the process is running.'),
+    original_token_count: z.number().optional().describe('Estimated tokens before truncation.'),
+    output: z.string().describe('Command output; may be truncated.'),
     supplemental_context: z.string().optional().describe('App context, not process output.'),
     // Dispatch adds this only after the original headerless Core result is durably
     // recorded. Declare its exact shape so SDK output validation cannot turn an
     // already executed command into an apparent failure and invite a replay.
     cosResultReceipt: z.object({
-      version: z.literal(1),
-      id: z.string().regex(/^[a-f0-9]{48}$/)
-    }).strict().optional()
+      version: z.number().int().min(1).max(2), id: z.string().regex(/^[a-f0-9]{48}$/),
+      invocationSha256: z.string().regex(/^[a-f0-9]{64}$/).optional()
+    }).strict().superRefine((receipt, ctx) => {
+      if ((receipt.version === 2) !== (receipt.invocationSha256 !== undefined))
+        ctx.addIssue({ code: 'custom', message: 'Receipt version and invocation proof disagree.' });
+    }).optional()
   })
   .strict();
 

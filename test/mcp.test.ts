@@ -596,7 +596,7 @@ describe('endpoint hardening', () => {
       expect(failed(returned)).toBe(false);
       expect(textOf(returned)).toContain('note line 1');
       const witness = returned.body?.result?.structuredContent?.cosResultReceipt;
-      expect(witness).toEqual({ version: 1, id: expect.stringMatching(/^[a-f0-9]{48}$/) });
+      expect(witness).toEqual({ version: 2, id: expect.stringMatching(/^[a-f0-9]{48}$/), invocationSha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
       // Metadata is not a user-requested file. ChatGPT materializes embedded
       // resources behind approval cards and can re-run a call after approval.
       // Keep proof in the post-commit structured result; a host which drops it
@@ -604,6 +604,65 @@ describe('endpoint hardening', () => {
       expect(returned.body.result.content.filter((part: any) => part.type === 'resource')).toEqual([]);
 
       expect(textOf(returned)).not.toContain('COS_RESULT_RECEIPT_V1=');
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('binds two headerless same-tool results in one workflow only with their original invocation digest', async () => {
+    const { attachNativeCoreResultReceipt, recordRequestEvidence, flushRecorder, receiptDurableOwnerUnique } =
+      await import('../src/main/session/recorder.js');
+    const { requestCorrelation, invocationArgumentsDigest } = await import('../src/main/session/correlation.js');
+    const conversationId = randomUUID(), requestId = 'wfr_digest_' + randomUUID();
+    const nativeIds = [randomUUID(), randomUUID()];
+    const args = [{ paths: ['/workspace/notes.txt'], max_bytes: 10 }, { paths: ['/workspace/notes.txt'], max_bytes: 11 }];
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const results: Array<{ id: string; invocationSha256: string }> = [];
+      for (const arguments_ of args) {
+        const result = await modern('tools/call', { name: 'read', arguments: arguments_ });
+        expect(result.status).toBe(200);
+        const proof = result.body.result.structuredContent.cosResultReceipt;
+        expect(proof).toEqual({ version: 2, id: expect.stringMatching(/^[a-f0-9]{48}$/),
+          invocationSha256: invocationArgumentsDigest('read', arguments_) });
+        results.push(proof);
+      }
+      await flushRecorder();
+      const sessionId = await recordRequestEvidence(conversationId, [{ kind: 'tool_evidence', time: Date.now(),
+        calls: nativeIds.map((messageId, order) => ({ messageId, requestId, tool: 'read', answered: true, order })) }]);
+      expect(sessionId).toBeTruthy();
+      expect(requestCorrelation(requestId)?.nativeCallAmbiguous).toBe(true);
+      const attach = (index: number, invocationSha256?: string) => attachNativeCoreResultReceipt({ conversationId,
+        sessionId: sessionId!, requestId, nativeCallMessageId: nativeIds[index]!, tool: 'read',
+        resultReceiptId: results[index]!.id, ...(invocationSha256 ? { invocationSha256 } : {}) });
+      expect(await attach(0)).toBe(false); // v1 cannot borrow a workflow sibling.
+      expect(await attach(0, results[1]!.invocationSha256)).toBe(false);
+      for (let index = 0; index < results.length; index++) {
+        expect(await attach(index, results[index]!.invocationSha256)).toBe(true);
+        expect(await attach(index, results[index]!.invocationSha256)).toBe(true);
+        expect(await receiptDurableOwnerUnique(results[index]!.id, sessionId!, nativeIds[index]!)).toBe(true);
+      }
+      expect(await attach(0, results[1]!.invocationSha256)).toBe(false);
+      expect(requestCorrelation(requestId)?.nativeCallAmbiguous).toBe(true);
+      const bound = (await readEvents(sessionId!, { kinds: ['tool_call'], requireIntegrity: true }))
+        .filter(row => row.kind === 'tool_call' && results.some(proof => proof.id === row.call.resultReceiptId));
+      expect(bound).toHaveLength(2);
+      for (const [index, proof] of results.entries()) expect(bound.find(row => row.kind === 'tool_call' &&
+        row.call.resultReceiptId === proof.id)).toMatchObject({ kind: 'tool_call', call: {
+          nativeCallMessageId: nativeIds[index], invocationSha256: proof.invocationSha256, attributionMethod: 'result_receipt' } });
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('keeps the original wire invocation digest when SDK validation adds defaults', async () => {
+    const { withInboundRequestId } = await import('../src/main/mcp/inbound.js');
+    const { invocationArgumentsDigest } = await import('../src/main/session/correlation.js');
+    const digest = invocationArgumentsDigest('read', { paths: ['/workspace/notes.txt'] });
+    const parsedArgs = { paths: ['/workspace/notes.txt'], max_bytes: 100 };
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const returned = await withInboundRequestId(null, () => dispatch('read', parsedArgs, null, null, 'core', async () => ({
+        content: [{ type: 'text', text: 'Result after schema defaults' }]
+      })), undefined, undefined, { tool: 'read', digest });
+      expect(returned.structuredContent?.cosResultReceipt).toMatchObject({ version: 2, invocationSha256: digest });
+      expect(digest).not.toBe(invocationArgumentsDigest('read', parsedArgs));
     } finally { vi.useRealTimers(); }
   });
 
@@ -628,7 +687,7 @@ describe('endpoint hardening', () => {
         structuredContent: { cosResultReceipt: { version: 1, id: oldId }, useful: 'preserved' }
       }));
       const witness = (returned.structuredContent!.cosResultReceipt as { version: number; id: string });
-      expect(witness).toEqual({ version: 1, id: expect.stringMatching(/^[a-f0-9]{48}$/) });
+      expect(witness).toEqual({ version: 2, id: expect.stringMatching(/^[a-f0-9]{48}$/), invocationSha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
       expect(witness.id).not.toBe(oldId);
       expect(returned.structuredContent!.useful).toBe('preserved');
       expect(returned.content.filter(part => part.type === 'resource')).toEqual([ordinary]);
@@ -2345,7 +2404,7 @@ describe('2025-era clients', () => {
     expect(typeof image?.data).toBe('string');
     expect(Buffer.from(String(image?.data), 'base64').subarray(0, 4)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     expect(reply.body.result?.structuredContent).toEqual({
-      cosResultReceipt: { version: 1, id: expect.stringMatching(/^[a-f0-9]{48}$/) }
+      cosResultReceipt: { version: 2, id: expect.stringMatching(/^[a-f0-9]{48}$/), invocationSha256: expect.stringMatching(/^[a-f0-9]{64}$/) }
     });
   });
 });
@@ -4767,7 +4826,7 @@ describe('exec_command and write_stdin', () => {
     expect(named.body.result?.isError, textOf(named)).not.toBe(true);
     expect(named.body.result?.structuredContent).toMatchObject({
       output: expect.stringContaining('export const name = "app";'),
-      cosResultReceipt: { version: 1, id: expect.stringMatching(/^[a-f0-9]{48}$/) }
+      cosResultReceipt: { version: 2, id: expect.stringMatching(/^[a-f0-9]{48}$/), invocationSha256: expect.stringMatching(/^[a-f0-9]{64}$/) }
     });
     expect(textOf(named)).toContain('export const name = "app";');
     expect(textOf(named)).not.toContain('cwd: /workspace');

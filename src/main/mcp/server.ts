@@ -20,6 +20,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { EXTERNAL_TUNNEL_CHALLENGE_HEADER, EXTERNAL_TUNNEL_PROBE_HEADER, EXTERNAL_TUNNEL_PROOF_HEADER, EXTERNAL_TUNNEL_PROOF_PATTERN, EXTERNAL_TUNNEL_REQUEST_ID_DIGEST_HEADER, MCP_SURFACE_TOKEN_PATTERN, type ExternalRouteVerifier } from '../../shared/external-tunnel.js';
 import { INSTANCE_CONNECTOR_SURFACES } from '../../shared/instance-profile.js';
+import { invocationArgumentsDigest } from '../session/correlation.js';
 import { createInboundTiming, formatInboundTiming, inboundIdentityFromHeaders, withInboundRequestId, type IdentityHeaderShapes } from './inbound.js';
 import http from 'node:http';
 import type { Socket } from 'node:net';
@@ -631,7 +632,15 @@ export async function startMcpServer(getContext: () => ToolContext, persistent?:
       res.once('finish', release);
       res.once('close', release);
       if (!selfTest && !tunnelProbe) rpcIdentity = noteIngressEvidence(route.id, Date.now(), requestId, body, identity.headers);
-      withInboundRequestId(requestId, () => void route.handler(req, res, body), timing, publication);
+      // Freeze only a bounded digest of the ORIGINAL tools/call arguments.
+      // SDK validation may add defaults or transform strings before dispatch;
+      // those derived values cannot identify the browser's authored invocation.
+      const rpc = body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : null;
+      const params = rpc?.method === 'tools/call' && rpc.params && typeof rpc.params === 'object' && !Array.isArray(rpc.params)
+        ? rpc.params as Record<string, unknown> : null;
+      const tool = typeof params?.name === 'string' && /^[a-z0-9_.-]{1,64}$/i.test(params.name) ? params.name : null;
+      const invocation = tool ? { tool, digest: invocationArgumentsDigest(tool, params?.arguments ?? {}) } : undefined;
+      withInboundRequestId(requestId, () => void route.handler(req, res, body), timing, publication, invocation);
     };
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       void readBoundedJsonBody(req).then((parsed) => {

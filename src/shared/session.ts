@@ -199,6 +199,8 @@ export interface ToolCallRecord {
   /** Random per-execution Core result witness. Recorded before publication; never a
    * workflow/JSON-RPC identity or a grant to replay the operation. */
   resultReceiptId?: string;
+  /** Canonical original tool/arguments digest frozen before result publication. */
+  invocationSha256?: string;
   /** Set only after the paired native Fiber tool-result message proves this call. */
   nativeCallMessageId?: string;
   tool: string;

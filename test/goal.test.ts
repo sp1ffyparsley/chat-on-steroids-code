@@ -2837,7 +2837,7 @@ describe('native browser Loop stop rejection custody', () => {
     return goal.snapshotGoalReplies().replies.find(row => row.conversationId === source.conversationId)!;
   }
 
-  it.each(['exact denied choice', 'transient picker', 'authorized send', 'unrelated failure'] as const)(
+  it.each(['exact denied choice', 'exact unavailable choice', 'transient picker', 'authorized send', 'unrelated failure'] as const)(
     'does not spend replacement helpers on a proven unavailable exact choice: %s', async variant =>
       withIsolatedNativeInputOutbox(async () => {
         const source = await seed(`exact-model-denial-${variant}`);
@@ -2854,8 +2854,9 @@ describe('native browser Loop stop rejection custody', () => {
           expect(await browserInput.authorizeBrowserInput(helper!.id, owner, null)).toBe(true);
         expect(await browserInput.failBrowserInput(helper!.id, owner,
           variant === 'unrelated failure' ? 'Composer unavailable' : 'Requested model or reasoning could not be confirmed',
-          { detail: variant === 'transient picker' ? 'model-unconfirmed' : 'model-choice-denied' })).toBe(true);
-        const denied = variant === 'exact denied choice';
+          { detail: variant === 'transient picker' ? 'model-unconfirmed'
+            : variant === 'exact unavailable choice' ? 'model-choice-unavailable' : 'model-choice-denied' })).toBe(true);
+        const denied = variant === 'exact denied choice' || variant === 'exact unavailable choice';
         const draft = await settled(source.conversationId);
         expect(draft).toMatchObject({ stage: 'failed', retryable: !denied });
         expect(draft.error).toBe(denied ? 'goal_browser_model_choice_denied' :

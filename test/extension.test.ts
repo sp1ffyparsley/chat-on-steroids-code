@@ -174,15 +174,13 @@ describe('extension release metadata', () => {
     // Comments discuss the secrets by name; the code must never touch them.
     const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
     expect(code).not.toMatch(/agent_key|authorization|access_token/i);
-    // Request arguments are never turned into an object. They used to be parsed for their
-    // `path`, which meant the arguments — the user's text, and the secrets observed inside
-    // them — existed as live values in this scope, one careless line from crossing over.
-    // The path is read off the front of the string instead, so `args` is never walked.
-    // The bounded native Core RESULT reader now parses one typed MCP envelope solely
-    // for its opaque post-commit witness. Keep that exception local: request readers
-    // and the rest of the page helper still cannot parse or serialize payload objects.
+    // Native result decoding and bounded invocation hashing are the only
+    // local JSON readers. Arguments may be normalized solely for SHA-256 in
+    // MAIN; only the digest crosses the generation-bound allowlist. Keep all
+    // other helpers from parsing/serializing provider payloads.
     const resultStart = code.indexOf('  function coreResultReceipt(');
-    const resultEnd = code.indexOf('\n  function localCountOf(', resultStart);
+    const resultEnd = code.indexOf('\n  const nativeInvocationDigests', resultStart);
+    const digestEnd = code.indexOf('\n  function localCountOf(', resultEnd);
     expect(resultStart).toBeGreaterThanOrEqual(0);
     expect(resultEnd).toBeGreaterThan(resultStart);
     const resultReader = code.slice(resultStart, resultEnd);
@@ -200,10 +198,17 @@ describe('extension release metadata', () => {
     expect(resultReader).toContain("message.author?.role !== 'tool'");
     expect(resultReader).toContain("content.content_type !== 'code' || content.language !== 'json'");
     expect(resultReader).toContain('return receiptId;');
-    expect(code.slice(0, resultStart) + code.slice(resultEnd)).not.toMatch(/JSON\.parse/);
+    const digestReader = code.slice(resultEnd, digestEnd);
+    expect(digestReader.match(/JSON\.parse/g)).toHaveLength(1);
+    expect(digestReader.match(/JSON\.stringify/g)).toHaveLength(1);
+    expect(digestReader).toContain('JSON.parse(payload)');
+    expect(digestReader).toContain("crypto.subtle.digest('SHA-256', bytes)");
+    expect(digestReader).toContain('bytes.length > 512 * 1024');
+    expect(digestReader).toContain('Object.getOwnPropertyDescriptor');
+    expect(digestReader).not.toMatch(/\bpost\(|postMessage|dispatchEvent|fetch\(|XMLHttpRequest/);
+    expect(code.slice(0, resultStart) + code.slice(digestEnd)).not.toMatch(/JSON\.parse|JSON\.stringify/);
     expect(code).not.toMatch(/\bargs\b/);
-    // Nor may a whole object be serialised across, which would defeat the allowlist.
-    expect(code).not.toMatch(/JSON\.stringify/);
+    // Hashing never grants a raw-argument or arbitrary-object transport field.
   });
 
   /**
@@ -9849,7 +9854,7 @@ describe('extension observation journal', () => {
     ]);
   });
 
-  it.each([17, 18])('stamps the worker reader stage while retaining only upstream shape witnesses (wire %s)', fiberWire => {
+  it.each([17, 18, 19])('stamps the worker reader stage while retaining only upstream shape witnesses (wire %s)', fiberWire => {
     const workerRecorder = Number(/const PAGE_RECORDER_VERSION = (\d+);/.exec(backgroundSource)?.[1]);
     expect(Number.isSafeInteger(workerRecorder)).toBe(true);
     const start = backgroundSource.indexOf('function shellScanDiagnostic(');

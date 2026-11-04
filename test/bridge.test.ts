@@ -9206,6 +9206,41 @@ describe('activity feed', () => {
     });
   });
 
+  it('ACKs a serialized headerless batch only after both invocation digests match their durable executions', async () => {
+    const recorder = await import('../src/main/session/recorder.js');
+    const store = await import('../src/main/session/store.js');
+    const { invocationArgumentsDigest } = await import('../src/main/session/correlation.js');
+    const conversationId = randomUUID(), requestId = 'wfr_exact_batch_' + randomUUID();
+    const nativeIds = [randomUUID(), randomUUID()], receipts = [randomBytes(24).toString('hex'), randomBytes(24).toString('hex')];
+    const args = [{ paths: ['/project/one.txt'] }, { paths: ['/project/two.txt'] }];
+    await pair();
+    const opened = await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'user_message', messageId: randomUUID(), text: 'Finish this exact batch.', time: Date.now() }
+    ] } });
+    const sessionId = opened.body.sessionId;
+    for (let index = 0; index < 2; index++) await recorder.recordToolCall({ tool: 'read', args: args[index],
+      content: [{ type: 'text', text: 'Returned original result' }], resultReceiptId: receipts[index],
+      requestId: null, outcome: 'ok', durationMs: 1, startedAt: Date.now() });
+    await recorder.flushRecorder();
+    const calls = nativeIds.map((messageId, index) => ({ messageId, requestId, tool: 'read', order: index,
+      answered: true, resultReceiptId: receipts[index], invocationSha256: invocationArgumentsDigest('read', args[index]) }));
+    const wrong = await request('POST', '/correlations', { body: { conversationId,
+      calls: calls.map(call => ({ ...call, invocationSha256: 'f'.repeat(64) })) } });
+    expect(wrong.body.confirmedResultReceipts).toEqual([]);
+    expect((await store.readEvents(sessionId, { kinds: ['tool_call'], requireIntegrity: true }))).toHaveLength(0);
+    const result = await request('POST', '/correlations', { body: { conversationId, calls } });
+    expect(result.body.confirmedResultReceipts).toEqual(receipts);
+    const rows = (await store.readEvents(sessionId, { kinds: ['tool_call'], requireIntegrity: true }))
+      .filter(row => row.kind === 'tool_call');
+    expect(rows).toHaveLength(2);
+    for (const [index, receipt] of receipts.entries()) expect(rows.find(row => row.call.resultReceiptId === receipt))
+      .toMatchObject({ call: { nativeCallMessageId: nativeIds[index], invocationSha256: calls[index]!.invocationSha256,
+        attributionMethod: 'result_receipt' } });
+    expect(requestCorrelation(requestId)?.nativeCallAmbiguous).toBe(true);
+    expect((await request('POST', '/correlations', { body: { conversationId, calls } })).body.confirmedResultReceipts).toEqual(receipts);
+    expect((await store.readEvents(sessionId, { kinds: ['tool_call'], requireIntegrity: true }))).toHaveLength(2);
+  });
+
   it.each(['ok', 'process_exit_nonzero', 'tool_rejected', 'tool_execution_error', 'tool_internal_error'] as const)(
     'binds and settles two exact owned Core receipts sharing one workflow without rewriting either original execution (%s)', async outcome => {
     const recorder = await import('../src/main/session/recorder.js');

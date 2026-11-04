@@ -57,7 +57,7 @@ it('carries validated user image bytes through an exact-session MCP result and a
     expect(texts.match(/Use session_finish/g)).toHaveLength(1);
     const start = first.result.content.findIndex((row: { text?: string }) => row.text?.includes('--- New instructions from the user ---'));
     const witness = first.result.structuredContent.cosResultReceipt;
-    expect(witness).toEqual({ version: 1, id: expect.stringMatching(/^[a-f0-9]{48}$/) });
+    expect(witness).toEqual({ version: 2, id: expect.stringMatching(/^[a-f0-9]{48}$/), invocationSha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
     expect(first.result.content.some((row: { type: string }) => row.type === 'resource')).toBe(false);
     const injected = first.result.content.slice(start);
     expect(injected.map((row: { type: string }) => row.type)).toEqual(['text', 'image', 'text', 'text', 'image', 'text']);

@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 134;
+  const RECORDER_VERSION = 135;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -4417,7 +4417,7 @@
   // 12 adds alternate-shell exact message/request provenance and provisional owner gating.
   // Old same-nonce frames can arrive before the replacement MAIN-world listener.
   // Reject the pre-refusal schema rather than silently losing request-join diagnostics.
-  const FIBER_VERSION = 18;
+  const FIBER_VERSION = 19;
   const FIBER_TIMEOUT_MS = 1500;
   const FIBER_MAX_ROWS = 400;
   /** Assistant turns whose per-call evidence is accepted from one scan. */
@@ -4805,18 +4805,23 @@
       }
       seen.add(messageId);
       const identityRefusalReasons = readIdentityRefusalReasons(entry);
+      const invocationProofValid = entry.invocationSha256 === undefined ||
+        typeof entry.invocationSha256 === 'string' && /^[a-f0-9]{64}$/.test(entry.invocationSha256);
       calls.push({
         messageId,
         tool,
         order: Number.isInteger(entry.order) ? Math.max(0, Math.min(FIBER_MAX_CALLS, entry.order)) : calls.length,
-        answered: entry.answered === true,
+        answered: entry.answered === true && invocationProofValid,
         ...(identityRefusalReasons ? { identityRefusalReasons } : {}),
         // Core's random witness is authoritative ONLY on a finished, typed
         // tool-result message. Keep this one bounded opaque value across the
         // isolated-world trust boundary; never copy tool output or arguments.
-        ...(entry.answered === true && typeof entry.resultReceiptId === 'string' &&
+        ...(entry.answered === true && invocationProofValid && typeof entry.resultReceiptId === 'string' &&
           /^[a-f0-9]{48}$/.test(entry.resultReceiptId)
           ? { resultReceiptId: entry.resultReceiptId } : {}),
+        ...(entry.answered === true && typeof entry.resultReceiptId === 'string' && /^[a-f0-9]{48}$/.test(entry.resultReceiptId) &&
+          typeof entry.invocationSha256 === 'string' && /^[a-f0-9]{64}$/.test(entry.invocationSha256)
+          ? { invocationSha256: entry.invocationSha256 } : {}),
         // ChatGPT's own id for the request, and its own creation time. The id is what lets
         // the app place the call in the chat that issued it; this script's own stamp is a
         // poll tick and cannot.
@@ -16489,7 +16494,8 @@
           // inference or another transient missing snapshot. Preserve only its
           // fixed reason; Main still owns positive pre-Send failure classification.
           return fail(limit || 'Requested model or reasoning could not be confirmed',
-            !limit && onTarget() ? modelRefusal === 'choice_denied' ? 'model-choice-denied' : 'model-unconfirmed' : undefined);
+            !limit && onTarget() ? modelRefusal === 'choice_denied' ? 'model-choice-denied'
+              : modelRefusal === 'choice_unavailable' ? 'model-choice-unavailable' : 'model-unconfirmed' : undefined);
         }
         await stage('model:confirmed');
       }

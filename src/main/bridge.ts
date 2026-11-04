@@ -1862,17 +1862,22 @@ function parseCallEvidence(input: unknown, untooled = false): PageCallEvidence[]
       continue;
     }
     seen.add(key);
+    const invocationProofValid = item['invocationSha256'] === undefined ||
+      typeof item['invocationSha256'] === 'string' && /^[a-f0-9]{64}$/.test(item['invocationSha256']);
     out.push({
       messageId,
       tool,
       order: typeof item['order'] === 'number' && Number.isFinite(item['order'])
         ? Math.max(0, Math.min(MAX_CALL_EVIDENCE, Math.floor(item['order'])))
         : out.length,
-      answered: item['answered'] === true,
-      ...(item['answered'] === true && tool && !stream &&
+      answered: item['answered'] === true && invocationProofValid,
+      ...(item['answered'] === true && invocationProofValid && tool && !stream &&
         typeof item['resultReceiptId'] === 'string' &&
         /^[a-f0-9]{48}$/.test(item['resultReceiptId'])
         ? { resultReceiptId: item['resultReceiptId'] } : {}),
+      ...(item['answered'] === true && typeof item['resultReceiptId'] === 'string' && /^[a-f0-9]{48}$/.test(item['resultReceiptId']) &&
+        typeof item['invocationSha256'] === 'string' && /^[a-f0-9]{64}$/.test(item['invocationSha256'])
+        ? { invocationSha256: item['invocationSha256'] } : {}),
       // Rebuilt like everything else here — an opaque id checked for shape, and a finite
       // number — so the page cannot smuggle anything through them.
       requestId,
@@ -6245,7 +6250,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         // second move or accept retirement of an unrelated first bucket.
         const catalogBeforeTransfer = await receiptCatalogCustodySnapshot();
         const source = catalogBeforeTransfer && await receiptTransferWitnessBefore(
-          call.resultReceiptId!, sessionId, call.messageId, call.tool, call.requestId!);
+          call.resultReceiptId!, sessionId, call.messageId, call.tool, call.requestId!, call.invocationSha256);
         if (!catalogBeforeTransfer || !source || !receiptCatalogCustodyMatches(
           catalogBeforeTransfer, await receiptCatalogCustodySnapshot())) {
           logWarn('Core result custody held: source witness or catalog preflight unverified');
@@ -6254,7 +6259,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
             capture: 'not_requested', detail: 'Receipt source or catalog unverified before transfer' });
           break;
         }
-        if (!source.owned && (native.tool !== call.tool || native.nativeCallAmbiguous === true ||
+        if (!source.owned && !source.invocationBound && (native.tool !== call.tool || native.nativeCallAmbiguous === true ||
             (native.nativeCallMessageId ?? native.messageId) !== call.messageId)) continue;
         // Another session can be created or its metadata can become unreadable
         // during the recorder's own awaited copy/append/rewrite. A post-transfer
@@ -6263,7 +6268,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         // the same original witness may be inspected again after recovery.
         const attached = await attachNativeCoreResultReceipt({ conversationId: id, sessionId,
           requestId: call.requestId!, nativeCallMessageId: call.messageId,
-          tool: call.tool, resultReceiptId: call.resultReceiptId! });
+          tool: call.tool, resultReceiptId: call.resultReceiptId!,
+          ...(call.invocationSha256 ? { invocationSha256: call.invocationSha256 } : {}) });
         if (!attached) continue;
         const catalogAfterTransfer = await receiptCatalogCustodySnapshot();
         if (!receiptCatalogCustodyMatches(catalogBeforeTransfer, catalogAfterTransfer,
@@ -12229,8 +12235,8 @@ async function receiptCatalogCustodySnapshot(): Promise<string | null> {
  * copied receipt in a foreign session, different callId, wrong tool or second
  * Unattributed bucket is never authority to rewrite an execution. */
 async function receiptTransferWitnessBefore(
-  receiptId: string, targetSessionId: string, nativeMessageId: string, tool: string, requestId: string
-): Promise<{ originalBucketId: string | null; callId: string; owned?: true } | null> {
+  receiptId: string, targetSessionId: string, nativeMessageId: string, tool: string, requestId: string, invocationSha256?: string
+): Promise<{ originalBucketId: string | null; callId: string; owned?: true; invocationBound?: true } | null> {
   try {
     let originalBucketId: string | null = null;
     let originalCallId: string | null = null;
@@ -12239,7 +12245,8 @@ async function receiptTransferWitnessBefore(
     for (const summary of await indexedSessions({ requireComplete: true })) {
       for (const row of await readReceiptWitnessOccurrences(summary.id, receiptId)) {
         const call = row.call;
-        if (!call.callId || call.tool !== tool || !isReturnedToolOutcome(call.outcome) ||
+        if (invocationSha256 !== undefined && call.invocationSha256 !== invocationSha256 ||
+            !call.callId || call.tool !== tool || !isReturnedToolOutcome(call.outcome) ||
             (call.process && !call.process.completedAt)) return null;
         if (summary.conversationId === null && summary.title === 'Unattributed activity' &&
             call.conversationId === null &&
@@ -12265,7 +12272,9 @@ async function receiptTransferWitnessBefore(
     }
     if (originalCallId && targetCallId && originalCallId !== targetCallId) return null;
     const callId = originalCallId ?? targetCallId;
-    return callId && !(owned && originalBucketId) ? { originalBucketId, callId, ...(owned ? { owned: true as const } : {}) } : null;
+    return callId && !(owned && originalBucketId) ? { originalBucketId, callId,
+      ...(owned ? { owned: true as const } : {}),
+      ...(invocationSha256 && /^[a-f0-9]{64}$/.test(invocationSha256) ? { invocationBound: true as const } : {}) } : null;
   } catch { return null; }
 }
 
