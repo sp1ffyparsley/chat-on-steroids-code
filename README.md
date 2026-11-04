@@ -2,7 +2,7 @@
 
 ## Candidate133 source: original-parent join and recovery repairs
 
-The exported production/test source now includes private source checkpoint `3771e8a5b3ca642b2177245dc3cafc0854a0455a`. This is source provenance, not a public Git ref. The final Windows package is still being qualified; the independently accepted installed baseline below remains131. A public source update is not installation or live-autonomy proof.
+The exported production/test source now includes private source checkpoint `164654da00e2fa10f7f7a71f2669b1118ac8f439`. This is source provenance, not a public Git ref. The final Windows package is still being qualified; the independently accepted installed baseline below remains131. A public source update is not installation or live-autonomy proof.
 
 - A reproduced circular prerequisite could reject a unique finished, witnessed native tool child when both its widget result pointer and rendered selected ID disappeared under a distinct native namespace. Exact child membership is now staged before independent namespace validation; original question, full parent/cache/branch, connector/request/result and Code Mode checks still own publication. Pending, unwitnessed, ambiguous, foreign, explicit unselected widget and conflicting results remain refused. Two real failure-first positives and22negative controls pass;479shell +136Fiber checks passed.
 - A bounded `shellScan.reader` diagnostic follows key counts through Fiber, content, worker and Main. Each boundary stamps itself and ignores forged downstream fields. Missing is unknown; zero is retained. These self-reported fields prove neither executing bytes nor tool completion. Three actual failures reproduced the missing transport fields; controls/operator propagation is covered.
@@ -18,6 +18,10 @@ This is a sanitized source mirror for engineering research. The original reposit
 Recorder131 was independently installed and accepted on November4 at07:26UTC from private qualified source c256758d6cf9184fee79eaed6e6ee3d27d120308 (tree50a24338959fec7efe7ea4f8dc4eb0502dd6c360; private receipt02de9825ceccfc867fb8facbb0e81a050ac912c8). Canonical qualification passed96preliminary +13,206Main checks with62conditional skips, followed by33post-pin checks and readiness. Prior cancelled/failed runs remain recorded separately. These are private release results, not a claim that this sanitized mirror's entire suite or a public installer was qualified.
 
 The accepted installation preserved133,596protected files/6,543,446,422bytes before eight successor applications. All291installed program files matched the qualified package. Current-page console checks verified recorder131 on15current routes across five profile cohorts. Correct installed/stable files and a page-reader label do not independently verify executing background-worker bytes or sustained autonomy.
+
+### Development-test process ownership
+
+The existing test cleanup helper now preserves live, foreign and unverified processes. On Windows it reaps only proven orphans of this workspace with an explicit absolute Vitest root, rechecking generation, command and parent under a retained OS handle. Implicit-root processes remain held; POSIX is explicitly diagnostic-only.31checks passed in each private/shared source checkout, including a real disposable Windows orphan. This independently fixes a global selection defect; it does not prove the cause of earlier silent qualification exits. The unchanged launcher fixture also passed alone. A later full qualification failed normally because the owned native screenshot fixture produced no frame; that test then passed unchanged in isolation. Its nonactivating fixture now remains unobscured and publishes READY only after real first paint. All20real desktop checks pass without changing production capture, deadlines or assertions. The failed runs remain failed; one fresh full qualification is running.
 
 ### Implemented in131
 

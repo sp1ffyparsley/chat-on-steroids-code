@@ -10,3 +10,5 @@ This repository is a sanitized code mirror. Read README.md for the exact source 
 - Do not copy personal prompts, stores, credentials, browser state, private logs, backups or deployment paths into this mirror. Keep fixture identities synthetic.
 - Run typecheck and the relevant existing regressions. A mirror check or package build does not prove installation or sustained useful next turns.
 - Keep this map and README current when the source or acceptance boundary changes. If retrieval fails, continue from supplied excerpts and label evidence; never invent symbols or return an access-only research report.
+
+- scripts/kill-stray-vitest.mjs preserves live/foreign/unknown runners. Windows cleanup requires exact explicit-root orphan identity under a native handle; POSIX is diagnostic-only. Never substitute global process-name kills.

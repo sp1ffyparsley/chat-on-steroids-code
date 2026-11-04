@@ -36,6 +36,9 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
         'public sealed class CosContractForm : System.Windows.Forms.Form { protected override bool ShowWithoutActivation { get { return true; } } }'),
       '$form=New-Object CosContractForm', '$form.Text=' + psQuote(title),
       '$form.ShowInTaskbar=$false', "$form.StartPosition='Manual'",
+      // Keep only our nonactivating fixture unobscured, and publish readiness after
+      // real first paint rather than the earlier native Shown notification.
+      '$form.TopMost=$true; $script:fixturePainted=$false',
       '$form.Location=New-Object System.Drawing.Point(8,8)',
       '$form.ClientSize=New-Object System.Drawing.Size(320,180)',
       '$button=New-Object System.Windows.Forms.Button',
@@ -44,7 +47,8 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
       '$button.Size=New-Object System.Drawing.Size(160,48)', '$form.Controls.Add($button)',
       '$timer=New-Object System.Windows.Forms.Timer; $timer.Interval=100',
       '$timer.Add_Tick({ if(Test-Path -LiteralPath ' + psQuote(closeFile) + '){ $form.Close() } })',
-      "$form.Add_Shown({ [Console]::WriteLine('READY'); $timer.Start() })",
+      '$form.Add_Paint({ $script:fixturePainted=$true })',
+      "$form.Add_Shown({ $form.Refresh(); $button.Refresh(); if(-not $script:fixturePainted){ throw 'Owned native fixture did not paint' }; [Console]::WriteLine('READY'); $timer.Start() })",
       'try { [System.Windows.Forms.Application]::Run($form) } finally { $timer.Dispose(); $form.Dispose() }'
     ].join('\n');
     const executable = path.join(process.env['SystemRoot'] || 'C:/Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe');
