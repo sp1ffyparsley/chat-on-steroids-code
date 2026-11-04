@@ -6,6 +6,8 @@ The current exported runtime source is private provenance checkpoint `523e14b405
 
 Live recovery is **not yet certified**. After installation, Computer Use stopped because it could not confidently verify Chrome's current URL; no alternate route or duplicate prompt was attempted. The earlier37missing-association incident remains an acceptance target. A separate account's visible GPT-6 picker reports Usage limit reached. Test success and correct installation are not proof of sustained automatic next turns.
 
+Research intake follow-up: the existing next-upgrade predecessor record now binds the independently accepted134program tree; four metadata fields and the matching assertion changed, with a failure-first mismatch then successful readiness. Existing content/worker/Main diagnostic tests now cover wires17and18 and partial stage fields.17targeted private checks pass. The suggested age-based Input counter reset used the wrong owner and a2024cutoff; removal of independent native scope guards was not supported by the observed refusal. These suggestions were not copied. FreshCopy is already operational; no new runtime build, install or task restart resulted from this intake.
+
 The first134canonical build remains failed (offline research heading contract and a glob-test timeout). Product headings were repaired without changing assertions; the glob case and full MCP suite passed unchanged. The subsequent full build passed. Historical release notes below describe their original observations.
 
 # Chat On Steroids - code research mirror

@@ -9849,20 +9849,23 @@ describe('extension observation journal', () => {
     ]);
   });
 
-  it('stamps the worker reader stage while retaining only upstream shape witnesses', () => {
+  it.each([17, 18])('stamps the worker reader stage while retaining only upstream shape witnesses (wire %s)', fiberWire => {
+    const workerRecorder = Number(/const PAGE_RECORDER_VERSION = (\d+);/.exec(backgroundSource)?.[1]);
+    expect(Number.isSafeInteger(workerRecorder)).toBe(true);
     const start = backgroundSource.indexOf('function shellScanDiagnostic(');
     const end = backgroundSource.indexOf('\n}', start) + 2;
     const project = (reader: unknown) => vm.runInNewContext(
       `${backgroundSource.slice(start, end)}; shellScanDiagnostic(raw);`,
-      { SHELL_SCAN_MAX: 400, PAGE_RECORDER_VERSION: 133, raw: { selectorMatches: 0, mapped: 0,
+      { SHELL_SCAN_MAX: 400, PAGE_RECORDER_VERSION: workerRecorder, raw: { selectorMatches: 0, mapped: 0,
         rejects: { fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0 }, reader } });
-    expect(project({ fiberWire: 17, fiberKeys: 88, contentRecorder: 132, contentKeys: 88,
+    expect(project({ fiberWire, fiberKeys: 88, contentRecorder: 132, contentKeys: 88,
       workerRecorder: 999, workerKeys: 399, mainKeys: 399 }).reader).toEqual({
-      fiberWire: 17, fiberKeys: 88, contentRecorder: 132, contentKeys: 88, workerRecorder: 133, workerKeys: 4 });
-    expect(project(undefined).reader).toEqual({ workerRecorder: 133, workerKeys: 4 });
+      fiberWire, fiberKeys: 88, contentRecorder: 132, contentKeys: 88, workerRecorder, workerKeys: 4 });
+    expect(project(undefined).reader).toEqual({ workerRecorder, workerKeys: 4 });
+    expect(project({ fiberWire }).reader).toEqual({ fiberWire, workerRecorder, workerKeys: 4 });
     let reads = 0;
     expect(project(Object.defineProperty({}, 'fiberWire', { get() { reads++; return 17; } })).reader)
-      .toEqual({ workerRecorder: 133, workerKeys: 4 });
+      .toEqual({ workerRecorder, workerKeys: 4 });
     expect(reads).toBe(0);
   });
 

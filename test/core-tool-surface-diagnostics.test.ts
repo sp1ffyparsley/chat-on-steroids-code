@@ -1250,7 +1250,7 @@ describe('Core tool-surface incident diagnostics', () => {
     expect(classifyCoreToolSurfaceFailure(evidence)).toMatchObject({ kind: 'zero_core_ingress', boundary: 'ingress' });
   });
 
-  it('traces reader diagnostic stages without accepting a page-authored Main stamp or completion proof', () => {
+  it.each([17, 18])('traces reader diagnostic stages without accepting a page-authored Main stamp or completion proof (wire %s)', fiberWire => {
     resetCoreBrowserEvidenceForTests();
     const rejects = { fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0 };
     const project = (reader: unknown) => {
@@ -1259,10 +1259,10 @@ describe('Core tool-surface incident diagnostics', () => {
         shellScan: { selectorMatches: 0, mapped: 0, rejects, reader } });
       return coreBrowserEvidence(TARGET);
     };
-    const reader = { fiberWire: 17, fiberKeys: 88, contentRecorder: 133, contentKeys: 88,
+    const reader = { fiberWire, fiberKeys: 88, contentRecorder: 133, contentKeys: 88,
       workerRecorder: 132, workerKeys: 53, mainKeys: 399, privateText: 'PRIVATE_FRAME' };
     const observed = project(reader);
-    expect((observed?.shellScan as any)?.reader).toEqual({ fiberWire: 17, fiberKeys: 88,
+    expect((observed?.shellScan as any)?.reader).toEqual({ fiberWire, fiberKeys: 88,
       contentRecorder: 133, contentKeys: 88, workerRecorder: 132, workerKeys: 53, mainKeys: 4 });
     expect(observed?.ordinaryFinal).toBeNull();
     expect(JSON.stringify(observed)).not.toContain('PRIVATE_FRAME');
@@ -1276,6 +1276,7 @@ describe('Core tool-surface incident diagnostics', () => {
     expect((project(accessor)?.shellScan as any)?.reader).toEqual({ mainKeys: 4 });
     expect(reads).toBe(0);
     expect((project(undefined)?.shellScan as any)?.reader).toEqual({ mainKeys: 4 });
+    expect((project({ fiberWire })?.shellScan as any)?.reader).toEqual({ fiberWire, mainKeys: 4 });
     resetCoreBrowserEvidenceForTests();
   });
 

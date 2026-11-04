@@ -17655,20 +17655,20 @@ describe('the activity feed', () => {
     domApi.shellKind = originalShellKind;
   });
 
-  it('stamps the content reader stage without trusting downstream stamps from the page', async () => {
+  it.each([17, 18])('stamps the content reader stage without trusting downstream stamps from the page (wire %s)', async fiberWire => {
     live = await harness(undefined, {
       activity: () => ({ ok: true, data: { entries: [], stream: [], nextSince: 0, pendingTools: 0 } })
     });
-    const reader = { fiberWire: 17, fiberKeys: 88, contentRecorder: 999, contentKeys: 399,
+    const reader = { fiberWire, fiberKeys: 88, contentRecorder: 999, contentKeys: 399,
       workerRecorder: 999, mainKeys: 399, privateText: 'PRIVATE_FRAME' };
     await replyFiber([], [], null, true, null, false, { selectorMatches: 0, mapped: 0,
       rejects: { fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0 }, reader });
     live.sent.length = 0;
     await live.hook.pullActivity();
     const scan = live.sent.filter(message => message.type === 'activity').at(-1)?.coreDiagnostic?.shellScan;
-    expect(scan?.reader).toEqual({ fiberWire: 17, fiberKeys: 88,
+    expect(scan?.reader).toEqual({ fiberWire, fiberKeys: 88,
       contentRecorder: expect.any(Number), contentKeys: 4 });
-    expect(scan?.reader.contentRecorder).toBeGreaterThanOrEqual(132);
+    expect(scan?.reader.contentRecorder).toBe(currentRecorderVersion);
     expect(JSON.stringify(scan)).not.toContain('PRIVATE_FRAME');
   });
 
