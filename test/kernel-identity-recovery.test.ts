@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { beforeEach, expect, it, vi } from 'vitest';
 const fixture = vi.hoisted(() => ({ attachment: vi.fn(), record: vi.fn(), blocked: false, lateRoute: false }));
 vi.mock('../src/main/session/recorder.js', async original => ({
@@ -28,8 +29,8 @@ beforeEach(() => {
   // Healthy identity recovery assumes the recorder committed. Individual storage
   // failure cases explicitly return null rather than making every test a failed append.
   fixture.attachment.mockResolvedValue('current');
-  fixture.record.mockImplementation(async (args: { resultReceiptId?: string; conversationId?: string | null }) => ({
-    callId: 'fixture-tool-call', resultReceiptId: args.resultReceiptId,
+  fixture.record.mockImplementation(async (args: { resultReceiptId?: string; invocationSha256?: string; conversationId?: string | null }) => ({
+    callId: 'fixture-tool-call', resultReceiptId: args.resultReceiptId, invocationSha256: args.invocationSha256,
     attributionMethod: args.conversationId ? 'request_id' : 'unattributed'
   }));
   fixture.blocked = false; fixture.lateRoute = false;
@@ -48,8 +49,9 @@ it('reports an actual agent identity refusal once after exact proof and records 
   prove();
   const recovered = await invoke();
   expect(notice(recovered)).toHaveLength(1);
-  expect(recovered.structuredContent?.cosResultReceipt).toEqual({ version: 1,
-    id: expect.stringMatching(/^[a-f0-9]{48}$/) });
+  expect(recovered.structuredContent?.cosResultReceipt).toEqual({ version: 2,
+    id: expect.stringMatching(/^[a-f0-9]{48}$/),
+    invocationSha256: createHash('sha256').update('["read",{}]').digest('hex') });
   expect(JSON.stringify(recovered)).toContain('Earlier agents calls were refused');
   expect(JSON.stringify(recovered)).toContain('Do not repeat completed operations');
   expect(recovered.content.filter(part => part.type === 'resource')).toEqual([]);

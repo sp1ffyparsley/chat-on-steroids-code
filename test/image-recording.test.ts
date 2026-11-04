@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { defaultConfig, initConfigPath, saveConfig } from '../src/main/config.js';
 import { startMcpServer, type McpEndpoint } from '../src/main/mcp/server.js';
@@ -52,7 +52,8 @@ async function callImage() {
   expect(reply.error).toBeUndefined();
   expect(reply.result.isError).not.toBe(true);
   const witness = reply.result.structuredContent.cosResultReceipt;
-  expect(witness).toEqual({ version: 1, id: expect.stringMatching(/^[a-f0-9]{48}$/) });
+  const invocationSha256 = createHash('sha256').update('["view_image",{"path":"/workspace/pixel.png"}]').digest('hex');
+  expect(witness).toEqual({ version: 2, id: expect.stringMatching(/^[a-f0-9]{48}$/), invocationSha256 });
   expect(reply.result.content).toEqual([
     { type: 'image', mimeType: 'image/png', data: png.toString('base64') }
   ]);
@@ -61,6 +62,7 @@ async function callImage() {
   if (event.kind !== 'tool_call') throw new Error('missing recorded tool call');
   expect(event.call.outcome).toBe('ok');
   expect(event.call.result.text).toBe('');
+  expect(event.call.invocationSha256).toBe(invocationSha256);
   return event.call;
 }
 
