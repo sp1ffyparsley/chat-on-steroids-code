@@ -61,7 +61,7 @@ describe('same-document evidence reader refresh', () => {
       beforeReply();
       window.dispatchEvent(new window.MessageEvent('message', { source: window, data: {
         source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce,
-        v: 17, scanOk: true, rows: [], turns
+        v: 18, scanOk: true, rows: [], turns
       } }));
     };
     window.addEventListener('message', listener);
@@ -267,7 +267,7 @@ describe('same-document evidence reader refresh', () => {
     const nonces: string[] = [];
     const onAsk = (event: any) => { if (event.data?.source === 'clf-fiber-ask-v2') nonces.push(event.data.nonce); };
     const reply = (nonce: string, scanOk: boolean) => window.dispatchEvent(new window.MessageEvent('message', {
-      source: window, data: { source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 17, scanOk, rows: [], turns: [] }
+      source: window, data: { source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 18, scanOk, rows: [], turns: [] }
     }));
     window.addEventListener('message', onAsk);
     onTestFinished(() => { window.removeEventListener('message', onAsk); window.setTimeout = timeout; });
@@ -2461,7 +2461,7 @@ describe('desktop input delivery and helper ownership', () => {
           const nonce = message.nonce;
           section.setAttribute('data-clf-fiber-v2-turn', `${nonce}:0`);
           win.dispatchEvent(new win.MessageEvent('message', { source: win, data: {
-            source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 17, scanOk: true, rows: [], turns: [{
+            source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 18, scanOk: true, rows: [], turns: [{
               index: 0, turnId: 'source-turn', conversationId: chatA, endMessageId: 'source-answer', calls: [], activities: [],
               messages: [{ role: 'assistant', messageId: 'source-answer', rawMessageId: 'source-answer', rawText: 'Finished.', stable: true }]
             }]
@@ -2705,7 +2705,7 @@ describe('desktop input delivery and helper ownership', () => {
         live!.document.querySelector('[data-turn-id="rotation-source-answer"]')!
           .setAttribute('data-clf-fiber-v2-turn', `${nonce}:0`);
         live!.window.dispatchEvent(new live!.window.MessageEvent('message', { source: live!.window as unknown as Window,
-          data: { source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 17, scanOk: true, rows: [],
+          data: { source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 18, scanOk: true, rows: [],
             turns: [{ index: 0, turnId: 'rotation-source-answer', conversationId: chatA, messages: [], activities: [],
               calls: [{ tool: 'read', messageId: 'completed-local-tool', answered: true }] }] } }));
       });
@@ -7013,7 +7013,7 @@ async function replyFiber(
     window.dispatchEvent(
       new window.MessageEvent('message', {
         data: {
-          source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken, v: 17, scanOk: true,
+          source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken, v: 18, scanOk: true,
           rows, turns: indexedTurns, ...(shellScan === undefined ? {} : { shellScan })
         },
         source: window
@@ -7482,7 +7482,7 @@ describe('naming the agent behind a row', () => {
     }));
     await replyFiber([
       {
-        v: 17,
+        v: 18,
         index: 0,
         tool: 'run_command',
         path: null,
@@ -7521,7 +7521,7 @@ describe('naming the agent behind a row', () => {
  */
 describe('the calls a row folded away', () => {
   const FOLDED = {
-    v: 17,
+    v: 18,
     index: 0,
     tool: 'run_command',
     path: '/TobisComputer/mcp/run_command',
@@ -12097,7 +12097,7 @@ describe('a stop button that goes missing while the turn is still running', () =
           source: 'clf-fiber-reply',
           nonce: event.data.nonce,
           scanToken: event.data.nonce,
-          v: 17,
+          v: 18,
           scanOk: true,
           rows: [],
           turns: [{
@@ -15572,7 +15572,7 @@ describe('a page leaving the screen', () => {
  */
 describe('evidence from the page context', () => {
   const GOOD = {
-    v: 17,
+    v: 18,
     index: 0,
     tool: 'agent_status',
     path: '/TobisComputer/mcp/agent_status',
@@ -17191,7 +17191,7 @@ describe('evidence from the page context', () => {
             source: 'clf-fiber-reply',
             nonce: event.data.nonce,
             scanToken: event.data.nonce,
-            v: 17,
+            v: 18,
             scanOk: true,
             rows: [],
             turns: [
@@ -17374,7 +17374,7 @@ describe('evidence from the page context', () => {
             source: 'clf-fiber-reply',
             nonce: event.data.nonce,
             scanToken: event.data.nonce,
-            v: 17,
+            v: 18,
             scanOk: true,
             rows: [{ ...GOOD, tool: 'read' }],
             turns: []
@@ -17541,7 +17541,8 @@ describe('evidence from the page context', () => {
 describe('the activity feed', () => {
   it.each([
     ['legacy diagnostic reply', 15, true], ['legacy failed scan', 15, false],
-    ['previous same-wire diagnostic reply', 16, true], ['previous same-wire failed scan', 16, false]
+    ['previous same-wire diagnostic reply', 16, true], ['previous same-wire failed scan', 16, false],
+    ['previous reader diagnostic reply', 17, true], ['previous reader failed scan', 17, false]
   ] as const)(
     'keeps an older helper reply from winning the current diagnostic scan: %s', async (_label, legacyWire, legacyOk) => {
       live = await harness(undefined, {
@@ -17568,7 +17569,7 @@ describe('the activity feed', () => {
       await new Promise(resolve => globalThis.setTimeout(resolve, 10));
       expect(settledScan).toBe(false);
       window.dispatchEvent(new window.MessageEvent('message', { source: window, data: {
-        source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 17, scanOk: true, rows: [], turns: [],
+        source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 18, scanOk: true, rows: [], turns: [],
         shellScan: { selectorMatches: 1, mapped: 1, rejects: {
           fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0,
           identityReasonWorkingTurnMismatch: 1, nativeAnchorPathEmpty: 1, nativeAnchorPrerequisite: 1
@@ -17609,7 +17610,7 @@ describe('the activity feed', () => {
     expect(valid?.coreDiagnostic?.shellScan).toEqual({
       selectorMatches: 3,
       mapped: 1,
-      reader: { contentRecorder: 133, contentKeys: 4 },
+      reader: { contentRecorder: 134, contentKeys: 4 },
       rejects: {
         fiberMissing: 1,
         ownerMissing: 1,
@@ -24928,7 +24929,7 @@ describe('the context meter and automatic compaction', () => {
         const scanToken = message.nonce;
         if (currentCalls !== null) section.setAttribute('data-clf-fiber-v2-turn', `${scanToken}:0`);
         window.dispatchEvent(new window.MessageEvent('message', { source: window, data: {
-          source: 'clf-fiber-reply', nonce: scanToken, scanToken, v: 17,
+          source: 'clf-fiber-reply', nonce: scanToken, scanToken, v: 18,
           scanOk: currentCalls !== null, rows: [], turns: currentCalls === null ? [] : [{
             index: 0,
             turnId: section.getAttribute('data-turn-id'),
@@ -26677,7 +26678,7 @@ describe('ordinary input native terminal association', () => {
       const scanToken = event.data.nonce;
       live!.document.querySelector('[data-clf-fiber-v2-turn]')?.setAttribute('data-clf-fiber-v2-turn', `${scanToken}:1`);
       live!.window.dispatchEvent(new live!.window.MessageEvent('message', { source: live!.window as unknown as Window,
-        data: { source: 'clf-fiber-reply', nonce: scanToken, scanToken, v: 17, scanOk: true,
+        data: { source: 'clf-fiber-reply', nonce: scanToken, scanToken, v: 18, scanOk: true,
           rows: [], turns: turns.map((turn, index) => ({ ...turn, codeModeCalls: (turn as any).codeModeCalls || [], index })) } }));
     };
     live!.window.addEventListener('message', feed);
@@ -26929,7 +26930,7 @@ describe('ordinary input native terminal association', () => {
           codeModeCalls: (turn.codeModeCalls || []).map((call: any) => ({ ...call, answered: true }))
         }));
         win.dispatchEvent(new win.MessageEvent('message', { source: win, data: {
-          source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 17,
+          source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 18,
           scanOk: true, rows: [], turns: next.map((turn: any, index: number) => ({ ...turn, index }))
         } }));
       };
@@ -26989,7 +26990,7 @@ describe('ordinary input native terminal association', () => {
         }))
       }));
       win.dispatchEvent(new win.MessageEvent('message', { source: win, data: {
-        source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 17,
+        source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 18,
         scanOk: true, rows: [], turns: next.map((turn: any, index: number) => ({ ...turn, index }))
       } }));
     };
@@ -27992,7 +27993,7 @@ describe('the goal loop', () => {
       const nonce = event.data.nonce;
       live!.document.querySelector('[data-turn-id="finished-answer"]')!.setAttribute('data-clf-fiber-v2-turn', `${nonce}:0`);
       win.dispatchEvent(new win.MessageEvent('message', { source: win, data: {
-        source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 17, scanOk: true, rows: [], turns: [{
+        source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 18, scanOk: true, rows: [], turns: [{
           index: 0, conversationId: CHAT, turnId: 'finished-answer', endMessageId: 'finished-final', calls: [], activities: [],
           messages: [{ messageId: 'finished-final', rawMessageId: 'finished-final', stable: true, rawText: 'Completed answer.' }]
         }]
@@ -30837,7 +30838,7 @@ describe('the goal loop', () => {
             source: 'clf-fiber-reply',
             nonce: event.data.nonce,
             scanToken,
-            v: 17,
+            v: 18,
             scanOk: true,
             rows: [],
             turns: [{
@@ -30920,7 +30921,7 @@ describe('the goal loop', () => {
             source: 'clf-fiber-reply',
             nonce: event.data.nonce,
             scanToken,
-            v: 17,
+            v: 18,
             scanOk: true,
             rows: [],
             turns: [{
@@ -32292,7 +32293,7 @@ describe('app Stop command uses current native turn proof', () => {
       if (event.data?.source !== 'clf-fiber-ask-v2') return;
       section.setAttribute('data-clf-fiber-v2-turn', `${event.data.nonce}:0`);
       window.dispatchEvent(new window.MessageEvent('message', { source: window, data: {
-        source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 17, scanOk: true, rows: [],
+        source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 18, scanOk: true, rows: [],
         turns: [{ ...terminal, index: 0, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', messages: [{
           messageId: 'late-final-message', stable: true, rawText: 'First words and the complete final answer.', renderedHtml: '<p>First words and the complete final answer.</p>'
         }] }]
@@ -32331,7 +32332,7 @@ describe('app Stop command uses current native turn proof', () => {
       }
       section.setAttribute('data-clf-fiber-v2-turn', `${event.data.nonce}:0`);
       window.dispatchEvent(new window.MessageEvent('message', { source: window, data: {
-        source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 17, scanOk: true, rows: [],
+        source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 18, scanOk: true, rows: [],
         turns: [{ ...terminal, index: 0, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', endMessageId: next === 'retry' ? null : terminal.endMessageId }]
       } }));
     };

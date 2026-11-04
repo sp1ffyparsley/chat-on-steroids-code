@@ -40,7 +40,7 @@
   'use strict';
 
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
-  const VERSION = 17;
+  const VERSION = 18;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -1618,7 +1618,7 @@
    * parent id is chronology, not proof that the enclosing native result reached ChatGPT. Resolve
    * that exact enclosing call without exporting code, arguments, output, or other page objects.
    */
-  function codeModeReceipts(messages, anchoredNarration = null) {
+  function codeModeReceipts(messages, anchoredNarration = null, admittedExecutions = null) {
     const byId = new Map();
     for (const message of messages) {
       const id = str(message && message.id);
@@ -1642,7 +1642,8 @@
         visited.add(id);
         const role = cursor.author && cursor.author.role;
         if (role === 'assistant' && cursor.recipient === 'functions.exec') {
-          owner = { id, scope: scope(cursor), valid: cursor.status === 'finished_successfully' && !!scope(cursor) };
+          owner = { id, scope: scope(cursor), valid: cursor.status === 'finished_successfully' && !!scope(cursor) &&
+            (!admittedExecutions || admittedExecutions.has(id)) };
           break;
         }
         // An earlier completed enclosing call cannot own a later ordinary invocation.
@@ -2244,6 +2245,30 @@
             nativeField(content, 'content_type') !== 'code' || nativeField(content, 'language') !== 'json' || !coreResultReceipt(returned)) continue;
         stagedResultMembers.add(children[0]);
       } catch { /* An unsupported native shape cannot add selected-path membership. */ }
+    }
+    // Code Mode results can be folded out of turn.messageIds too. Their typed,
+    // selected execution owner and exact finished native receipt establish only
+    // membership here; the independent user/final namespace, full path/cache
+    // checks and downstream Core/Code Mode receipts still own publication.
+    if (live && typedUserId && selected.has(typedUserId)) {
+      const admittedExecutions = new Set(shell.executionIds.filter(id => selected.has(id)));
+      if (admittedExecutions.size) try {
+        // Project only own data used by the existing receipt validator. Never
+        // traverse an extra provider getter or copy code/arguments/result text.
+        const messages = currentPath.map(id => {
+          const node = nativeField(mapping, id), message = nativeField(node, 'message');
+          if (nativeField(node, 'id') !== id || nativeField(message, 'id') !== id) return null;
+          const author = nativeField(message, 'author'), metadata = nativeField(message, 'metadata');
+          return { id, status: nativeField(message, 'status'), recipient: nativeField(message, 'recipient'),
+            author: { role: nativeField(author, 'role'), name: nativeField(author, 'name') },
+            metadata: { parent_id: nativeField(metadata, 'parent_id'), request_id: nativeField(metadata, 'request_id'),
+              working_turn_id: nativeField(metadata, 'working_turn_id'), turn_exchange_id: nativeField(metadata, 'turn_exchange_id') } };
+        });
+        const receipts = codeModeReceipts(messages, nativeNarration, admittedExecutions);
+        for (const message of messages) if (message?.author.role === 'tool' &&
+            message.author.name === 'functions.exec' && message.recipient === 'all' &&
+            !selected.has(message.id) && receipts.get(message.id) === true) stagedResultMembers.add(message.id);
+      } catch { /* An unsupported enclosing result cannot supply path membership. */ }
     }
     let mountedNativeScopeRefusal = null;
     // Fixed diagnostic only: older workers may drop additive anchor counters.

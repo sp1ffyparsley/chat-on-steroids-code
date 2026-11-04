@@ -2178,6 +2178,54 @@ describe('alternate shell turn/message provenance', () => {
       } finally { page.dom.window.close(); }
     });
 
+  it.each(['prior execution', 'enclosing execution', 'pending execution', 'pending execution result',
+    'foreign execution scope', 'wrong execution parent', 'unselected execution', 'untyped execution',
+    'unselected user', 'foreign final namespace', 'no live mapping'] as const)(
+    'retains exact Code Mode ancestry when only its result is folded out of selected ids: %s', async variant => {
+      const accepted = variant === 'prior execution' || variant === 'enclosing execution';
+      const page = await shellHarness({ withCall: true, withExec: true, nativeCallReceipt: true,
+        nativeCallLive: variant !== 'no live mapping', callCompleted: false, assistantCompleted: false,
+        nativeCallMutation(mapping, entry) {
+          completeExecBeforeCall(mapping, entry);
+          delete entry.turn.items.find((item: any) => item.callId === CALL).widgetStateSource;
+          mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: JSON.stringify({
+            content: [{ type: 'text', text: 'PRIVATE_TOOL_RESULT' }],
+            structuredContent: { cosResultReceipt: { version: 1, id: 'a'.repeat(48) } } }) };
+          entry.turn.messageIds = [USER, EXEC, CALL, RESULT, ASSISTANT];
+          if (variant === 'enclosing execution') {
+            mapping[CALL].parent = EXEC;
+            mapping[CALL].message.metadata.parent_id = EXEC;
+            mapping[EXEC_RESULT].parent = RESULT;
+            mapping[EXEC_RESULT].message.metadata.parent_id = RESULT;
+            mapping[EXEC].message.metadata.request_id = REQUEST;
+            mapping[EXEC_RESULT].message.metadata.request_id = REQUEST;
+            mapping[ASSISTANT].parent = EXEC_RESULT;
+          }
+          for (const [id, row] of Object.entries(mapping) as [string, any][]) if (id !== USER)
+            Object.assign(row.message.metadata, { working_turn_id: 'native-folded-exec-working',
+              turn_exchange_id: 'native-folded-exec-exchange', parent_id: row.parent });
+          if (variant === 'pending execution') mapping[EXEC].message.status = 'in_progress';
+          if (variant === 'pending execution result') mapping[EXEC_RESULT].message.status = 'in_progress';
+          if (variant === 'foreign execution scope') mapping[EXEC_RESULT].message.metadata.request_id = 'foreign-exec';
+          if (variant === 'wrong execution parent') mapping[EXEC_RESULT].message.metadata.parent_id = USER;
+          if (variant === 'unselected execution') entry.turn.messageIds = [USER, CALL, RESULT, ASSISTANT];
+          if (variant === 'untyped execution') entry.turn.items = entry.turn.items.filter((item: any) => item.callId !== EXEC);
+          if (variant === 'unselected user') entry.turn.messageIds = [EXEC, CALL, RESULT, ASSISTANT];
+          if (variant === 'foreign final namespace') mapping[ASSISTANT].message.metadata.turn_exchange_id = 'foreign-final';
+        } });
+      try {
+        expect(page.fiber.turns[0].calls[0]).toMatchObject({ requestId: accepted ? REQUEST : null,
+          answered: accepted });
+        // An enclosing execution owns the shared request ID; its child must not
+        // create a second ingress association for the same workflow request.
+        const requestOwner = variant === 'enclosing execution' ? EXEC : CALL;
+        expect(page.fiber.turns[0].requests.some((row: any) => row.requestId === REQUEST && row.messageId === requestOwner))
+          .toBe(accepted);
+        if (!accepted) expect(page.fiber.turns[0].endMessageId).toBeNull();
+        expect(JSON.stringify(page.fiber)).not.toContain('PRIVATE_TOOL_RESULT');
+      } finally { page.dom.window.close(); }
+    });
+
   it.each([
     ['identity only', true, false],
     ['finished exact result', true, true],
@@ -3195,7 +3243,7 @@ describe('alternate shell turn/message provenance', () => {
       });
       expect(page.exchange.getAttribute('data-clf-fiber-v2-turn')).toBe('shell-scan:0');
       expect(page.fiber.shellScan).toEqual({
-        reader: { fiberWire: 17, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
+        reader: { fiberWire: 18, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
         selectorMatches: 1,
         mapped: 1,
         rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
@@ -3221,7 +3269,7 @@ describe('alternate shell turn/message provenance', () => {
       });
       expect(page.exchange.getAttribute('data-clf-fiber-v2-turn')).toBe('shell-scan:0');
       expect(page.fiber.shellScan).toEqual({
-        reader: { fiberWire: 17, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
+        reader: { fiberWire: 18, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
         selectorMatches: 1,
         mapped: 1,
         rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
@@ -3241,7 +3289,7 @@ describe('alternate shell turn/message provenance', () => {
       expect(page.fiber.turns).toHaveLength(1);
       expect(page.fiber.turns[0]).toMatchObject({ turnId: TURN, endMessageId: ASSISTANT });
       expect(page.fiber.shellScan).toEqual({
-        reader: { fiberWire: 17, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
+        reader: { fiberWire: 18, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
         selectorMatches: 1,
         mapped: 1,
         rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
@@ -3261,7 +3309,7 @@ describe('alternate shell turn/message provenance', () => {
       expect(page.fiber.turns).toEqual([]);
       expect(page.exchange.hasAttribute('data-clf-fiber-v2-turn')).toBe(false);
       expect(page.fiber.shellScan).toEqual({
-        reader: { fiberWire: 17, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
+        reader: { fiberWire: 18, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
         selectorMatches: 1,
         mapped: 0,
         rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
@@ -3289,7 +3337,7 @@ describe('alternate shell turn/message provenance', () => {
         expect(page.exchange.getAttribute('data-clf-fiber-v2-turn')).toBe('shell-scan:0');
         expect(page.secondExchange?.hasAttribute('data-clf-fiber-v2-turn')).toBe(secondStamped);
         expect(page.fiber.shellScan).toEqual({
-        reader: { fiberWire: 17, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
+        reader: { fiberWire: 18, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
           selectorMatches: 2,
           mapped,
           rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,

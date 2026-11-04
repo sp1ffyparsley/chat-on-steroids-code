@@ -1,3 +1,9 @@
+## Candidate134 source repair; installed133 remains the accepted runtime
+
+Private source `913ee843a59822d01ec91891af4cd378315218b3` reproduces another original-parent join gap: a finished native `functions.exec` result may be folded out of the selected rendered IDs while the exact typed execution and current native branch remain. Two corrected-witness positive cases failed before repair; nine negative controls passed. The existing Code Mode receipt validator now optionally constrains staging to selected typed execution owners. Only own-data identity/status fields are projected; code, arguments and output are not copied. Independent original user/final namespace, full branch/cache checks and downstream Core/Code Mode completion remain unchanged.
+
+Both prior-execution and enclosing-execution cases now pass. Existing two reader/shell suites passed626checks before the paired generation bump. Content/background recorder134 and Fiber wire18 prevent an older17helper from downgrading the new reader. Wider four-suite run passed3331checks and failed two old generation snapshots; those failed results remain failed. Corrected focused generation/publication/legacy-reply controls passed9checks. Typecheck and syntax checks passed. Canonical strict package qualification is running;134is NOT yet qualified, installed or a live-autonomy claim. One real page still shows37missing associations; its trace matches the unselected-path failure class but does not independently identify the omitted node role. No live receipt debt, model circuit, task or permission was cleared.
+
 # Chat On Steroids - code research mirror
 
 ## Recorder133 installed: original-parent join and recovery repairs

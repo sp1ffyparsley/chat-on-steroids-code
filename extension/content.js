@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 133;
+  const RECORDER_VERSION = 134;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -4417,7 +4417,7 @@
   // 12 adds alternate-shell exact message/request provenance and provisional owner gating.
   // Old same-nonce frames can arrive before the replacement MAIN-world listener.
   // Reject the pre-refusal schema rather than silently losing request-join diagnostics.
-  const FIBER_VERSION = 17;
+  const FIBER_VERSION = 18;
   const FIBER_TIMEOUT_MS = 1500;
   const FIBER_MAX_ROWS = 400;
   /** Assistant turns whose per-call evidence is accepted from one scan. */
