@@ -2178,21 +2178,25 @@ describe('alternate shell turn/message provenance', () => {
       } finally { page.dom.window.close(); }
     });
 
-  it.each(['prior execution', 'enclosing execution', 'pending execution', 'pending execution result',
-    'foreign execution scope', 'wrong execution parent', 'unselected execution', 'untyped execution',
+  it.each(['prior execution', 'enclosing execution', 'folded prior execution', 'folded enclosing execution',
+    'pending execution', 'pending execution result',
+    'foreign execution scope', 'wrong execution parent', 'foreign typed execution', 'untyped execution',
     'unselected user', 'foreign final namespace', 'no live mapping'] as const)(
     'retains exact Code Mode ancestry when only its result is folded out of selected ids: %s', async variant => {
-      const accepted = variant === 'prior execution' || variant === 'enclosing execution';
+      const accepted = ['prior execution', 'enclosing execution', 'folded prior execution', 'folded enclosing execution'].includes(variant);
+      const enclosing = variant.endsWith('enclosing execution');
+      let renderedEntry: any;
       const page = await shellHarness({ withCall: true, withExec: true, nativeCallReceipt: true,
         nativeCallLive: variant !== 'no live mapping', callCompleted: false, assistantCompleted: false,
         nativeCallMutation(mapping, entry) {
+          renderedEntry = entry;
           completeExecBeforeCall(mapping, entry);
           delete entry.turn.items.find((item: any) => item.callId === CALL).widgetStateSource;
           mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: JSON.stringify({
             content: [{ type: 'text', text: 'PRIVATE_TOOL_RESULT' }],
             structuredContent: { cosResultReceipt: { version: 1, id: 'a'.repeat(48) } } }) };
           entry.turn.messageIds = [USER, EXEC, CALL, RESULT, ASSISTANT];
-          if (variant === 'enclosing execution') {
+          if (enclosing) {
             mapping[CALL].parent = EXEC;
             mapping[CALL].message.metadata.parent_id = EXEC;
             mapping[EXEC_RESULT].parent = RESULT;
@@ -2208,7 +2212,11 @@ describe('alternate shell turn/message provenance', () => {
           if (variant === 'pending execution result') mapping[EXEC_RESULT].message.status = 'in_progress';
           if (variant === 'foreign execution scope') mapping[EXEC_RESULT].message.metadata.request_id = 'foreign-exec';
           if (variant === 'wrong execution parent') mapping[EXEC_RESULT].message.metadata.parent_id = USER;
-          if (variant === 'unselected execution') entry.turn.messageIds = [USER, CALL, RESULT, ASSISTANT];
+          if (variant.startsWith('folded ')) entry.turn.messageIds = [USER, CALL, RESULT, ASSISTANT];
+          if (variant === 'foreign typed execution') {
+            entry.turn.messageIds = [USER, CALL, RESULT, ASSISTANT];
+            entry.turn.items.find((item: any) => item.callId === EXEC).callId = 'foreign-typed-execution';
+          }
           if (variant === 'untyped execution') entry.turn.items = entry.turn.items.filter((item: any) => item.callId !== EXEC);
           if (variant === 'unselected user') entry.turn.messageIds = [EXEC, CALL, RESULT, ASSISTANT];
           if (variant === 'foreign final namespace') mapping[ASSISTANT].message.metadata.turn_exchange_id = 'foreign-final';
@@ -2218,9 +2226,18 @@ describe('alternate shell turn/message provenance', () => {
           answered: accepted });
         // An enclosing execution owns the shared request ID; its child must not
         // create a second ingress association for the same workflow request.
-        const requestOwner = variant === 'enclosing execution' ? EXEC : CALL;
+        const requestOwner = enclosing ? EXEC : CALL;
         expect(page.fiber.turns[0].requests.some((row: any) => row.requestId === REQUEST && row.messageId === requestOwner))
           .toBe(accepted);
+        if (accepted) {
+          // Folding/rehydration cannot rebind a shared workflow ID to its child.
+          renderedEntry.turn.messageIds = variant.startsWith('folded ')
+            ? [USER, EXEC, EXEC_RESULT, CALL, RESULT, ASSISTANT] : [USER, CALL, RESULT, ASSISTANT];
+          const next = await shellRescan(page, 'same-native-owner-' + variant.replaceAll(' ', '-'));
+          expect(next.turns[0].calls[0]).toMatchObject({ requestId: REQUEST, answered: true });
+          expect(next.turns[0].requests.filter((row: any) => row.requestId === REQUEST))
+            .toEqual([expect.objectContaining({ messageId: requestOwner })]);
+        }
         if (!accepted) expect(page.fiber.turns[0].endMessageId).toBeNull();
         expect(JSON.stringify(page.fiber)).not.toContain('PRIVATE_TOOL_RESULT');
       } finally { page.dom.window.close(); }

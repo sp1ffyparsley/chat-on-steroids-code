@@ -2246,12 +2246,13 @@
         stagedResultMembers.add(children[0]);
       } catch { /* An unsupported native shape cannot add selected-path membership. */ }
     }
-    // Code Mode results can be folded out of turn.messageIds too. Their typed,
-    // selected execution owner and exact finished native receipt establish only
+    // Code Mode invocations/results can be folded out of turn.messageIds too.
+    // This rendered turn's exact typed execution owner and finished receipt establish only
     // membership here; the independent user/final namespace, full path/cache
     // checks and downstream Core/Code Mode receipts still own publication.
+    const stagedExecutionMembers = new Set();
     if (live && typedUserId && selected.has(typedUserId)) {
-      const admittedExecutions = new Set(shell.executionIds.filter(id => selected.has(id)));
+      const admittedExecutions = new Set(shell.executionIds);
       if (admittedExecutions.size) try {
         // Project only own data used by the existing receipt validator. Never
         // traverse an extra provider getter or copy code/arguments/result text.
@@ -2265,9 +2266,12 @@
               working_turn_id: nativeField(metadata, 'working_turn_id'), turn_exchange_id: nativeField(metadata, 'turn_exchange_id') } };
         });
         const receipts = codeModeReceipts(messages, nativeNarration, admittedExecutions);
-        for (const message of messages) if (message?.author.role === 'tool' &&
-            message.author.name === 'functions.exec' && message.recipient === 'all' &&
-            !selected.has(message.id) && receipts.get(message.id) === true) stagedResultMembers.add(message.id);
+        for (const message of messages) if (message && !selected.has(message.id) && receipts.get(message.id) === true) {
+          if (message.author.role === 'tool' && message.author.name === 'functions.exec' && message.recipient === 'all')
+            stagedResultMembers.add(message.id);
+          else if (message.author.role === 'assistant' && message.recipient === 'functions.exec' &&
+              admittedExecutions.has(message.id)) stagedExecutionMembers.add(message.id);
+        }
       } catch { /* An unsupported enclosing result cannot supply path membership. */ }
     }
     let mountedNativeScopeRefusal = null;
@@ -2308,7 +2312,7 @@
       if (currentPath[0] !== typedUserId) {
         prerequisite('nativeAnchorUserPathMismatch'); return refuse('nativeScopePathUnproved');
       }
-      if (!currentPath.every(id => selected.has(id) || nativeNarration(id) || stagedResultMembers.has(id))) {
+      if (!currentPath.every(id => selected.has(id) || nativeNarration(id) || stagedResultMembers.has(id) || stagedExecutionMembers.has(id))) {
         prerequisite('nativeAnchorUnselectedPath'); return refuse('nativeScopePathUnproved');
       }
       try {
@@ -2785,7 +2789,10 @@
     }
     traceNativeReferenceRecovery();
     const out = [];
-    for (const id of new Set([...ids, ...invocationIds, ...shellCurrentPath(live, entry)])) {
+    // Once the exact native branch is independently anchored, use its chronology
+    // first. A folded execution must not change a shared workflow request's
+    // original parent from functions.exec to its first rendered child.
+    for (const id of new Set([...(mountedNativeScope ? currentPath : []), ...ids, ...invocationIds, ...shellCurrentPath(live, entry)])) {
       // A selected native ID can precede its widget. Selection proves which
       // native row exists, not that the row belongs to this typed user: keep
       // its request key private until the same ancestry proof that admits the
