@@ -599,6 +599,83 @@ describe('private native completion fence checkpoints', () => {
   });
 });
 
+describe('metadata checkpoint warning coalescing', () => {
+  it('bounds metadata diagnostic memory and preserves read errors and fresh diagnostic windows', async () => {
+    const conversation = randomUUID();
+    const ids = Array.from({ length: 129 }, (_, index) => `metadata-diagnostic-${index}`);
+    const read = (id: string) => readSessionNativeCompletionFenceCheckpoint(id, conversation, 'profile-diagnostic');
+    const warnings = () => getLog().filter(row => row.level === 'warn' &&
+      row.message.startsWith('session metadata-diagnostic-'));
+    for (const id of ids) await expect(read(id)).rejects.toThrow('metadata is unavailable');
+    expect(warnings()).toHaveLength(129);
+    await expect(read(ids.at(-1)!)).rejects.toThrow('metadata is unavailable');
+    expect(warnings()).toHaveLength(129);
+    await expect(read(ids[0]!)).rejects.toThrow('metadata is unavailable');
+    expect(warnings()).toHaveLength(130);
+    const realRead = fs.readFile.bind(fs);
+    const denied = vi.spyOn(fs, 'readFile').mockImplementation((async (
+      file: Parameters<typeof fs.readFile>[0], ...args: unknown[]
+    ) => {
+      if (String(file).includes(ids[0]!)) throw Object.assign(new Error('PRIVATE_FILESYSTEM_DETAIL'), { code: 'EACCES' });
+      return (realRead as (...params: unknown[]) => Promise<unknown>)(file, ...args);
+    }) as typeof fs.readFile);
+    try { await expect(read(ids[0]!)).rejects.toThrow('metadata could not be read (EACCES)'); }
+    finally { denied.mockRestore(); }
+    expect(warnings()).toHaveLength(130);
+    let now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      now += 5 * 60_000;
+      await expect(read(ids[0]!)).rejects.toThrow('metadata is unavailable');
+      expect(warnings()).toHaveLength(131);
+      resetSessionStoreForTests();
+      await expect(read(ids[0]!)).rejects.toThrow('metadata is unavailable');
+      expect(warnings()).toHaveLength(132);
+    } finally { clock.mockRestore(); }
+    expect(warnings().some(row => row.message.includes('PRIVATE_FILESYSTEM_DETAIL'))).toBe(false);
+  });
+
+  it('coalesces repeated missing checkpoints without caching their refusal, and reports changed state and recovery', async () => {
+    const conversation = randomUUID();
+    const session = await createSession({ conversationId: conversation });
+    await flushSessions();
+    const folder = path.join(sessionsRoot(), session.id);
+    const metadata = path.join(folder, 'meta.json');
+    const backup = path.join(folder, 'meta.backup.json');
+    const valid = await fs.readFile(metadata);
+    resetSessionStoreForTests();
+    try {
+      await fs.rm(metadata); await fs.rm(backup, { force: true });
+      const warnings = () => getLog().filter(row => row.level === 'warn' &&
+        row.message.startsWith(`session ${session.id}: meta.json`));
+      const read = () => readSessionNativeCompletionFenceCheckpoint(session.id, conversation, 'profile-diagnostic');
+      for (let attempt = 0; attempt < 4; attempt++)
+        await expect(read()).rejects.toThrow('metadata is unavailable');
+      expect(warnings()).toHaveLength(1);
+      expect(await sessionDirectoryMissing(session.id)).toBe(false);
+      await fs.writeFile(metadata, 'PRIVATE_INVALID_CHECKPOINT');
+      await expect(read()).rejects.toThrow('metadata is unavailable');
+      expect(warnings()).toHaveLength(2);
+      await fs.writeFile(backup, valid);
+      expect(await read()).toBeNull();
+      expect(await read()).toBeNull();
+      expect(warnings()).toHaveLength(3);
+      await fs.writeFile(metadata, valid);
+      expect(await read()).toBeNull();
+      expect(getLog().filter(row => row.level === 'info' &&
+        row.message === `session ${session.id}: metadata checkpoint readable again`)).toHaveLength(1);
+      await fs.rm(metadata); await fs.rm(backup);
+      await expect(read()).rejects.toThrow('metadata is unavailable');
+      expect(warnings()).toHaveLength(4);
+      expect(warnings().some(row => row.message.includes('PRIVATE_INVALID_CHECKPOINT'))).toBe(false);
+    } finally {
+      await fs.writeFile(metadata, valid);
+      await fs.writeFile(backup, valid);
+      resetSessionStoreForTests();
+    }
+  });
+});
+
 describe('canonical shard warning coalescing', () => {
   async function fixture() {
     const session = await createSession({ title: 'Unreadable shard diagnostics' });

@@ -1,6 +1,12 @@
 # Chat On Steroids - code research mirror
 
-## Current: recorder137 independently installed privately
+## Current source: candidate138; privately installed runtime remains137
+
+Candidate138 source adds four focused reliability repairs: native Retry rechecks the exact latest failure/control immediately before its click; exact Resume rechecks the latest native source/failure, newer answers, editor text, attachments and control ownership immediately before its click; an explicitly requested cold-start pause is durably saved before restored outbox/browser work can wake; and repeated unreadable metadata warnings are bounded without caching a read result or accepting missing history. Six affected whole suites passed3,162targeted checks privately, including genuine failure-first cases and adjacent refusal controls. The existing content/background recorder markers are synchronized to138.
+
+The canonical private build is underway;138 is not yet qualified, installed or live-proven. Installed137 remains actual. Original request/result attribution, missing diagnostic stages and successful native response retrieval remain unresolved; these source repairs do not establish sustained automatic next turns. This mirror supplies reviewed source and tests only, not a qualified public installer.
+
+## Recorder137 independently installed privately
 
 This mirror publishes reviewed source and tests, not a qualified public installer. The latest privately installed package is137; its strict release, exact installer, protected-data and full installed-program checks passed. Use this mirror's public commit SHA for research citations. Private provenance hashes in historical notes are not public Git references.
 

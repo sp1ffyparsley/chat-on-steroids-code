@@ -3410,6 +3410,40 @@ describe('localized roleless transport cards', () => {
       if (variant === 'draft') expect(box.textContent).toBe('Retain my unsent draft');
     });
 
+  it.each(['draft', 'removed control', 'disabled control', 'newer turn', 'unchanged'] as const)(
+    'rechecks native Retry after the final currentness callback: %s', variant => {
+      box.textContent = '';
+      const { retry, node } = card('Retry', 'Message delivery timed out. Please try again.');
+      const clicked = vi.fn(); retry.addEventListener('click', clicked);
+      let checks = 0;
+      const current = () => {
+        if (++checks === 3) {
+          if (variant === 'draft') box.textContent = 'A newly entered task';
+          if (variant === 'removed control') retry.remove();
+          if (variant === 'disabled control') retry.disabled = true;
+          if (variant === 'newer turn') {
+            const newer = document.createElement('section');
+            newer.dataset.testid = 'conversation-turn-newer'; newer.dataset.turn = 'assistant';
+            newer.innerHTML = '<div data-message-author-role="assistant" data-message-id="later-answer"><div class="markdown">New native answer</div></div>';
+            document.body.append(newer);
+          }
+        }
+        return true;
+      };
+      expect(api.retryLatestTransportFailure(current, () => true)).toEqual(variant === 'unchanged'
+        ? { status: 'retried' } : { status: 'stopped', reason: 'page_changed' });
+      expect(clicked).toHaveBeenCalledTimes(variant === 'unchanged' ? 1 : 0);
+      if (variant === 'draft') expect(box.textContent).toBe('A newly entered task');
+      if (variant !== 'unchanged') {
+        box.textContent = ''; retry.disabled = false;
+        // A refused stale click has not spent the original control's native Retry grant.
+        document.querySelector('[data-testid="conversation-turn-newer"]')?.remove();
+        if (!retry.isConnected) node.append(retry);
+        expect(api.retryLatestTransportFailure(() => true, () => true)).toEqual({ status: 'retried' });
+        expect(clicked).toHaveBeenCalledOnce();
+      }
+    });
+
   it.each(['Markdown', 'blockquote', 'pre', 'code'])
   ('does not promote an input-stream quotation inside %s when Retry sits outside the authored child', shape => {
     box.textContent = '';
@@ -3726,6 +3760,50 @@ describe('Resume stream unavailable without native Retry', () => {
     })).toEqual({ status: 'stopped', reason: 'resume_text_changed' });
     expect(sent).not.toHaveBeenCalled();
   });
+
+  it.each(['edited text', 'new composer draft', 'ambiguous Send', 'newer answer', 'newer user', 'native Retry appeared', 'unchanged'] as const)(
+    'rechecks Resume after its final currentness callback: %s', async variant => {
+      const { send, cancel, sent } = failedResume();
+      const cancelled = vi.spyOn(cancel, 'click');
+      let authorized = false;
+      let changed = false;
+      const result = await api.resubmitExactResumeMessage({
+        messageId: 'message-one', token, expectedText: prompt,
+        beforeResubmit: () => { authorized = true; return true; },
+        stillCurrent: () => {
+          if (authorized && !changed) {
+            changed = true;
+            if (variant === 'edited text')
+              document.querySelector('[role="textbox"]')!.textContent = `${prompt}\nDifferent instruction`;
+            if (variant === 'new composer draft') box.textContent = 'My next task';
+            if (variant === 'ambiguous Send') send.parentElement!.append(send.cloneNode(true));
+            if (variant === 'newer answer') {
+              const newer = document.createElement('section');
+              newer.dataset.testid = 'conversation-turn-newer'; newer.dataset.turn = 'assistant';
+              newer.innerHTML = '<div data-message-author-role="assistant" data-message-id="newer-answer"><div class="markdown">Work completed.</div></div>';
+              document.body.append(newer);
+            }
+            if (variant === 'newer user') {
+              user('A different task');
+              const newer = document.body.lastElementChild!;
+              newer.setAttribute('data-testid', 'conversation-turn-newer');
+              newer.setAttribute('data-turn-id', 'turn-two');
+              newer.querySelector('[data-message-id]')!.setAttribute('data-message-id', 'message-two');
+            }
+            if (variant === 'native Retry appeared') {
+              const retry = document.createElement('button'); retry.textContent = 'Retry';
+              document.querySelector('[role="alert"]')!.append(retry);
+            }
+          }
+          return true;
+        }
+      });
+      expect(result).toEqual(variant === 'unchanged'
+        ? { status: 'resubmitted' } : { status: 'stopped', reason: 'resume_text_changed' });
+      expect(sent).toHaveBeenCalledTimes(variant === 'unchanged' ? 1 : 0);
+      expect(cancelled).toHaveBeenCalledTimes(variant === 'unchanged' ? 0 : 1);
+      if (variant === 'new composer draft') expect(box.textContent).toBe('My next task');
+    });
 });
 
 describe('model cooldown fallback', () => {

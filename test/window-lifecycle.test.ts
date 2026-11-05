@@ -1166,6 +1166,109 @@ describe('Windows login startup', () => {
     expect(vm.runInContext("sameExplicitAutomationControl(helper, { ...helper, helperSettings: { ...helper.helperSettings, profileId: 'another-account' } })", context)).toBe(false);
   });
 
+  function startupPauseFixture(initialPause = false) {
+    const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');
+    const start = source.indexOf('async function persistStartupAutomationPause(');
+    const end = source.indexOf('\nconst PAUSE_SESSION_AUTOMATION_ARG', start);
+    const parserStart = source.indexOf('const PAUSE_SESSION_AUTOMATION_ARG');
+    const parserEnd = source.indexOf('\ntype ExplicitAutomationControl', parserStart);
+    const controlStart = source.indexOf('function explicitAutomationControlFromArgs');
+    const controlEnd = source.indexOf('\n}\n\n// A second process', controlStart) + 2;
+    expect(start).toBeGreaterThanOrEqual(0);
+    const runtime = { id: 'profile-foot', paused: initialPause };
+    const operations: string[] = [];
+    const persist = vi.fn(async (update: (config: { ui: { automationPaused: boolean } }) => { ui: { automationPaused: boolean } }) => {
+      runtime.paused = update({ ui: { automationPaused: runtime.paused } }).ui.automationPaused;
+      operations.push('pause-persisted');
+    });
+    const context = vm.createContext({
+      getActiveInstanceRuntime: () => ({ profile: { id: runtime.id } }),
+      getConfig: () => ({ ui: { automationPaused: runtime.paused } }),
+      updateConfig: persist,
+      logWarn: vi.fn(), logInfo: vi.fn(), safeCloseForUpdateAttempted,
+      helperReasoningSettingsRequest, signOutEmergencyAlertSettingRequest,
+      operatorSessionInspectionRequest, operatorSettingsControlRequest, operatorConnectionControlRequest,
+      operatorSharedAccountSettingsRequest, operatorProfileCreationRequest, operatorProfileBrowserBindingRequest,
+      operatorProfileRenameRequest,
+      startupAutomationResumeRequested: (argv: string[]) => argv.includes('--resume-automation') && !argv.includes('--updated')
+    });
+    vm.runInContext(stripTypeScriptTypes(
+      source.slice(parserStart, parserEnd).replaceAll('export ', '') + '\n' +
+      source.slice(controlStart, controlEnd) + '\n' + source.slice(start, end)), context);
+    const run = async (argv: string[], profile = 'profile-foot') => {
+      context.argv = argv; context.profile = profile;
+      await vm.runInContext('persistStartupAutomationPause(argv, profile)', context);
+      operations.push(`first-browser-work:paused=${runtime.paused}`);
+    };
+    return { runtime, operations, persist, run };
+  }
+
+  it.each(['ordinary-pause', 'pause-over-resume', 'already-paused', 'no-pause'])(
+    'persists startup pause before admitting restored browser work: %s', variant => {
+      const f = startupPauseFixture(variant === 'already-paused');
+      const argv = ['app.exe', '--background', '--cos-instance-runtime=profile-foot'];
+      if (variant !== 'no-pause') argv.push('--pause-automation', '--pause-session-automation=session-old-1');
+      if (variant === 'pause-over-resume') argv.push('--resume-automation');
+      return f.run(argv).then(() => {
+        const expectedPause = variant !== 'no-pause';
+        expect(f.runtime.paused).toBe(expectedPause);
+        expect(f.persist).toHaveBeenCalledTimes(variant === 'ordinary-pause' || variant === 'pause-over-resume' ? 1 : 0);
+        expect(f.operations.at(-1)).toBe(`first-browser-work:paused=${expectedPause}`);
+        if (f.persist.mock.calls.length) expect(f.operations[0]).toBe('pause-persisted');
+      });
+    });
+
+  it.each([
+    ['wrong runtime', []],
+    ['wrong routed profile', ['--cos-instance-runtime=profile-other']],
+    ['wrong helper profile', ['--set-helper-reasoning=high', '--helper-settings-profile=profile-other']],
+    ['invalid session', ['--pause-session-automation=../../wrong']],
+    ['operator settings', ['--cos-settings-action=read']],
+    ['operator enqueue', ['--cos-enqueue-input=11111111-1111-4111-8111-111111111111']],
+    ['invalid operator', ['--cos-unknown-invalid']],
+    ['account creation', ['--cos-create-profile=Someone']],
+    ['update close', ['--safe-close-for-update=profile-foot']],
+    ['companion reload', ['--reload-companion=profile-foot']]
+  ] as const)('refuses %s before startup pause can mutate settings or wake old work', async (variant, extra) => {
+    const f = startupPauseFixture();
+    if (variant === 'wrong runtime') f.runtime.id = 'profile-other';
+    await expect(f.run(['app.exe', '--background', '--pause-automation', ...extra])).rejects.toThrow();
+    expect(f.persist).not.toHaveBeenCalled();
+    expect(f.runtime.paused).toBe(false);
+    expect(f.operations).toEqual([]);
+  });
+
+  it('rechecks the account inside the serialized startup pause save', async () => {
+    const f = startupPauseFixture();
+    f.persist.mockImplementationOnce(async update => {
+      f.runtime.id = 'profile-other';
+      update({ ui: { automationPaused: false } });
+    });
+    await expect(f.run(['app.exe', '--pause-automation'])).rejects.toThrow(/running account/);
+    expect(f.runtime.paused).toBe(false);
+    expect(f.operations).toEqual([]);
+  });
+
+  it('does not run restored browser work when the startup pause cannot be saved', async () => {
+    const f = startupPauseFixture();
+    f.persist.mockRejectedValueOnce(new Error('disk failure'));
+    await expect(f.run(['app.exe', '--pause-automation'])).rejects.toThrow('disk failure');
+    expect(f.runtime.paused).toBe(false);
+    expect(f.operations).toEqual([]);
+  });
+
+  it('persists an explicit cold-start pause before any restored browser work can wake', () => {
+    const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');
+    const bootstrap = source.indexOf('void app.whenReady().then(async () => {');
+    const pause = source.indexOf('await persistStartupAutomationPause(process.argv, activeRuntime.profile.id);', bootstrap);
+    const account = source.indexOf('await validateIsolatedInstanceSecrets(', bootstrap);
+    const outbox = source.indexOf('await startQueuedWakeRetrySync();', bootstrap);
+    const bridge = source.indexOf('void startBridge()', bootstrap);
+    expect(pause).toBeGreaterThan(account);
+    expect(pause).toBeLessThan(outbox);
+    expect(pause).toBeLessThan(bridge);
+  });
+
   it('routes a cold-start pause request through the restored runtime gate', () => {
     const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');
     const runtimeAssignment = source.indexOf('startExplicitAutomationControlRuntime = ensureExplicitAutomationControlRuntime;');

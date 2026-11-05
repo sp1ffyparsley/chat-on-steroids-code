@@ -311,6 +311,37 @@ export function startupAutomationResumeRequested(argv: readonly string[]): boole
   return argv.includes('--resume-automation') && !argv.includes('--updated');
 }
 
+/** Persist an explicit startup stop before restored outbox or browser owners can run.
+ * The ordinary serialized control queue still owns per-chat switches and live admission. */
+async function persistStartupAutomationPause(argv: readonly string[], profileId: string): Promise<void> {
+  if (!startupAutomationPauseRequested(argv)) return;
+  // An operator request is exclusive. Do not borrow its launch to mutate another setting,
+  // even when its own parser will later refuse an incomplete or mixed operation.
+  if (argv.some(argument => argument.startsWith('--cos-') && !argument.startsWith('--cos-instance-runtime=')) ||
+      argv.some(argument => argument.startsWith('--reload-companion') || argument.startsWith('--defer-companion-reload') ||
+        argument.startsWith('--discard-unexportable-companion-buffers')) || safeCloseForUpdateAttempted(argv)) {
+    throw new Error('Startup automation pause cannot share a launch with operator or update controls.');
+  }
+  const control = explicitAutomationControlFromArgs(argv);
+  const routed = argv.filter(argument => argument.startsWith('--cos-instance-runtime='));
+  const assertCurrent = () => {
+    if (!control?.pauseAll || getActiveInstanceRuntime().profile.id !== profileId ||
+        routed.length > 1 || (routed.length === 1 && routed[0] !== `--cos-instance-runtime=${profileId}`) ||
+        (control.helperSettings && control.helperSettings.profileId !== profileId)) {
+      throw new Error('Startup automation pause does not match this running account; no setting was changed.');
+    }
+  };
+  assertCurrent();
+  if (getConfig().ui.automationPaused !== true) {
+    await updateConfig(config => {
+      assertCurrent();
+      return { ...config, ui: { ...config.ui, automationPaused: true } };
+    });
+  }
+  assertCurrent();
+  logInfo('startup: explicit automation pause persisted before restoring browser work');
+}
+
 const PAUSE_SESSION_AUTOMATION_ARG = '--pause-session-automation=';
 const STABLE_LOCAL_SESSION_ID = /^[0-9a-z-]{8,64}$/i;
 
@@ -1211,6 +1242,7 @@ void app.whenReady().then(async () => {
     await loadConnectorIdentity();
     runtimeStoresReady = true;
     logEvent('profile.config.loaded', `Loaded ${activeRuntime.profile.accountLabel || activeRuntime.profile.displayName || activeRuntime.profile.id} (${activeRuntime.profile.platform})`);
+    await persistStartupAutomationPause(process.argv, activeRuntime.profile.id);
   } catch (error) {
     failInstancePreflight(error);
     return;

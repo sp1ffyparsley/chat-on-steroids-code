@@ -4783,12 +4783,16 @@ var CLF_DOM = (() => {
     }
     // The synchronous authorization hook may itself remount/hide the card, add another control,
     // change the draft or advance the native source. Its result cannot carry stale DOM authority.
+    // Currentness can synchronously publish a new native turn or edit the composer.
+    // Invoke it before reading the final physical controls, so its true result never
+    // carries the earlier DOM snapshot across that publication.
+    if (!stillCurrent()) return { status: 'stopped', reason: 'page_changed' };
     const finalControls = eligibleControls(readCurrentErrors());
     const finalPageChanged = wholePageLoadFailure
       ? Boolean(composer()) || pendingDraft() || turns().length !== 0 || !conversationId()
       : composer() !== box || !box?.isConnected || hasComposerAttachments() || draftBlocksRetry() ||
         (turnNodes(turns().at(-1)).at(-1) || null) !== latestSection;
-    if (!stillCurrent() || generating() || finalPageChanged || finalControls.length !== 1 ||
+    if (generating() || finalPageChanged || finalControls.length !== 1 ||
         finalControls[0].node !== error.node || finalControls[0].retry !== error.retry) {
       return { status: 'stopped', reason: 'page_changed' };
     }
@@ -4908,10 +4912,11 @@ var CLF_DOM = (() => {
       cancelEdit();
       return { status: 'stopped', reason: 'resume_text_changed' };
     }
-    const submit = [...scope.querySelectorAll('button')].filter(control => displayed(control) &&
+    const submitControls = () => [...scope.querySelectorAll('button')].filter(control => displayed(control) &&
       !control.disabled && control.getAttribute('aria-disabled') !== 'true' &&
       /^(?:send|send message|save|save changes)$/i.test(nativeControlLabel(control)) &&
       !control.closest(`${OWN_SURFACES},.markdown`));
+    const submit = submitControls();
     if (submit.length !== 1 || !stillCurrent() || !editing.isConnected) {
       cancelEdit();
       return { status: 'stopped', reason: submit.length > 1 ? 'ambiguous_send' : 'send_unavailable' };
@@ -4924,8 +4929,23 @@ var CLF_DOM = (() => {
         return { status: 'stopped', reason: 'resubmit_not_authorized' };
       }
     }
+    // Both callbacks may synchronously publish new page state. Read the exact edited
+    // handoff, separate composer and unique native Send only after their last invocation.
+    const current = stillCurrent();
     const finalText = readEditing();
-    if (!stillCurrent() || !editing.isConnected || finalText !== editedText || !promptEnvelopeValid(finalText) ||
+    const finalSubmit = submitControls();
+    const finalMessages = messages();
+    const finalOwned = finalMessages.filter(message => message.role === 'user' && message.id === messageId);
+    const finalFailures = errors().filter(error => resumeStreamFailure(error.text));
+    const sourceChanged = finalOwned.length !== 1 || finalOwned[0].node !== owned[0].node ||
+      finalMessages.filter(message => message.role === 'user').at(-1) !== finalOwned[0] ||
+      finalMessages.slice(finalMessages.indexOf(finalOwned[0]) + 1).some(message => message.role === 'user' ||
+        (message.role === 'assistant' && !resumeStreamFailure(message.text))) ||
+      finalFailures.length !== 1 || finalFailures[0].node !== failures[0].node || finalFailures[0].retry;
+    if (!current || generating() || composer() !== box || !box.isConnected || hasComposerAttachments() ||
+        (editorText(box) || '').trim() || !scope.isConnected || !editing.isConnected ||
+        sourceChanged || finalText !== editedText || !promptEnvelopeValid(finalText) ||
+        finalSubmit.length !== 1 || finalSubmit[0] !== submit[0] ||
         !submit[0].isConnected || submit[0].disabled || submit[0].getAttribute('aria-disabled') === 'true') {
       cancelEdit();
       return { status: 'stopped', reason: 'resume_text_changed' };

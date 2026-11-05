@@ -78,9 +78,9 @@ const ATTACHMENT_CATALOG_READ_CONCURRENCY = 64;
 /** Small shard reads are latency-bound on Windows; keep parallelism bounded to avoid I/O bursts. */
 const CANONICAL_SHARD_READ_CONCURRENCY = 8;
 /** Bounded, in-memory diagnostics; never message/result or read-success authority. */
-const MAX_CANONICAL_SHARD_WARNINGS = 128;
-const CANONICAL_SHARD_WARNING_INTERVAL_MS = 5 * 60_000;
-const unreadableCanonicalShardWarnings = new Map<string, { failure: string; reportedAt: number }>();
+const MAX_SESSION_FILE_WARNINGS = 128;
+const SESSION_FILE_WARNING_INTERVAL_MS = 5 * 60_000;
+const unreadableSessionFileWarnings = new Map<string, { failure: string; reportedAt: number }>();
 let canonicalShardWarningEpoch = 0;
 
 /** Manual sidebar deletes remain recoverable without keeping an unbounded second history. */
@@ -151,7 +151,7 @@ function rememberMissingCurrentConversation(conversationId: string): void {
 }
 
 export function initSessionStore(userDataDir: string): void {
-  unreadableCanonicalShardWarnings.clear();
+  unreadableSessionFileWarnings.clear();
   canonicalShardWarningEpoch++;
   root = path.join(userDataDir, 'sessions');
   sessionAssetUsage.clear();
@@ -1178,22 +1178,26 @@ async function sealTornTail(id: string): Promise<void> {
  * Diagnostic memory only: every attempt still reads and validates the current bytes.
  * Hashes/error codes stay private; no message content or filesystem exception text is logged.
  */
+function shouldWarnUnreadableSessionFile(file: string, failure: string, epoch: number): boolean {
+  if (epoch !== canonicalShardWarningEpoch) return false;
+  const now = Date.now(), previous = unreadableSessionFileWarnings.get(file);
+  const report = !previous || previous.failure !== failure ||
+    now < previous.reportedAt || now - previous.reportedAt >= SESSION_FILE_WARNING_INTERVAL_MS;
+  unreadableSessionFileWarnings.delete(file);
+  unreadableSessionFileWarnings.set(file, { failure, reportedAt: report ? now : previous!.reportedAt });
+  while (unreadableSessionFileWarnings.size > MAX_SESSION_FILE_WARNINGS)
+    unreadableSessionFileWarnings.delete(unreadableSessionFileWarnings.keys().next().value!);
+  return report;
+}
+
 function warnUnreadableCanonicalShard(
   id: string, file: string, name: string, raw: Buffer | undefined, error: unknown, epoch: number
 ): void {
-  if (epoch !== canonicalShardWarningEpoch) return;
   const code = (error as NodeJS.ErrnoException | null)?.code;
   const failure = raw
     ? 'bytes:' + createHash('sha256').update(raw).digest('hex')
     : 'read:' + (typeof code === 'string' && /^[A-Z0-9_]{1,32}$/.test(code) ? code : 'UNKNOWN');
-  const now = Date.now(), previous = unreadableCanonicalShardWarnings.get(file);
-  const report = !previous || previous.failure !== failure ||
-    now < previous.reportedAt || now - previous.reportedAt >= CANONICAL_SHARD_WARNING_INTERVAL_MS;
-  unreadableCanonicalShardWarnings.delete(file);
-  unreadableCanonicalShardWarnings.set(file, { failure, reportedAt: report ? now : previous!.reportedAt });
-  while (unreadableCanonicalShardWarnings.size > MAX_CANONICAL_SHARD_WARNINGS)
-    unreadableCanonicalShardWarnings.delete(unreadableCanonicalShardWarnings.keys().next().value!);
-  if (report) logWarn(
+  if (shouldWarnUnreadableSessionFile(file, failure, epoch)) logWarn(
     'session ' + id + ': ignored unreadable canonical message shard ' + name + '; existing history retained, shard unchanged'
   );
 }
@@ -1242,7 +1246,7 @@ async function readCanonicalMessages(id: string, aliasesCollapsed?: () => void):
           if (!key) return null;
           const expectedName = `${createHash('sha256').update(key).digest('hex')}.json`;
           if (expectedName !== name) return null;
-          if (warningEpoch === canonicalShardWarningEpoch) unreadableCanonicalShardWarnings.delete(file);
+          if (warningEpoch === canonicalShardWarningEpoch) unreadableSessionFileWarnings.delete(file);
           return [key, event] as const;
         } catch (error) {
           warnUnreadableCanonicalShard(id, file, name, raw, error, warningEpoch);
@@ -3101,12 +3105,19 @@ async function readMetaFile(
 /** The durable projection of one session, or a truthful refusal when storage is unreadable. */
 async function readMetaCheckpoint(id: string): Promise<MetaCheckpoint | null> {
   const dir = sessionDir(id);
-  const primary = await readMetaFile(id, path.join(dir, 'meta.json'));
-  if (primary.checkpoint) return primary.checkpoint;
+  const metadata = path.join(dir, 'meta.json');
+  const warningEpoch = canonicalShardWarningEpoch;
+  const primary = await readMetaFile(id, metadata);
+  if (primary.checkpoint) {
+    if (warningEpoch === canonicalShardWarningEpoch && unreadableSessionFileWarnings.delete(metadata))
+      logInfo(`session ${id}: metadata checkpoint readable again`);
+    return primary.checkpoint;
+  }
 
   const backup = await readMetaFile(id, path.join(dir, 'meta.backup.json'));
   if (backup.checkpoint) {
-    logWarn(`session ${id}: meta.json ${primary.state}; using the last validated checkpoint`);
+    if (shouldWarnUnreadableSessionFile(metadata, `metadata:${primary.state}:backup-valid`, warningEpoch))
+      logWarn(`session ${id}: meta.json ${primary.state}; using the last validated checkpoint`);
     return backup.checkpoint;
   }
 
@@ -3116,7 +3127,9 @@ async function readMetaCheckpoint(id: string): Promise<MetaCheckpoint | null> {
   if (failure) {
     throw new Error(`Session ${id} metadata could not be read (${failure.code ?? failure.message})`);
   }
-  logWarn(
+  // Diagnostic memory only: every caller still reads both current files and receives the
+  // same refusal. A frequently polled damaged session must not fill the incident ring.
+  if (shouldWarnUnreadableSessionFile(metadata, `metadata:${primary.state}:${backup.state}`, warningEpoch)) logWarn(
     `session ${id}: meta.json ${primary.state}, meta.backup.json ${backup.state}; ` +
       'refusing to treat it as an empty session'
   );
@@ -4693,7 +4706,7 @@ export async function emptyDeletedSessions(): Promise<number> {
 /** Test seam: forgets in-memory state without touching the files. */
 export function resetSessionStoreForTests(): void {
   latestQuestionReads.clear();
-  unreadableCanonicalShardWarnings.clear();
+  unreadableSessionFileWarnings.clear();
   canonicalShardWarningEpoch++;
   for (const entry of open.values()) if (entry.metaTimer) clearTimeout(entry.metaTimer);
   open.clear();
@@ -4709,7 +4722,7 @@ export function resetSessionStoreForTests(): void {
 
 /** Test seam: puts the store back to never having been told where to write. */
 export function unsetSessionRootForTests(): void {
-  unreadableCanonicalShardWarnings.clear();
+  unreadableSessionFileWarnings.clear();
   canonicalShardWarningEpoch++;
   root = '';
   sessionAssetUsage.clear();
