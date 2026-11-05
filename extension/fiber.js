@@ -2392,7 +2392,7 @@
             const finals = entry.turn.items.filter(item => item?.type === 'assistant-message' && item.phase === 'final_answer');
             const finalId = finals.length === 1 ? str(finals[0].messageId) : null;
             const terminal = finalId && shellProviderTerminalAt(mapping, finalId);
-            if (!finalId || currentPath.at(-1) !== finalId || !terminal || shellItemText(finals[0]) !== terminal.text)
+            if (!finalId || currentPath.at(-1) !== finalId || !shellScopeFinalReceiptMatches(finals[0], terminal))
               return refuse('nativeScopeFinalReceiptUnproved');
             const finalMeta = nativeField(messageAt(finalId), 'metadata');
             if (str(nativeField(finalMeta, 'working_turn_id')) !== working || str(nativeField(finalMeta, 'turn_exchange_id')) !== exchange)
@@ -2476,7 +2476,7 @@
           const finalId = str(finals[0].messageId);
           if (!finalId || currentPath.at(-1) !== finalId) return refuse('nativeScopeFinalPathMismatch');
           const terminal = shellProviderTerminalAt(mapping, finalId);
-          if (!terminal || shellItemText(finals[0]) !== terminal.text) return refuse('nativeScopeFinalReceiptUnproved');
+          if (!shellScopeFinalReceiptMatches(finals[0], terminal)) return refuse('nativeScopeFinalReceiptUnproved');
           const finalMeta = nativeField(messageAt(finalId), 'metadata');
           working = str(nativeField(finalMeta, 'working_turn_id'));
           exchange = str(nativeField(finalMeta, 'turn_exchange_id'));
@@ -3143,18 +3143,44 @@
    * truncate a decision into a different answer, or import another message's/private payload.
    * Completion and turn ownership still come from shellTurnSource, never this text field.
    */
-  function shellItemText(item) {
-    const content = typeof item?.content === 'string' ? item.content : '';
-    const id = str(item?.messageId);
-    if (!id || item.type !== 'assistant-message' || item.phase !== 'final_answer' ||
-        contentReferenceSourceId({ content: { content_type: 'text', parts: [content] } }) !== id) return content;
-    const references = item.contentReferences;
-    if (!Array.isArray(references) || references.length !== 1) return content;
-    const reference = references[0], text = reference?.model_dil_v2?.fallbackMarkdown;
-    if (reference?.type !== 'dil' || reference.source_message_id !== id ||
+  function shellPublicItemData(object, key) {
+    try {
+      const descriptor = object && typeof object === 'object' ? Object.getOwnPropertyDescriptor(object, key) : null;
+      return descriptor && own.call(descriptor, 'value') ? descriptor.value : undefined;
+    } catch { return undefined; }
+  }
+
+  function shellFinalContentReference(item, id) {
+    const content = shellPublicItemData(item, 'content');
+    if (!id || str(shellPublicItemData(item, 'messageId')) !== id ||
+        shellPublicItemData(item, 'type') !== 'assistant-message' || shellPublicItemData(item, 'phase') !== 'final_answer' ||
+        typeof content !== 'string' || (content.match(/\bsource_message_id\s*=/g) || []).length !== 1 ||
+        contentReferenceSourceId({ content: { content_type: 'text', parts: [content] } }) !== id) return null;
+    const references = shellPublicItemData(item, 'contentReferences');
+    if (!Array.isArray(references) || shellPublicItemData(references, 'length') !== 1) return null;
+    const reference = shellPublicItemData(references, '0');
+    const text = shellPublicItemData(shellPublicItemData(reference, 'model_dil_v2'), 'fallbackMarkdown');
+    if (shellPublicItemData(reference, 'type') !== 'dil' || shellPublicItemData(reference, 'source_message_id') !== id ||
         typeof text !== 'string' || !text.trim() || text.length > MAX_RENDERED_TEXT ||
-        /^\s*::chatgpt-content-reference\{/.test(text)) return content;
-    return unescapeFallbackMarkdown(text);
+        /^\s*::chatgpt-content-reference\{/.test(text)) return null;
+    return { text };
+  }
+
+  // Original-request namespace proof only. A same-message public DIL preview can differ
+  // from the canonical authored text. Its exact source pointer identifies that native
+  // final; it never supplies a tool receipt, changes a Send payload or overrides the
+  // separate completed:false terminal/body corroboration.
+  function shellScopeFinalReceiptMatches(item, terminal) {
+    const id = str(shellPublicItemData(item, 'messageId')), content = shellPublicItemData(item, 'content');
+    if (!terminal || id !== terminal.id || shellPublicItemData(item, 'type') !== 'assistant-message' ||
+        shellPublicItemData(item, 'phase') !== 'final_answer' || typeof content !== 'string') return false;
+    return content === terminal.text || shellFinalContentReference(item, id) !== null;
+  }
+
+  function shellItemText(item) {
+    const value = shellPublicItemData(item, 'content'), content = typeof value === 'string' ? value : '';
+    const reference = shellFinalContentReference(item, str(shellPublicItemData(item, 'messageId')));
+    return reference ? unescapeFallbackMarkdown(reference.text) : content;
   }
 
   // Upstream 78be0891: decode provider fallback punctuation, preserving fenced and inline code.

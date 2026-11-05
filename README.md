@@ -1,16 +1,19 @@
-## Recorder134 installed; live reconciliation remains unverified
-
-The current exported runtime source is private provenance checkpoint `523e14b405138481593e173e1f35b08a9e21baa0` (not a public Git ref). The qualified private build passed96preliminary and13,312main checks with62conditional skips, then33installer checks and readiness. Installation independently preserved all133,945account files (6,569,854,717bytes) before eight successor apps; all291program files matched the package. Original account settings and pause states were restored. This research mirror does not distribute a qualified public installer.
-
-134 repairs folded native Code Mode results and exact typed execution owners absent from rendered IDs. Native chronology preserves a shared workflow request's original parent across folding and rehydration. Four positive cases, nine negative controls and four rescans pass in the628reader/shell checks. Content/background recorder134 and Fiber wire18 prevent an older reader from replacing the current owner. Original question, branch, terminal-result and Send ownership checks remain intact.
-
-Live recovery is **not yet certified**. After installation, Computer Use stopped because it could not confidently verify Chrome's current URL; no alternate route or duplicate prompt was attempted. The earlier37missing-association incident remains an acceptance target. A separate account's visible GPT-6 picker reports Usage limit reached. Test success and correct installation are not proof of sustained automatic next turns.
-
-Research intake follow-up: the existing next-upgrade predecessor record now binds the independently accepted134program tree; four metadata fields and the matching assertion changed, with a failure-first mismatch then successful readiness. Existing content/worker/Main diagnostic tests now cover wires17and18 and partial stage fields.17targeted private checks pass. The suggested age-based Input counter reset used the wrong owner and a2024cutoff; removal of independent native scope guards was not supported by the observed refusal. These suggestions were not copied. FreshCopy is already operational; no new runtime build, install or task restart resulted from this intake.
-
-The first134canonical build remains failed (offline research heading contract and a glob-test timeout). Product headings were repaired without changing assertions; the glob case and full MCP suite passed unchanged. The subsequent full build passed. Historical release notes below describe their original observations.
-
 # Chat On Steroids - code research mirror
+
+## Current: recorder136 source candidate;135 installed privately
+
+This mirror publishes reviewed source and tests, not a qualified public installer. The latest privately installed package is135;136 is a source candidate undergoing the full strict release checks. Use this mirror's public commit SHA for research citations. Private provenance hashes in historical notes are not public Git references.
+
+135 introduced independently anchored native execution groups, original-wire invocation digests frozen before SDK defaults, unique durable v2 result witnesses, bounded native WebCrypto matching, and first-refusal handling for positively unavailable helper choices. Its strict release run passed96preliminary and13,351main tests with62conditional skips;33installer checks and independent installation verification passed.
+
+136 repairs a reproduced final-answer representation mismatch: an exact same-message DIL preview may differ from canonical native authored text. A unique own-data source pointer may establish original-request namespace identity against an independently terminal native final. It never substitutes for a per-call result receipt, overrides completed:false/body corroboration, changes a Send payload, resets a retry circuit, or guesses legacy batch ownership. Foreign, duplicate, getter-backed, incomplete and missing references remain refused. Existing fallback text projection now avoids getters.
+
+The five affected suites pass3,376tests, including v2 repeated-tool joins, legacy batch refusal and privacy/source controls; typecheck and JavaScript syntax checks pass. Full136qualification,136installation and sustained live automatic next turns remain separate, unverified claims. Provider model availability and old ambiguous results remain real constraints. No new dependency, worker, polling loop or authority store was added.
+
+## Historical release records
+
+The notes below describe their original checkpoints and do not supersede the current status above.
+
 
 ## Recorder133 installed: original-parent join and recovery repairs
 

@@ -2188,7 +2188,10 @@ describe('alternate shell turn/message provenance', () => {
       } finally { page.dom.window.close(); }
     });
 
-  it.each(['exact canonical group', 'pending canonical group', 'pending header mismatch', 'missing system header', 'visible system header', 'foreign header scope',
+  it.each(['exact canonical group', 'exact final reference', 'foreign final pointer', 'foreign final reference',
+    'multiple final references', 'getter final reference', 'unfinished native final reference',
+    'duplicate final pointer source', 'missing final reference preview',
+    'pending canonical group', 'pending header mismatch', 'missing system header', 'visible system header', 'foreign header scope',
     'unfinished execution', 'unfinished execution result', 'foreign retained parent', 'cached conflict',
     'unselected call', 'missing live branch', 'system accessor'] as const)(
     'recovers folded native execution ownership from an exact provider group: %s', async variant => {
@@ -2233,9 +2236,22 @@ describe('alternate shell turn/message provenance', () => {
           if (variant === 'unselected call') entry.turn.messageIds = [USER, ASSISTANT];
           if (variant === 'system accessor') Object.defineProperty(mapping[HEADER].message.metadata,
             'is_visually_hidden_from_conversation', { get() { getterReads++; throw new Error('PRIVATE_SYSTEM_GETTER'); } });
+          if (variant.includes('final reference') || variant === 'foreign final pointer' || variant === 'duplicate final pointer source') {
+            const final = entry.turn.items.find((item: any) => item.messageId === ASSISTANT);
+            final.completed = true;
+            final.content = `::chatgpt-content-reference{source_message_id="${variant === 'foreign final pointer' ? 'foreign-final' : ASSISTANT}"}`;
+            final.contentReferences = [{ type: 'dil', source_message_id: variant === 'foreign final reference' ? 'foreign-final' : ASSISTANT,
+              model_dil_v2: { fallbackMarkdown: 'Rendered final preview differs from the native authored body.' } }];
+            if (variant === 'multiple final references') final.contentReferences.push({ ...final.contentReferences[0] });
+            if (variant === 'duplicate final pointer source') final.content = `::chatgpt-content-reference{source_message_id="${ASSISTANT}" source_message_id="foreign-final"}`;
+            if (variant === 'missing final reference preview') delete final.contentReferences[0].model_dil_v2.fallbackMarkdown;
+            if (variant === 'getter final reference') Object.defineProperty(final.contentReferences[0], 'source_message_id',
+              { get() { getterReads++; throw new Error('PRIVATE_FINAL_REFERENCE_GETTER'); } });
+            if (variant === 'unfinished native final reference') mapping[ASSISTANT].message.status = 'in_progress';
+          }
         } });
       try {
-        const accepted = variant === 'exact canonical group';
+        const accepted = variant === 'exact canonical group' || variant === 'exact final reference';
         expect(page.fiber.turns[0].calls[0]).toMatchObject({
           requestId: accepted || variant === 'pending canonical group' ? REQUEST : null, answered: accepted });
         if (accepted || variant === 'pending canonical group')
@@ -2245,14 +2261,14 @@ describe('alternate shell turn/message provenance', () => {
       } finally { page.dom.window.close(); }
     });
 
-  it.each(['exact reordered batch', 'wrong invocation digest', 'duplicate argument owners', 'legacy batch receipts',
+  it.each(['exact reordered batch', 'referenced final batch', 'referenced final legacy batch', 'wrong invocation digest', 'duplicate argument owners', 'legacy batch receipts',
     'foreign result resource', 'pending result', 'duplicate receipt token', 'source changes while hashing', 'arguments change while hashing'] as const)(
     'binds serialized repeated-tool results only by committed invocation proof: %s', async variant => {
       const HEADER = 'proof-header', CALL2 = 'proof-call-two', RESULT2 = 'proof-result-two';
       let liveMapping: any, mutated = false;
       const digest = (file: string) => createHash('sha256').update(JSON.stringify(['read', { paths: [file] }])).digest('hex');
       const receipt = (id: string, hash: string) => JSON.stringify({ content: [{ type: 'text', text: 'PRIVATE_RESULT' }],
-        structuredContent: { cosResultReceipt: variant === 'legacy batch receipts' ? { version: 1, id }
+        structuredContent: { cosResultReceipt: variant === 'legacy batch receipts' || variant === 'referenced final legacy batch' ? { version: 1, id }
           : { version: 2, id, invocationSha256: hash } } });
       const page = await shellHarness({ withCall: true, withExec: true, nativeCallReceipt: true,
         callCompleted: false, assistantCompleted: false,
@@ -2291,6 +2307,13 @@ describe('alternate shell turn/message provenance', () => {
           if (variant === 'foreign result resource') mapping[RESULT].message.metadata.invoked_resource = {
             app_name: APP, resource_uri: '/' + ASDK + '/link_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/read' };
           if (variant === 'pending result') mapping[RESULT].message.status = 'in_progress';
+          if (variant.startsWith('referenced final')) {
+            const final = entry.turn.items.find((item: any) => item.messageId === ASSISTANT);
+            final.completed = true;
+            final.content = `::chatgpt-content-reference{source_message_id="${ASSISTANT}"}`;
+            final.contentReferences = [{ type: 'dil', source_message_id: ASSISTANT,
+              model_dil_v2: { fallbackMarkdown: 'Rendered final preview differs from the native authored body.' } }];
+          }
         } });
       try {
         if (variant === 'exact reordered batch') expect(page.fiber.turns[0].calls.map((call: any) => call.answered)).toEqual([true, true]);
@@ -2300,12 +2323,16 @@ describe('alternate shell turn/message provenance', () => {
           observed = await shellRescan(page, 'proof-scan-' + tries);
         }
         const calls = observed.turns[0].calls;
-        const expected = variant === 'exact reordered batch' ? [true, true]
+        const expected = variant === 'exact reordered batch' || variant === 'referenced final batch' ? [true, true]
           : ['wrong invocation digest', 'foreign result resource', 'arguments change while hashing'].includes(variant) ? [false, true] : [false, false];
         expect(calls.map((call: any) => call.answered)).toEqual(expected);
-        if (variant === 'exact reordered batch') {
+        if (variant === 'exact reordered batch' || variant === 'referenced final batch') {
           expect(calls[0]).toMatchObject({ requestId: REQUEST, resultReceiptId: 'a'.repeat(48), invocationSha256: digest('one') });
           expect(calls[1]).toMatchObject({ requestId: REQUEST, resultReceiptId: 'b'.repeat(48), invocationSha256: digest('two') });
+        }
+        if (variant === 'referenced final legacy batch') {
+          expect(calls.map((call: any) => call.requestId)).toEqual([REQUEST, REQUEST]);
+          expect(calls.every((call: any) => call.resultReceiptId === undefined)).toBe(true);
         }
         expect(JSON.stringify(observed)).not.toMatch(/PRIVATE_RESULT|connector_tool_payload|"paths"/);
       } finally { page.dom.window.close(); }
