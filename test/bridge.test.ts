@@ -2280,6 +2280,50 @@ describe('opt-in settled-turn Loop forward-readiness', () => {
     } finally { await f.cleanup(); }
   });
 
+  it('refuses an initially active foreign helper source moved to the archive during its awaited lookup', async () => {
+    const f = await retainedUncertainFixture('decision');
+    const original = sessionStoreModule.getSession;
+    let moved = false;
+    const lookup = vi.spyOn(sessionStoreModule, 'getSession').mockImplementation(async id => {
+      const source = await original(id);
+      if (id === f.foreign.id && source && !moved) {
+        moved = true;
+        await sessionStoreModule.deleteSession(id);
+      }
+      return source;
+    });
+    try {
+      const inputPath = path.join(dir, 'state', 'session-input.json');
+      const before = await fs.readFile(inputPath, 'utf8');
+      expect(await settledForwardBridge.settledTurnContinuationAllowed(f.sessionId, f.conversationId, f.turnId)).toBe(false);
+      expect(moved).toBe(true);
+      expect(await original(f.foreign.id)).toBeNull();
+      expect(await fs.readFile(inputPath, 'utf8')).toBe(before);
+      expect(await f.input.claimBrowserInput(f.uncertain.id, 'never-replay-transitioned-helper', null, true)).toBeNull();
+      expect(nativeFinalEvidenceWait(coreBrowserEvidence(f.conversationId))?.reason).toBe('evidence');
+    } finally { lookup.mockRestore(); await f.cleanup(); }
+  });
+
+  it.each(['current-alias', 'historical-alias', 'unrelated-alias'] as const)(
+    'checks all archived source lineage against active current and historical aliases: %s', async cause => {
+      const f = await retainedUncertainFixture('decision');
+      try {
+        const archivedCurrent = randomUUID();
+        expect(await sessionStoreModule.rebindSession(f.foreign.id, f.foreignConversation, archivedCurrent)).toBe(true);
+        await sessionStoreModule.deleteSession(f.foreign.id);
+        const alias = await sessionStoreModule.createSession({ conversationId:
+          cause === 'unrelated-alias' ? randomUUID() : f.foreignConversation });
+        if (cause === 'historical-alias')
+          expect(await sessionStoreModule.rebindSession(alias.id, f.foreignConversation, randomUUID())).toBe(true);
+        const before = await fs.readFile(path.join(dir, 'state', 'session-input.json'), 'utf8');
+        expect(await settledForwardBridge.settledTurnContinuationAllowed(f.sessionId, f.conversationId, f.turnId))
+          .toBe(cause === 'unrelated-alias');
+        expect(await fs.readFile(path.join(dir, 'state', 'session-input.json'), 'utf8')).toBe(before);
+        expect(await f.input.claimBrowserInput(f.uncertain.id, 'never-replay-aliased-helper', null, true)).toBeNull();
+        expect(nativeFinalEvidenceWait(coreBrowserEvidence(f.conversationId))?.reason).toBe('evidence');
+      } finally { await f.cleanup(); }
+    });
+
   it.each(['corrupt-primary', 'missing-primary', 'wrong-id', 'missing-lineage', 'duplicate-lineage',
     'current-conversation', 'current-lineage', 'active-alias', 'active-source-collision'] as const)(
     'refuses archived helper custody with %s', async cause => {
@@ -20165,7 +20209,8 @@ describe('delivering a bootstrap', () => {
         expect(command).toBeTruthy();
         const status = await request('GET', '/status');
         expect(status.body.inputs).toEqual([]);
-        expect(status.body.inputOpeningIds).toEqual([]);
+        // Custody is retained even when Core policy withholds every dispatch handout.
+        expect(status.body.inputOpeningIds).toContain(row.id);
         expect(status.body.placement).toBeNull();
         expect(status.body.openConversationRequests).toEqual([]);
         expect(coreConnectionRecovery).toHaveBeenCalledTimes(state === 'offline' ? 1 : 0);
@@ -20380,7 +20425,8 @@ describe('delivering a bootstrap', () => {
       });
       expect(signedOut.status).toBe(200);
       expect(signedOut.body.inputs).toEqual([]);
-      expect(signedOut.body.inputOpeningIds).toEqual([]);
+      // Signed-out policy must not erase the still-queued opening election.
+      expect(signedOut.body.inputOpeningIds).toContain(row.id);
       expect((await listInputs()).find(entry => entry.id === row.id)).toMatchObject({ state: 'queued', owner: null });
       expect(await bridgeStatus()).toMatchObject({ authState: 'signed-out' });
       await expect(requestBrowserDecision('Do not spend a helper attempt while signed out', new AbortController().signal))

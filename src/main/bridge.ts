@@ -5658,7 +5658,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         projectCreateDispatchAllowed: !dispatchPaused && browserAuthState === 'signed-in',
         projectCreateRequests: dispatchPaused || browserAuthState !== 'signed-in' ? [] : await pendingProjectCreates(),
         openConversationRequests: browserDispatchPaused ? [] : pendingBrowserConversationOpens(),
-        inputOpeningIds: browserDispatchPaused ? [] : inputRows.filter(row => !['sent', 'failed', 'cancelled'].includes(row.state)).map(row => row.id),
+        // Retained opening custody is not dispatch authority. Withheld handouts must not
+        // make the worker retire a still-queued or unknown-Send election as terminal.
+        inputOpeningIds: inputRows.filter(row => !['sent', 'failed', 'cancelled'].includes(row.state)).map(row => row.id),
         // Direct composer messages are the user's foreground intent. The companion uses only
         // these inert ids to let a fresh authored chat cross the browser-maintenance queue before
         // automatic recovery work; message text still remains behind the exclusive input claim.
@@ -12923,6 +12925,9 @@ async function settledTurnInputCustodyScope(sessionId: string, id: string, rows:
         const archived = await readDeletedSessionCustody(sourceSessionId);
         if (archived === null) return null;
         if (archived) {
+          // Do not reinterpret an active source as archived midway through this proof. The
+          // archive lookup still runs for active sources to retain its same-ID collision veto.
+          if (source) return null;
           const currentSession = await getSession(sessionId);
           const currentLineageRevision = JSON.stringify(currentSession?.chatIds);
           const currentLineage = new Set([id, ...(currentSession?.chatIds ?? [])]);
@@ -12931,8 +12936,10 @@ async function settledTurnInputCustodyScope(sessionId: string, id: string, rows:
           // Reuse the complete active catalog. A live alias cannot be hidden by the archive;
           // unrelated archived IDs need no scan because Input freezes this exact source ID.
           const active = await indexedSessions({ requireComplete: true });
+          const archivedLineage = new Set(archived.chatIds);
           if (active.some(session => session.id === sourceSessionId ||
-              session.conversationId === archived.conversationId || session.chatIds.includes(archived.conversationId))) return null;
+              session.conversationId !== null && archivedLineage.has(session.conversationId) ||
+              session.chatIds.some(cid => archivedLineage.has(cid)))) return null;
           const latestCurrent = await getSession(sessionId);
           const rechecked = await readDeletedSessionCustody(sourceSessionId);
           if (!rechecked || rechecked.fingerprint !== archived.fingerprint ||

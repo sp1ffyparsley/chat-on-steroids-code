@@ -1400,8 +1400,13 @@ describe('custody-preserving companion reload', () => {
     expect(worker.runtimeReload).not.toHaveBeenCalled();
   });
 
-  it.each([['deferred', true], ['deferred', false], ['accepted-intervening', true], ['unknown-intervening', true], ['account-changed', true]] as const)(
-    'joins the old maintenance flight release before replaying its held wake: %s, woken=%s', async (outcome, woken) => {
+  it.each([
+    ['deferred', true, false], ['deferred', false, false], ['accepted-intervening', true, false],
+    ['unknown-intervening', true, false], ['account-changed', true, false],
+    ['deferred', true, true], ['deferred', false, true], ['accepted-intervening', true, true],
+    ['unknown-intervening', true, true], ['account-changed', true, true]
+  ] as const)(
+    'joins the old maintenance flight release before replaying its held wake: %s, woken=%s, rejected=%s', async (outcome, woken, rejected) => {
       const maintainStart = backgroundSource.indexOf('function maintain(woken = false) {');
       const maintainEnd = backgroundSource.indexOf('\n/**', maintainStart);
       const reloadStart = backgroundSource.indexOf('  async reloadCompanion(_message, sender) {');
@@ -1410,7 +1415,9 @@ describe('custody-preserving companion reload', () => {
         .replace(/^async reloadCompanion\(/, 'async function reloadCompanion(').replace(/,$/, '');
       let releaseReload!: () => void, releaseMaintenance!: () => void;
       const reloadGate = new Promise<void>(resolve => { releaseReload = resolve; });
-      const maintenanceGate = new Promise<void>(resolve => { releaseMaintenance = resolve; });
+      const maintenanceGate = new Promise<void>((resolve, reject) => {
+        releaseMaintenance = () => rejected ? reject(new Error('prior maintenance failed')) : resolve();
+      });
       const maintainOnce = vi.fn(async () => undefined);
       const context = { maintenanceFlight: null as Promise<void> | null, maintenanceAgain: false,
         companionReloadFlight: null, connectionEpoch: 1, companionPopup: () => true, maintainOnce,
@@ -1420,7 +1427,7 @@ describe('custody-preserving companion reload', () => {
       context.maintenanceFlight = maintenanceGate.finally(() => { context.maintenanceFlight = null; });
       const owner = vm.runInNewContext(`${backgroundSource.slice(maintainStart, maintainEnd)}\n${reloadFunction}; ({ maintain, reloadCompanion });`, context);
       const reload = owner.reloadCompanion({}, {});
-      void owner.maintain(woken);
+      void owner.maintain(woken).catch(() => undefined);
       releaseReload();
       expect(await reload).toMatchObject({ ok: false, error: 'reload_deferred' });
       expect(maintainOnce).not.toHaveBeenCalled();

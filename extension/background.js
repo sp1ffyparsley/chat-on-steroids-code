@@ -8044,7 +8044,7 @@ const HANDLERS = {
           // An older pass may have exited its loop but not released its flight yet. Joining
           // that owner first avoids latching again onto an already-finished pass. Accepted
           // intervening reloads clear the same latch, so this cannot revive post-reload work.
-          void Promise.resolve(maintenanceFlight).then(() => {
+          void Promise.resolve(maintenanceFlight).catch(() => undefined).then(() => {
             if (maintenanceAgain && epoch === connectionEpoch) return maintain(true);
           }).catch(() => undefined);
         } else maintenanceAgain = false;
