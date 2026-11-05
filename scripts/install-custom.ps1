@@ -132,15 +132,15 @@ $script:InstalledUpgradeBaseline = [pscustomobject]@{
   Version = '2.1.39'
   SafeCloseForUpdate = $true
   FileCount = 291
-  TotalBytes = 575472348
-  TreeSha256 = 'd4df91f604be8a734af3c21ea4453100009b183ff66da57368251624ed3727c5'
+  TotalBytes = 575481960
+  TreeSha256 = 'f0ba550a02ef24dd3de1e5ced5e576f974603e1a86058b7fb6ca9ea81c5c7ed3'
   FileVersion = '2.1.39'
   ProductVersion = '2.1.39.0'
-  ExeSha256 = '17765e962d256e9cf3f474a2cb9ada4e269993744f7a1d58701816917713560a'
-  AppAsarSha256 = '8c4624edbf3d1c5a6d57d2e323639cd2802bd4e54afd7c42171b7b7331a5ba5e'
+  ExeSha256 = '6534f9ebac2b18ad14423186a7446f786ba6b847dcbb757f37bb8e532fda5eaf'
+  AppAsarSha256 = 'd335d4e2d2e37fc6e195320c0db719d2f432523c7e6d364523895720c4c31311'
   ExtensionVersion = '2.1.39'
-  ExtensionBackgroundSha256 = '8fcfd2b83e68ee5e22970a947c0057bd59789eacfd27e6feee6f7ae993c6b67d'
-  SourceProvenanceSha256 = '707dda60c98cac21f31e1f5a5e4f1ba1fdd10c2afae6dbeff2c71d979176d83b'
+  ExtensionBackgroundSha256 = 'd9e418e275fca693a6758a41e346054e99b2b1d85977e42a71b77724f5bcece7'
+  SourceProvenanceSha256 = '7f06735abdd1e7e0e84e379b53d09de9c5baf53b65dd9d24b52b527fa9abd4da'
   CustomBuildText = 'Chat On Steroids local custom build. Update through scripts/update-custom.ps1 and reinstall from this checkout.'
 }
 
