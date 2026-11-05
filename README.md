@@ -1,6 +1,6 @@
 # Chat On Steroids - code research mirror
 
-## Current source: candidate140; recorder139 remains installed
+## Current source: privately qualified candidate140; recorder139 remains the accepted installation
 
 Candidate140 adds Main-owned recovery of a missing original request-ID half only when every unchanged original parent is independently bound to canonical executions, immutable invocation/returned-result witnesses, the complete durable receipt catalogue and current source. It preserves the original document/time/parent census and unresolved result debt; a later browser observation alone cannot supply the missing identity or authorize Send. Concurrent callers join the existing exact conversation settlement rather than repeating its catalogue/disk work. The earlier pre-coalescing whole affected run passed1,783checks; focused recovery cases cover changed source, wrong or reordered parents, stale data, ambiguous custody and concurrent controls. Fresh native final-result receipts remain unproved, so this is not an all-matching-fixed claim.
 
@@ -8,7 +8,9 @@ An additional source-only activation repair lets an existing normal lossless com
 
 Candidate140's second canonical build failed three stale shell-fingerprint assertions (67dev-fast checks passed/3failed). The reviewed hash assertions were corrected with modified/unknown-source refusals retained; three focused checks passed. The third canonical build then passed70dev-fast checks but failed before the20native checks could start because the desktop helper did not answer within its existing deadline. Both failed runs remain failed.
 
-A source-only native diagnostic now distinguishes compilation, request dispatch and window enumeration through five fixed stderr stage codes in the existing bounded timeout report. It exports no native text and changes no deadline, capture authority or helper-retirement guard. Six failure-first diagnostic cases were reproduced; the13retirement checks and20real native checks subsequently passed locally, with typecheck passing. A separate unchanged local run also encountered a zero-size Windows capture surface, so intermittent native startup/capture reliability is still open. The fourth canonical build is pending; none of these local checks establishes candidate140 qualification or installation.
+A native diagnostic now distinguishes compilation, request dispatch and window enumeration through five fixed stderr stage codes in the existing bounded timeout report. It exports no native text and changes no deadline, capture authority or helper-retirement guard. Six failure-first diagnostic cases were reproduced; the13retirement checks and20real native checks subsequently passed locally, with typecheck passing. A separate unchanged local run also encountered a zero-size Windows capture surface, so intermittent native startup/capture reliability is still open.
+
+The fourth canonical private build passed96preliminary checks and13,457Main checks with62conditional skips in745.24seconds. Its33post-pin installer checks passed in140.29seconds and readiness passed. Compiled private source is `1f499104e389422c174c4f972c81e546c43e50c8`, tree`471959c687b05d1e4657361d852f3ce6a00dd060`; qualification receipt pin is `48f3ca38478933d1af68776fff16405ce5aa4862`. The exact private installer is162,762,779bytes/SHA-256`b3be479e4ce9b04393c9f3eea31580ead706ea7f65cab9c8ab09cccbfdf882f3`. These are private attestation identifiers, not Git objects available in this public mirror; use this mirror's own commit for public source research. The protected-data activation checkpoint is in progress. Recorder140 is not yet independently accepted as installed.
 
 Public follow-up validation passed90runtime/companion checks, three focused blocked-shell fingerprint checks and the exact installed-baseline assertion. Anonymous fixture profile IDs now retain their lowercase parser-valid form; no account identity or control rule was relaxed.
 
@@ -16,7 +18,7 @@ New operator prompts now ask the agent to execute and test authorized unfinished
 
 Public mirror checks passed18focused original-request recovery cases,547operator/DOM cases and the single changed content diagnostic fixture, plus typecheck and staged privacy/diff checks. These focused and whole-suite counts overlap earlier runs and are not a full release total.
 
-These changes are SOURCE ONLY and are not installed. Future full qualification and activation are pending; recorder139 is still the independently accepted runtime. Existing fresh tasks remain under their current owners. No native completion, approval, model fallback, duplicate prompt or sustained-autonomy authority is inferred from publishing these source changes. This mirror is not a binary release.
+This mirror publishes source and the reviewed private qualification receipt, not a public binary release. Recorder139 remains the independently accepted installation until the separate recorder140 activation and verification complete. Existing fresh tasks retain their current owners and saved work. No native completion, approval, model fallback, duplicate prompt or sustained-autonomy authority is inferred from publishing these source changes.
 
 ## Current: recorder139 independently installed privately
 
