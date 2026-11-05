@@ -501,7 +501,7 @@ describe('native hourly message limit', () => {
     document.body.append(alert);
     const clicked = vi.fn(); button.addEventListener('click', clicked);
     expect(api.errors()).toEqual(expect.arrayContaining([
-      expect.objectContaining({ reason: 'account_restricted', blocking: true, recoverable: false })
+      expect.objectContaining({ reason: 'account_restricted', blocking: true, recoverable: false, usageLimit: true })
     ]));
     expect(api.errors().find(error => error.blocking)?.retry).toBeUndefined();
     expect(await api.send()).toBe(false);
@@ -527,7 +527,7 @@ describe('native short usage limit', () => {
     document.body.append(alert);
     const clicked = vi.fn(); button.addEventListener('click', clicked);
     expect(api.errors()).toEqual(expect.arrayContaining([
-      expect.objectContaining({ reason: 'account_restricted', text: warning, blocking: true, recoverable: false })
+      expect.objectContaining({ reason: 'account_restricted', text: warning, blocking: true, recoverable: false, usageLimit: true })
     ]));
     expect(api.errors().find(error => error.blocking)?.retry).toBeUndefined();
     expect(await api.send()).toBe(false);

@@ -470,6 +470,7 @@ import { pendingBrowserInputs, browserDecisionPreclaimRecovery, claimBrowserInpu
 import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 import { handoffMatchesContinuation } from './session/handoff.js';
 import http from 'node:http';
+import { browserHelperQuotaRejected } from './session/input.js';
 import type { BridgeStatus, ConnectionState } from '../shared/types.js';
 import type { InputImage } from '../shared/input.js';
 import { positionOf } from '../shared/chronology.js';
@@ -5800,13 +5801,27 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       const failureText = typeof body.error === 'string' ? body.error : 'Unable to prepare ChatGPT';
       const ok = await failBrowserInput(body.id, body.owner, failureText,
         { confirmedUnsent,
+          ...(body.detail === 'usage-limit' && typeof body.messageId === 'string' &&
+              (body.conversationId === null || conversationId(body.conversationId))
+            ? { rejectedMessageId: body.messageId,
+              conversationId: body.conversationId === null ? null : conversationId(body.conversationId)! } : {}),
           ...(confirmedUnsent ? { conversationId: confirmedConversation } : {}),
           ...(typeof body.detail === 'string' && /^[a-z-]{1,40}$/.test(body.detail)
             ? { detail: body.detail } : {}),
           // Temporary planners suppress transcript observations. Only this exact input
           // owner's durably accepted failure may propagate a provider restriction.
           // Publish the hold before releasing its waiter, not after Goal spends a retry.
-          onAcceptedFailure: async () => { await pauseForNativeAccountRestriction(failureText); }
+          onAcceptedFailure: async () => {
+            const retained = (await listInputs()).find(row => row.id === body.id);
+            if (retained?.state === 'failed' && retained.error === 'goal_browser_usage_limit' &&
+                (browserHelperQuotaRejected(retained) || (
+                retained.sendAuthorizedAt === undefined && retained.messageId === undefined &&
+                retained.deliveredAt === undefined && retained.toolReceiptUncertain !== true))) {
+              logInfo('bridge: exact helper usage rejection retained for hourly recovery; account pause unchanged');
+              return;
+            }
+            await pauseForNativeAccountRestriction(failureText);
+          }
         });
       const after = (await listInputs()).find(row => row.id === body.id);
       if (await reconcileDiagnosticWakeInput(body.id)) {

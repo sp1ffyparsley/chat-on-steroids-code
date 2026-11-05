@@ -10890,6 +10890,27 @@
         const seconds = Math.round((goal.retryMs || GOAL_RETRY_MS) / 1000);
         return { stage: `Retrying Goal in ${seconds} seconds`, detail: failure, body: '', kind: 'goal', ...bar(at) };
       }
+      // An unavailable native model and an unreviewed helper prerequisite are held
+      // obligations, not crashed execution. Use typed current failure custody only;
+      // this projection never clears a circuit, retries, authorizes, or sends work.
+      let failureCode = draft?.stage === 'failed' && typeof draft.error === 'string'
+        ? draft.error : goal.errorCode;
+      for (let depth = 0; depth < 4 && typeof failureCode === 'string' &&
+          failureCode.startsWith('request_failed:'); depth++) {
+        failureCode = failureCode.slice('request_failed:'.length).trim();
+      }
+      const automation = goal.mode === 'loop' ? 'Loop' : 'Goal';
+      if (failureCode === 'goal_browser_model_choice_denied' || failureCode === 'goal_browser_usage_limit') {
+        const until = draft?.availabilityRetryAt;
+        const remaining = Number.isFinite(until) && until > Date.now() ? Math.ceil((until - Date.now()) / 1000) : 0;
+        const next = remaining > 0 ? `Next bounded attempt in ${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}.` : '';
+        return { stage: `${automation} waiting for ${failureCode === 'goal_browser_usage_limit' ? 'usage cooldown' : 'requested model'}`, detail: [failure, next].filter(Boolean).join(' '),
+          body: '', kind: 'wait', steps: [], at: 0, done: false };
+      }
+      if (failureCode === 'goal_external_hold') {
+        return { stage: `${automation} needs prerequisite review`, detail: failure,
+          body: '', kind: 'wait', steps: [], at: 0, done: false };
+      }
       return { stage: goal.mode === 'loop' ? 'Loop hit an error' : 'Goal hit an error', detail: failure, body: '', kind: 'goal-error', ...bar(at) };
     }
     // A chat opening on a specific goal. There is no answer to read and no turn to settle,
@@ -15714,12 +15735,13 @@
     });
     return true;
   }
-  function failTemporaryDecisionProviderFailure(decision, error) {
+  function failTemporaryDecisionProviderFailure(decision, error, quotaRejected = false) {
     if (!decision?.temporary || desktopDecision !== decision || !decision.onTarget() || decision.providerFailurePublishing) return;
     clearDesktopDecisionCheck(decision);
     decision.providerFailurePublishing = true;
     void ask({ type: 'desktop_input', id: decision.id, owner: decision.owner,
-      lifetime: 'temporary-planner', fail: true, error }).then(reply => {
+      lifetime: 'temporary-planner', fail: true, error,
+      ...(quotaRejected ? { detail: 'usage-limit', messageId: decision.messageId } : {}) }).then(reply => {
       if (reply?.data?.ok === true && desktopDecision === decision && decision.onTarget()) {
         clearDesktopDecisionCheck(decision);
         resetTemporaryDecisionDomCandidate(decision);
@@ -16006,7 +16028,12 @@
     if (decision.temporary) {
       const restriction = CLF_DOM.errors().find(error => error.blocking === true && error.reason === 'account_restricted');
       if (restriction) {
-        failTemporaryDecisionProviderFailure(decision, restriction.text);
+        const currentMessages = CLF_DOM.messages();
+        const nativeUser = currentMessages.findLastIndex(message => message.role === 'user');
+        const exactQuotaRejection = restriction.usageLimit === true && nativeUser >= 0 &&
+          currentMessages[nativeUser].id === decision.messageId && !CLF_DOM.generating() &&
+          !currentMessages.slice(nativeUser + 1).some(message => message.role === 'assistant' && (message.text || '').trim());
+        failTemporaryDecisionProviderFailure(decision, restriction.text, exactQuotaRejection);
         return;
       }
     }
@@ -16424,9 +16451,10 @@
       const temporary = input.lifetime === 'temporary-planner';
       if (temporary && ((!temporaryPlannerPage() && !strippedTemporaryHelper()) ||
           !CLF_DOM.temporaryChatReady())) return fail('Temporary Chat was not confirmed. Open the helper tab and complete its Temporary Chat introduction.');
-      const providerLimitation = () => CLF_DOM.errors().find(error => error.blocking === true)?.text;
-      const limitation = providerLimitation();
-      if (limitation) return fail(limitation);
+      const providerRestriction = () => CLF_DOM.errors().find(error => error.blocking === true);
+      const providerLimitation = () => providerRestriction()?.text;
+      const restriction = providerRestriction();
+      if (restriction) return fail(restriction.text, restriction.usageLimit === true ? 'usage-limit' : undefined);
       const choosingStartedAt = Date.now();
       // The picker selects the next turn's model, not the existing generation.
       // Its proven model was frozen by Main before directTurn could be offered.
@@ -16494,7 +16522,7 @@
           // inference or another transient missing snapshot. Preserve only its
           // fixed reason; Main still owns positive pre-Send failure classification.
           return fail(limit || 'Requested model or reasoning could not be confirmed',
-            !limit && onTarget() ? modelRefusal === 'choice_denied' ? 'model-choice-denied'
+            providerRestriction()?.usageLimit === true ? 'usage-limit' : !limit && onTarget() ? modelRefusal === 'choice_denied' ? 'model-choice-denied'
               : modelRefusal === 'choice_unavailable' ? 'model-choice-unavailable' : 'model-unconfirmed' : undefined);
         }
         await stage('model:confirmed');

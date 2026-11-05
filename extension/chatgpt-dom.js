@@ -2993,7 +2993,8 @@ var CLF_DOM = (() => {
           // The hourly-limit alert includes a Retry button, but quota is not transport failure.
           // Keep the provider notice, never its button label or Retry authority.
           addOccurrence({ text: value.replace(/\s*retry$/i, ''), node, turnId: null, recoverable: false,
-            blocking: true, reason: 'account_restricted' });
+            blocking: true, reason: 'account_restricted',
+            ...((hourlyLimit || usageLimit) ? { usageLimit: true } : {}) });
           continue;
         }
         // Native model rejection observed October14, before any accepted user receipt.

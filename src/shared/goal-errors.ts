@@ -62,6 +62,7 @@ export function goalHelperFailureCause(error: string): GoalHelperFailureCause {
 /** Presentation only. Keep machine errors and retry/ownership decisions unchanged. */
 const explanations: Readonly<Record<string, string>> = {
   goal_browser_model_choice_denied: helperFailureExplanations.model_choice_denied,
+  goal_browser_usage_limit: 'ChatGPT returned an exact native helper usage-limit rejection. The same task, model and original delivery receipt are retained. CoS will make one bounded attempt after the one-hour cooldown; uncertain delivery is not replayed.',
   goal_external_hold: 'The helper returned an external-hold decision. This does not establish that approval is required. The task remains open; no new message was sent and no permission was granted. Review the retained helper and current task to identify a real prerequisite or an incorrect generated hold before resuming.',
   goal_generated_authority_claim: 'An automatic helper claimed to authorize or approve an action. Helper text cannot grant human permission. Its answer and delivery receipt are saved; no continuation was sent and the original task remains open.',
   goal_browser_prompt_envelope_invalid: 'The companion refused the required helper prompt header/footer before Send was authorized. The exact prepared input and saved reply remain retained. Verify or reload the current companion and repair its envelope contract, then deliberately retry this same obligation; automatic replacement helpers are paused.',

@@ -48,6 +48,7 @@ import { requestBrowserDecision, authorizeBrowserHelperRetry, settleTimedOutBrow
 import { canonicalInputProvenanceMatches, recordAutomaticGoalInput } from './session/input-history.js';
 import { GOAL_EXTERNAL_HOLD_REPLY, automaticDecisionHold, isAutomaticDecisionHoldCode, goalErrorMessage, goalHelperFailureCause, isGoalHelperFailureCause, type GoalHelperFailureCause } from '../shared/goal-errors.js';
 import { MAX_CHATGPT_MESSAGE_CHARS, nativePreparedInputMatches, retainedLegacyInputPayloadMatches, userPromptText } from '../shared/user-prompt.js';
+import { browserHelperModelRetryAt } from './session/input.js';
 import { MAX_BROWSER_DECISION_RESPONSE_CHARS } from '../shared/input.js';
 import { planProgressText, type TaskProgressUpdate } from '../shared/task-progress.js';
 import { acceptanceCheckpoint, acceptanceMeaningConflicts, acceptanceNeedsRecordedExecutionEvidence, acceptanceSummary, canonicalAcceptanceSummary, canonicalAcceptanceView, executionScopeFromNativeDelivery, explicitlyCorrectsHumanAcceptance, retainedAcceptanceIdsFromObjective, unresolvedHumanCorrectionFragments, visibleAcceptanceDeclarations, type HumanCorrectionFragment, type RecordedCoreResultEvidence, type RecordedExecutionEvidence, type RecordedSkillApplicationEvidence } from '../shared/agent-plan.js';
@@ -250,22 +251,26 @@ const SETTLED_FAILURE = /^(?:auth_rejected|out_of_credit|unknown_model|no_api_ke
 const NATIVE_COMPLETION_WAIT = /^(?:request_failed:\s*)?native_completion_unverified(?:$|:)/;
 
 function retryableGoalFailure(error: string, draft?: GoalDraft): boolean {
-  // A positively unavailable exact native choice is not a transient picker miss.
-  // Input emits this only before authorization/receipt; preserve the same reply and
-  // requested model without spending three replacement helpers or selecting fallback.
-  if (error === 'goal_browser_model_choice_denied') {
+  // Exact model denial or an owned quota rejection is not a transient picker miss.
+  // Retain the same obligation/model; one due account/pair probe does not spend the
+  // transient three-failure circuit or permit replay of uncertain native delivery.
+  if (error === 'goal_browser_model_choice_denied' || error === 'goal_browser_usage_limit') {
     if (!draft) return false;
     const available = exactChatModelAvailableAfter(draft.helper?.model, draft.helper?.reasoningEffort, draft.settledAt);
     const settings = getConfig(), pending = goalPendingReplyFor(draft.conversationId);
-    if (!available && draft.stage === 'failed' && draft.backend === 'chatgpt' &&
+    const current = draft.stage === 'failed' && draft.backend === 'chatgpt' &&
         settings.ui.automationPaused !== true && settings.sessions.record && goalArmedFor(draft.conversationId) &&
         pending?.sessionId === draft.sessionId && pending.turnId === draft.turnId &&
         pending.acceptedAt === draft.sourceAcceptedAt &&
         draft.helper?.model === (settings.goal.helperModel ?? 'gpt-6-thinking') &&
-        draft.helper?.reasoningEffort === (settings.goal.helperReasoning ?? 'high')) {
-      requestDeniedChatModelRecheck(draft.helper.model, draft.helper.reasoningEffort, draft.settledAt);
+        draft.helper?.reasoningEffort === (settings.goal.helperReasoning ?? 'high');
+    if (!current) return false;
+    const retryAt = browserHelperModelRetryAt(draft.helper?.model, draft.helper?.reasoningEffort);
+    if (!available && error !== 'goal_browser_usage_limit') {
+      requestDeniedChatModelRecheck(draft.helper?.model, draft.helper?.reasoningEffort, draft.settledAt);
     }
-    return available;
+    return (error !== 'goal_browser_usage_limit' && available) ||
+      (retryAt !== null && Date.now() >= retryAt);
   }
   // Repeating a decision cannot supply a missing native receipt. Reuse the
   // existing reader/retry owner only after that exact completion fence clears.
@@ -483,6 +488,8 @@ export interface GoalDraftView {
    * *allowed* stays with the page, which is where every reason Goal may not act already lives.
    */
   retryable: boolean;
+  /** Durable account/pair cooldown, never a timer that authorizes native Send. */
+  availabilityRetryAt?: number;
 }
 
 type GoalHelperSelection = Readonly<{ model: string | null; reasoningEffort: ReasoningEffort | null }>;
@@ -1731,6 +1738,9 @@ function view(draft: GoalDraft): GoalDraftView {
   const obligation = goalReplies.get(draft.conversationId);
   const failureCause = obligation?.sessionId === draft.sessionId && obligation.turnId === draft.turnId
     ? obligation.helperFailureCause : undefined;
+  const retryAt = draft.stage === 'failed' &&
+    (draft.error === 'goal_browser_model_choice_denied' || draft.error === 'goal_browser_usage_limit')
+    ? browserHelperModelRetryAt(draft.helper?.model, draft.helper?.reasoningEffort) : null;
   return {
     token: draft.token,
     conversationId: draft.conversationId,
@@ -1744,6 +1754,7 @@ function view(draft: GoalDraft): GoalDraftView {
     // is history, and a page that polls again must not find a message to type a second time.
     reply: draft.stage === 'ready' && !draft.acknowledged ? draft.reply : '',
     error: draft.error,
+    ...(retryAt !== null && retryAt > 0 ? { availabilityRetryAt: retryAt } : {}),
     ...(draft.outboxContinuationOwned ? { outboxContinuationOwned: true } : {}),
     ...(draft.error ? { message: goalErrorMessage(draft.error, failureCause) } : {}),
     retryable: draft.stage === 'failed' && retryableGoalFailure(draft.error ?? '', draft)

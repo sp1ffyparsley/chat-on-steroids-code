@@ -5973,6 +5973,12 @@ describe('desktop input delivery and helper ownership', () => {
     expect(live.sent.filter(message => message.type === 'desktop_input' && message.fail)).toEqual([
       expect.objectContaining({ id: inputId, owner: 'input-owner', lifetime: 'temporary-planner', error: warning })
     ]);
+    const failure = live.sent.find(message => message.type === 'desktop_input' && message.fail);
+    if (/^you['’]ve (?:reached our limit|hit your limit)/i.test(warning)) {
+      const ack = live.sent.find(message => message.type === 'desktop_input' && message.ack);
+      expect(failure).toMatchObject({ detail: 'usage-limit', messageId: ack?.messageId });
+      expect(failure?.messageId).toBeTruthy();
+    } else expect(failure?.detail).not.toBe('usage-limit');
     expect(live.sent.filter(message => message.type === 'desktop_input' && message.response)).toEqual([]);
     expect(sends).toBe(1);
     expect(retries).toBe(0);
@@ -30620,6 +30626,31 @@ describe('the goal loop', () => {
     expect(hook.stageView({ job: { stage: 'opening', busy: true }, goal: { phase: 'settling', model: MODEL, draft: null } })).toMatchObject({
       stage: 'Opening a fresh chat'
     });
+  });
+
+  it('distinguishes unavailable models and prerequisite review from broken Goal execution', async () => {
+    live = await harness(`https://chatgpt.com/c/${CHAT}`, goalReplies());
+    const view = (goal: Record<string, unknown>) => live!.hook.stageView({ job: null,
+      goal: { model: MODEL, phase: 'drafting', error: 'Retained diagnostic', ...goal } });
+    for (const mode of ['goal', 'loop']) {
+      const name = mode === 'loop' ? 'Loop' : 'Goal';
+      expect(view({ mode, errorCode: 'goal_browser_model_choice_denied' })).toMatchObject({
+        stage: `${name} waiting for requested model`, kind: 'wait', steps: [], done: false
+      });
+      expect(view({ mode, draft: { stage: 'failed', error: 'request_failed: goal_external_hold' } }))
+        .toMatchObject({ stage: `${name} needs prerequisite review`, kind: 'wait', steps: [], done: false });
+    }
+    expect(view({ errorCode: 'goal_browser_model_choice_denied',
+      draft: { stage: 'failed', error: 'goal_browser_send_unconfirmed' } }))
+      .toMatchObject({ stage: 'Goal hit an error', kind: 'goal-error' });
+    expect(view({ errorCode: 'goal_generated_authority_claim' }))
+      .toMatchObject({ stage: 'Goal hit an error', kind: 'goal-error' });
+    expect(view({ draft: { stage: 'failed', error: 'goal_browser_usage_limit',
+      availabilityRetryAt: live.window.Date.now() + 60 * 60_000 } }))
+      .toMatchObject({ stage: 'Goal waiting for usage cooldown', kind: 'wait',
+        detail: expect.stringContaining('Next bounded attempt in 60:00.'), done: false });
+    expect(view({ error: 'Provider prose says goal_external_hold, but has no typed code' }))
+      .toMatchObject({ stage: 'Goal hit an error', kind: 'goal-error' });
   });
 
   /**

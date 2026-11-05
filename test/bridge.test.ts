@@ -24704,15 +24704,20 @@ describe('unattributed activity recovery', () => {
     [false, "You've hit your limit. Please try again later."],
     [true, "You've hit your limit. Please try again later."],
     [false, 'We’re doing a quick check to keep ChatGPT reliable. Try again in 27 minutes.'],
-    [true, 'We’re doing a quick check to keep ChatGPT reliable. Try again in 27 minutes.']
-  ] as const)('pauses on an owned Temporary Chat usage-limit failure without losing its native receipt (delivered=%s, notice=%s)', async (delivered, warning) => {
+    [true, 'We’re doing a quick check to keep ChatGPT reliable. Try again in 27 minutes.'],
+    [true, "You've hit your limit. Please try again later.", 'exact'],
+    [true, "You've hit your limit. Please try again later.", 'foreign'],
+    [true, "You've hit your limit. Please try again later.", 'foreign-route']
+  ] as const)('pauses on an owned Temporary Chat usage-limit failure without losing its native receipt (delivered=%s, notice=%s, binding=%s)', async (delivered, warning, binding?: string) => {
+    const warnings = vi.spyOn(await import('../src/main/logger.js'), 'logWarn');
+    onTestFinished(() => warnings.mockRestore());
     const previous = getConfig();
     const inputOwner = await import('../src/main/session/input.js');
     const controller = new AbortController();
     try {
       await pair();
       const sourceSessionId = `source-${warning.includes('quick check') ? 'reliability' : warning.includes('unusual activity')
-        ? 'unusual' : warning.includes('hit your limit') ? 'usage' : 'hourly'}-helper-${delivered}`;
+        ? 'unusual' : warning.includes('hit your limit') ? 'usage' : 'hourly'}-helper-${delivered}-${binding ?? 'legacy'}`;
       const pending = inputOwner.requestBrowserDecision('Preserve this helper request', controller.signal, {
         sourceSessionId, lifetime: 'temporary-planner'
       });
@@ -24731,11 +24736,18 @@ describe('unattributed activity recovery', () => {
       }
       expect((await request('POST', '/input/fail', { body: { ...receipt, owner: 'foreign-page', error: warning } })).body.ok).toBe(false);
       expect(getConfig().ui.automationPaused).not.toBe(true);
-      expect((await request('POST', '/input/fail', { body: { ...receipt, error: warning } })).body.ok).toBe(true);
-      expect(getConfig().ui.automationPaused).toBe(true);
-      expect(await maintenance()).toBeNull();
+      const failure = await request('POST', '/input/fail', { body: { ...receipt, error: warning,
+        ...(binding ? { detail: 'usage-limit', messageId: binding === 'foreign' ? 'other-message' : 'native-hourly-helper',
+          ...(binding === 'foreign-route' ? { conversationId: 'fefefefe-1234-4321-9876-123456789abc' } : {}) } : {}) } });
+      expect(failure.body, JSON.stringify(warnings.mock.calls.slice(-3)))
+        .toEqual(expect.objectContaining({ ok: true }));
+      const hourlyRecovery = (!delivered || binding === 'exact') && /^you['’]ve (?:reached our limit|hit your limit)/i.test(warning);
+      expect(getConfig().ui.automationPaused === true).toBe(!hourlyRecovery);
+      if (!hourlyRecovery) expect(await maintenance()).toBeNull();
       const row = (await inputOwner.listInputs()).find(entry => entry.id === id);
-      expect(row).toMatchObject({ state: 'failed', error: warning });
+      expect(row).toMatchObject({ state: 'failed', error: hourlyRecovery ? 'goal_browser_usage_limit' : warning });
+      if (hourlyRecovery) expect(inputOwner.browserHelperModelRetryAt(row!.model, row!.reasoningEffort))
+        .toBeGreaterThan(Date.now());
       if (delivered) expect(row).toMatchObject({ messageId: 'native-hourly-helper', deliveredAt: expect.any(Number), sendAuthorizedAt: expect.any(Number) });
       else expect(row?.sendAuthorizedAt).toBeUndefined();
       expect(await rejected).toBeInstanceOf(Error);

@@ -179,6 +179,8 @@ const entrySchema = inputArgs.extend({
   response: z.string().max(MAX_BROWSER_DECISION_RESPONSE_CHARS).optional(),
   /** Local output archive receipt only; never a native Send or execution receipt. */
   decisionOutput: z.object({ sha256: z.string().regex(/^[a-f0-9]{64}$/), bytes: z.number().int().nonnegative() }).optional(),
+  /** Exact accepted native helper message subsequently rejected by a current quota notice. */
+  quotaRejectedMessageId: z.string().min(1).max(256).optional(),
   state: z.enum(['queued', 'browser', 'tool', 'sent', 'cancelled', 'failed', 'decision']),
   /** Main restarted after this exact tool-result offer but before a later-call receipt proved delivery. */
   toolReceiptUncertain: z.boolean().optional(),
@@ -1299,7 +1301,9 @@ function append(current: InputEntry[], entry: InputEntry, stackDirect = false): 
     (!terminal(row) || needsHistory(row) || pendingContinuations.has(row.id))).map(row => row.sourceHelperId!));
   const activeWorkflowRuns = new Set(current.filter(row => row.workflow &&
     (!terminal(row) || row.state === 'sent' && !row.workflowReceipt)).map(row => row.workflow!.runId));
+  const cooldownHelpers = helperModelCooldownCustodyIds(current);
   const active = current.filter(row => !terminal(row) || needsHistory(row) ||
+    cooldownHelpers.has(row.id) ||
     (row.workflow && activeWorkflowRuns.has(row.workflow.runId)) ||
     pendingStages(row) || heldHelperIds.has(row.id) || pendingContinuations.has(row.id) ||
     (row.purpose === 'rotation' && row.queuedTurn && row.rotationRetiredAt === undefined) ||
@@ -3323,6 +3327,54 @@ function helperConfirmedUnsent(row: InputEntry): boolean {
         row.deliveryText === undefined));
 }
 
+/** One account/model/effort wait, reconstructed from the incumbent durable outbox. */
+export const BROWSER_HELPER_AVAILABILITY_RETRY_MS = 60 * 60_000;
+export function browserHelperQuotaRejected(row: InputEntry): boolean {
+  return row.state === 'failed' && row.error === 'goal_browser_usage_limit' &&
+    helperNativeSendConfirmed(row) && row.quotaRejectedMessageId === row.messageId &&
+    row.response === undefined && row.toolReceiptUncertain !== true;
+}
+const helperAvailabilityFailure = (row: InputEntry) => row.state === 'failed' &&
+  (row.error === 'goal_browser_model_choice_denied' || row.error === 'goal_browser_usage_limit');
+function helperModelRetryAt(rows: readonly InputEntry[], model: string | null | undefined,
+  effort: string | null | undefined): number | null {
+  if (!model || !effort) return null;
+  const matching = rows.filter(row => row.purpose === 'decision' && row.lifetime === 'temporary-planner' &&
+    row.model === model && row.reasoningEffort === effort);
+  const deniedAt = matching.filter(row => helperAvailabilityFailure(row) &&
+    (helperConfirmedUnsent(row) || browserHelperQuotaRejected(row)) &&
+    row.toolReceiptUncertain !== true).map(row => row.recoveryTransitions?.at(-1)?.at)
+    .filter((at): at is number => Number.isSafeInteger(at) && at! > 0);
+  if (!deniedAt.length) return null;
+  const latest = Math.max(...deniedAt);
+  // A collected, accepted answer after the denial proves the exact pair worked.
+  // A native Send alone or an ambiguous/private response never clears the wait.
+  if (matching.some(row => row.state === 'sent' && helperNativeSendConfirmed(row) &&
+      row.decisionOutput && row.deliveredAt! > latest)) return 0;
+  return latest + BROWSER_HELPER_AVAILABILITY_RETRY_MS;
+}
+/** Read-only Goal projection. Zero means a later real helper answer recovered the pair. */
+export function browserHelperModelRetryAt(model: string | null | undefined,
+  effort: string | null | undefined): number | null {
+  return helperModelRetryAt(entries ?? [], model, effort);
+}
+/** Keep one existing failure receipt per held pair, not an unbounded retry history. */
+function helperModelCooldownCustodyIds(rows: readonly InputEntry[]): Set<string> {
+  const latest = new Map<string, InputEntry>();
+  for (const row of rows) {
+    if (!helperAvailabilityFailure(row) || !row.model || !row.reasoningEffort ||
+        (!helperConfirmedUnsent(row) && !browserHelperQuotaRejected(row)) || row.toolReceiptUncertain === true) continue;
+    const at = row.recoveryTransitions?.at(-1)?.at;
+    if (!Number.isSafeInteger(at) || at! <= 0) continue;
+    const key = `${row.model}\0${row.reasoningEffort}`, previous = latest.get(key);
+    if (!previous || at! > previous.recoveryTransitions!.at(-1)!.at) latest.set(key, row);
+  }
+  return new Set([...latest.values()].filter(row => {
+    const retryAt = helperModelRetryAt(rows, row.model, row.reasoningEffort);
+    return retryAt !== null && retryAt > 0;
+  }).map(row => row.id));
+}
+
 function helperNativeSendConfirmed(row: InputEntry): boolean {
   return helperNativeSendReceipt(row) && row.deliveredAt! <= Date.now();
 }
@@ -3697,7 +3749,7 @@ export async function failBrowserInput(id: string, owner: string, error: string,
   options: { confirmedUnsent?: boolean; conversationId?: string | null; detail?: string;
     /** Publish the incumbent account hold after this exact failure is durable, before
      * releasing its waiter. Never called for rejected ownership or a refused failure. */
-    onAcceptedFailure?: () => Promise<void> } = {}): Promise<boolean> {
+    onAcceptedFailure?: () => Promise<void>; rejectedMessageId?: string } = {}): Promise<boolean> {
   let releaseAfterPublication: (() => void) | undefined;
   const rejectDecision = (message: string) => {
     const waiter = decisionWaiters.get(id);
@@ -3737,22 +3789,37 @@ export async function failBrowserInput(id: string, owner: string, error: string,
     // Provider availability may mean quota, entitlement or retirement; do not guess which.
     const deniedModelChoice = (options.detail === 'model-choice-denied' || options.detail === 'model-choice-unavailable') &&
       error === 'Requested model or reasoning could not be confirmed';
-    // These deterministic adapter refusals cannot improve by opening another helper.
+    const usageLimit = (options.detail === 'usage-limit' || options.detail === undefined) &&
+      /^you['’]ve (?:reached our limit of messages per hour|hit your limit)\. please try again later\.?$/i.test(error);
+    const rejectedQuota = usageLimit && options.detail === 'usage-limit' &&
+      options.rejectedMessageId !== undefined && options.rejectedMessageId === entry.messageId &&
+      options.conversationId === entry.conversationId &&
+      entry.state === 'decision' && helperNativeSendConfirmed(entry) &&
+      entry.response === undefined && entry.decisionOutput === undefined && entry.toolReceiptUncertain !== true;
+    if (rejectedQuota) {
+      await commit(current.map(row => row === entry ? { ...row, state: 'failed' as const,
+        error: 'goal_browser_usage_limit', quotaRejectedMessageId: entry.messageId,
+        ...addRecoveryTransition(row, 'provider_recovery_unknown', 'exact-native-usage-rejection', 'failed') } : row));
+      logWarn(`input ${id}: exact native helper usage rejection retained; original Send receipt preserved, retry in one hour`);
+      rejectDecision('goal_browser_usage_limit');
+      return true;
+    }
+    // Preserve deterministic envelope refusals and timed availability/usage holds.
     // Classify only while this exact delivery owner still positively precedes every
     // native Send/receipt boundary. Authorized or uncertain outcomes keep their
     // existing ambiguous handling even if they report the same presentation text.
-    if (entry.purpose === 'decision' && (error === NATIVE_PROMPT_ENVELOPE_REFUSAL || deniedModelChoice) && entry.requiresAuthorization === true &&
+    if (entry.purpose === 'decision' && (error === NATIVE_PROMPT_ENVELOPE_REFUSAL || deniedModelChoice || usageLimit) && entry.requiresAuthorization === true &&
         entry.sendAuthorizedAt === undefined && entry.messageId === undefined &&
         entry.deliveredAt === undefined && entry.deliveredSessionId === undefined &&
         entry.response === undefined && entry.toolReceiptUncertain !== true) {
-      const code = deniedModelChoice ? 'goal_browser_model_choice_denied' : 'goal_browser_prompt_envelope_invalid';
+      const code = usageLimit ? 'goal_browser_usage_limit' : deniedModelChoice ? 'goal_browser_model_choice_denied' : 'goal_browser_prompt_envelope_invalid';
       const failure = classifyProviderRecoveryFailure({ confirmedUnsent: true, state: 'browser',
         sendAuthorized: false, messageIdPresent: false, deliveredAtPresent: false, error: code });
       await commit(current.map(row => sameDelivery(entry, row) ? {
         ...row, state: 'failed' as const, error: code, recoveryFailure: failure,
-        ...addRecoveryTransition(row, failure.phase, deniedModelChoice ? options.detail! : failure.detail, 'failed')
+        ...addRecoveryTransition(row, failure.phase, usageLimit ? 'usage-limit' : deniedModelChoice ? options.detail! : failure.detail, 'failed')
       } : row));
-      logWarn(`input ${id}: ${code}; pre-Send obligation retained, automatic helper replacement requires repair`);
+      logWarn(`input ${id}: ${code}; pre-Send obligation retained${deniedModelChoice || usageLimit ? '; exact pair retry deferred for one hour' : ', automatic helper replacement requires repair'}`);
       rejectDecision(code);
       return true;
     }
@@ -4157,18 +4224,28 @@ export async function requestBrowserDecision(text: string, signal: AbortSignal, 
           row.decisionSourceTurnId === options.sourceTurnId);
         if (sameTurn.some(row => row.goalSourceSuperseded)) throw new Error('goal_browser_source_superseded');
         // A cold restart must not forget a definitive, positively unsent denial.
-        // Only a later native catalogue proving this SAME exact pair available can
-        // release automatic preparation. Ordinary claim/source/Send gates still apply.
+        // A later native catalogue or one due hourly preparation probe can recheck
+        // this SAME pair. No timer bypasses claim/source/native-selection/Send gates.
         const requestedModel = options.model === undefined ? 'gpt-6-thinking' : options.model;
         const requestedEffort = options.reasoningEffort === undefined ? 'high' : options.reasoningEffort;
-        const denied = [...sameTurn].reverse().find(row => row.state === 'failed' &&
-          row.error === 'goal_browser_model_choice_denied' &&
+        const deniedChoices = sameTurn.filter(row => helperAvailabilityFailure(row) &&
           row.model === requestedModel && row.reasoningEffort === requestedEffort);
-        if (denied && (!helperConfirmedUnsent(denied) || denied.toolReceiptUncertain === true))
+        const denied = deniedChoices.at(-1);
+        if (deniedChoices.some(row => (!helperConfirmedUnsent(row) && !browserHelperQuotaRejected(row)) || row.toolReceiptUncertain === true))
           throw new Error('goal_browser_send_unconfirmed');
-        if (denied && !exactChatModelAvailableAfter(denied.model, denied.reasoningEffort,
-              denied.recoveryTransitions?.at(-1)?.at ?? Infinity))
-          throw new Error('goal_browser_model_choice_denied');
+        const retryAt = helperModelRetryAt(current, requestedModel, requestedEffort);
+        const latestQuota = retryAt !== null && retryAt > 0 && current.some(row =>
+          row.error === 'goal_browser_usage_limit' && row.model === requestedModel &&
+          row.reasoningEffort === requestedEffort &&
+          row.recoveryTransitions?.at(-1)?.at === retryAt - BROWSER_HELPER_AVAILABILITY_RETRY_MS);
+        const availableAfter = denied?.recoveryTransitions?.at(-1)?.at ??
+          (retryAt && retryAt - BROWSER_HELPER_AVAILABILITY_RETRY_MS) ?? Infinity;
+        const freshAvailable = exactChatModelAvailableAfter(requestedModel, requestedEffort, availableAfter);
+        if ((!freshAvailable || latestQuota) && ((denied && retryAt === null) || (retryAt !== null && Date.now() < retryAt)))
+          throw new Error(latestQuota ? 'goal_browser_usage_limit' : denied?.error ?? 'goal_browser_model_choice_denied');
+        if (retryAt !== null && retryAt > 0 && (!freshAvailable || latestQuota) && current.some(row => row.purpose === 'decision' &&
+            !terminal(row) && row.model === requestedModel && row.reasoningEffort === requestedEffort))
+          throw new Error('goal_browser_busy');
         // A collected safety hold is not transport weather. Keep this exact source
         // parked across restart; only the existing one-shot explicit reconciliation
         // authority or a genuinely different source may request another decision.
@@ -4386,7 +4463,8 @@ async function saveDecisionOutput(row: InputEntry, response: string, _conversati
 export async function browserDecisionOutputSaved(id: string, owner: string, conversationId?: string | null): Promise<boolean> {
   const row = (await listInputs()).find(entry => entry.id === id && entry.owner === owner && entry.purpose === 'decision' && entry.lifetime === 'temporary-planner');
   if (!row || row.conversationId !== (conversationId ?? null) || !['sent', 'failed', 'cancelled'].includes(row.state)) return false;
-  if (!row.decisionOutput) return row.state !== 'sent' && helperConfirmedUnsent(row);
+  if (!row.decisionOutput) return row.state !== 'sent' &&
+    (helperConfirmedUnsent(row) || browserHelperQuotaRejected(row));
   try {
     const file = decisionOutputFile(id);
     if ((await fs.lstat(file)).isSymbolicLink() || (await fs.stat(file)).size > 150_000) return false;
@@ -4413,6 +4491,15 @@ export function completeBrowserDecision(id: string, owner: string, response: str
     // A superseded or exactly expired decision can never instruct an executor again,
     // but its native-sent helper still owns an answer worth preserving before retirement.
     // Archive-only collection retains cancellation, original receipts and source identity.
+    const quotaRejected = current.find(entry => entry.id === id && entry.owner === owner &&
+      entry.conversationId === (conversationId ?? null) && browserHelperQuotaRejected(entry));
+    if (quotaRejected) {
+      const decisionOutput = await saveDecisionOutput(quotaRejected, response, conversationId);
+      if (decisionOutput && !quotaRejected.decisionOutput)
+        await commit(current.map(entry => entry === quotaRejected ? { ...entry, decisionOutput } : entry));
+      logInfo(`browser helper ${id}: late quota-rejected answer archived only; no continuation authorized`);
+      return true;
+    }
     const superseded = current.find(entry => entry.id === id &&
       supersededBrowserDecisionArchiveEligible(entry, owner, conversationId));
     if (superseded) {
