@@ -2856,6 +2856,35 @@ var CLF_DOM = (() => {
     return Number.isFinite(since) && since > 0 && lastAccessNotice?.path === location.pathname &&
       lastAccessNotice.at >= since ? lastAccessNotice.text : '';
   }
+  /** A native render card may sit inside the assistant's source-reference Markdown wrapper.
+   * That wrapper is not arbitrary authored HTML: every exposed source, selected message and
+   * conversation must agree. Nested Markdown, quotations, code and user content stay excluded.
+   * This establishes only response-view ownership, never a tool result or Send receipt. */
+  function nativeDisplayFailureSourceBound(node, section) {
+    const root = node?.closest('[data-dil-message-id]');
+    const id = root?.getAttribute('data-dil-message-id');
+    const forbidden = `${OWN_SURFACES},.markdown,blockquote,pre,code,[data-message-author-role="user"],[data-content-search-unit-key$=":user"],[data-clf-user-text],[contenteditable]`;
+    if (!root || !section || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id || '') ||
+        root.closest(TURN) !== section || node.closest(TURN) !== section ||
+        node.closest(forbidden) || node.querySelector(`${forbidden},[data-markdown-text-style]`)) return false;
+    const markdown = node.closest('[data-markdown-text-style]');
+    if (!markdown) return true;
+    const copy = root.closest('[data-dil-source-message-id]');
+    const selection = markdown.parentElement;
+    const unit = selection?.closest('[data-content-search-unit-key]');
+    return markdown.getAttribute('data-markdown-text-style') === 'assistant-message' &&
+      !!copy && copy.closest('[data-markdown-text-style]') === markdown &&
+      copy.getAttribute('data-dil-source-message-id') === id &&
+      copy.getAttribute('data-markdown-copy') === 'contents' &&
+      /^(?:0|[1-9][0-9]{0,3})$/.test(copy.getAttribute('data-chatgpt-copy-reference') || '') &&
+      root.closest('[data-chatgpt-selection-message-id]') === selection &&
+      selection.getAttribute('data-chatgpt-selection-message-id') === id &&
+      selection.getAttribute('data-chatgpt-selection-conversation-id') === conversationId() &&
+      !selection.closest('[data-markdown-text-style]') &&
+      !!unit?.getAttribute('data-content-search-unit-key')?.endsWith(':assistant') &&
+      selection.closest(TURN) === section;
+  }
+
   function errors() {
     return safe(() => {
       const out = [];
@@ -3010,11 +3039,8 @@ var CLF_DOM = (() => {
           // words alone (including quotations or an older same-id section) grant nothing.
           if (turn === latestTurn && section === latestSection) {
             for (const node of section.querySelectorAll('[data-dil-render-failed][role="status"]')) {
-              const root = node.closest('[data-dil-message-id]');
-              const authored = `${OWN_SURFACES},.markdown,blockquote,pre,code,[data-markdown-text-style],[data-message-author-role="user"],[data-content-search-unit-key$=":user"],[data-clf-user-text],[contenteditable]`;
-              if (!root || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(root.getAttribute('data-dil-message-id') || '') ||
-                  root.closest(TURN) !== section || node.closest(TURN) !== section ||
-                  node.closest(`${authored},[hidden],[inert],[aria-hidden="true"]`) || node.querySelector(authored) ||
+              if (!nativeDisplayFailureSourceBound(node, section) ||
+                  node.closest('[hidden],[inert],[aria-hidden="true"]') ||
                   !composerCssVisible(node) || !displayed(node)) continue;
               const value = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
               if (!/^this response couldn['’]t load\.?$/i.test(value)) continue;
@@ -4641,7 +4667,8 @@ var CLF_DOM = (() => {
           final.key !== found.key || !stillCurrent() || location.pathname !== path) return held('page-changed');
       // The policy callback can synchronously publish a later section, even reusing
       // this logical turn id. Recheck physical ownership after that final callback.
-      if (final.section !== turnNodes(turns().at(-1)).at(-1)) return held('page-changed');
+      if (final.section !== turnNodes(turns().at(-1)).at(-1) ||
+          !nativeDisplayFailureSourceBound(final.node, final.section)) return held('page-changed');
       // Spend before React dispatch. A failed/intercepted click is not another grant.
       reloadedDisplayMessages.add(found.key);
       found.button.click();

@@ -3093,6 +3093,66 @@ describe('native response-only render recovery', () => {
     return { section, root, notice, reload };
   }
 
+  function referencedResponse() {
+    const live = failedResponse();
+    const unit = document.createElement('div');
+    unit.setAttribute('data-content-search-unit-key', 'native-group:assistant');
+    const selection = document.createElement('div');
+    selection.setAttribute('data-chatgpt-selection-message-id', messageId);
+    selection.setAttribute('data-chatgpt-selection-conversation-id', 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    const markdown = document.createElement('div');
+    markdown.setAttribute('data-markdown-text-style', 'assistant-message');
+    const copy = document.createElement('div');
+    copy.setAttribute('data-dil-source-message-id', messageId);
+    copy.setAttribute('data-markdown-copy', 'contents');
+    copy.setAttribute('data-chatgpt-copy-reference', '0');
+    copy.append(live.root); markdown.append(copy); selection.append(markdown); unit.append(selection);
+    live.section.append(unit);
+    return { ...live, unit, selection, markdown, copy };
+  }
+
+  it('reloads the current native DIL failure inside its exact source-bound assistant Markdown wrapper', () => {
+    dom.reconfigure({ url: 'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' });
+    const live = referencedResponse();
+    const click = vi.fn(), send = vi.fn();
+    live.reload.addEventListener('click', click); button.addEventListener('click', send);
+    expect(api.errors()).toEqual(expect.arrayContaining([expect.objectContaining({ node: live.notice, displayFailure: true })]));
+    expect(api.recoverNativeDisplayFailure(() => true)).toEqual({ status: 'requested' });
+    expect(click).toHaveBeenCalledOnce(); expect(send).not.toHaveBeenCalled();
+    expect(box.textContent).toBe('Exact app prompt');
+    expect(api.recoverNativeDisplayFailure(() => true).status).toBe('held');
+    expect(click).toHaveBeenCalledOnce();
+  });
+
+  it.each(['source', 'selection', 'conversation', 'copy-kind', 'copy-reference', 'missing-selection',
+    'missing-unit', 'user-unit', 'nested-markdown', 'blockquote', 'code', 'user', 'source-changed-at-last-check'] as const)(
+    'refuses an unbound or authored render card inside assistant Markdown: %s', boundary => {
+      dom.reconfigure({ url: 'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' });
+      const live = referencedResponse(); const click = vi.fn(); live.reload.addEventListener('click', click);
+      const foreign = 'a369616e-c5ca-43df-a66b-86b525e38603';
+      if (boundary === 'source') live.copy.setAttribute('data-dil-source-message-id', foreign);
+      if (boundary === 'selection') live.selection.setAttribute('data-chatgpt-selection-message-id', foreign);
+      if (boundary === 'conversation') live.selection.setAttribute('data-chatgpt-selection-conversation-id', foreign);
+      if (boundary === 'copy-kind') live.copy.setAttribute('data-markdown-copy', 'code-block');
+      if (boundary === 'copy-reference') live.copy.setAttribute('data-chatgpt-copy-reference', 'not-a-reference');
+      if (boundary === 'missing-selection') live.selection.removeAttribute('data-chatgpt-selection-message-id');
+      if (boundary === 'missing-unit') live.unit.removeAttribute('data-content-search-unit-key');
+      if (boundary === 'user-unit') live.unit.setAttribute('data-content-search-unit-key', 'native-group:user');
+      if (['nested-markdown', 'blockquote', 'code', 'user'].includes(boundary)) {
+        const authored = document.createElement(boundary === 'blockquote' || boundary === 'code' ? boundary : 'div');
+        if (boundary === 'nested-markdown') authored.setAttribute('data-markdown-text-style', 'assistant-message');
+        if (boundary === 'user') authored.setAttribute('data-message-author-role', 'user');
+        live.root.replaceWith(authored); authored.append(live.root);
+      }
+      let checks = 0;
+      expect(api.recoverNativeDisplayFailure(() => {
+        if (++checks === 3 && boundary === 'source-changed-at-last-check')
+          live.copy.setAttribute('data-dil-source-message-id', foreign);
+        return true;
+      }).status).toBe('held');
+      expect(click).not.toHaveBeenCalled(); expect(box.textContent).toBe('Exact app prompt');
+    });
+
   it('reloads only the exact current response view once and preserves a draft and native work', () => {
     dom.reconfigure({ url: 'https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' });
     const old = failedResponse('a369616e-c5ca-43df-a66b-86b525e38603');

@@ -1,6 +1,6 @@
 # Chat On Steroids - code research mirror
 
-## Current: recorder136 independently installed privately
+## Current: recorder137 source candidate;136 independently installed privately
 
 This mirror publishes reviewed source and tests, not a qualified public installer. The latest privately installed package is136; its strict release, exact installer, protected-data and full installed-program checks passed. Use this mirror's public commit SHA for research citations. Private provenance hashes in historical notes are not public Git references.
 
@@ -9,6 +9,8 @@ This mirror publishes reviewed source and tests, not a qualified public installe
 136 repairs a reproduced final-answer representation mismatch: an exact same-message DIL preview may differ from canonical native authored text. A unique own-data source pointer may establish original-request namespace identity against an independently terminal native final. It never substitutes for a per-call result receipt, overrides completed:false/body corroboration, changes a Send payload, resets a retry circuit, or guesses legacy batch ownership. Foreign, duplicate, getter-backed, incomplete and missing references remain refused. Existing fallback text projection now avoids getters.
 
 The five affected suites pass3,376tests, including v2 repeated-tool joins, legacy batch refusal and privacy/source controls; typecheck and JavaScript syntax checks pass. Private136qualification passed96preliminary and13,361main tests with62conditional skips, followed by33installer checks and readiness. The first full run had one logger timeout; unchanged isolated and whole98logger checks passed, and the second full run passed. All133,989protected files and291installed program files independently matched before successor apps reopened. Original settings were restored. Live reader136 now admits the original request namespace in the reproduced37-call case with zero identity refusals;35legacy result references and the retained original fence remain unverified. Sustained live automatic next turns are not certified. Provider model availability and old ambiguous results remain real constraints. No new dependency, worker, polling loop or authority store was added.
+
+137 source candidate repairs a live-reproduced response-view recovery refusal: native DIL failure cards now live inside a source-reference assistant Markdown wrapper. The existing DOM owner admits only matching native source, selected message, conversation and contents-reference identities; nested authored text, code, quotations, foreign sources, stale sections, paused policy and repeated clicks remain refused. Source ownership is rechecked after the final policy callback. A genuine failure-first regression is repaired;3whole affected suites pass3,229checks and typecheck/syntax pass. A manual native Reload response restored the existing answer without prompt/tool replay. Full137package qualification, installation and automatic live recovery remain pending;136 is still installed. No receipt, model or security guard is relaxed.
 
 ## Historical release records
 

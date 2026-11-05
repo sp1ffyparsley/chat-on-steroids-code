@@ -1278,8 +1278,9 @@ describe('native approval automation ownership', () => {
     return { card, allow, clicked: () => clicks };
   }
 
-  it.each(['active', 'paused', 'off', 'expired', 'route-changed'] as const)(
-    'routes response-only view recovery through the current elected policy: %s', async mode => {
+  it.each((['active', 'paused', 'off', 'expired', 'route-changed'] as const).flatMap(mode =>
+    [{ mode, referenced: false }, { mode, referenced: true }]))(
+    'routes response-only view recovery through the current elected policy: $mode / referenced=$referenced', async ({ mode, referenced }) => {
       const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
       live = await harness(`https://chatgpt.com/c/${conversationId}`, {
         activity: () => ({ ok: true, data: { automationPaused: mode === 'paused',
@@ -1296,6 +1297,20 @@ describe('native approval automation ownership', () => {
       for (const node of [root, status, reload]) node.setAttribute('data-clf-test-rendered', '1');
       const click = vi.fn(); reload.addEventListener('click', click);
       root.append(status, reload); section.append(root);
+      if (referenced) {
+        const unit = live.document.createElement('div');
+        unit.setAttribute('data-content-search-unit-key', 'native-group:assistant');
+        const selection = live.document.createElement('div');
+        selection.setAttribute('data-chatgpt-selection-message-id', root.getAttribute('data-dil-message-id')!);
+        selection.setAttribute('data-chatgpt-selection-conversation-id', conversationId);
+        const markdown = live.document.createElement('div');
+        markdown.setAttribute('data-markdown-text-style', 'assistant-message');
+        const copy = live.document.createElement('div');
+        copy.setAttribute('data-dil-source-message-id', root.getAttribute('data-dil-message-id')!);
+        copy.setAttribute('data-markdown-copy', 'contents');
+        copy.setAttribute('data-chatgpt-copy-reference', '0');
+        copy.append(root); markdown.append(copy); selection.append(markdown); unit.append(selection); section.append(unit);
+      }
       const before = live.sent.length;
       live.hook.observe(); await settle();
       expect(click).toHaveBeenCalledTimes(mode === 'active' ? 1 : 0);
@@ -17617,7 +17632,7 @@ describe('the activity feed', () => {
     expect(valid?.coreDiagnostic?.shellScan).toEqual({
       selectorMatches: 3,
       mapped: 1,
-      reader: { contentRecorder: 136, contentKeys: 4 },
+      reader: { contentRecorder: 137, contentKeys: 4 },
       rejects: {
         fiberMissing: 1,
         ownerMissing: 1,
