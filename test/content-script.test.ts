@@ -17632,7 +17632,7 @@ describe('the activity feed', () => {
     expect(valid?.coreDiagnostic?.shellScan).toEqual({
       selectorMatches: 3,
       mapped: 1,
-      reader: { contentRecorder: 141, contentKeys: 4 },
+      reader: { contentRecorder: currentRecorderVersion, contentKeys: 4 },
       rejects: {
         fiberMissing: 1,
         ownerMissing: 1,
