@@ -582,6 +582,7 @@ import {
   confirmLoopProgressReport,
   releaseLoopProgressReport,
   sessionDirectoryMissing,
+  readDeletedSessionCustody,
   type WorkstreamActiveWork,
   readSessionNativeCompletionFenceCheckpoint,
   compareAndSetSessionNativeCompletionFence,
@@ -12912,8 +12913,37 @@ async function settledTurnInputCustodyScope(sessionId: string, id: string, rows:
           ((row.purpose === 'decision' || helper) &&
             (!helper || helper.purpose !== 'decision' || helper.lifetime !== 'temporary-planner' ||
               helper.decisionSourceSessionId !== sourceSessionId || !helper.decisionSourceTurnId))) return null;
+      const sourceRowRevision = createHash('sha256').update(JSON.stringify(row)).digest('hex');
       const source = await getSession(sourceSessionId);
       const sourceConversation = source?.conversationId;
+      // A manually archived helper source remains foreign custody, not a restored chat.
+      // This narrow null-route helper case cannot borrow an outgoing's guessed source.
+      if (row.purpose === 'decision' && !row.sessionId && !row.deliveredSessionId &&
+          !row.conversationId && exactCurrentQuestion) {
+        const archived = await readDeletedSessionCustody(sourceSessionId);
+        if (archived === null) return null;
+        if (archived) {
+          const currentSession = await getSession(sessionId);
+          const currentLineageRevision = JSON.stringify(currentSession?.chatIds);
+          const currentLineage = new Set([id, ...(currentSession?.chatIds ?? [])]);
+          if (currentSession?.conversationId !== id ||
+              [archived.conversationId, ...archived.chatIds].some(cid => currentLineage.has(cid))) return null;
+          // Reuse the complete active catalog. A live alias cannot be hidden by the archive;
+          // unrelated archived IDs need no scan because Input freezes this exact source ID.
+          const active = await indexedSessions({ requireComplete: true });
+          if (active.some(session => session.id === sourceSessionId ||
+              session.conversationId === archived.conversationId || session.chatIds.includes(archived.conversationId))) return null;
+          const latestCurrent = await getSession(sessionId);
+          const rechecked = await readDeletedSessionCustody(sourceSessionId);
+          if (!rechecked || rechecked.fingerprint !== archived.fingerprint ||
+              latestCurrent?.conversationId !== id ||
+              JSON.stringify(latestCurrent.chatIds) !== currentLineageRevision ||
+              createHash('sha256').update(JSON.stringify(row)).digest('hex') !== sourceRowRevision || !archived.current() || !rechecked.current()) return null;
+          foreign.push(JSON.stringify(['archived-foreign-helper', row.id, row.state, sourceSessionId,
+            archived.conversationId, archived.chatIds, archived.fingerprint, sourceRowRevision]));
+          continue;
+        }
+      }
       if (!sourceConversation || sourceConversation === id ||
           (row.purpose !== 'decision' && sourceConversation !== row.conversationId)) return null;
       // A helper's native Temporary Chat is not its source. If an own recording is present,

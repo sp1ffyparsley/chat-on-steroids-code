@@ -62,6 +62,7 @@ import {
   permanentlyDeleteSession,
   readAsset,
   readEvents,
+  readDeletedSessionCustody,
   readRecentEvents,
   readReceiptWitnessOccurrences,
   readLatestUserMessage,
@@ -4003,6 +4004,40 @@ describe('session store', () => {
 // ---------------------------------------------------------------- handoffs
 
 describe('recoverable manual deletion', () => {
+  it('reads exact archive custody without restoring or enumerating archives', async () => {
+    const summary = await createSession({ title: 'Retained custody', conversationId: randomUUID() });
+    expect(await readDeletedSessionCustody(summary.id)).toBeUndefined();
+    await deleteSession(summary.id);
+    const file = path.join(sessionsRoot(), '.deleted-sessions', summary.id, 'meta.json');
+    const before = await fs.readFile(file, 'utf8');
+    const scan = vi.spyOn(fs, 'readdir');
+    try {
+      const custody = await readDeletedSessionCustody(summary.id);
+      expect(custody).toMatchObject({ id: summary.id, conversationId: summary.conversationId, chatIds: summary.chatIds });
+      expect(custody?.fingerprint).toMatch(/^[a-f0-9]{64}$/);
+      expect(custody?.current()).toBe(true);
+      expect(scan).not.toHaveBeenCalled();
+      expect(await fs.readFile(file, 'utf8')).toBe(before);
+      expect(await getSession(summary.id)).toBeNull();
+      await restoreDeletedSession(summary.id);
+      expect(custody?.current()).toBe(false);
+    } finally { scan.mockRestore(); }
+  });
+
+  it.each(['corrupt', 'missing', 'oversized', 'invalid-lineage'] as const)(
+    'requires a valid bounded archive primary despite a good backup (%s)', async cause => {
+      const summary = await createSession({ conversationId: randomUUID() });
+      await deleteSession(summary.id);
+      const file = path.join(sessionsRoot(), '.deleted-sessions', summary.id, 'meta.json');
+      const raw = await fs.readFile(file, 'utf8');
+      await fs.writeFile(path.join(path.dirname(file), 'meta.backup.json'), raw);
+      if (cause === 'corrupt') await fs.writeFile(file, '{');
+      if (cause === 'missing') await fs.unlink(file);
+      if (cause === 'oversized') await fs.writeFile(file, ' '.repeat(1024 * 1024 + 1));
+      if (cause === 'invalid-lineage') { const meta = JSON.parse(raw); meta.chatIds.push(' invalid '); await fs.writeFile(file, JSON.stringify(meta)); }
+      expect(await readDeletedSessionCustody(summary.id)).toBeNull();
+    });
+
   it('does not recreate a retired session directory from a delayed metadata write', async () => {
     const summary = await createSession({ title: 'No resurrection' });
     await flushSessions();

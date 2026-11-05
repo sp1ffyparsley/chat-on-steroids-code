@@ -2248,6 +2248,7 @@ describe('alternate shell turn/message provenance', () => {
     'multiple final references', 'getter final reference', 'unfinished native final reference',
     'duplicate final pointer source', 'missing final reference preview',
     'duplicate final anchor', 'off-path final anchor', 'nonterminal final anchor', 'different final body anchor',
+    'orphan execution result', 'execution result request mismatch', 'execution child result missing',
     'pending canonical group', 'pending header mismatch', 'missing system header', 'visible system header', 'foreign header scope',
     'unfinished execution', 'unfinished execution result', 'foreign retained parent', 'cached conflict',
     'unselected call', 'missing live branch', 'system accessor'] as const)(
@@ -2300,6 +2301,20 @@ describe('alternate shell turn/message provenance', () => {
           if (variant === 'off-path final anchor') entry.turn.items.at(-1).messageId = RESULT;
           if (variant === 'nonterminal final anchor') mapping[ASSISTANT].message.status = 'in_progress';
           if (variant === 'different final body anchor') entry.turn.items.at(-1).content = 'PRIVATE_DIFFERENT_FINAL';
+          if (variant === 'orphan execution result') {
+            const orphan = 'PRIVATE_ORPHAN_EXEC_RESULT';
+            mapping[orphan] = { id: orphan, parent: HEADER, message: { id: orphan,
+              author: { role: 'tool', name: 'functions.exec' }, recipient: 'all', status: 'finished_successfully',
+              metadata: { ...scope, parent_id: HEADER } } };
+            mapping[EXEC].parent = orphan;
+          }
+          if (variant === 'execution result request mismatch')
+            mapping[EXEC_RESULT].message.metadata.request_id = 'PRIVATE_OTHER_EXEC_REQUEST';
+          if (variant === 'execution child result missing') {
+            delete mapping[RESULT];
+            mapping[EXEC_RESULT].parent = CALL;
+            mapping[EXEC_RESULT].message.metadata.parent_id = CALL;
+          }
           if (variant.includes('final reference') || variant === 'foreign final pointer' || variant === 'duplicate final pointer source') {
             const final = entry.turn.items.find((item: any) => item.messageId === ASSISTANT);
             final.completed = true;
@@ -2329,6 +2344,18 @@ describe('alternate shell turn/message provenance', () => {
           expect(page.fiber.turns[0].endMessageId).toBeNull();
           for (const value of [USER, ASSISTANT, CALL, RESULT, REQUEST, EXEC, 'PRIVATE_DUPLICATE_FINAL',
             'PRIVATE_DIFFERENT_FINAL', 'PRIVATE_SYSTEM_TEXT', 'native-group-working', 'native-group-exchange'])
+            expect(trace).not.toContain(value);
+        }
+        if (['orphan execution result', 'execution result request mismatch', 'execution child result missing'].includes(variant)) {
+          const branch = variant === 'orphan execution result' ? 'execution-result-no-owner'
+            : variant === 'execution child result missing' ? 'execution-result-child-count' : 'execution-result-request';
+          const trace = diagnosticLogs.find(line => line.includes('native result-reference recovery diagnostic'))!;
+          expect(trace).toContain('anchorReason=nativeScopeBranchConflict');
+          expect(trace).toContain(`anchorBranch=${branch}`);
+          expect(page.fiber.turns[0].requests).not.toContainEqual(expect.objectContaining({ requestId: REQUEST, messageId: CALL }));
+          expect(page.fiber.turns[0].endMessageId).toBeNull();
+          for (const value of [USER, ASSISTANT, CALL, RESULT, REQUEST, EXEC, EXEC_RESULT,
+            'PRIVATE_ORPHAN_EXEC_RESULT', 'PRIVATE_OTHER_EXEC_REQUEST'])
             expect(trace).not.toContain(value);
         }
         expect(getterReads).toBe(0);

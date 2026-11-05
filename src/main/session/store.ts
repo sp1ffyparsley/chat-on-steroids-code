@@ -4651,6 +4651,68 @@ export async function deletedSessionCount(): Promise<number> {
   return names.filter((id) => /^[0-9a-z-]{8,64}$/i.test(id)).length;
 }
 
+/** Exact read-only archive custody, never restoration, pruning or result authority.
+ * Undefined means no archive; null means unreadable/conflicting custody. A valid primary
+ * is required; a missing/damaged primary cannot borrow an older backup. The synchronous
+ * witness also revokes across active ownership mutations while a caller awaits its proof. */
+export async function readDeletedSessionCustody(id: string): Promise<{
+  id: string; conversationId: string; chatIds: string[]; fingerprint: string; current: () => boolean;
+} | null | undefined> {
+  assertSessionId(id);
+  const storeRoot = root, dir = checkedDeletedSessionDir(id), file = path.join(dir, 'meta.json');
+  const epoch = attachmentEpoch, current = () => root === storeRoot && attachmentEpoch === epoch;
+  const stamp = (stat: Awaited<ReturnType<typeof fs.lstat>>) => JSON.stringify([
+    stat.dev, stat.ino, stat.size, stat.birthtimeMs, stat.ctimeMs, stat.mtimeMs
+  ]);
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  try {
+    // Absence is distinct from an existing but conflicting/damaged archive. In
+    // particular, an active source cannot hide a second archive of the same ID.
+    const folder = await fs.lstat(dir).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return undefined;
+      throw error;
+    });
+    if (!folder) return current() ? undefined : null;
+    if (!await sessionDirectoryMissing(id) || root !== storeRoot) return null;
+    const metadata = await fs.lstat(file);
+    const resolved = await fs.realpath(dir);
+    const samePath = process.platform === 'win32'
+      ? resolved.toLowerCase() === path.resolve(dir).toLowerCase() : resolved === path.resolve(dir);
+    if (!samePath || !folder.isDirectory() || folder.isSymbolicLink() ||
+        !metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 1 || metadata.size > 1024 * 1024) return null;
+    handle = await fs.open(file, 'r');
+    if (stamp(await handle.stat()) !== stamp(metadata)) return null;
+    // Allocate only the inspected size plus one byte: concurrent growth is refusal, not
+    // an unbounded read or a reason to accept a partial metadata record.
+    const bytes = Buffer.alloc(metadata.size + 1);
+    let size = 0;
+    while (size < bytes.length) {
+      const read = await handle.read(bytes, size, bytes.length - size, null);
+      if (!read.bytesRead) break;
+      size += read.bytesRead;
+    }
+    if (size !== metadata.size || stamp(await handle.stat()) !== stamp(metadata)) return null;
+    const raw = bytes.subarray(0, size).toString('utf8'), parsed = JSON.parse(raw);
+    const validId = (value: unknown): value is string => typeof value === 'string' &&
+      value.length > 0 && value.length <= 200 && !/\s/.test(value);
+    if (parsed?.id !== id || !validId(parsed.conversationId) || !Array.isArray(parsed.chatIds) ||
+        parsed.chatIds.length < 1 || parsed.chatIds.length > 10_000 || !parsed.chatIds.every(validId) ||
+        new Set(parsed.chatIds).size !== parsed.chatIds.length || !parsed.chatIds.includes(parsed.conversationId)) return null;
+    const checkpoint = normalizeSummary(id, raw);
+    if (!checkpoint || checkpoint.summary.conversationId !== parsed.conversationId ||
+        JSON.stringify(checkpoint.summary.chatIds) !== JSON.stringify(parsed.chatIds)) return null;
+    const latestFolder = await fs.lstat(dir), latestMetadata = await fs.lstat(file);
+    if (root !== storeRoot || stamp(latestFolder) !== stamp(folder) || stamp(latestMetadata) !== stamp(metadata) ||
+        latestFolder.isSymbolicLink() || latestMetadata.isSymbolicLink() || !await sessionDirectoryMissing(id) ||
+        !current()) return null;
+    return { id, conversationId: parsed.conversationId, chatIds: [...parsed.chatIds], current,
+      fingerprint: createHash('sha256').update(JSON.stringify([
+        storeRoot, id, stamp(folder), stamp(metadata), createHash('sha256').update(bytes.subarray(0, size)).digest('hex')
+      ])).digest('hex') };
+  } catch { return null; }
+  finally { await handle?.close().catch(() => undefined); }
+}
+
 /** Bounded metadata needed to fence old trash entries before permanent removal. */
 export async function listDeletedSessions(): Promise<DeletedSessionRecovery[]> {
   const trash = deletedSessionsRoot();

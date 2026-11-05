@@ -2444,8 +2444,11 @@
               if (execution || !request) return refuse('nativeScopeBranchConflict', 'execution-start');
               execution = { id, request, calls: [], results: [], closed: false }; executionIds.add(id);
             } else if (role === 'tool' && nativeField(author, 'name') === 'functions.exec' && recipient === 'all') {
-              if (!execution || str(nativeField(metadata, 'request_id')) !== execution.request ||
-                  execution.calls.length !== execution.results.length) return refuse('nativeScopeBranchConflict', 'execution-result');
+              if (!execution) return refuse('nativeScopeBranchConflict', 'execution-result-no-owner');
+              if (str(nativeField(metadata, 'request_id')) !== execution.request)
+                return refuse('nativeScopeBranchConflict', 'execution-result-request');
+              if (execution.calls.length !== execution.results.length)
+                return refuse('nativeScopeBranchConflict', 'execution-result-child-count');
               execution.closed = true; execution = null;
             } else if (role === 'assistant' && recipient === 'api_tool.call_tool') {
               const call = shell.calls.find(call => call.messageId === id), path = nativeRequestPath(message);

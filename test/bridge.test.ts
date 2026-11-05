@@ -2263,6 +2263,126 @@ describe('opt-in settled-turn Loop forward-readiness', () => {
     } finally { await f.cleanup(); }
   });
 
+  it('keeps an archived foreign helper Send unknown without starving a distinct settled source', async () => {
+    const f = await retainedUncertainFixture('decision');
+    try {
+      f.uncertain.state = 'failed';
+      f.uncertain.requiresAuthorization = true;
+      await f.persist();
+      await sessionStoreModule.deleteSession(f.foreign.id);
+      const inputPath = path.join(dir, 'state', 'session-input.json');
+      const before = await fs.readFile(inputPath, 'utf8');
+      expect(await settledForwardBridge.settledTurnContinuationAllowed(f.sessionId, f.conversationId, f.turnId)).toBe(true);
+      expect(await fs.readFile(inputPath, 'utf8')).toBe(before);
+      expect(await sessionStoreModule.getSession(f.foreign.id)).toBeNull();
+      expect(await f.input.claimBrowserInput(f.uncertain.id, 'never-replay-archived-helper', null, true)).toBeNull();
+      expect(nativeFinalEvidenceWait(coreBrowserEvidence(f.conversationId))?.reason).toBe('evidence');
+    } finally { await f.cleanup(); }
+  });
+
+  it.each(['corrupt-primary', 'missing-primary', 'wrong-id', 'missing-lineage', 'duplicate-lineage',
+    'current-conversation', 'current-lineage', 'active-alias', 'active-source-collision'] as const)(
+    'refuses archived helper custody with %s', async cause => {
+      const f = await retainedUncertainFixture('decision');
+      try {
+        await sessionStoreModule.deleteSession(f.foreign.id);
+        const archive = path.join(sessionStoreModule.sessionsRoot(), '.deleted-sessions', f.foreign.id);
+        const file = path.join(archive, 'meta.json');
+        const raw = await fs.readFile(file, 'utf8'), meta = JSON.parse(raw);
+        await fs.writeFile(path.join(archive, 'meta.backup.json'), raw);
+        if (cause === 'corrupt-primary') await fs.writeFile(file, '{');
+        else if (cause === 'missing-primary') await fs.unlink(file);
+        else if (cause === 'active-alias') await sessionStoreModule.createSession({ conversationId: f.foreignConversation });
+        else if (cause === 'active-source-collision') {
+          await sessionStoreModule.restoreDeletedSession(f.foreign.id);
+          await fs.mkdir(archive, { recursive: true });
+          await fs.writeFile(file, raw);
+        }
+        else {
+          if (cause === 'wrong-id') meta.id = f.sessionId;
+          if (cause === 'missing-lineage') delete meta.chatIds;
+          if (cause === 'duplicate-lineage') meta.chatIds.push(meta.chatIds[0]);
+          if (cause === 'current-conversation') { meta.conversationId = f.conversationId; meta.chatIds = [f.conversationId]; }
+          if (cause === 'current-lineage') meta.chatIds.push(f.conversationId);
+          await fs.writeFile(file, JSON.stringify(meta));
+        }
+        expect(await settledForwardBridge.settledTurnContinuationAllowed(f.sessionId, f.conversationId, f.turnId)).toBe(false);
+      } finally { await f.cleanup(); }
+    });
+
+  it.each(['metadata', 'restore', 'delete', 'input-row', 'active-alias'] as const)(
+    'revokes archived helper custody when %s changes before the final closure', async cause => {
+      const f = await retainedUncertainFixture('decision');
+      try {
+        await sessionStoreModule.deleteSession(f.foreign.id);
+        const proof = await settledForwardBridge.settledTurnContinuationProof(f.sessionId, f.conversationId, f.turnId);
+        expect(await proof?.()).toBe(true);
+        const archive = path.join(sessionStoreModule.sessionsRoot(), '.deleted-sessions', f.foreign.id);
+        if (cause === 'metadata') {
+          const file = path.join(archive, 'meta.json'), meta = JSON.parse(await fs.readFile(file, 'utf8'));
+          meta.title += ' changed';
+          await fs.writeFile(file, JSON.stringify(meta));
+        }
+        if (cause === 'restore') await sessionStoreModule.restoreDeletedSession(f.foreign.id);
+        if (cause === 'delete') await fs.unlink(path.join(archive, 'meta.json'));
+        if (cause === 'input-row') { f.uncertain.sendAuthorizedAt! += 1; await f.persist(); }
+        if (cause === 'active-alias') await sessionStoreModule.createSession({ conversationId: f.foreignConversation });
+        expect(await proof?.()).toBe(false);
+      } finally { await f.cleanup(); }
+    });
+
+  it('refuses an active source alias appearing across the awaited archive read', async () => {
+    const f = await retainedUncertainFixture('decision');
+    try {
+      await sessionStoreModule.deleteSession(f.foreign.id);
+      const original = sessionStoreModule.readDeletedSessionCustody;
+      let changed = false;
+      const lookup = vi.spyOn(sessionStoreModule, 'readDeletedSessionCustody').mockImplementation(async id => {
+        const result = await original(id);
+        if (id === f.foreign.id && !changed) {
+          changed = true;
+          await sessionStoreModule.createSession({ conversationId: f.foreignConversation });
+        }
+        return result;
+      });
+      try { expect(await settledForwardBridge.settledTurnContinuationAllowed(f.sessionId, f.conversationId, f.turnId)).toBe(false); }
+      finally { lookup.mockRestore(); }
+    } finally { await f.cleanup(); }
+  });
+
+  it('refuses an active source alias appearing after the awaited catalog snapshot', async () => {
+    const f = await retainedUncertainFixture('decision');
+    try {
+      await sessionStoreModule.deleteSession(f.foreign.id);
+      const original = sessionStoreModule.indexedSessions;
+      let changed = false;
+      const lookup = vi.spyOn(sessionStoreModule, 'indexedSessions').mockImplementation(async options => {
+        const result = await original(options);
+        if (!changed) {
+          changed = true;
+          await sessionStoreModule.createSession({ conversationId: f.foreignConversation });
+        }
+        return result;
+      });
+      try { expect(await settledForwardBridge.settledTurnContinuationAllowed(f.sessionId, f.conversationId, f.turnId)).toBe(false); }
+      finally { lookup.mockRestore(); }
+    } finally { await f.cleanup(); }
+  });
+
+  it('does not scan or conflate an unrelated archive with the exact retained helper source', async () => {
+    const f = await retainedUncertainFixture('decision');
+    try {
+      await sessionStoreModule.deleteSession(f.foreign.id);
+      const other = await sessionStoreModule.createSession({ conversationId: f.foreignConversation });
+      await sessionStoreModule.deleteSession(other.id);
+      const scan = vi.spyOn(sessionStoreModule, 'listDeletedSessions');
+      try {
+        expect(await settledForwardBridge.settledTurnContinuationAllowed(f.sessionId, f.conversationId, f.turnId)).toBe(true);
+        expect(scan).not.toHaveBeenCalled();
+      } finally { scan.mockRestore(); }
+    } finally { await f.cleanup(); }
+  });
+
   it('revokes pruned-helper foreign proof if conflicting retained helper provenance appears', async () => {
     const f = await retainedUncertainFixture();
     try {
