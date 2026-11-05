@@ -1,14 +1,14 @@
 # Chat On Steroids - code research mirror
 
-## Current: recorder136 source candidate;135 installed privately
+## Current: recorder136 independently installed privately
 
-This mirror publishes reviewed source and tests, not a qualified public installer. The latest privately installed package is135;136 is a source candidate undergoing the full strict release checks. Use this mirror's public commit SHA for research citations. Private provenance hashes in historical notes are not public Git references.
+This mirror publishes reviewed source and tests, not a qualified public installer. The latest privately installed package is136; its strict release, exact installer, protected-data and full installed-program checks passed. Use this mirror's public commit SHA for research citations. Private provenance hashes in historical notes are not public Git references.
 
 135 introduced independently anchored native execution groups, original-wire invocation digests frozen before SDK defaults, unique durable v2 result witnesses, bounded native WebCrypto matching, and first-refusal handling for positively unavailable helper choices. Its strict release run passed96preliminary and13,351main tests with62conditional skips;33installer checks and independent installation verification passed.
 
 136 repairs a reproduced final-answer representation mismatch: an exact same-message DIL preview may differ from canonical native authored text. A unique own-data source pointer may establish original-request namespace identity against an independently terminal native final. It never substitutes for a per-call result receipt, overrides completed:false/body corroboration, changes a Send payload, resets a retry circuit, or guesses legacy batch ownership. Foreign, duplicate, getter-backed, incomplete and missing references remain refused. Existing fallback text projection now avoids getters.
 
-The five affected suites pass3,376tests, including v2 repeated-tool joins, legacy batch refusal and privacy/source controls; typecheck and JavaScript syntax checks pass. Full136qualification,136installation and sustained live automatic next turns remain separate, unverified claims. Provider model availability and old ambiguous results remain real constraints. No new dependency, worker, polling loop or authority store was added.
+The five affected suites pass3,376tests, including v2 repeated-tool joins, legacy batch refusal and privacy/source controls; typecheck and JavaScript syntax checks pass. Private136qualification passed96preliminary and13,361main tests with62conditional skips, followed by33installer checks and readiness. The first full run had one logger timeout; unchanged isolated and whole98logger checks passed, and the second full run passed. All133,989protected files and291installed program files independently matched before successor apps reopened. Original settings were restored. Live reader136 now admits the original request namespace in the reproduced37-call case with zero identity refusals;35legacy result references and the retained original fence remain unverified. Sustained live automatic next turns are not certified. Provider model availability and old ambiguous results remain real constraints. No new dependency, worker, polling loop or authority store was added.
 
 ## Historical release records
 
