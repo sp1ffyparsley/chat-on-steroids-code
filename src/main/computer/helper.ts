@@ -31,6 +31,7 @@ $ProgressPreference = 'SilentlyContinue'
 # into the target window exactly as mangled. That hits every textual argument the helper
 # takes — type, set_value, UIA queries — not only keystrokes.
 [Console]::InputEncoding = [System.Text.Encoding]::UTF8
+[Console]::Error.WriteLine('[cos-desktop] compile-start')
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
@@ -540,6 +541,7 @@ public static class Clf {
 ${WINDOWS_KEYS_SOURCE}
 ${WINDOWS_APP_IDENTITY_SOURCE}
 '@ -ReferencedAssemblies System.Drawing
+[Console]::Error.WriteLine('[cos-desktop] compiled')
 
 ${WINDOWS_CAPTURE_BOOTSTRAP}
 
@@ -1154,9 +1156,11 @@ function Handle-Request($request) {
       $result.foreground = [Clf]::ForegroundId()
     }
     'windows' {
+      [Console]::Error.WriteLine('[cos-desktop] windows-enumeration')
       $screen = Get-ScreenRect
       $result.windows = @(Get-WindowRows)
       $result.screen = $screen.virtual
+      [Console]::Error.WriteLine('[cos-desktop] windows-enumerated')
     }
     'apps' {
       $apps = Get-WindowsApps $request
@@ -1334,6 +1338,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
   if ([string]::IsNullOrWhiteSpace($line)) { continue }
   try {
     $request = $line | ConvertFrom-Json
+    [Console]::Error.WriteLine('[cos-desktop] request-dispatch')
     $reply = Handle-Request $request
   } catch {
     $message = $_.Exception.Message

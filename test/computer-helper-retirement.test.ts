@@ -148,8 +148,20 @@ describe('desktop helper retirement ordering', () => {
     if (script) await expect(fs.stat(script)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it.each([null, 'walk-elements', 'Private native provider text'])(
-    'keeps timeout retirement custody and only reports a fixed native stage (%s)', async nativeStage => {
+  it.each([
+    [null, ''],
+    ['[cos-uia] walk-elements\n', ' Last reported UIA stage: walk-elements.'],
+    ['[cos-uia] Private native provider text\n', ''],
+    ['[cos-desktop] compile-start\n', ' Last reported desktop stage: compile-start.'],
+    ['[cos-desktop] compiled\n', ' Last reported desktop stage: compiled.'],
+    ['[cos-desktop] request-dispatch\n', ' Last reported desktop stage: request-dispatch.'],
+    ['[cos-desktop] windows-enumeration\n', ' Last reported desktop stage: windows-enumeration.'],
+    ['[cos-desktop] windows-enumerated\n', ' Last reported desktop stage: windows-enumerated.'],
+    ['[cos-desktop] Private startup details\n', ''],
+    ['[cos-desktop] compiled\n[cos-uia] root-window\n', ' Last reported UIA stage: root-window.'],
+    ['[cos-uia] done\n[cos-desktop] windows-enumeration\n', ' Last reported desktop stage: windows-enumeration.']
+  ] as const)(
+    'keeps timeout retirement custody and only reports a fixed native stage (%s)', async (nativeDiagnostic, suffix) => {
     vi.useFakeTimers();
 
     let firstSettled = false;
@@ -169,8 +181,8 @@ describe('desktop helper retirement ordering', () => {
     // The helper first materializes its script asynchronously; start the test clock
     // from actual request admission rather than from the beginning of file I/O.
     await vi.waitFor(() => expect(fake.children[0]?.writeCount).toBe(1));
-    if (nativeStage !== null) fake.children[0]!.stderr.emit('data',
-      Buffer.from(`[cos-uia] ${nativeStage}\nPrivate unrelated provider text\n`));
+    if (nativeDiagnostic !== null) fake.children[0]!.stderr.emit('data',
+      Buffer.from(`${nativeDiagnostic}Private unrelated provider text\n`));
     await vi.advanceTimersByTimeAsync(15_000);
     await Promise.resolve();
     expect(fake.terminateProcessTree).toHaveBeenCalledWith(9000);
@@ -184,8 +196,7 @@ describe('desktop helper retirement ordering', () => {
     fake.releaseFirstRetirement();
     await observedFirst;
     await expect(second).resolves.toEqual({ windows: [], screen: { x: 0, y: 0, width: 100, height: 100 } });
-    expect(firstError).toEqual(expect.objectContaining({ message: 'The desktop helper did not answer in time.' +
-      (nativeStage === 'walk-elements' ? ' Last reported UIA stage: walk-elements.' : '') }));
+    expect(firstError).toEqual(expect.objectContaining({ message: 'The desktop helper did not answer in time.' + suffix }));
     expect(String(firstError)).not.toContain('Private');
     expect(fake.spawn).toHaveBeenCalledTimes(2);
   });
