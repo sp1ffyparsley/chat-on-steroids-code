@@ -713,6 +713,26 @@ export function settledNativeTurnCandidate(conversation: string, now = Date.now(
     coreCallMessageIds: [...final.coreCallMessageIds], codeCallMessageIds: [...final.codeCallMessageIds ?? []] };
 }
 
+/** Main-only late identity recovery after the canonical execution/receipt owner has
+ * independently proved every original parent. A browser observation alone never calls
+ * this owner. Keep the original document, time, census and unresolved-result debt. */
+export function retainNativeRequestIdsFromDurableReceipts(conversation: string,
+  expected: Readonly<PendingNativeCompletion>, requestIds: readonly string[]): boolean {
+  const row = snapshots.get(conversation), pending = row?.pendingCompletion, final = row?.ordinaryFinal;
+  const native = settledNativeTurnCandidate(conversation);
+  if (!row || !pending || !final || !native || pending.reason === 'inventory-incomplete' ||
+      pending.allCoreRequestIds !== null || JSON.stringify(pending) !== JSON.stringify(expected) ||
+      pending.calls < 1 || pending.codeCalls !== 0 || !pending.coreCallMessageIds ||
+      pending.coreCallMessageIds.length !== pending.calls || !pending.codeCallMessageIds || pending.codeCallMessageIds.length !== 0 ||
+      final.callInventoryComplete === false || final.calls !== pending.calls || final.codeCalls !== 0 ||
+      native.sourceUserMessageId !== pending.sourceUserMessageId || !final.allCoreRequestIds ||
+      requestIds.length !== pending.calls || final.allCoreRequestIds.length !== pending.calls ||
+      pending.coreCallMessageIds.some((id, at) => native.coreCallMessageIds[at] !== id) ||
+      requestIds.some((id, at) => typeof id !== 'string' || !id || id.length > 100 || final.allCoreRequestIds![at] !== id)) return false;
+  pending.allCoreRequestIds = [...requestIds];
+  return true;
+}
+
 /** Candidate for the incumbent Bridge's durable-tool-result check. Browser prose is not proof. */
 export function nativeCompletionCandidate(conversation: string): {
   observedAt: number; pendingObservedAt: number; reason: PendingNativeCompletion['reason'];

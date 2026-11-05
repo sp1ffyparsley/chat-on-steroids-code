@@ -9242,6 +9242,166 @@ describe('activity feed', () => {
     expect((await store.readEvents(sessionId, { kinds: ['tool_call'], requireIntegrity: true }))).toHaveLength(2);
   });
 
+  it.each(['exact', 'concurrent controls', 'source edited', 'foreign current question', 'reordered parents', 'different parent',
+    'different request', 'known request half', 'missing digest', 'missing receipt', 'changed digest',
+    'changed args', 'foreign receipt copy', 'pending Input', 'unknown Send', 'source changes during receipt check',
+    'source changes during final Input check',
+    'wrong checkpoint profile'] as const)(
+    'recovers only the missing original request half from exact durable owned receipts after a new document (%s)', async variant => {
+    const recorder = await import('../src/main/session/recorder.js');
+    const store = await import('../src/main/session/store.js');
+    const { invocationArgumentsDigest } = await import('../src/main/session/correlation.js');
+    const conversationId = randomUUID(), userId = randomUUID(), finalId = randomUUID();
+    const requestId = 'wfr_recovered_owned_' + randomUUID();
+    const messageIds = [randomUUID(), randomUUID()];
+    const receipts = [randomBytes(24).toString('hex'), randomBytes(24).toString('hex')];
+    const args = [{ paths: ['/project/original-one.txt'] }, { paths: ['/project/original-two.txt'] }];
+    const turnId = 'g-owned-recovery-' + randomUUID();
+    await pair(); resetCoreBrowserEvidenceForTests();
+    const opened = await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'user_message', messageId: userId, text: 'Complete these exact original results.', time: Date.now() },
+      { kind: 'turn_start', turnId, time: Date.now() }
+    ] } });
+    const sessionId = opened.body.sessionId;
+    const native = { documentId: 'owned-request-original-document', navigationEpoch: 4,
+      shell: 'alternate', shellDiscovery: 'compatible', requestIds: [requestId] };
+    const pending = { reason: 'open-call', questions: 1, calls: 2, openCalls: 2,
+      codeCalls: 0, openCodeCalls: 0, activeTurnMapped: false,
+      sourceUserMessageId: userId, coreCallMessageIds: messageIds,
+      ...(variant === 'known request half' ? { allCoreRequestIds: ['wfr_prior_one', 'wfr_prior_two'] } : {}) };
+    const report = (ordinaryFinal: Record<string, unknown>, replacement = false) => request('POST',
+      `/activity?conversationId=${conversationId}`, { body: { coreDiagnostic: {
+        ...native, ...(replacement ? { documentId: 'owned-request-new-document', navigationEpoch: 5 } : {}),
+        observedAt: Date.now(), ordinaryFinal } } });
+    await report(pending);
+    const original = coreBrowserEvidence(conversationId)!.pendingCompletion!;
+    expect(original.allCoreRequestIds).toEqual(variant === 'known request half' ? ['wfr_prior_one', 'wfr_prior_two'] : null);
+    const calls = messageIds.map((messageId, index) => ({ messageId, requestId, tool: 'read',
+      order: index, answered: false }));
+    await request('POST', '/correlations', { body: { conversationId, calls } });
+    for (const [index, resultReceiptId] of receipts.entries()) await recorder.recordToolCall({ tool: 'read',
+      args: args[index], ...(variant === 'missing digest' ? {} : { invocationSha256: invocationArgumentsDigest('read', args[index])! }),
+      content: [{ type: 'text', text: 'Exact original returned execution' }], resultReceiptId,
+      requestId, conversationId, sessionId, outcome: 'ok', durationMs: 1, startedAt: Date.now() });
+    await recorder.flushRecorder();
+    expect((await request('POST', '/correlations', { body: { conversationId,
+      calls: calls.map((call, index) => ({ ...call, answered: true, resultReceiptId: receipts[index],
+        ...(variant === 'missing digest' ? {} : { invocationSha256: invocationArgumentsDigest('read', args[index]) }) })) } })).body.confirmedResultReceipts).toEqual(receipts);
+    await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'assistant_message', messageId: finalId, providerMessageId: finalId, turnId,
+        text: 'Both original results returned.', time: Date.now(), state: 'final', final: true },
+      { kind: 'turn_end', turnId, outcome: 'completed', time: Date.now() }
+    ] } });
+    const journal = path.join(store.sessionsRoot(), sessionId, 'events.jsonl');
+    const bytes = await fs.readFile(journal);
+    const final = { ...pending, openCalls: 1, openRequestIds: [requestId],
+      allCoreRequestIds: [requestId, requestId], settledFinalMessageId: finalId };
+    const editSource = async () => {
+      const user = (await store.readEvents(sessionId, { kinds: ['user_message'] }))[0]!;
+      if (user.kind !== 'user_message') throw new Error('Expected the original user fixture');
+      await store.upsertMessageEvent(sessionId, { ...user, time: Date.now(),
+        message: { text: 'A different original instruction', chars: 32, truncated: false } });
+    };
+    if (variant === 'source edited') await editSource();
+    if (variant === 'foreign current question') final.sourceUserMessageId = randomUUID();
+    if (variant === 'reordered parents') final.coreCallMessageIds = [...messageIds].reverse();
+    if (variant === 'different parent') final.coreCallMessageIds = [randomUUID(), messageIds[1]!];
+    if (variant === 'different request') final.allCoreRequestIds = ['wfr_foreign_request', requestId];
+    if (['missing receipt', 'changed digest', 'changed args'].includes(variant)) {
+      const files = await fs.readdir(path.join(store.sessionsRoot(), sessionId, 'messages'));
+      for (const name of files) {
+        const file = path.join(store.sessionsRoot(), sessionId, 'messages', name);
+        const raw = await fs.readFile(file, 'utf8'), row = JSON.parse(raw);
+        if (row.kind !== 'tool_call' || row.call.nativeCallMessageId !== messageIds[0]) continue;
+        if (variant === 'missing receipt') delete row.call.resultReceiptId;
+        if (variant === 'changed digest') row.call.invocationSha256 = 'f'.repeat(64);
+        if (variant === 'changed args') row.call.args = { text: 'Changed original args', chars: 21, truncated: false };
+        await fs.writeFile(file, JSON.stringify(row));
+        onTestFinished(() => fs.writeFile(file, raw));
+      }
+    }
+    if (variant === 'foreign receipt copy') {
+      const foreign = await store.createSession({ conversationId: randomUUID() });
+      const originalRow = (await store.readEvents(sessionId, { kinds: ['tool_call'] }))[0]!;
+      await store.appendEvent(foreign.id, { ...originalRow, time: Date.now() });
+    }
+    const input = await import('../src/main/session/input.js');
+    if (variant === 'unknown Send' || variant === 'pending Input') {
+      const pending = await input.enqueueInput({ id: randomUUID(), sessionId, dueAt: Date.now(),
+        model: 'gpt-6-thinking', reasoningEffort: 'high',
+        text: 'Existing pending input must remain retained', automation: 'off', mode: 'auto' });
+      if (variant === 'unknown Send') {
+        const list = input.listInputs;
+        const authorizedAt = Date.now() - 1000;
+        const spy = vi.spyOn(input, 'listInputs').mockImplementation(async () => (await list()).map(row =>
+          row.id === pending.id ? { ...row, state: 'failed' as const, owner: 'uncertain-native-owner',
+            sendAuthorizedAt: authorizedAt } : row));
+        onTestFinished(() => spy.mockRestore());
+      }
+    }
+    if (variant === 'source changes during receipt check') {
+      const unique = recorder.receiptDurableOwnerUnique;
+      let changed = false;
+      const spy = vi.spyOn(recorder, 'receiptDurableOwnerUnique').mockImplementation(async (...values) => {
+        const accepted = await unique(...values);
+        if (!changed) { changed = true; await editSource(); }
+        return accepted;
+      });
+      onTestFinished(() => spy.mockRestore());
+    }
+    if (variant === 'wrong checkpoint profile') {
+      const read = store.readSessionNativeCompletionFenceCheckpoint;
+      const spy = vi.spyOn(store, 'readSessionNativeCompletionFenceCheckpoint').mockImplementation(async (...values) => {
+        const result = await read(...values);
+        return result?.fence ? { ...result, fence: { ...result.fence, profileId: 'profile-foreign' } } : result;
+      });
+      onTestFinished(() => spy.mockRestore());
+    }
+    const priorInputs = await input.listInputs();
+    if (variant === 'source changes during final Input check') {
+      const list = input.listInputs;
+      let reads = 0;
+      const spy = vi.spyOn(input, 'listInputs').mockImplementation(async () => {
+        const rows = await list();
+        if (++reads === 2) await editSource();
+        return rows;
+      });
+      onTestFinished(() => spy.mockRestore());
+    }
+    let response: { status: number };
+    if (variant === 'concurrent controls') {
+      const evidence = await import('../src/main/core-browser-evidence.js');
+      const { settleObservedNativeCompletion } = await import('../src/main/bridge.js');
+      evidence.noteCoreBrowserEvidence({ ...native, conversationId, shell: 'alternate', shellDiscovery: 'compatible',
+        documentId: 'owned-request-new-document', navigationEpoch: 5, observedAt: Date.now(),
+        turnId, ordinaryFinal: final });
+      const first = settleObservedNativeCompletion(conversationId, sessionId);
+      const second = settleObservedNativeCompletion(conversationId, sessionId);
+      const sameOwner = first === second;
+      expect(await settleObservedNativeCompletion(conversationId, 'foreign-session-owner')).toBe(false);
+      await Promise.all([first, second]);
+      expect(sameOwner).toBe(true);
+      response = { status: 200 };
+    } else response = await report(final, true);
+    if (variant !== 'exact' && variant !== 'concurrent controls') {
+      expect(coreBrowserEvidence(conversationId)!.pendingCompletion).toEqual(original);
+      expect(await input.listInputs()).toEqual(priorInputs);
+      expect(await fs.readFile(journal)).toEqual(bytes);
+      return;
+    }
+    expect(response.status).toBe(200);
+    expect(coreBrowserEvidence(conversationId)!.pendingCompletion).toEqual({ ...original,
+      allCoreRequestIds: [requestId, requestId] });
+    expect(nativeCompletionCandidate(conversationId)).toBeNull(); // Native result uncertainty is still retained.
+    const profile = (await import('../src/main/config.js')).getActiveInstanceRuntime().profile.id;
+    expect((await store.readSessionNativeCompletionFenceCheckpoint(sessionId, conversationId, profile))?.fence)
+      .toEqual({ version: 1, profileId: profile, sessionId, conversationId, ...original,
+        allCoreRequestIds: [requestId, requestId] });
+    expect((await report({ ...final, reason: 'associated', openCalls: 0, openRequestIds: [] }, true)).status).toBe(200);
+    expect(coreBrowserEvidence(conversationId)!.pendingCompletion).toBeNull();
+    expect(await fs.readFile(journal)).toEqual(bytes);
+  });
+
   it.each(['ok', 'process_exit_nonzero', 'tool_rejected', 'tool_execution_error', 'tool_internal_error'] as const)(
     'binds and settles two exact owned Core receipts sharing one workflow without rewriting either original execution (%s)', async outcome => {
     const recorder = await import('../src/main/session/recorder.js');

@@ -1,5 +1,15 @@
 # Chat On Steroids - code research mirror
 
+## Current source: candidate140; recorder139 remains installed
+
+Candidate140 adds Main-owned recovery of a missing original request-ID half only when every unchanged original parent is independently bound to canonical executions, immutable invocation/returned-result witnesses, the complete durable receipt catalogue and current source. It preserves the original document/time/parent census and unresolved result debt; a later browser observation alone cannot supply the missing identity or authorize Send. Concurrent callers join the existing exact conversation settlement rather than repeating its catalogue/disk work. The earlier pre-coalescing whole affected run passed1,783checks; focused recovery cases cover changed source, wrong or reordered parents, stale data, ambiguous custody and concurrent controls. Fresh native final-result receipts remain unproved, so this is not an all-matching-fixed claim.
+
+New operator prompts now ask the agent to execute and test authorized unfinished work and report actual results or specific blockers. Already-prepared requests keep their exact previous reserved headers and delivery bytes; both shared and browser parsers recognize that frozen vocabulary without rewriting it. The operator/DOM checks passed556cases plus4focused compatibility cases privately. Content/background recorder markers are paired at140, and its narrow content diagnostic fixture passed.
+
+Public mirror checks passed18focused original-request recovery cases,547operator/DOM cases and the single changed content diagnostic fixture, plus typecheck and staged privacy/diff checks. These focused and whole-suite counts overlap earlier runs and are not a full release total.
+
+These changes are SOURCE ONLY and are not installed. Future full qualification and activation are pending; recorder139 is still the independently accepted runtime. Existing fresh tasks remain under their current owners. No native completion, approval, model fallback, duplicate prompt or sustained-autonomy authority is inferred from publishing these source changes. This mirror is not a binary release.
+
 ## Current: recorder139 independently installed privately
 
 Recorder139 forwards the native model-availability array through the existing elected background catalogue owner; it had been omitted from the request body. The existing Goal/status owner can also request one due passive inspection after an exact native reset or bounded evidence staleness, while preserving the same requested model/reasoning, current source, pause and no-open checks. A reset clock never establishes availability or permits a helper Send: only later fresh exact native positive evidence can release the existing confirmed-unsent hold. No fallback model, budget reset, duplicate helper, new timer or new tab is introduced. Content/background recorder markers are paired at139; the already-public anchorBranch diagnostics are included.

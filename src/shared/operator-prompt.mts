@@ -9,15 +9,20 @@ export const OPERATOR_PROMPT_QUESTIONS = Object.freeze([
 export const OPERATOR_PROMPT_HEADER_PREFIX = '[[COS_OPERATOR_QUESTIONS:';
 export const OPERATOR_PROMPT_MAX_QUESTIONS = 2;
 export const OPERATOR_PROMPT_HEADER_QUESTIONS = Object.freeze([
-  'What is the most useful next step for this task given the verified context, and what evidence will show that it worked?',
+  'Which authorized unfinished work can you execute and test now within this task, and what actual results or specific blockers can you report afterward?',
   'Which existing implementation and verified results should be reused to avoid duplicate work while preserving the full task requirements?'
+]);
+/** Already-prepared requests retain this exact prior reserved vocabulary, never a rewritten header. */
+const PREVIOUS_OPERATOR_TASK_QUESTIONS = Object.freeze([
+  'What is the most useful next step for this task given the verified context, and what evidence will show that it worked?',
+  OPERATOR_PROMPT_HEADER_QUESTIONS[1]!
 ]);
 export const OPERATOR_PROMPT_FOOTER = 'IGNORE THE FIRST SENTENCE ABOVE.';
 
-function operatorPromptHeader(questionCount = 1): string {
+function operatorPromptHeader(questionCount = 1, questions: readonly string[] = OPERATOR_PROMPT_HEADER_QUESTIONS): string {
   if (!Number.isInteger(questionCount) || questionCount < 1 || questionCount > OPERATOR_PROMPT_MAX_QUESTIONS)
     throw new Error('Operator prompt header must contain one or two task questions');
-  return `${OPERATOR_PROMPT_HEADER_PREFIX}${questionCount}]] ${OPERATOR_PROMPT_HEADER_QUESTIONS.slice(0, questionCount).join(' ')}`;
+  return `${OPERATOR_PROMPT_HEADER_PREFIX}${questionCount}]] ${questions.slice(0, questionCount).join(' ')}`;
 }
 
 /** Recognize a reserved marked header or an intact historical ten-question line. */
@@ -26,7 +31,8 @@ function envelopeStart(value: string) {
   const firstBreak = trimmed.indexOf('\n');
   const newline = firstBreak >= 0 && trimmed[firstBreak - 1] === '\r' ? '\r\n' : '\n';
   const header = firstBreak < 0 ? trimmed : trimmed.slice(0, firstBreak - (newline.length - 1));
-  if (header === operatorPromptHeader(1) || header === operatorPromptHeader(2))
+  if ([OPERATOR_PROMPT_HEADER_QUESTIONS, PREVIOUS_OPERATOR_TASK_QUESTIONS].some(questions =>
+      header === operatorPromptHeader(1, questions) || header === operatorPromptHeader(2, questions)))
     return { trimmed, newline, bodyStart: firstBreak < 0 ? trimmed.length + 1 : firstBreak + 1 };
   const questions = header.endsWith('.') ? header.slice(0, -1).split(', ') : [];
   if (questions.length !== 10 || new Set(questions).size !== 10 ||
@@ -102,6 +108,7 @@ export function operatorPromptOverhead(): { chars: number; bytes: number } {
   // Reserve the larger complete envelope; never rewrite them to fit a new header.
   const longest = (size: (text: string) => number) => Math.max(
     size(operatorPromptHeader(2)) + 2 + size(OPERATOR_PROMPT_FOOTER),
+    size(operatorPromptHeader(2, PREVIOUS_OPERATOR_TASK_QUESTIONS)) + 2 + size(OPERATOR_PROMPT_FOOTER),
     OPERATOR_PROMPT_QUESTIONS.map(size).sort((a, b) => b - a).slice(0, 10)
       .reduce((sum, count) => sum + count, fixed));
   return { chars: longest(text => text.length), bytes: longest(text => new TextEncoder().encode(text).length) };

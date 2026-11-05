@@ -106,14 +106,19 @@ var CLF_DOM = (() => {
   const OPERATOR_PROMPT_HEADER_PREFIX = '[[COS_OPERATOR_QUESTIONS:';
   const OPERATOR_PROMPT_MAX_QUESTIONS = 2;
   const OPERATOR_PROMPT_HEADER_QUESTIONS = [
-    'What is the most useful next step for this task given the verified context, and what evidence will show that it worked?',
+    'Which authorized unfinished work can you execute and test now within this task, and what actual results or specific blockers can you report afterward?',
     'Which existing implementation and verified results should be reused to avoid duplicate work while preserving the full task requirements?'
   ];
+  // Readback of frozen reserved headers only; new delivery never rewrites an old request.
+  const PREVIOUS_OPERATOR_TASK_QUESTIONS = [
+    'What is the most useful next step for this task given the verified context, and what evidence will show that it worked?',
+    OPERATOR_PROMPT_HEADER_QUESTIONS[1]
+  ];
   const OPERATOR_PROMPT_FOOTER = 'IGNORE THE FIRST SENTENCE ABOVE.';
-  function operatorPromptHeader(questionCount = 1) {
+  function operatorPromptHeader(questionCount = 1, questions = OPERATOR_PROMPT_HEADER_QUESTIONS) {
     if (!Number.isInteger(questionCount) || questionCount < 1 || questionCount > OPERATOR_PROMPT_MAX_QUESTIONS)
       throw new Error('Operator prompt header must contain one or two task questions');
-    return `${OPERATOR_PROMPT_HEADER_PREFIX}${questionCount}]] ${OPERATOR_PROMPT_HEADER_QUESTIONS.slice(0, questionCount).join(' ')}`;
+    return `${OPERATOR_PROMPT_HEADER_PREFIX}${questionCount}]] ${questions.slice(0, questionCount).join(' ')}`;
   }
   function operatorPromptStart(value) {
     if (typeof value !== 'string') return null;
@@ -121,7 +126,8 @@ var CLF_DOM = (() => {
     const firstBreak = normalized.indexOf('\n');
     const newline = firstBreak >= 0 && normalized[firstBreak - 1] === '\r' ? '\r\n' : '\n';
     const header = firstBreak < 0 ? normalized : normalized.slice(0, firstBreak - (newline.length - 1));
-    if (header === operatorPromptHeader(1) || header === operatorPromptHeader(2))
+    if ([OPERATOR_PROMPT_HEADER_QUESTIONS, PREVIOUS_OPERATOR_TASK_QUESTIONS].some(questions =>
+        header === operatorPromptHeader(1, questions) || header === operatorPromptHeader(2, questions)))
       return { normalized, firstBreak, newline };
     const questions = header.endsWith('.') ? header.slice(0, -1).split(', ') : [];
     if (questions.length !== 10 || new Set(questions).size !== 10 ||

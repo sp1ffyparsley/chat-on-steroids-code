@@ -15,7 +15,7 @@ import { pendingChatModelRequest, observeChatModels, requestChatModels } from '.
 import { isProModel } from '../shared/chat-models.js';
 import type { SessionSummary } from '../shared/session.js';
 import { evaluateAgentHealth } from '../shared/agent-health.js';
-import { CORE_BROWSER_EVIDENCE_MAX_AGE_MS, CORE_SHELL_CALL_REJECTION_KEYS, acknowledgeNativeCompletion, coreBrowserEvidence, nativeCompletionCandidate, nativeCompletionDiagnostic, nativeFinalEvidenceWait, nativeIdentityRefusalSummary, noteCoreBrowserEvidence, retainUnverifiedNativeCompletionFromIncident, retainNativeCompletionFromCheckpoint, retainNativeCompletionObservationsFromCheckpoint, retainNativeCompletionAfterClearFailure, retainAdditionalNativeCompletionUncertainty, settledNativeTurnCandidate } from './core-browser-evidence.js';
+import { CORE_BROWSER_EVIDENCE_MAX_AGE_MS, CORE_SHELL_CALL_REJECTION_KEYS, acknowledgeNativeCompletion, coreBrowserEvidence, nativeCompletionCandidate, nativeCompletionDiagnostic, nativeFinalEvidenceWait, nativeIdentityRefusalSummary, noteCoreBrowserEvidence, retainUnverifiedNativeCompletionFromIncident, retainNativeCompletionFromCheckpoint, retainNativeCompletionObservationsFromCheckpoint, retainNativeCompletionAfterClearFailure, retainAdditionalNativeCompletionUncertainty, retainNativeRequestIdsFromDurableReceipts, settledNativeTurnCandidate } from './core-browser-evidence.js';
 import { unifiedExecManager } from './codex/manager.js';
 import type {
   CoreToolSurfaceDiagnostic,
@@ -2500,7 +2500,8 @@ export async function sessionControlsFor(sessionId: string): Promise<SessionCont
   // Reconcile ONLY an already validated same-question completion candidate
   // through the incumbent exact recorder/incident owner; this cannot send,
   // replace a draft, retry a tool, or infer a finished call from status alone.
-  if (nativeCompletionCandidate(id)) await settleObservedNativeCompletion(id, sessionId);
+  if (nativeCompletionCandidate(id) || coreBrowserEvidence(id)?.pendingCompletion?.allCoreRequestIds === null)
+    await settleObservedNativeCompletion(id, sessionId);
   const control = goalSwitchFor(id);
   const blocked = goalBlockReason(id);
   const session = await getSession(sessionId);
@@ -12373,7 +12374,101 @@ async function persistNativeCompletionCheckpoint(sessionId: string, conversation
   } finally { observationWritesInFlight--; }
 }
 
-async function settleObservedNativeCompletion(conversationId: string, sessionId: string): Promise<boolean> {
+/** Recover a missing original request half from Main's already-bound canonical
+ * executions, not from a new document's claim. Every receipt still passes the
+ * incumbent full-catalog, original-journal, immutable-argument and fsync checks.
+ * This changes no original parent, document, timestamp, result or Send state. */
+async function reconcileOwnedNativeRequestIdentity(conversationId: string, sessionId: string): Promise<boolean> {
+  const original = nativeCompletionCheckpoint(sessionId, conversationId);
+  const native = settledNativeTurnCandidate(conversationId), snapshot = coreBrowserEvidence(conversationId);
+  if (!original || original.reason === 'inventory-incomplete' || original.allCoreRequestIds !== null ||
+      original.calls < 1 || original.codeCalls !== 0 || !original.sourceUserMessageId ||
+      !original.coreCallMessageIds || original.coreCallMessageIds.length !== original.calls ||
+      !native || native.sourceUserMessageId !== original.sourceUserMessageId ||
+      native.coreCallMessageIds.length !== original.calls || native.codeCallMessageIds.length !== 0 ||
+      original.coreCallMessageIds.some((id, at) => native.coreCallMessageIds[at] !== id) ||
+      !snapshot?.ordinaryFinal?.allCoreRequestIds || snapshot.ordinaryFinal.allCoreRequestIds.length !== original.calls) return false;
+  const profile = getActiveInstanceRuntime().profile.id;
+  const current = () => {
+    const next = settledNativeTurnCandidate(conversationId), observed = coreBrowserEvidence(conversationId);
+    return getActiveInstanceRuntime().profile.id === profile &&
+      JSON.stringify(nativeCompletionCheckpoint(sessionId, conversationId)) === JSON.stringify(original) &&
+      next?.documentId === native.documentId && next.navigationEpoch === native.navigationEpoch &&
+      next.sourceUserMessageId === native.sourceUserMessageId && next.finalMessageId === native.finalMessageId &&
+      JSON.stringify(next.coreCallMessageIds) === JSON.stringify(native.coreCallMessageIds) &&
+      JSON.stringify(observed?.ordinaryFinal?.allCoreRequestIds) === JSON.stringify(snapshot.ordinaryFinal!.allCoreRequestIds);
+  };
+  try {
+    if ((await findSessionByConversation(conversationId, { requireUnique: true }))?.id !== sessionId ||
+        await conversationWasSuperseded(conversationId)) return false;
+    const checkpoint = await readSessionNativeCompletionFenceCheckpoint(sessionId, conversationId, profile);
+    if (JSON.stringify(checkpoint?.fence) !== JSON.stringify(original)) return false;
+    const rows = await readEvents(sessionId, { requireIntegrity: true });
+    const source = rows.findLast(row => row.kind === 'user_message');
+    if (source?.kind !== 'user_message' || source.messageId !== original.sourceUserMessageId ||
+        source.message.truncated || !source.message.text.trim() || source.unverifiedAuthorshipClaim ||
+        !Number.isFinite(source.semanticUpdatedAt) || source.semanticUpdatedAt! > original.observedAt ||
+        source.time > original.observedAt) return false;
+    const final = rows.findLast(row => row.kind === 'assistant_message' && row.final && row.state === 'final');
+    if (final?.kind !== 'assistant_message' || final.messageId !== native.finalMessageId ||
+        final.providerMessageId !== native.finalMessageId || final.message.truncated ||
+        (final.origin ?? final.seq) <= (source.origin ?? source.seq)) return false;
+    const inputCurrent = async () => !(await listInputs()).some(row =>
+      (row.sessionId === sessionId || row.deliveredSessionId === sessionId ||
+       row.decisionSourceSessionId === sessionId || row.conversationId === conversationId) &&
+      (!['sent', 'failed', 'cancelled'].includes(row.state) ||
+       row.sendAuthorizedAt !== undefined && (row.deliveredAt === undefined || !row.messageId)));
+    if (!await inputCurrent()) return false;
+    const owned: Extract<SessionEvent, { kind: 'tool_call' }>[] = [];
+    const requestIds: string[] = [];
+    for (const [at, nativeId] of original.coreCallMessageIds.entries()) {
+      const matches = rows.filter((row): row is Extract<SessionEvent, { kind: 'tool_call' }> =>
+        row.kind === 'tool_call' && row.call.nativeCallMessageId === nativeId);
+      const row = matches[0], call = row?.call;
+      if (matches.length !== 1 || !row || !call || row.source !== 'mcp' ||
+          call.conversationId !== conversationId || call.requestId !== snapshot.ordinaryFinal.allCoreRequestIds[at] ||
+          !call.requestId || !/^[a-f0-9]{64}$/.test(call.invocationSha256 ?? '') ||
+          !/^[a-f0-9]{48}$/.test(call.resultReceiptId ?? '') || !isReturnedToolOutcome(call.outcome) ||
+          call.process && !call.process.completedAt || !ownedReceiptHeaderCompatible(call, sessionId)) return false;
+      owned.push(row); requestIds.push(call.requestId);
+    }
+    if (new Set(owned.map(row => row.call.resultReceiptId)).size !== original.calls) return false;
+    const catalog = await receiptCatalogCustodySnapshot();
+    if (!catalog) return false;
+    for (const row of owned) if (!await receiptDurableOwnerUnique(row.call.resultReceiptId!, sessionId,
+      row.call.nativeCallMessageId!, row.call.callId) || !current()) return false;
+    // The canonical binding owner compares immutable args/results against the original
+    // JSONL execution. Re-read the full source after those asynchronous disk barriers.
+    if (!receiptCatalogCustodyMatches(catalog, await receiptCatalogCustodySnapshot()) ||
+        (await getSession(sessionId))?.conversationId !== conversationId ||
+        await conversationWasSuperseded(conversationId) || !await inputCurrent() || !current()) return false;
+    // Input/catalog readers yield too. Keep the canonical source revision check last,
+    // immediately before the synchronous identity-only publication.
+    if (JSON.stringify(await readEvents(sessionId, { requireIntegrity: true })) !== JSON.stringify(rows) || !current()) return false;
+    const pending = snapshot.pendingCompletion!;
+    if (!retainNativeRequestIdsFromDurableReceipts(conversationId, pending, requestIds)) return false;
+    if (!await persistNativeCompletionCheckpoint(sessionId, conversationId)) return false;
+    logInfo('native Core original request identity recovered from exact owned execution receipts; original result debt retained');
+    return true;
+  } catch { return false; }
+}
+
+/** One incumbent receipt reconciliation per exact conversation owner. Status and
+ * browser polls join the same disk/catalog work; this is not a timer or a ledger. */
+const nativeCompletionSettlements = new Map<string, { sessionId: string; profileId: string; work: Promise<boolean> }>();
+export function settleObservedNativeCompletion(conversationId: string, sessionId: string): Promise<boolean> {
+  const profileId = getActiveInstanceRuntime().profile.id;
+  const held = nativeCompletionSettlements.get(conversationId);
+  if (held) return held.sessionId === sessionId && held.profileId === profileId ? held.work : Promise.resolve(false);
+  const work = Promise.resolve().then(() => settleObservedNativeCompletionNow(conversationId, sessionId)).finally(() => {
+    if (nativeCompletionSettlements.get(conversationId)?.work === work) nativeCompletionSettlements.delete(conversationId);
+  });
+  nativeCompletionSettlements.set(conversationId, { sessionId, profileId, work });
+  return work;
+}
+
+async function settleObservedNativeCompletionNow(conversationId: string, sessionId: string): Promise<boolean> {
+  if (!nativeCompletionCandidate(conversationId)) await reconcileOwnedNativeRequestIdentity(conversationId, sessionId);
   const completion = nativeCompletionCandidate(conversationId);
   if (!completion) return false;
   const exact = await findSessionByConversation(conversationId, { requireUnique: true });

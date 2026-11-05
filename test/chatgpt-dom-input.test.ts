@@ -110,7 +110,7 @@ describe('mandatory CoS envelope at the native click boundary', () => {
   it('generates one task-relevant voice question without randomness and preserves legacy frozen text', () => {
     const random = vi.spyOn(dom.window.crypto, 'getRandomValues');
     const generated = api.preparePromptEnvelope('Exact voice task');
-    expect(generated.split('\n')[0]).toBe('[[COS_OPERATOR_QUESTIONS:1]] What is the most useful next step for this task given the verified context, and what evidence will show that it worked?');
+    expect(generated.split('\n')[0]).toBe('[[COS_OPERATOR_QUESTIONS:1]] Which authorized unfinished work can you execute and test now within this task, and what actual results or specific blockers can you report afterward?');
     expect(random).not.toHaveBeenCalled();
     const legacy = `${OPERATOR_PROMPT_QUESTIONS.slice(0, 10).join(', ')}.\nExact old voice task\n${OPERATOR_PROMPT_FOOTER}`;
     expect(api.preparePromptEnvelope(legacy)).toBe(legacy);
@@ -126,6 +126,26 @@ describe('mandatory CoS envelope at the native click boundary', () => {
     expect(await api.send({ submittedText: legacy,
       beforeSend: async () => { box.textContent = preparedPrompt('Retained exact task'); return true; } })).toBe(false);
     expect(click).toHaveBeenCalledTimes(1);
+  });
+  it.each([1, 2])('keeps a frozen prior reserved header byte-exact at native Send (%i questions)', async count => {
+    const oldQuestions = [
+      'What is the most useful next step for this task given the verified context, and what evidence will show that it worked?',
+      'Which existing implementation and verified results should be reused to avoid duplicate work while preserving the full task requirements?'
+    ];
+    const frozen = `[[COS_OPERATOR_QUESTIONS:${count}]] ${oldQuestions.slice(0, count).join(' ')}\nRetained exact task\n${OPERATOR_PROMPT_FOOTER}`;
+    const newer = prepareOperatorPrompt('Retained exact task', undefined, count);
+    expect(newer).not.toBe(frozen);
+    expect(api.preparePromptEnvelope(frozen)).toBe(frozen);
+    expect(api.promptEnvelopeValid(newer)).toBe(true);
+    expect(api.operatorPromptBody(newer)).toBe(api.operatorPromptBody(frozen));
+    box.textContent = frozen;
+    const click = vi.fn(() => user(frozen)); button.addEventListener('click', click);
+    expect(await api.send({ submittedText: frozen })).toBe(true);
+    box.textContent = frozen;
+    expect(await api.send({ submittedText: frozen, beforeSend: async () => {
+      box.textContent = newer; return true;
+    } })).toBe(false);
+    expect(click).toHaveBeenCalledOnce();
   });
   it('cannot disable the envelope through a legacy caller option', async () => {
     box.textContent = 'Task';

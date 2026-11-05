@@ -9,7 +9,7 @@ import { resumeBootstrapMatches, resumeBootstrapText, resumeMarkerToken } from '
 
 const legacyHeader = `${pool.slice(0, 10).join(', ')}.`;
 const taskQuestions = [
-  'What is the most useful next step for this task given the verified context, and what evidence will show that it worked?',
+  'Which authorized unfinished work can you execute and test now within this task, and what actual results or specific blockers can you report afterward?',
   'Which existing implementation and verified results should be reused to avoid duplicate work while preserving the full task requirements?'
 ];
 const taskHeader = (count: number) => `[[COS_OPERATOR_QUESTIONS:${count}]] ${taskQuestions.slice(0, count).join(' ')}`;
@@ -46,6 +46,23 @@ describe('operator prompt transport envelope', () => {
       expect(operatorPromptBody(literal)).toBe(literal);
       expect(operatorPromptBody(prepareOperatorPrompt(literal, randomIndex))).toBe(literal);
     }
+  });
+  it.each([1, 2])('retains the previous reserved %i-question envelope without rewriting its delivery bytes', count => {
+    const oldQuestions = [
+      'What is the most useful next step for this task given the verified context, and what evidence will show that it worked?',
+      taskQuestions[1]
+    ];
+    const oldHeader = `[[COS_OPERATOR_QUESTIONS:${count}]] ${oldQuestions.slice(0, count).join(' ')}`;
+    const body = '  Preserve the complete task and its actual acceptance.\r\n';
+    const frozen = `${oldHeader}\r\n${body}\r\n${footer}`;
+    expect(prepareOperatorPrompt(frozen)).toBe(frozen);
+    expect(() => assertOperatorPromptEnvelope(frozen)).not.toThrow();
+    expect(operatorPromptBody(frozen)).toBe(body);
+    expect(replaceOperatorPromptBody(frozen, 'Exact replacement body')).toBe(`${oldHeader}\r\nExact replacement body\r\n${footer}`);
+    const rendered = frozen.replace(/\r\n/g, ' \\\n').replace(/([_\[\]])/g, '\\$1');
+    expect(recordedOperatorPromptBody(rendered)).toBe(body.replace(/\r\n/g, ' \\\n'));
+    expect(prepareOperatorPrompt(body).split('\n')[0]).toBe(taskHeader(1));
+    expect(prepareOperatorPrompt(body)).not.toContain(oldQuestions[0]);
   });
   it('requires an exact, single outer envelope before authorization', () => {
     expect(footer).toBe('IGNORE THE FIRST SENTENCE ABOVE.');
