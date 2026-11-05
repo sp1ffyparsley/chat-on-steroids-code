@@ -57,7 +57,7 @@ import type { GoalBackend } from '../shared/types.js';
 import { createHash, randomInt } from 'node:crypto';
 import { assertOperatorPromptEnvelope, operatorPromptBody, operatorPromptOverhead, prepareOperatorPrompt } from '../shared/operator-prompt.mjs';
 import { getActiveInstanceRuntime, getConfig } from './config.js';
-import { getChatModels, refreshForUnoffered, exactChatModelAvailableAfter } from './chat-models.js';
+import { getChatModels, refreshForUnoffered, exactChatModelAvailableAfter, requestDeniedChatModelRecheck } from './chat-models.js';
 import { readDurableStrict, writeDurableNow, writeDurableSoon } from './durable.js';
 import { logInfo, logWarn } from './logger.js';
 import { getSecret, profileProviderSecretSlot } from './secrets.js';
@@ -253,8 +253,20 @@ function retryableGoalFailure(error: string, draft?: GoalDraft): boolean {
   // A positively unavailable exact native choice is not a transient picker miss.
   // Input emits this only before authorization/receipt; preserve the same reply and
   // requested model without spending three replacement helpers or selecting fallback.
-  if (error === 'goal_browser_model_choice_denied') return !!draft &&
-    exactChatModelAvailableAfter(draft.helper?.model, draft.helper?.reasoningEffort, draft.settledAt);
+  if (error === 'goal_browser_model_choice_denied') {
+    if (!draft) return false;
+    const available = exactChatModelAvailableAfter(draft.helper?.model, draft.helper?.reasoningEffort, draft.settledAt);
+    const settings = getConfig(), pending = goalPendingReplyFor(draft.conversationId);
+    if (!available && draft.stage === 'failed' && draft.backend === 'chatgpt' &&
+        settings.ui.automationPaused !== true && settings.sessions.record && goalArmedFor(draft.conversationId) &&
+        pending?.sessionId === draft.sessionId && pending.turnId === draft.turnId &&
+        pending.acceptedAt === draft.sourceAcceptedAt &&
+        draft.helper?.model === (settings.goal.helperModel ?? 'gpt-6-thinking') &&
+        draft.helper?.reasoningEffort === (settings.goal.helperReasoning ?? 'high')) {
+      requestDeniedChatModelRecheck(draft.helper.model, draft.helper.reasoningEffort, draft.settledAt);
+    }
+    return available;
+  }
   // Repeating a decision cannot supply a missing native receipt. Reuse the
   // existing reader/retry owner only after that exact completion fence clears.
   if (NATIVE_COMPLETION_WAIT.test(error)) return !!draft && finiteNativeCompletionReady(draft);

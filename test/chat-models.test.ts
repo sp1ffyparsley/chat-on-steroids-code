@@ -1,6 +1,6 @@
 import { REASONING_EFFORTS } from '../src/shared/session.js';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
-import { getChatModels, requestChatModels, pendingChatModelRequest, observeChatModels, resetChatModelsForTests, configureChatModelDiscovery, startChatModelDiscovery, restoreChatModels, refreshForUnoffered, exactChatModelAvailableAfter } from '../src/main/chat-models.js';
+import { getChatModels, requestChatModels, pendingChatModelRequest, observeChatModels, resetChatModelsForTests, configureChatModelDiscovery, startChatModelDiscovery, restoreChatModels, refreshForUnoffered, exactChatModelAvailableAfter, requestDeniedChatModelRecheck } from '../src/main/chat-models.js';
 const saved = vi.hoisted(() => ({ value: null as unknown }));
 vi.mock('../src/main/durable.js', () => ({ readDurable: async () => saved.value, writeDurableSoon: (_name: string, value: unknown) => { saved.value = structuredClone(value); } }));
 const models = [{ id: 'gpt-example', label: 'GPT Example', efforts: ['none', 'medium', 'high', 'xhigh'] }];
@@ -11,6 +11,56 @@ const availability = [
 beforeEach(() => { resetChatModelsForTests(); saved.value = null; vi.useFakeTimers(); });
 afterEach(() => vi.useRealTimers());
 describe('durable observed ChatGPT model catalog', () => {
+  it('rechecks a denied pair once when its native reset is due, without treating the clock as availability', () => {
+    const deniedAt = Date.now(), resetAt = deniedAt + 60_000;
+    vi.advanceTimersByTime(1000);
+    requestChatModels(false);
+    observeChatModels({ nonce: pendingChatModelRequest()!.nonce, models,
+      availability: [{ model: 'gpt-example', label: 'GPT Example', effort: 'high', status: 'unavailable', retryAt: resetAt }] });
+    expect(requestDeniedChatModelRecheck('gpt-example', 'high', deniedAt)).toBe(false);
+    vi.advanceTimersByTime(59_000);
+    expect(requestDeniedChatModelRecheck('gpt-example', 'high', deniedAt)).toBe(true);
+    const request = pendingChatModelRequest();
+    expect(request).toMatchObject({ allowOpen: false });
+    expect(exactChatModelAvailableAfter('gpt-example', 'high', deniedAt)).toBe(false);
+    for (let i = 0; i < 20; i++) expect(requestDeniedChatModelRecheck('gpt-example', 'high', deniedAt)).toBe(false);
+    expect(pendingChatModelRequest()).toEqual(request);
+    // An inspection timeout is not a fresh reset: ordinary status reads cannot reopen its request.
+    vi.advanceTimersByTime(120_001);
+    expect(pendingChatModelRequest()).toBeNull();
+    expect(requestDeniedChatModelRecheck('gpt-example', 'high', deniedAt)).toBe(false);
+    vi.advanceTimersByTime(15 * 60_000 - 120_001);
+    expect(requestDeniedChatModelRecheck('gpt-example', 'high', deniedAt)).toBe(true);
+  });
+
+  it.each(['no reset', 'other model reset', 'other effort reset'])(
+    'uses bounded evidence staleness when no exact reset exists: %s', variant => {
+      const deniedAt = Date.now();
+      vi.advanceTimersByTime(1000);
+      requestChatModels(false);
+      observeChatModels({ nonce: pendingChatModelRequest()!.nonce, models,
+        availability: [{ model: variant === 'other model reset' ? 'gpt-other' : 'gpt-example', label: 'GPT Example',
+          effort: variant === 'other effort reset' ? 'xhigh' : 'high', status: 'unavailable',
+          ...(variant !== 'no reset' ? { retryAt: Date.now() + 60_000 } : {}) }] });
+      vi.advanceTimersByTime(60_001);
+      expect(requestDeniedChatModelRecheck('gpt-example', 'high', deniedAt)).toBe(false);
+      vi.advanceTimersByTime(15 * 60_000 - 60_001);
+      expect(requestDeniedChatModelRecheck('gpt-example', 'high', deniedAt)).toBe(true);
+      expect(pendingChatModelRequest()).toMatchObject({ allowOpen: false });
+    });
+
+  it('does not request another inspection after fresh exact availability or for an invalid denial', () => {
+    const deniedAt = Date.now(); vi.advanceTimersByTime(1000);
+    requestChatModels(false);
+    observeChatModels({ nonce: pendingChatModelRequest()!.nonce, models,
+      availability: [{ model: 'gpt-example', label: 'GPT Example', effort: 'high', status: 'available' }] });
+    expect(exactChatModelAvailableAfter('gpt-example', 'high', deniedAt)).toBe(true);
+    expect(requestDeniedChatModelRecheck('gpt-example', 'high', deniedAt)).toBe(false);
+    for (const invalid of [NaN, Infinity, 0, Date.now() + 1])
+      expect(requestDeniedChatModelRecheck('gpt-example', 'high', invalid)).toBe(false);
+    expect(pendingChatModelRequest()).toBeNull();
+  });
+
   it.each(['fresh exact', 'old observation', 'denied', 'missing evidence', 'other model', 'other effort', 'stale observation', 'failed refresh', 'partial failed observation', 'contradictory cooldown'])(
     'requires fresh positive native availability after denial: %s', variant => {
       const deniedAt = Date.now();

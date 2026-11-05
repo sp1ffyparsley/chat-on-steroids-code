@@ -73,6 +73,22 @@ export function exactChatModelAvailableAfter(model: string | null | undefined,
     evidence?.length === 1 && evidence[0]!.status === 'available' &&
     (evidence[0]!.retryAt === undefined || evidence[0]!.retryAt <= current.observedAt);
 }
+/** Existing Goal/status observations may request a due passive inspection, never a helper or tab.
+ * A reset timestamp is only a reason to look again; fresh native positive evidence owns release. */
+export function requestDeniedChatModelRecheck(model: string | null | undefined,
+  effort: string | null | undefined, deniedAt: number): boolean {
+  const current = getChatModels(), now = Date.now();
+  if (!model || !effort || !Number.isFinite(deniedAt) || deniedAt <= 0 || deniedAt > now || request ||
+      exactChatModelAvailableAfter(model, effort, deniedAt)) return false;
+  const since = Math.max(deniedAt, current.observedAt ?? 0, current.requestedAt ?? 0);
+  const evidence = current.availability?.filter(row => row.model === model && row.effort === effort);
+  const reset = evidence?.length === 1 && evidence[0]!.status === 'unavailable' ? evidence[0]!.retryAt : undefined;
+  const dueAt = reset !== undefined && reset > since ? reset : since + MODEL_AVAILABILITY_REFRESH_MS;
+  if (now < dueAt) return false;
+  logInfo('model discovery: denied helper availability recheck due; passive inspection only');
+  requestChatModels(false);
+  return true;
+}
 export function requestChatModels(allowOpen = true): ChatModelCatalog {
   expire();
   if (!request) {

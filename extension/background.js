@@ -8249,7 +8249,8 @@ const HANDLERS = {
     if (!ownsDocument(source) || modelCatalogTarget?.tab !== source.tab || modelCatalogTarget.nonce !== message.nonce ||
       (modelCatalogTarget.documentId && modelCatalogTarget.documentId !== source.documentId) ||
       tab.pendingUrl || !isChatGptUrl(tab.url)) return { ok: false };
-    const body = JSON.stringify({ nonce: message.nonce, models: message.models, error: message.error });
+    const body = JSON.stringify({ nonce: message.nonce, models: message.models,
+      availability: message.availability, error: message.error });
     if (body.length > 12000) return { ok: false };
     const result = await call('/models', { method: 'POST', body });
     return result;
@@ -10596,7 +10597,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 138;
+const PAGE_RECORDER_VERSION = 139;
 
 let deferredRecoveryWork = null;
 

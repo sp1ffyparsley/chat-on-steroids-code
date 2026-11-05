@@ -2940,6 +2940,45 @@ describe('native browser Loop stop rejection custody', () => {
       }
     }));
 
+  it.each(['enabled', 'globally paused', 'chat off', 'changed preference', 'changed source'])(
+    'requests passive denied-helper availability only for its current enabled source: %s', async boundary =>
+    withIsolatedNativeInputOutbox(async () => {
+      const catalog = await import('../src/main/chat-models.js');
+      catalog.resetChatModelsForTests();
+      const source = await seed('passive-model-denial-recheck');
+      goal.startGoalDraft({ conversationId: source.conversationId, sessionId: source.sessionId, turnId: source.sourceTurnId });
+      let helper: InputEntry | undefined;
+      await vi.waitFor(async () => {
+        helper = (await browserInput.listInputs()).find(row => row.purpose === 'decision' && row.decisionSourceSessionId === source.sessionId);
+        expect(helper).toBeDefined();
+      });
+      expect(await browserInput.claimBrowserInput(helper!.id, 'passive-denied-owner', null, true)).not.toBeNull();
+      expect(await browserInput.failBrowserInput(helper!.id, 'passive-denied-owner',
+        'Requested model or reasoning could not be confirmed', { detail: 'model-choice-unavailable' })).toBe(true);
+      await settled(source.conversationId);
+      if (boundary === 'globally paused') await saveConfig({ ...defaultConfig(),
+        ui: { ...defaultConfig().ui, automationPaused: true }, goal: { ...defaultConfig().goal,
+          enabled: true, backend: 'chatgpt', loopBackend: 'chatgpt', helperModel: 'gpt-6-thinking', helperReasoning: 'high' } });
+      if (boundary === 'chat off') await goal.setGoalSwitchNow(source.conversationId, 'loop', false);
+      if (boundary === 'changed preference') await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal,
+        enabled: true, backend: 'chatgpt', loopBackend: 'chatgpt', helperModel: 'gpt-6-thinking', helperReasoning: 'xhigh' } });
+      if (boundary === 'changed source') {
+        const replies = goal.snapshotGoalReplies();
+        goal.restoreGoalReplies({ ...replies, replies: replies.replies.map(row => row.sessionId === source.sessionId
+          ? { ...row, turnId: 'newer-source-turn' } : row) });
+      }
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 15 * 60_000 + 1);
+      try {
+        goal.goalDraftNeedsIntervention(source.conversationId);
+        const request = catalog.pendingChatModelRequest();
+        if (boundary === 'enabled') expect(request).toMatchObject({ allowOpen: false });
+        else expect(request).toBeNull();
+        for (let i = 0; i < 10; i++) goal.goalDraftNeedsIntervention(source.conversationId);
+        expect(catalog.pendingChatModelRequest()).toEqual(request);
+        expect((await browserInput.listInputs()).filter(row => row.decisionSourceSessionId === source.sessionId)).toHaveLength(1);
+      } finally { clock.mockRestore(); catalog.resetChatModelsForTests(); }
+    }));
+
   it('spends an explicit model-denial retry in the exact existing unsent outbox owner', async () =>
     withIsolatedNativeInputOutbox(async () => {
       const source = await seed('explicit-model-denial-retry');

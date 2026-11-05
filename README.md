@@ -1,5 +1,11 @@
 # Chat On Steroids - code research mirror
 
+## Current source: candidate139; qualification pending, accepted runtime remains138
+
+Candidate139 forwards the native model-availability array through the existing elected background catalogue owner; it had been omitted from the request body. The existing Goal/status owner can also request one due passive inspection after an exact native reset or bounded evidence staleness, while preserving the same requested model/reasoning, current source, pause and no-open checks. A reset clock never establishes availability or permits a helper Send: only later fresh exact native positive evidence can release the existing confirmed-unsent hold. No fallback model, budget reset, duplicate helper, new timer or new tab is introduced. Content/background recorder markers are paired at139; the already-public anchorBranch diagnostics are included.
+
+The private affected run passed1,485checks, plus13focused checks and typecheck. Candidate139 is SOURCE ONLY here; canonical qualification is pending. Its first private build failed one native capture check (19passed/1failed); the unchanged native20checks later passed and a second canonical build is running. The failed build remains failed. Recorder138 is still the last independently accepted installation. Original request/result matching remains open, and no fleet-autonomy or live139recovery claim is made. Publishing this source is not a binary release.
+
 ## Current: recorder138 independently installed privately
 
 Recorder138 source adds four focused reliability repairs: native Retry rechecks the exact latest failure/control immediately before its click; exact Resume rechecks the latest native source/failure, newer answers, editor text, attachments and control ownership immediately before its click; an explicitly requested cold-start pause is durably saved before restored outbox/browser work can wake; and repeated unreadable metadata warnings are bounded without caching a read result or accepting missing history. Six affected whole suites passed3,162targeted checks privately, including genuine failure-first cases and adjacent refusal controls. The existing content/background recorder markers are synchronized to138.

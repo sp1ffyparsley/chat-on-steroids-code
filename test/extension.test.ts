@@ -1587,6 +1587,36 @@ describe('confirmed pre-Send recovery receipts', () => {
 });
 
 describe('model discovery command custody', () => {
+  it.each(['available', 'unavailable'])('forwards exact native %s availability through the elected catalog owner', async status => {
+    const nonce = '11111111-2222-4333-8444-555555555555';
+    const start = backgroundSource.indexOf('  async model_catalog(');
+    const end = backgroundSource.indexOf('  async conversation_deleted(', start);
+    const bodies: Record<string, unknown>[] = [];
+    const context = {
+      ownsDocument: (source: { documentId: string }) => source.documentId === 'current-doc',
+      chrome: { tabs: { get: async () => ({ url: 'https://chatgpt.com/' }) } },
+      modelCatalogTarget: { tab: 7, nonce, documentId: 'current-doc' },
+      isChatGptUrl: () => true,
+      call: async (_route: string, options: { body: string }) => {
+        bodies.push(JSON.parse(options.body)); return { ok: true };
+      }
+    };
+    const handler = vm.runInNewContext('({' + backgroundSource.slice(start, end) + '})', context).model_catalog;
+    const models = [{ id: 'exact-model', label: 'Exact model', efforts: ['high'] }];
+    const availability = [{ model: 'exact-model', label: 'Exact model', effort: 'high', status, retryAt: 1_900_000_000_000 }];
+    const input = { nonce, models, availability, unrelated: 'not forwarded' };
+    expect(await handler(input, null, { tab: 7, documentId: 'current-doc' })).toEqual({ ok: true });
+    expect(bodies).toEqual([{ nonce, models, availability }]);
+    bodies.length = 0;
+    for (const [message, source] of [
+      [{ ...input, nonce: '99999999-2222-4333-8444-555555555555' }, { tab: 7, documentId: 'current-doc' }],
+      [input, { tab: 7, documentId: 'old-doc' }],
+      [input, { tab: 8, documentId: 'current-doc' }],
+      [{ ...input, availability: Array(300).fill({ ...availability[0], label: 'x'.repeat(80) }) }, { tab: 7, documentId: 'current-doc' }]
+    ]) expect(await handler(message, null, source)).toEqual({ ok: false });
+    expect(bodies).toEqual([]);
+  });
+
   it.each([false, true])('never borrows a command-owned opening (allowOpen=%s)', async (allowOpen) => {
     const commandId = '4e689b755134a55a';
     const nonce = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff';
