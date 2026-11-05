@@ -2002,18 +2002,28 @@ describe('alternate shell turn/message provenance', () => {
     });
 
   it.each([
-    ['incomplete turn before a bad final', 'nativeScopeTurnIncomplete'],
-    ['unselected path before a bad final', 'nativeScopePathUnproved'],
-    ['duplicate final', 'nativeScopeFinalCount'],
-    ['final off current path', 'nativeScopeFinalPathMismatch'],
-    ['nonterminal final', 'nativeScopeFinalReceiptUnproved'],
-    ['missing final namespace', 'nativeScopeFinalNamespaceMissing'],
-    ['cached branch conflict', 'nativeScopeCacheConflict'],
-    ['branch namespace conflict', 'nativeScopeBranchConflict'],
-    ['branch exchange conflict', 'nativeScopeBranchConflict'],
-    ['branch metadata parent conflict', 'nativeScopeBranchConflict'],
-    ['namespace accessor', 'nativeScopeFinalNamespaceMissing']
-  ] as const)('reports only the first attempted native scope anchor refusal: %s', async (variant, expectedReason) => {
+    ['incomplete turn before a bad final', 'nativeScopeTurnIncomplete', 'none'],
+    ['unselected path before a bad final', 'nativeScopePathUnproved', 'none'],
+    ['duplicate final', 'nativeScopeFinalCount', 'final-count'],
+    ['final off current path', 'nativeScopeFinalPathMismatch', 'path-tail'],
+    ['nonterminal final', 'nativeScopeFinalReceiptUnproved', 'native-terminal'],
+    ['native routing', 'nativeScopeFinalReceiptUnproved', 'native-routing'],
+    ['native terminal accessor', 'nativeScopeFinalReceiptUnproved', 'native-own-data'],
+    ['native text shape', 'nativeScopeFinalReceiptUnproved', 'native-text-shape'],
+    ['native text part', 'nativeScopeFinalReceiptUnproved', 'native-text-part'],
+    ['empty native text', 'nativeScopeFinalReceiptUnproved', 'native-text-empty'],
+    ['oversized native text', 'nativeScopeFinalReceiptUnproved', 'native-text-budget'],
+    ['typed final shape', 'nativeScopeFinalReceiptUnproved', 'typed-final-shape'],
+    ['different final body', 'nativeScopeFinalReceiptUnproved', 'body-or-reference'],
+    ['foreign final reference', 'nativeScopeFinalReceiptUnproved', 'body-or-reference'],
+    ['getter final reference', 'nativeScopeFinalReceiptUnproved', 'body-or-reference'],
+    ['missing final namespace', 'nativeScopeFinalNamespaceMissing', 'none'],
+    ['cached branch conflict', 'nativeScopeCacheConflict', 'none'],
+    ['branch namespace conflict', 'nativeScopeBranchConflict', 'none'],
+    ['branch exchange conflict', 'nativeScopeBranchConflict', 'none'],
+    ['branch metadata parent conflict', 'nativeScopeBranchConflict', 'none'],
+    ['namespace accessor', 'nativeScopeFinalNamespaceMissing', 'none']
+  ] as const)('reports only the first attempted native scope anchor refusal: %s', async (variant, expectedReason, expectedFacet) => {
     let accessorReads = 0;
     const diagnosticLogs: string[] = [];
     const page = await shellHarness({ withCall: true, nativeCallReceipt: true,
@@ -2033,6 +2043,25 @@ describe('alternate shell turn/message provenance', () => {
         if (variant === 'final off current path') entry.turn.items.at(-1).messageId = RESULT;
         if (['incomplete turn before a bad final', 'unselected path before a bad final', 'nonterminal final'].includes(variant))
           mapping[ASSISTANT].message.status = 'in_progress';
+        if (variant === 'native routing') mapping[ASSISTANT].message.recipient = 'PRIVATE_FOREIGN_RECIPIENT';
+        if (variant === 'native terminal accessor') Object.defineProperty(mapping[ASSISTANT].message, 'end_turn', {
+          get() { accessorReads++; throw new Error('PRIVATE_TERMINAL_GETTER'); }
+        });
+        if (variant === 'native text shape') mapping[ASSISTANT].message.content.content_type = 'image';
+        if (variant === 'native text part') mapping[ASSISTANT].message.content.parts = [{ text: 'PRIVATE_UNSUPPORTED_TEXT' }];
+        if (variant === 'empty native text') mapping[ASSISTANT].message.content.parts = [''];
+        if (variant === 'oversized native text') mapping[ASSISTANT].message.content.parts = ['x'.repeat(700 * 1024)];
+        if (variant === 'typed final shape') entry.turn.items.at(-1).content = { text: 'PRIVATE_TYPED_SHAPE' };
+        if (variant === 'different final body') entry.turn.items.at(-1).content = 'PRIVATE_DIFFERENT_BODY';
+        if (variant === 'foreign final reference' || variant === 'getter final reference') {
+          const final = entry.turn.items.at(-1);
+          final.content = `::chatgpt-content-reference{source_message_id="${ASSISTANT}"}`;
+          final.contentReferences = [{ type: 'dil', source_message_id: 'PRIVATE_FOREIGN_FINAL',
+            model_dil_v2: { fallbackMarkdown: 'PRIVATE_PREVIEW_TEXT' } }];
+          if (variant === 'getter final reference') Object.defineProperty(final.contentReferences[0], 'source_message_id', {
+            get() { accessorReads++; throw new Error('PRIVATE_FINAL_REFERENCE_GETTER'); }
+          });
+        }
         if (variant === 'missing final namespace') delete mapping[ASSISTANT].message.metadata.working_turn_id;
         if (variant === 'branch namespace conflict') mapping[RESULT].message.metadata.working_turn_id = 'PRIVATE_OTHER_WORKING';
         if (variant === 'branch exchange conflict') mapping[RESULT].message.metadata.turn_exchange_id = 'PRIVATE_OTHER_EXCHANGE';
@@ -2054,17 +2083,34 @@ describe('alternate shell turn/message provenance', () => {
       }
       expect(call).toMatchObject({ requestId: null, answered: false });
       expect(page.fiber.turns[0].requests).not.toContainEqual(expect.objectContaining({ requestId: REQUEST, messageId: CALL }));
-      expect(page.fiber.turns[0].endMessageId).toBeNull();
+      // The existing public-reference terminal projection is independent of the
+      // refused request namespace; diagnostics must preserve both facts unchanged.
+      expect(page.fiber.turns[0].endMessageId).toBe(
+        variant === 'foreign final reference' || variant === 'getter final reference' ? ASSISTANT : null);
       expect(accessorReads).toBe(0);
       const trace = diagnosticLogs.find(line => line.includes('native result-reference recovery diagnostic'))!;
       expect(trace).toContain(`${expectedReason}:1`);
+      expect(trace).toContain(`anchorFinalFacet=${expectedFacet}`);
       if (variant === 'unselected path before a bad final') {
         expect(trace).toContain('anchorMember=core-result');
         expect(trace).toContain('anchorMemberTerminal=true');
       }
       for (const value of [USER, CALL, RESULT, REQUEST, APP, LINK, 'PRIVATE_ANCHOR_WORKING', 'PRIVATE_ANCHOR_EXCHANGE',
         'PRIVATE_OTHER_WORKING', 'PRIVATE_OTHER_EXCHANGE', 'PRIVATE_OTHER_PARENT',
-        'PRIVATE_SCOPE_GETTER', 'PRIVATE_TOOL_RESULT']) expect(trace).not.toContain(value);
+        'PRIVATE_SCOPE_GETTER', 'PRIVATE_TOOL_RESULT', 'PRIVATE_FOREIGN_RECIPIENT', 'PRIVATE_TERMINAL_GETTER',
+        'PRIVATE_UNSUPPORTED_TEXT', 'PRIVATE_TYPED_SHAPE', 'PRIVATE_DIFFERENT_BODY', 'PRIVATE_FOREIGN_FINAL',
+        'PRIVATE_PREVIEW_TEXT', 'PRIVATE_FINAL_REFERENCE_GETTER']) expect(trace).not.toContain(value);
+    } finally { page.dom.window.close(); }
+  });
+
+  it('does not invent a final-anchor facet when the typed shell is rejected before anchor inspection', async () => {
+    const diagnosticLogs: string[] = [];
+    const page = await shellHarness({ withCall: true, nativeCallReceipt: true,
+      callCompleted: false, assistantCompleted: false, diagnosticLogs,
+      nativeCallMutation(_mapping, entry) { entry.turn.items.at(-1).messageId = ''; } });
+    try {
+      expect(page.fiber.turns).toEqual([]);
+      expect(diagnosticLogs.some(line => line.includes('anchorFinalFacet='))).toBe(false);
     } finally { page.dom.window.close(); }
   });
 
@@ -2201,13 +2247,16 @@ describe('alternate shell turn/message provenance', () => {
   it.each(['exact canonical group', 'exact final reference', 'foreign final pointer', 'foreign final reference',
     'multiple final references', 'getter final reference', 'unfinished native final reference',
     'duplicate final pointer source', 'missing final reference preview',
+    'duplicate final anchor', 'off-path final anchor', 'nonterminal final anchor', 'different final body anchor',
     'pending canonical group', 'pending header mismatch', 'missing system header', 'visible system header', 'foreign header scope',
     'unfinished execution', 'unfinished execution result', 'foreign retained parent', 'cached conflict',
     'unselected call', 'missing live branch', 'system accessor'] as const)(
     'recovers folded native execution ownership from an exact provider group: %s', async variant => {
       let getterReads = 0;
+      const diagnosticLogs: string[] = [];
       const HEADER = 'native-group-header';
       const page = await shellHarness({ withCall: true, withExec: true, nativeCallReceipt: true,
+        diagnosticLogs,
         status: variant.startsWith('pending ') ? 'in_progress' : 'complete',
         nativeCurrentNode: variant.startsWith('pending ') ? CALL : ASSISTANT,
         nativeCallLive: variant !== 'missing live branch', nativeCallCacheConflict: variant === 'cached conflict',
@@ -2246,6 +2295,11 @@ describe('alternate shell turn/message provenance', () => {
           if (variant === 'unselected call') entry.turn.messageIds = [USER, ASSISTANT];
           if (variant === 'system accessor') Object.defineProperty(mapping[HEADER].message.metadata,
             'is_visually_hidden_from_conversation', { get() { getterReads++; throw new Error('PRIVATE_SYSTEM_GETTER'); } });
+          if (variant === 'duplicate final anchor') entry.turn.items.push({ type: 'assistant-message',
+            messageId: RESULT, phase: 'final_answer', content: 'PRIVATE_DUPLICATE_FINAL', completed: false });
+          if (variant === 'off-path final anchor') entry.turn.items.at(-1).messageId = RESULT;
+          if (variant === 'nonterminal final anchor') mapping[ASSISTANT].message.status = 'in_progress';
+          if (variant === 'different final body anchor') entry.turn.items.at(-1).content = 'PRIVATE_DIFFERENT_FINAL';
           if (variant.includes('final reference') || variant === 'foreign final pointer' || variant === 'duplicate final pointer source') {
             const final = entry.turn.items.find((item: any) => item.messageId === ASSISTANT);
             final.completed = true;
@@ -2266,6 +2320,17 @@ describe('alternate shell turn/message provenance', () => {
           requestId: accepted || variant === 'pending canonical group' ? REQUEST : null, answered: accepted });
         if (accepted || variant === 'pending canonical group')
           expect(page.fiber.turns[0].requests.filter((row: any) => row.requestId === REQUEST)).toEqual([expect.objectContaining({ messageId: EXEC })]);
+        if (variant.endsWith('final anchor') || variant === 'different final body anchor') {
+          const facet = variant === 'duplicate final anchor' ? 'final-count' : variant === 'off-path final anchor'
+            ? 'path-tail' : variant === 'nonterminal final anchor' ? 'native-terminal' : 'body-or-reference';
+          const trace = diagnosticLogs.find(line => line.includes('native result-reference recovery diagnostic'))!;
+          expect(trace).toContain('anchorReason=nativeScopeFinalReceiptUnproved');
+          expect(trace).toContain(`anchorFinalFacet=${facet}`);
+          expect(page.fiber.turns[0].endMessageId).toBeNull();
+          for (const value of [USER, ASSISTANT, CALL, RESULT, REQUEST, EXEC, 'PRIVATE_DUPLICATE_FINAL',
+            'PRIVATE_DIFFERENT_FINAL', 'PRIVATE_SYSTEM_TEXT', 'native-group-working', 'native-group-exchange'])
+            expect(trace).not.toContain(value);
+        }
         expect(getterReads).toBe(0);
         expect(JSON.stringify(page.fiber)).not.toMatch(/PRIVATE_SYSTEM_TEXT|PRIVATE_SYSTEM_GETTER|retired-header-parent|retired-exec-parent/);
       } finally { page.dom.window.close(); }

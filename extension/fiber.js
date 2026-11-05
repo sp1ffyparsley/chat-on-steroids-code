@@ -2047,37 +2047,44 @@
    * field that grants terminal status must be an own data property. Accessors, multimodal rows,
    * missing routing, oversized text and any other native shape remain non-terminal.
    */
-  function shellProviderTerminalAt(mapping, id) {
+  function shellProviderTerminalAt(mapping, id, diagnostic = null) {
+    const note = facet => { try { diagnostic?.(facet); } catch { /* Diagnostics grant no authority. */ } };
+    const refuse = facet => { note(facet); return null; };
     try {
       const nodeDescriptor = mapping && typeof mapping === 'object'
         ? Object.getOwnPropertyDescriptor(mapping, id) : null;
-      if (!nodeDescriptor) return undefined;
-      if (!own.call(nodeDescriptor, 'value')) return null;
+      if (!nodeDescriptor) { note('native-node-missing'); return undefined; }
+      if (!own.call(nodeDescriptor, 'value')) return refuse('native-own-data');
       const node = nodeDescriptor.value;
       const value = (object, key) => {
         const descriptor = object && typeof object === 'object'
           ? Object.getOwnPropertyDescriptor(object, key) : null;
-        return descriptor && own.call(descriptor, 'value') ? descriptor.value : undefined;
+        if (!descriptor || !own.call(descriptor, 'value')) { note('native-own-data'); return undefined; }
+        return descriptor.value;
       };
       const message = value(node, 'message'), author = value(message, 'author'), content = value(message, 'content');
       const parts = value(content, 'parts'), length = Array.isArray(parts) ? value(parts, 'length') : null;
-      if (value(node, 'id') !== id || value(message, 'id') !== id || value(node, 'parent') == null ||
-          value(author, 'role') !== 'assistant' || value(message, 'recipient') !== 'all' ||
-          value(message, 'channel') !== 'final' || value(message, 'status') !== 'finished_successfully' ||
-          value(message, 'end_turn') !== true || value(content, 'content_type') !== 'text' ||
-          !Number.isSafeInteger(length) || length < 1 || length > MAX_ROWS) return null;
+      if (value(node, 'id') !== id || value(message, 'id') !== id || value(node, 'parent') == null)
+        return refuse('native-identity');
+      if (value(author, 'role') !== 'assistant' || value(message, 'recipient') !== 'all' ||
+          value(message, 'channel') !== 'final') return refuse('native-routing');
+      if (value(message, 'status') !== 'finished_successfully' || value(message, 'end_turn') !== true)
+        return refuse('native-terminal');
+      if (value(content, 'content_type') !== 'text' || !Number.isSafeInteger(length) || length < 1 || length > MAX_ROWS)
+        return refuse('native-text-shape');
       let text = '';
       for (let index = 0; index < length; index++) {
         const descriptor = Object.getOwnPropertyDescriptor(parts, String(index));
-        if (!descriptor || !own.call(descriptor, 'value') || typeof descriptor.value !== 'string') return null;
+        if (!descriptor || !own.call(descriptor, 'value')) return refuse('native-own-data');
+        if (typeof descriptor.value !== 'string') return refuse('native-text-part');
         if (index) text += '\n';
         text += descriptor.value;
-        if (text.length > MAX_RENDERED_TEXT) return null;
+        if (text.length > MAX_RENDERED_TEXT) return refuse('native-text-budget');
       }
       const parent = value(node, 'parent');
-      return text ? { id, parent, text } : null;
+      return text ? { id, parent, text } : refuse('native-text-empty');
     } catch {
-      return null;
+      return refuse('native-unsupported');
     }
   }
 
@@ -2332,6 +2339,8 @@
     // Retain the first failed prerequisite in the existing bounded console trace.
     let nativeAnchorReason = 'none';
     let nativeAnchorBranch = 'none';
+    let nativeAnchorFinalFacet = 'none';
+    const finalFacet = facet => { if (nativeAnchorFinalFacet === 'none') nativeAnchorFinalFacet = facet; };
     let nativeAnchorMember = 'none', nativeAnchorMemberTerminal = false, nativeAnchorMemberTyped = false;
     const mountedNativeScope = (() => {
       // No independent mounted anchor was attempted without these prerequisites.
@@ -2392,9 +2401,12 @@
           if (!pending) {
             if (entry.turn.status !== 'complete') return refuse('nativeScopeTurnIncomplete');
             const finals = entry.turn.items.filter(item => item?.type === 'assistant-message' && item.phase === 'final_answer');
-            const finalId = finals.length === 1 ? str(finals[0].messageId) : null;
-            const terminal = finalId && shellProviderTerminalAt(mapping, finalId);
-            if (!finalId || currentPath.at(-1) !== finalId || !shellScopeFinalReceiptMatches(finals[0], terminal))
+            if (finals.length !== 1) { finalFacet('final-count'); return refuse('nativeScopeFinalReceiptUnproved'); }
+            const finalId = str(finals[0].messageId);
+            if (!finalId) { finalFacet('final-id'); return refuse('nativeScopeFinalReceiptUnproved'); }
+            if (currentPath.at(-1) !== finalId) { finalFacet('path-tail'); return refuse('nativeScopeFinalReceiptUnproved'); }
+            const terminal = shellProviderTerminalAt(mapping, finalId, finalFacet);
+            if (!shellScopeFinalReceiptMatches(finals[0], terminal, finalFacet))
               return refuse('nativeScopeFinalReceiptUnproved');
             const finalMeta = nativeField(messageAt(finalId), 'metadata');
             if (str(nativeField(finalMeta, 'working_turn_id')) !== working || str(nativeField(finalMeta, 'turn_exchange_id')) !== exchange)
@@ -2480,11 +2492,12 @@
       try {
         if (!hasUserScope) {
           const finals = entry.turn.items.filter(item => item?.type === 'assistant-message' && item.phase === 'final_answer');
-          if (finals.length !== 1) return refuse('nativeScopeFinalCount');
+          if (finals.length !== 1) { finalFacet('final-count'); return refuse('nativeScopeFinalCount'); }
           const finalId = str(finals[0].messageId);
-          if (!finalId || currentPath.at(-1) !== finalId) return refuse('nativeScopeFinalPathMismatch');
-          const terminal = shellProviderTerminalAt(mapping, finalId);
-          if (!shellScopeFinalReceiptMatches(finals[0], terminal)) return refuse('nativeScopeFinalReceiptUnproved');
+          if (!finalId) { finalFacet('final-id'); return refuse('nativeScopeFinalPathMismatch'); }
+          if (currentPath.at(-1) !== finalId) { finalFacet('path-tail'); return refuse('nativeScopeFinalPathMismatch'); }
+          const terminal = shellProviderTerminalAt(mapping, finalId, finalFacet);
+          if (!shellScopeFinalReceiptMatches(finals[0], terminal, finalFacet)) return refuse('nativeScopeFinalReceiptUnproved');
           const finalMeta = nativeField(messageAt(finalId), 'metadata');
           working = str(nativeField(finalMeta, 'working_turn_id'));
           exchange = str(nativeField(finalMeta, 'turn_exchange_id'));
@@ -2810,7 +2823,7 @@
           const key = [shape.typedCalls, shape.missingReferences, shape.liveMapping, shape.currentPathNodes,
             shape.selectedMissingCalls, shape.nativeMissingCalls, shape.typedUserPresent, shape.typedUserSelected,
             selectedRequestIdsPresent, selectedRequestIdsMissing, identityRefusalCalls,
-            nativeAnchorReason, nativeAnchorBranch, nativeAnchorMember, nativeAnchorMemberTerminal, nativeAnchorMemberTyped, ...Object.values(identityRefusalReasons), selectedToolResults, witnessedToolResults,
+            nativeAnchorReason, nativeAnchorBranch, nativeAnchorFinalFacet, nativeAnchorMember, nativeAnchorMemberTerminal, nativeAnchorMemberTyped, ...Object.values(identityRefusalReasons), selectedToolResults, witnessedToolResults,
             missingWithChild, missingWithWitness, ...Object.values(resultShapes)].join(':');
           if (!nativeReferenceTraceKeys.has(key) && nativeReferenceTraceKeys.size < MAX_TURNS) {
             nativeReferenceTraceKeys.add(key);
@@ -2821,7 +2834,7 @@
               ` typedUser=${shape.typedUserPresent} selectedUser=${shape.typedUserSelected}` +
               ` requestIdPresent=${selectedRequestIdsPresent} requestIdMissing=${selectedRequestIdsMissing}` +
               ` identityRefusals=${identityRefusalCalls} nativeScope=${Boolean(mountedNativeScope)}` +
-              ` anchorReason=${nativeAnchorReason} anchorBranch=${nativeAnchorBranch} anchorMember=${nativeAnchorMember}` +
+              ` anchorReason=${nativeAnchorReason} anchorBranch=${nativeAnchorBranch} anchorFinalFacet=${nativeAnchorFinalFacet} anchorMember=${nativeAnchorMember}` +
               ` anchorMemberTerminal=${nativeAnchorMemberTerminal} anchorMemberTyped=${nativeAnchorMemberTyped}` +
               ` identityReasons=${Object.entries(identityRefusalReasons).map(([kind, count]) => kind + ":" + count).join(',')}` +
               ` selectedResults=${selectedToolResults} witnessedResults=${witnessedToolResults}` +
@@ -3180,11 +3193,13 @@
   // from the canonical authored text. Its exact source pointer identifies that native
   // final; it never supplies a tool receipt, changes a Send payload or overrides the
   // separate completed:false terminal/body corroboration.
-  function shellScopeFinalReceiptMatches(item, terminal) {
+  function shellScopeFinalReceiptMatches(item, terminal, diagnostic = null) {
+    const refuse = facet => { try { diagnostic?.(facet); } catch { /* Diagnostics grant no authority. */ } return false; };
     const id = str(shellPublicItemData(item, 'messageId')), content = shellPublicItemData(item, 'content');
-    if (!terminal || id !== terminal.id || shellPublicItemData(item, 'type') !== 'assistant-message' ||
-        shellPublicItemData(item, 'phase') !== 'final_answer' || typeof content !== 'string') return false;
-    return content === terminal.text || shellFinalContentReference(item, id) !== null;
+    if (!terminal) return refuse('native-terminal-unproved');
+    if (id !== terminal.id || shellPublicItemData(item, 'type') !== 'assistant-message' ||
+        shellPublicItemData(item, 'phase') !== 'final_answer' || typeof content !== 'string') return refuse('typed-final-shape');
+    return content === terminal.text || shellFinalContentReference(item, id) !== null || refuse('body-or-reference');
   }
 
   function shellItemText(item) {

@@ -185,6 +185,74 @@ async function companionReloadFixture(withControls = false) {
 }
 
 describe('automatic companion reload custody', () => {
+  it.each(['unknown', 'signed-out'] as const)(
+    'requests only lossless maintenance while paused with %s provider authentication', async authState => {
+      const fixture = await companionReloadFixture();
+      fixture.config.ui.automationPaused = true;
+      fixture.status.authState = authState;
+      await fixture.start(); await fixture.settle();
+      expect(fixture.open).toHaveBeenCalledOnce();
+      expect(fixture.open.mock.calls[0]![0]).toMatch(/^chrome-extension:\/\/[a-p]{32}\/popup\.html\?clf-reload=1&nonce=[a-zA-Z0-9_-]+&close=1$/);
+      expect(fixture.config.ui.automationPaused).toBe(true);
+      expect(fixture.status.authState).toBe(authState);
+      expect(fixture.resume).not.toHaveBeenCalled();
+      expect(fixture.write).toHaveBeenCalledWith('companion-fingerprint', 'new-fingerprint');
+      expect(fixture.pending()).toBeNull();
+      fixture.changed(); await fixture.settle();
+      expect(fixture.open).toHaveBeenCalledOnce();
+    });
+
+  it.each(['origin', 'presence', 'before-dispatch'] as const)(
+    'withdraws paused-only maintenance after unpause at the %s boundary', async boundary => {
+      const fixture = await companionReloadFixture();
+      fixture.config.ui.automationPaused = true;
+      fixture.status.authState = 'unknown';
+      let release!: () => void;
+      if (boundary === 'origin') fixture.secret.mockImplementationOnce(() => new Promise<string>(resolve => {
+        release = () => resolve('chrome-extension://fcckeonnadegkheflpbppbddkpkdhjip');
+      }));
+      if (boundary === 'presence') fixture.bridge.mockImplementationOnce(() => new Promise<typeof fixture.status>(resolve => {
+        release = () => resolve({ ...fixture.status });
+      }));
+      if (boundary === 'before-dispatch') {
+        const eligible = vm.runInContext('companionReloadEligible', fixture.context) as (...args: unknown[]) => Promise<unknown>;
+        fixture.context.companionReloadEligible = async (...args: unknown[]) => {
+          const grant = await eligible(...args);
+          expect(grant).toBe('paused-maintenance');
+          fixture.config.ui.automationPaused = false;
+          return grant;
+        };
+      }
+      const starting = fixture.start();
+      if (boundary !== 'before-dispatch') {
+        await vi.waitFor(() => expect(boundary === 'origin' ? fixture.secret : fixture.bridge).toHaveBeenCalledOnce());
+        fixture.config.ui.automationPaused = false;
+        release();
+      }
+      await starting; await fixture.settle();
+      expect(fixture.open).not.toHaveBeenCalled();
+      expect(fixture.write).not.toHaveBeenCalled();
+      expect(fixture.pending()?.dispatched).toBe(false);
+      expect(fixture.pending()?.fingerprint).toBe('new-fingerprint');
+      expect(fixture.resume).not.toHaveBeenCalled();
+      expect(fixture.status.authState).toBe('unknown');
+    });
+
+  it.each(['unpaired', 'absent'] as const)(
+    'refuses paused unknown-auth maintenance without fresh %s bridge custody', async boundary => {
+      const fixture = await companionReloadFixture();
+      fixture.config.ui.automationPaused = true;
+      fixture.status.authState = 'unknown';
+      if (boundary === 'unpaired') fixture.status.paired = false;
+      else fixture.status.present = false;
+      await fixture.start(); await fixture.settle();
+      expect(fixture.open).not.toHaveBeenCalled();
+      expect(fixture.write).not.toHaveBeenCalled();
+      expect(fixture.pending()?.dispatched).toBe(false);
+      expect(fixture.config.ui.automationPaused).toBe(true);
+      expect(fixture.resume).not.toHaveBeenCalled();
+    });
+
   it('requests the normal lossless companion reload while automation stays paused', async () => {
     const fixture = await companionReloadFixture();
     fixture.config.ui.automationPaused = true;
@@ -555,7 +623,8 @@ describe('automatic companion reload custody', () => {
   it.each(['unpaired', 'absent', 'signed-out', 'unknown-auth'] as const)
     ('retains the pending fingerprint without opening a cached origin while %s', async (hold) => {
       const fixture = await companionReloadFixture();
-      fixture.config.ui.automationPaused = true;
+      // Unknown/signed-out task admission remains refused outside paused maintenance.
+      fixture.config.ui.automationPaused = hold === 'unpaired' || hold === 'absent';
       if (hold === 'unpaired') fixture.status.paired = false;
       else if (hold === 'absent') fixture.status.present = false;
       else fixture.status.authState = hold === 'signed-out' ? 'signed-out' : 'unknown';

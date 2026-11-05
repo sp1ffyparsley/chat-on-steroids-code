@@ -682,11 +682,16 @@ function companionReloadCurrent(state: PendingCompanionReload): boolean {
   return !quitting && !state.deferredForProcess && companionReloadOwnerCurrent(state);
 }
 
-/** Fresh bounded browser presence is reload eligibility, not proof of useful chat work. */
-async function companionReloadEligible(state: PendingCompanionReload): Promise<boolean> {
-  if (!companionReloadCurrent(state)) return false;
+/** Local pairing/presence owns maintenance; provider sign-in still owns ordinary admission.
+ * A paused-only grant cannot outlive the Pause that authorized its lossless request. */
+async function companionReloadEligible(state: PendingCompanionReload, allowPausedMaintenance = false):
+  Promise<'signed-in' | 'paused-maintenance' | null> {
+  if (!companionReloadCurrent(state)) return null;
+  const pausedMaintenance = allowPausedMaintenance && getConfig().ui.automationPaused === true;
   const status = await bridgeStatus();
-  return companionReloadCurrent(state) && status.paired === true && status.present === true && status.authState === 'signed-in';
+  if (!companionReloadCurrent(state) || status.paired !== true || status.present !== true) return null;
+  if (status.authState === 'signed-in') return 'signed-in';
+  return pausedMaintenance && getConfig().ui.automationPaused === true ? 'paused-maintenance' : null;
 }
 
 function clearPendingCompanionReload(state: PendingCompanionReload): void {
@@ -702,12 +707,17 @@ async function completePendingCompanionReload(state: PendingCompanionReload): Pr
   if (!companionReloadCurrent(state)) return;
   state.attempting = true;
   try {
+    const pausedMaintenance = getConfig().ui.automationPaused === true;
     const profile = getActiveInstanceRuntime().profile;
     const origin = await getSecret(bridgeExtensionOriginSecretSlot(profile.state.mode, profile.id));
     if (!companionReloadCurrent(state)) return;
     const url = companionReloadUrl(origin, `${Date.now().toString(36)}-${process.pid.toString(36)}`);
-    if (!url || !(await companionReloadEligible(state))) return;
-    if (!companionReloadCurrent(state)) return;
+    if (!url) return;
+    const eligibility = await companionReloadEligible(state, pausedMaintenance);
+    if (!eligibility || !companionReloadCurrent(state) ||
+        (eligibility === 'paused-maintenance' && getConfig().ui.automationPaused !== true)) return;
+    if (eligibility === 'paused-maintenance')
+      logInfo('Browser companion lossless maintenance admitted while automation remains paused; provider authentication unchanged.');
     // Native launch can take effect even if its Promise rejects. Never replay an issued Reload:
     // Reload itself disconnects the companion, so later presence is not an acceptance receipt.
     state.dispatched = true;
@@ -726,8 +736,8 @@ async function completePendingCompanionReload(state: PendingCompanionReload): Pr
 
 /**
  * Keeps one exact installed companion generation pending until this account proves its Chrome
- * extension origin and fresh signed-in paired presence. Global Pause remains in force while
- * the normal worker reload owner drains journals and refuses open pages or retained custody.
+ * extension origin and fresh paired presence. Provider sign-in remains required outside
+ * paused maintenance; the normal worker still refuses open pages or retained custody.
  * This is process-lifetime work; a later eligible bridge change continues the same pending owner.
  */
 async function armPendingCompanionReload(fingerprint: string): Promise<void> {
@@ -762,7 +772,7 @@ async function reloadPairedCompanionAfterUpdate(fingerprint: string | null): Pro
       ? 'Changed browser companion bytes remain pending under an exact operator deferral for this process. Existing Chrome bytes were not verified updated.'
       : pendingCompanionReload.dispatched
       ? 'Browser companion reload was already requested; its exact bookkeeping remains held. No automatic replay will occur in this process. Inspect the account reload and receipt before restarting.'
-      : 'Browser companion was updated on disk; reload remains pending until this exact account is signed in and freshly paired. Automation may remain paused; the worker still owns lossless reload checks. Cached extension origin alone cannot authorize Reload.');
+      : 'Browser companion was updated on disk; reload remains pending until this exact account is freshly paired and either signed in or paused for maintenance. The worker still owns lossless reload checks. Cached extension origin alone cannot authorize Reload.');
   }
 }
 
