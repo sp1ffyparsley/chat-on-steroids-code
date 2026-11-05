@@ -1,8 +1,8 @@
 # Chat On Steroids - code research mirror
 
-## Source-only hourly helper recovery — future143, installed142 unchanged
+## Source-only hourly helper recovery — proposed143, installed142 unchanged
 
-The new reviewed source adds bounded hourly recovery for an unavailable exact helper model/reasoning pair or an owned native usage-limit rejection. It is not a new qualified build, installation, executing browser generation or verified live hourly recovery. Content/background markers remain142; installed142 still comes from the accepted compiled source recorded below. Working chats were not stopped for this source change.
+The143label is a proposed future release only; these changes have not been built, qualified, installed or verified in live hourly recovery. The new reviewed source adds bounded hourly recovery for an unavailable exact helper model/reasoning pair or an owned native usage-limit rejection. It is not a new qualified build, installation, executing browser generation or verified live hourly recovery. Content/background markers remain142; installed142 still comes from the accepted compiled source recorded below. Working chats were not stopped for this source change.
 
 A failed helper's existing durable Input recovery receipt owns the one-hour cooldown for that account and exact model/effort pair. The existing Goal lifecycle may prepare one due attempt only while the same current obligation remains armed, unpaused and otherwise eligible. A different chat cannot evade the account/pair cooldown, cold restore does not reset it, and ordinary last50terminal-history trimming retains the latest necessary cooldown proof. This reuses existing owners; it adds no watcher, timer service, dependency, queue or model fallback. An elapsed hour permits a bounded recheck, never proof that provider access has reset.
 
