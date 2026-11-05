@@ -6,6 +6,14 @@ Recorder138 source adds four focused reliability repairs: native Retry rechecks 
 
 Recorder138 completed private qualification:96preliminary and13,411Main checks passed with62conditional skips;33post-pin installer checks passed in147.67seconds, and readiness passed. The upgrade was independently accepted on November5 at12:34AM EST after protected-data and full installed-program verification passed before successor startup. Five fresh task Inputs reached provider-core-progress with native Send acknowledgments; no automatic successor has been observed yet. Deployment acceptance is not sustained live automation proof. Original request/result attribution, missing diagnostic stages and successful native response retrieval remain unresolved; these source repairs do not establish sustained automatic next turns. This mirror supplies reviewed source and tests only, not a qualified public installer.
 
+## Source-only follow-up after accepted138
+
+A bounded native-anchor branch diagnostic now identifies the first specific refusal stage inside an existing namespace/parent gate using fixed enums only. It does not change matching acceptance, expose private identities or certify missing tool results. The whole shell-compatibility suite passed526checks privately, with11targeted first-refusal/privacy cases passing. This additive diagnostic is source only, not a newly qualified or installed runtime; the underlying fresh request/result join remains unresolved.
+
+The future upgrade baseline now matches the independently accepted138 program fingerprint, with its exact regression assertion. The stale137baseline first failed, then the corrected assertion and readiness passed. This metadata refresh required no runtime rebuild or second installation.
+
+A fresh helper investigation also found requested High reasoning versus observed XHigh. The precise picker/settings currentness boundary remains under investigation; this observation does not authorize a fallback model, automatic budget reset or duplicate helper.
+
 ## Historical recorder137 installation
 
 This mirror publishes reviewed source and tests, not a qualified public installer. The previous privately installed package was137; its strict release, exact installer, protected-data and full installed-program checks passed. This historical record is superseded by138 above. Use this mirror's public commit SHA for research citations. Private provenance hashes in historical notes are not public Git references.

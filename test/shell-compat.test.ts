@@ -2010,6 +2010,8 @@ describe('alternate shell turn/message provenance', () => {
     ['missing final namespace', 'nativeScopeFinalNamespaceMissing'],
     ['cached branch conflict', 'nativeScopeCacheConflict'],
     ['branch namespace conflict', 'nativeScopeBranchConflict'],
+    ['branch exchange conflict', 'nativeScopeBranchConflict'],
+    ['branch metadata parent conflict', 'nativeScopeBranchConflict'],
     ['namespace accessor', 'nativeScopeFinalNamespaceMissing']
   ] as const)('reports only the first attempted native scope anchor refusal: %s', async (variant, expectedReason) => {
     let accessorReads = 0;
@@ -2033,6 +2035,8 @@ describe('alternate shell turn/message provenance', () => {
           mapping[ASSISTANT].message.status = 'in_progress';
         if (variant === 'missing final namespace') delete mapping[ASSISTANT].message.metadata.working_turn_id;
         if (variant === 'branch namespace conflict') mapping[RESULT].message.metadata.working_turn_id = 'PRIVATE_OTHER_WORKING';
+        if (variant === 'branch exchange conflict') mapping[RESULT].message.metadata.turn_exchange_id = 'PRIVATE_OTHER_EXCHANGE';
+        if (variant === 'branch metadata parent conflict') mapping[RESULT].message.metadata.parent_id = 'PRIVATE_OTHER_PARENT';
         if (variant === 'namespace accessor') Object.defineProperty(mapping[ASSISTANT].message.metadata, 'working_turn_id', {
           get() { accessorReads++; throw new Error('PRIVATE_SCOPE_GETTER'); }
         });
@@ -2043,6 +2047,11 @@ describe('alternate shell turn/message provenance', () => {
       expect(call.identityRefusalReasons).toEqual(expect.arrayContaining(['workingTurnMismatch', 'turnExchangeMismatch']));
       const key = 'identityReason' + expectedReason[0]!.toUpperCase() + expectedReason.slice(1);
       expect(page.fiber.shellScan.rejects[key]).toBe(1);
+      if (variant.startsWith('branch ')) {
+        const stage = variant === 'branch namespace conflict' ? 'selected-working-turn'
+          : variant === 'branch exchange conflict' ? 'selected-exchange' : 'selected-metadata-parent';
+        expect(diagnosticLogs.some(line => line.includes(`anchorBranch=${stage}`))).toBe(true);
+      }
       expect(call).toMatchObject({ requestId: null, answered: false });
       expect(page.fiber.turns[0].requests).not.toContainEqual(expect.objectContaining({ requestId: REQUEST, messageId: CALL }));
       expect(page.fiber.turns[0].endMessageId).toBeNull();
@@ -2054,7 +2063,8 @@ describe('alternate shell turn/message provenance', () => {
         expect(trace).toContain('anchorMemberTerminal=true');
       }
       for (const value of [USER, CALL, RESULT, REQUEST, APP, LINK, 'PRIVATE_ANCHOR_WORKING', 'PRIVATE_ANCHOR_EXCHANGE',
-        'PRIVATE_OTHER_WORKING', 'PRIVATE_SCOPE_GETTER', 'PRIVATE_TOOL_RESULT']) expect(trace).not.toContain(value);
+        'PRIVATE_OTHER_WORKING', 'PRIVATE_OTHER_EXCHANGE', 'PRIVATE_OTHER_PARENT',
+        'PRIVATE_SCOPE_GETTER', 'PRIVATE_TOOL_RESULT']) expect(trace).not.toContain(value);
     } finally { page.dom.window.close(); }
   });
 

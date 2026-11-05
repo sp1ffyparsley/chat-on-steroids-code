@@ -2331,6 +2331,7 @@
     // Fixed diagnostic only: older workers may drop additive anchor counters.
     // Retain the first failed prerequisite in the existing bounded console trace.
     let nativeAnchorReason = 'none';
+    let nativeAnchorBranch = 'none';
     let nativeAnchorMember = 'none', nativeAnchorMemberTerminal = false, nativeAnchorMemberTyped = false;
     const mountedNativeScope = (() => {
       // No independent mounted anchor was attempted without these prerequisites.
@@ -2343,9 +2344,10 @@
       if (!shell.calls.length) return null;
       if (!live) { prerequisite('nativeAnchorLiveMissing'); return null; }
       if (!typedUserId) { prerequisite('nativeAnchorUserMissing'); return null; }
-      const refuse = reason => {
+      const refuse = (reason, branch = 'none') => {
         mountedNativeScopeRefusal = reason;
         if (nativeAnchorReason === 'none') nativeAnchorReason = reason;
+        if (nativeAnchorBranch === 'none' && reason === 'nativeScopeBranchConflict') nativeAnchorBranch = branch;
         return null;
       };
       const nativeUser = messageAt(typedUserId);
@@ -2356,7 +2358,7 @@
       let exchange = str(nativeField(userMeta, 'turn_exchange_id'));
       if (hasUserScope && (!working || !exchange ||
           nativeField(nativeField(nativeUser, 'author'), 'role') !== 'user'))
-        return refuse('nativeScopeBranchConflict');
+        return refuse('nativeScopeBranchConflict', 'user-scope');
       if (!hasUserScope && entry.turn.status !== 'complete' &&
           nativeField(nativeField(messageAt(currentPath[1]), 'author'), 'role') !== 'system') {
         prerequisite('nativeAnchorTurnIncomplete'); return refuse('nativeScopeTurnIncomplete');
@@ -2384,7 +2386,7 @@
               nativeField(header, 'recipient') !== 'all' || nativeField(header, 'status') !== 'finished_successfully' ||
               nativeField(headerMeta, 'is_visually_hidden_from_conversation') !== true ||
               nativeField(headerMeta, 'message_type') !== 'next' || nativeField(headerMeta, 'rebase_developer_message') !== false)
-            return refuse('nativeScopeBranchConflict');
+            return refuse('nativeScopeBranchConflict', 'header-shape');
           working = headerWorking; exchange = headerExchange;
           const pending = entry.turn.status === 'in_progress';
           if (!pending) {
@@ -2396,7 +2398,7 @@
               return refuse('nativeScopeFinalReceiptUnproved');
             const finalMeta = nativeField(messageAt(finalId), 'metadata');
             if (str(nativeField(finalMeta, 'working_turn_id')) !== working || str(nativeField(finalMeta, 'turn_exchange_id')) !== exchange)
-              return refuse('nativeScopeBranchConflict');
+              return refuse('nativeScopeBranchConflict', 'final-namespace');
           }
           const canonicalParents = new Map(), executionIds = new Set(), nativeCalls = new Set(), executionGroups = new Map(), receiptIds = new Set();
           let execution = null;
@@ -2405,11 +2407,17 @@
             const author = nativeField(message, 'author'), metadata = nativeField(message, 'metadata');
             const role = nativeField(author, 'role'), recipient = nativeField(message, 'recipient');
             const parent = nativeField(node, 'parent'), retainedParent = str(nativeField(metadata, 'parent_id'));
-            if (nativeField(node, 'id') !== id || nativeField(message, 'id') !== id || parent !== currentPath[at - 1] ||
-                !retainedParent || retainedParent !== parent && own.call(mapping, retainedParent) ||
-                str(nativeField(metadata, 'working_turn_id')) !== working || str(nativeField(metadata, 'turn_exchange_id')) !== exchange ||
-                !(nativeField(message, 'status') === 'finished_successfully' || pending && role === 'assistant' &&
-                  nativeField(message, 'status') === 'in_progress')) return refuse('nativeScopeBranchConflict');
+            if (nativeField(node, 'id') !== id || nativeField(message, 'id') !== id)
+              return refuse('nativeScopeBranchConflict', 'group-node');
+            if (parent !== currentPath[at - 1]) return refuse('nativeScopeBranchConflict', 'group-parent');
+            if (!retainedParent || retainedParent !== parent && own.call(mapping, retainedParent))
+              return refuse('nativeScopeBranchConflict', 'group-retained-parent');
+            if (str(nativeField(metadata, 'working_turn_id')) !== working)
+              return refuse('nativeScopeBranchConflict', 'group-working-turn');
+            if (str(nativeField(metadata, 'turn_exchange_id')) !== exchange)
+              return refuse('nativeScopeBranchConflict', 'group-exchange');
+            if (!(nativeField(message, 'status') === 'finished_successfully' || pending && role === 'assistant' &&
+                nativeField(message, 'status') === 'in_progress')) return refuse('nativeScopeBranchConflict', 'group-status');
             const cachedNode = nativeField(nativeField(data, 'mapping'), id);
             if (cachedNode && cachedNode !== node) {
               const cachedMessage = nativeField(cachedNode, 'message'), cachedMeta = nativeField(cachedMessage, 'metadata');
@@ -2418,31 +2426,31 @@
                     nativeField(cachedMeta, key) !== nativeField(metadata, key))) return refuse('nativeScopeCacheConflict');
             }
             canonicalParents.set(id, parent);
-            if (at === 1) { if (role !== 'system') return refuse('nativeScopeBranchConflict'); continue; }
+            if (at === 1) { if (role !== 'system') return refuse('nativeScopeBranchConflict', 'header-role'); continue; }
             if (role === 'assistant' && recipient === 'functions.exec') {
               const request = str(nativeField(metadata, 'request_id'));
-              if (execution || !request) return refuse('nativeScopeBranchConflict');
+              if (execution || !request) return refuse('nativeScopeBranchConflict', 'execution-start');
               execution = { id, request, calls: [], results: [], closed: false }; executionIds.add(id);
             } else if (role === 'tool' && nativeField(author, 'name') === 'functions.exec' && recipient === 'all') {
               if (!execution || str(nativeField(metadata, 'request_id')) !== execution.request ||
-                  execution.calls.length !== execution.results.length) return refuse('nativeScopeBranchConflict');
+                  execution.calls.length !== execution.results.length) return refuse('nativeScopeBranchConflict', 'execution-result');
               execution.closed = true; execution = null;
             } else if (role === 'assistant' && recipient === 'api_tool.call_tool') {
               const call = shell.calls.find(call => call.messageId === id), path = nativeRequestPath(message);
               const server = ownServerName(shell.callSources.get(id)?.server);
               if (!execution || !selected.has(id) || !call || !path || !server || !ourPath(path) ||
                   !nativeRequestServerMatches(path, server) || toolName(path) !== call.tool ||
-                  str(nativeField(metadata, 'request_id')) !== execution.request) return refuse('nativeScopeBranchConflict');
+                  str(nativeField(metadata, 'request_id')) !== execution.request) return refuse('nativeScopeBranchConflict', 'core-invocation');
               nativeCalls.add(id); execution.calls.push(id); executionGroups.set(id, execution);
             } else if (role === 'tool' && nativeField(author, 'name') === 'api_tool.call_tool' && recipient === 'all') {
               const resource = nativeField(metadata, 'invoked_resource');
               if (!execution || str(nativeField(metadata, 'request_id')) !== execution.request || !coreResultReceipt(message) ||
                   !ownResult({ app: str(nativeField(resource, 'app_name')), resource: str(nativeField(resource, 'resource_uri')) }))
-                return refuse('nativeScopeBranchConflict');
+                return refuse('nativeScopeBranchConflict', 'core-result');
               const receiptId = coreResultReceipt(message);
-              if (receiptIds.has(receiptId)) return refuse('nativeScopeBranchConflict');
+              if (receiptIds.has(receiptId)) return refuse('nativeScopeBranchConflict', 'duplicate-receipt');
               receiptIds.add(receiptId); execution.results.push(id);
-            } else if (!(role === 'assistant' && recipient === 'all')) return refuse('nativeScopeBranchConflict');
+            } else if (!(role === 'assistant' && recipient === 'all')) return refuse('nativeScopeBranchConflict', 'group-role');
           }
           if (execution && !pending || !executionIds.size || nativeCalls.size !== shell.calls.length ||
               shell.calls.some(call => !nativeCalls.has(call.messageId)) || ids.some(id => !currentIds.has(id)))
@@ -2496,11 +2504,13 @@
                 ['parent_id', 'working_turn_id', 'turn_exchange_id', 'request_id'].some(key =>
                   nativeField(cachedMeta, key) !== nativeField(metadata, key))) return refuse('nativeScopeCacheConflict');
           }
-          if ((role !== 'assistant' && role !== 'tool') ||
-              nativeField(node, 'parent') !== currentPath[at - 1] ||
-              nativeField(metadata, 'parent_id') !== currentPath[at - 1] ||
-              str(nativeField(metadata, 'working_turn_id')) !== working ||
-              str(nativeField(metadata, 'turn_exchange_id')) !== exchange) return refuse('nativeScopeBranchConflict');
+          if (role !== 'assistant' && role !== 'tool') return refuse('nativeScopeBranchConflict', 'selected-role');
+          if (nativeField(node, 'parent') !== currentPath[at - 1]) return refuse('nativeScopeBranchConflict', 'selected-parent');
+          if (nativeField(metadata, 'parent_id') !== currentPath[at - 1])
+            return refuse('nativeScopeBranchConflict', 'selected-metadata-parent');
+          if (str(nativeField(metadata, 'working_turn_id')) !== working)
+            return refuse('nativeScopeBranchConflict', 'selected-working-turn');
+          if (str(nativeField(metadata, 'turn_exchange_id')) !== exchange) return refuse('nativeScopeBranchConflict', 'selected-exchange');
         }
         return { working, exchange };
       } catch { return refuse('nativeScopeUnsupported'); }
@@ -2800,7 +2810,7 @@
           const key = [shape.typedCalls, shape.missingReferences, shape.liveMapping, shape.currentPathNodes,
             shape.selectedMissingCalls, shape.nativeMissingCalls, shape.typedUserPresent, shape.typedUserSelected,
             selectedRequestIdsPresent, selectedRequestIdsMissing, identityRefusalCalls,
-            nativeAnchorReason, nativeAnchorMember, nativeAnchorMemberTerminal, nativeAnchorMemberTyped, ...Object.values(identityRefusalReasons), selectedToolResults, witnessedToolResults,
+            nativeAnchorReason, nativeAnchorBranch, nativeAnchorMember, nativeAnchorMemberTerminal, nativeAnchorMemberTyped, ...Object.values(identityRefusalReasons), selectedToolResults, witnessedToolResults,
             missingWithChild, missingWithWitness, ...Object.values(resultShapes)].join(':');
           if (!nativeReferenceTraceKeys.has(key) && nativeReferenceTraceKeys.size < MAX_TURNS) {
             nativeReferenceTraceKeys.add(key);
@@ -2811,7 +2821,7 @@
               ` typedUser=${shape.typedUserPresent} selectedUser=${shape.typedUserSelected}` +
               ` requestIdPresent=${selectedRequestIdsPresent} requestIdMissing=${selectedRequestIdsMissing}` +
               ` identityRefusals=${identityRefusalCalls} nativeScope=${Boolean(mountedNativeScope)}` +
-              ` anchorReason=${nativeAnchorReason} anchorMember=${nativeAnchorMember}` +
+              ` anchorReason=${nativeAnchorReason} anchorBranch=${nativeAnchorBranch} anchorMember=${nativeAnchorMember}` +
               ` anchorMemberTerminal=${nativeAnchorMemberTerminal} anchorMemberTyped=${nativeAnchorMemberTyped}` +
               ` identityReasons=${Object.entries(identityRefusalReasons).map(([kind, count]) => kind + ":" + count).join(',')}` +
               ` selectedResults=${selectedToolResults} witnessedResults=${witnessedToolResults}` +
