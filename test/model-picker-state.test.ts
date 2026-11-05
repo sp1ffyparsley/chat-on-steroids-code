@@ -407,7 +407,7 @@ it.each(['disabled', 'denied', 'unavailable', 'owner_changed', 'expired'] as con
     if (cause === 'denied') (f.props.modelSwitcherDenialsBySlug as any)['gpt-5-6-thinking'] = { reason: 'workspace_policy' };
     const effort = cause === 'unavailable' ? 'xhigh' : 'high';
     expect(await f.api.selectModelSettings('gpt-5-6-thinking', effort, () => cause !== 'owner_changed',
-      { failure, deadline: page.window.Date.now() + (cause === 'expired' ? -1 : 2000), exact: true })).toBe(false);
+      { failure, deadline: page.window.Date.now() + (cause === 'expired' ? -1 : 2000), observationMs: 40, exact: true })).toBe(false);
     expect(failure).toHaveBeenCalledExactlyOnceWith(cause === 'owner_changed' ? 'owner_changed'
       : cause === 'expired' ? 'preparation_expired' : cause === 'denied' ? 'choice_denied' : 'choice_unavailable');
     if (['disabled', 'owner_changed', 'expired'].includes(cause)) expect(f.actions).not.toHaveBeenCalled();
@@ -436,6 +436,58 @@ it.each(['trigger_missing', 'snapshot_missing'] as const)('reobserves the actual
   expect(failure).toHaveBeenCalledTimes(1);
   expect(f.api.visibleModelSelection()).toEqual({ model: 'gpt-5-6-thinking', reasoningEffort: 'high' });
 });
+it.each(['after-baseline', 'before-baseline'] as const)(
+  'reobserves one missing exact pair in the same selector invocation after native hydration (%s)', async timing => {
+    const f = fixture(), win = page.window, doc = win.document, failure = vi.fn();
+    let closes = 0;
+    const hydrated = { ...f.selections[0]![1]!, bucket: 4, modelSlug: 'gpt-6-thinking' };
+    const hydrate = () => {
+      f.selections[0]!.push(hydrated);
+      doc.querySelector('form')!.setAttribute('data-native-picker-hydrated', 'true');
+    };
+    doc.addEventListener('keydown', event => {
+      if (event.key !== 'Escape' || ++closes !== 1) return;
+      if (timing === 'before-baseline') queueMicrotask(hydrate);
+      else win.setTimeout(hydrate, 10);
+    });
+    const deadline = win.Date.now() + 1000;
+    expect(await f.api.selectModelSettings('gpt-6-thinking', 'high', () => true,
+      { exact: true, deadline, observationMs: 200, failure })).toBe(true);
+    expect(f.state.currentSelection).toBe(hydrated);
+    expect(f.api.visibleModelSelection()).toEqual({ model: 'gpt-6-thinking', reasoningEffort: 'high' });
+    expect(failure).not.toHaveBeenCalled();
+    expect(closes).toBe(2);
+    expect(win.Date.now()).toBeLessThan(deadline);
+  });
+
+it.each(['owner_changed', 'deadline', 'choice_denied', 'missing-forever'] as const)(
+  'keeps exact hydration reobservation bounded without further native selection (%s)', async cause => {
+    const f = fixture(), win = page.window, doc = win.document, failure = vi.fn(), send = vi.fn();
+    let current = true, closes = 0, actionsAtClose = 0;
+    doc.querySelector('[data-testid="send-button"]')!.addEventListener('click', send);
+    const original = f.state.currentSelection;
+    doc.addEventListener('keydown', event => {
+      if (event.key !== 'Escape' || ++closes !== 1) return;
+      actionsAtClose = f.actions.mock.calls.length;
+      if (cause === 'missing-forever') return;
+      win.setTimeout(() => {
+        if (cause === 'owner_changed') current = false;
+        else f.selections[0]!.push({ ...f.selections[0]![1]!, bucket: 4, modelSlug: 'gpt-6-thinking',
+          availability: { status: cause === 'choice_denied' ? 'upgrade_required' : 'available' } });
+        doc.querySelector('form')!.setAttribute('data-native-picker-hydrated', cause);
+      }, cause === 'deadline' ? 250 : 10);
+    });
+    const deadline = win.Date.now() + (cause === 'deadline' ? 200 : 800);
+    expect(await f.api.selectModelSettings('gpt-6-thinking', 'high', () => current,
+      { exact: true, deadline, observationMs: cause === 'missing-forever' ? 40 : 400, failure })).toBe(false);
+    expect(failure).toHaveBeenCalledExactlyOnceWith(cause === 'deadline' ? 'preparation_expired'
+      : cause === 'missing-forever' ? 'choice_unavailable' : cause);
+    expect(closes).toBe(1);
+    expect(f.actions).toHaveBeenCalledTimes(actionsAtClose);
+    expect(f.state.currentSelection).toBe(original);
+    expect(send).not.toHaveBeenCalled();
+  });
+
 it('reports an unclosed native picker as terminal even when its first snapshot was missing', async () => {
   const f = fixture(null), win = page.window, nativeTimer = win.setTimeout.bind(win), post = win.postMessage;
   win.setTimeout = ((callback: TimerHandler, ms?: number) => nativeTimer(callback, Math.min(ms ?? 0, ms === 1500 ? 1 : 20))) as typeof win.setTimeout;

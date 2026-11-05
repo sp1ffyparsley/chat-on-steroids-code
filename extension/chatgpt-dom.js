@@ -4158,8 +4158,8 @@ var CLF_DOM = (() => {
       observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
       const timer = setTimeout(() => finish(null), remaining(timeout)); void check();
     });
-    const state = async predicate => {
-      const found = await wait(async () => { const value = await readPickerState(); return value && (!predicate || predicate(value)) ? value : null; });
+    const state = async (predicate, timeout) => {
+      const found = await wait(async () => { const value = await readPickerState(); return value && (!predicate || predicate(value)) ? value : null; }, timeout);
       return found || failed(predicate ? 'selection_unconfirmed' : 'snapshot_missing');
     };
     // Reading native state also lets MAIN stamp the exact alternate-shell trigger owner.
@@ -4404,7 +4404,52 @@ var CLF_DOM = (() => {
     const result = await inspectModelCatalogState(stillCurrent, failure);
     return result?.models.length ? { models: result.models, availability: result.availability } : null;
   }
+  function requestedPickerChoice(choice, model, effort) {
+    const name = normalizeModelLabel(model);
+    return (choice.id === model || choice.familyId === model ||
+      (name && (normalizeModelLabel(choice.familyLabel) === name || normalizeModelLabel(choice.label) === name))) &&
+      (!effort || choice.effort === effort);
+  }
+
   async function selectModelSettings(model, effort, stillCurrent = () => true, options = {}) {
+    let refusal = null, missingPair = false;
+    const deadline = Number.isFinite(options.deadline) ? options.deadline : Infinity;
+    const current = () => stillCurrent() && Date.now() < deadline;
+    const failed = () => {
+      if (typeof options.failure === 'function') options.failure(Date.now() >= deadline ? 'preparation_expired'
+        : !stillCurrent() ? 'owner_changed' : refusal || 'selection_unconfirmed');
+      return false;
+    };
+    const attempt = () => selectModelSettingsOnce(model, effort, stillCurrent,
+      { ...options, failure: reason => { refusal = reason; } }, () => { missingPair = true; });
+    if (await attempt()) return true;
+    // Only a fully observed missing exact pair may hydrate within this same preparation.
+    // Disabled controls, positive denial, ambiguous state and failed closure never retry.
+    if (!missingPair || refusal !== 'choice_unavailable' || options.exact !== true ||
+        !model || !effort || !Number.isFinite(options.deadline) || !current()) return failed();
+    const ui = modelPickerAccess(current, options);
+    let baseline;
+    const changed = await ui.state(state => {
+      // Hydration may have completed during the first close. Do not wait for a second
+      // mutation when the current exact pair already became available or was denied.
+      if (state.choices.some(choice => requestedPickerChoice(choice, model, effort))) return true;
+      const signature = JSON.stringify([state.version, state.currentBucket,
+        state.versions.map(version => [version.id, version.label]),
+        state.choices.map(choice => [choice.bucket, choice.id, choice.familyId, choice.effort, choice.available]),
+        state.lanes ?? null]);
+      if (baseline === undefined) { baseline = signature; return false; }
+      return signature !== baseline;
+    }, Number.isFinite(options.observationMs) ? Math.min(15000, Math.max(0, options.observationMs)) : 15000);
+    if (!changed || !current()) return failed();
+    if (changed.choices.some(choice => requestedPickerChoice(choice, model, effort) && choice.available === false)) {
+      refusal = 'choice_denied'; return failed();
+    }
+    // The unchanged selector owns all version/effort actions, restoration and final proof.
+    // It runs at most once more, with the original deadline and currentness predicate.
+    return await attempt() || failed();
+  }
+
+  async function selectModelSettingsOnce(model, effort, stillCurrent = () => true, options = {}, missingPair = () => {}) {
     if (!model && !effort) return true;
     // Optional diagnostics stay inside the incumbent selector. Fixed reason codes contain
     // no provider copy, model labels, draft text or snapshots. Legacy callers retain Boolean
@@ -4444,9 +4489,7 @@ var CLF_DOM = (() => {
         // actually observed family; never to an account default or another model.
         const name = normalizeModelLabel(model);
         const deniedRequestedChoice = state => options.exact === true && state.choices.some(choice =>
-          (choice.id === model || choice.familyId === model ||
-            (name && (normalizeModelLabel(choice.familyLabel) === name || normalizeModelLabel(choice.label) === name))) &&
-          (!effort || choice.effort === effort) && choice.available === false);
+          requestedPickerChoice(choice, model, effort) && choice.available === false);
         // A complete native snapshot can positively deny the exact requested pair. That
         // denial must survive an unrelated version's missing/hydrating snapshot below.
         if (deniedRequestedChoice(original)) return refused('choice_denied');
@@ -4492,7 +4535,7 @@ var CLF_DOM = (() => {
         const candidates = offered.filter(entry => !wantedEffort || entry.choice.effort === wantedEffort);
         const rank = Math.max(0, ...candidates.map(candidate => candidate.rank));
         const matches = candidates.filter(candidate => candidate.rank === rank);
-        if (!matches.length) return refused('choice_unavailable');
+        if (!matches.length) { missingPair(); return refused('choice_unavailable'); }
         if ((model && new Set(matches.map(candidate => candidate.choice.familyId)).size !== 1) ||
             (model && wantedEffort && new Set(matches.map(candidate => `${candidate.choice.id}\u0000${candidate.choice.effort}`)).size !== 1)) return refused('selection_ambiguous');
         const wanted = matches.find(candidate => candidate.version === original.version &&

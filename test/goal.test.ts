@@ -2856,7 +2856,7 @@ describe('native browser Loop stop rejection custody', () => {
           variant === 'unrelated failure' ? 'Composer unavailable' : 'Requested model or reasoning could not be confirmed',
           { detail: variant === 'transient picker' ? 'model-unconfirmed'
             : variant === 'exact unavailable choice' ? 'model-choice-unavailable' : 'model-choice-denied' })).toBe(true);
-        const denied = variant === 'exact denied choice' || variant === 'exact unavailable choice';
+        const denied = variant === 'exact denied choice';
         const draft = await settled(source.conversationId);
         expect(draft).toMatchObject({ stage: 'failed', retryable: !denied });
         expect(draft.error).toBe(denied ? 'goal_browser_model_choice_denied' :
@@ -2873,6 +2873,63 @@ describe('native browser Loop stop rejection custody', () => {
         if (denied) expect(rows[0]!.sendAuthorizedAt).toBeUndefined();
         expect((await browserInput.listInputs()).some(row => row.sourceHelperId === helper!.id)).toBe(false);
       }));
+
+  it.each(['unavailable', 'denied', 'authorized', 'uncertain', 'no transition'] as const)(
+    'cold recovery distinguishes a legacy missing-choice failure from an actual denial: %s', async variant =>
+    withIsolatedNativeInputOutbox(async () => {
+      const source = await seed(`legacy-missing-choice-${variant}`);
+      goal.startGoalDraft({ conversationId: source.conversationId, sessionId: source.sessionId, turnId: source.sourceTurnId });
+      let helper: InputEntry | undefined;
+      await vi.waitFor(async () => {
+        helper = (await browserInput.listInputs()).find(row => row.purpose === 'decision' && row.decisionSourceSessionId === source.sessionId);
+        expect(helper).toBeDefined();
+      });
+      expect(await browserInput.claimBrowserInput(helper!.id, 'legacy-missing-choice-owner', null, true)).not.toBeNull();
+      expect(await browserInput.failBrowserInput(helper!.id, 'legacy-missing-choice-owner',
+        'Requested model or reasoning could not be confirmed', { detail: 'model-choice-denied' })).toBe(true);
+      await settled(source.conversationId);
+      const saved = (await browserInput.listInputs()).map(row => row.id !== helper!.id ? row : {
+        ...row,
+        ...(variant === 'authorized' ? { sendAuthorizedAt: Date.now() } : {}),
+        ...(variant === 'uncertain' ? { toolReceiptUncertain: true } : {}),
+        recoveryTransitions: variant === 'no transition' ? undefined : row.recoveryTransitions!.map((transition, index, all) =>
+          index === all.length - 1 && variant !== 'denied' ? { ...transition, reason: 'model-choice-unavailable' } : transition)
+      });
+      await writeDurableNow('session-input', saved);
+      browserInput.resetInputForTests();
+      await browserInput.listInputs();
+      const abort = new AbortController();
+      const options = { lifetime: 'temporary-planner' as const, sourceSessionId: source.sessionId,
+        sourceTurnId: source.sourceTurnId, model: helper!.model, reasoningEffort: helper!.reasoningEffort };
+      if (variant !== 'unavailable') {
+        await expect(browserInput.requestBrowserDecision('Retained original work', abort.signal, options)).rejects.toThrow(
+          variant === 'authorized' || variant === 'uncertain' ? 'goal_browser_send_unconfirmed' : 'goal_browser_model_choice_denied');
+        expect(browserInput.browserHelperModelRetryAt(helper!.model, helper!.reasoningEffort)).not.toBe(0);
+        return;
+      }
+      expect(browserInput.browserHelperModelRetryAt(helper!.model, helper!.reasoningEffort)).toBe(0);
+      expect(goal.goalDraftNeedsIntervention(source.conversationId)).toBe(false);
+      const ordinary = await browserInput.enqueueInput({ id: randomUUID(), mode: 'auto', dueAt: Date.now(),
+        text: 'Unrelated retained note', sessionId: source.sessionId, model: helper!.model, reasoningEffort: helper!.reasoningEffort });
+      await writeDurableNow('session-input', [...saved, ...Array.from({ length: 60 }, () => ({
+        ...ordinary, id: randomUUID(), state: 'cancelled' as const }))]);
+      browserInput.resetInputForTests();
+      await browserInput.enqueueInput({ id: randomUUID(), mode: 'auto', dueAt: Date.now(),
+        text: 'Exercise legacy proof retention', sessionId: source.sessionId, model: helper!.model, reasoningEffort: helper!.reasoningEffort });
+      expect((await browserInput.listInputs()).some(row => row.id === helper!.id)).toBe(true);
+      expect(browserInput.browserHelperModelRetryAt(helper!.model, helper!.reasoningEffort)).toBe(0);
+      const pending = browserInput.requestBrowserDecision('Retained original work', abort.signal, options);
+      const cancelled = expect(pending).rejects.toBeDefined();
+      try {
+        await vi.waitFor(async () => {
+          const rows = (await browserInput.listInputs()).filter(row => row.decisionSourceSessionId === source.sessionId);
+          expect(rows).toHaveLength(2);
+          expect(rows[0]).toMatchObject({ id: helper!.id, state: 'failed', error: 'goal_browser_model_choice_denied' });
+          expect(rows[1]).toMatchObject({ state: 'queued', model: helper!.model, reasoningEffort: helper!.reasoningEffort });
+          expect(rows.every(row => row.messageId === undefined && row.deliveredAt === undefined)).toBe(true);
+        });
+      } finally { abort.abort(); await cancelled; }
+    }));
 
   it('retries a confirmed-unsent denied helper once per hour across cold restore without replaying uncertain sends', async () =>
     withIsolatedNativeInputOutbox(async () => {
@@ -2895,7 +2952,12 @@ describe('native browser Loop stop rejection custody', () => {
       const otherOptions = { ...options, sourceSessionId: otherSession.id, sourceTurnId: 'another-source-final' };
       const ordinary = await browserInput.enqueueInput({ id: randomUUID(), mode: 'auto', dueAt: Date.now(), text: 'Unrelated retained note', sessionId: otherSession.id,
         model: helper!.model, reasoningEffort: helper!.reasoningEffort });
-      await writeDurableNow('session-input', [...saved, ...Array.from({ length: 60 }, () => ({ ...ordinary,
+      const originalDenial = saved.find(row => row.id === helper!.id)!;
+      // A later legacy hydration miss must not evict the earlier real denial's cooldown proof.
+      const legacyMissing = { ...originalDenial, id: randomUUID(), createdAt: originalDenial.createdAt + 1,
+        recoveryTransitions: originalDenial.recoveryTransitions!.map((transition, index, all) =>
+          index === all.length - 1 ? { ...transition, at: deniedAt + 1, reason: 'model-choice-unavailable' } : transition) };
+      await writeDurableNow('session-input', [...saved, legacyMissing, ...Array.from({ length: 60 }, () => ({ ...ordinary,
         id: randomUUID(), state: 'cancelled' as const }))]);
       browserInput.resetInputForTests();
       await browserInput.enqueueInput({ id: randomUUID(), mode: 'auto', dueAt: Date.now(), text: 'Exercise the real bounded-history trim', sessionId: otherSession.id,
@@ -3091,7 +3153,7 @@ describe('native browser Loop stop rejection custody', () => {
       });
       expect(await browserInput.claimBrowserInput(helper!.id, 'passive-denied-owner', null, true)).not.toBeNull();
       expect(await browserInput.failBrowserInput(helper!.id, 'passive-denied-owner',
-        'Requested model or reasoning could not be confirmed', { detail: 'model-choice-unavailable' })).toBe(true);
+        'Requested model or reasoning could not be confirmed', { detail: 'model-choice-denied' })).toBe(true);
       await settled(source.conversationId);
       if (boundary === 'globally paused') await saveConfig({ ...defaultConfig(),
         ui: { ...defaultConfig().ui, automationPaused: true }, goal: { ...defaultConfig().goal,

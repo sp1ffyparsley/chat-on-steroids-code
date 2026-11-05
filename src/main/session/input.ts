@@ -3336,16 +3336,28 @@ export function browserHelperQuotaRejected(row: InputEntry): boolean {
 }
 const helperAvailabilityFailure = (row: InputEntry) => row.state === 'failed' &&
   (row.error === 'goal_browser_model_choice_denied' || row.error === 'goal_browser_usage_limit');
+/** Older companions collapsed a missing exact choice into denial. Its saved preparation
+ * receipt can disprove that classification, never a native Send or genuine provider refusal. */
+function legacyMissingChoiceFailure(row: InputEntry): boolean {
+  const transition = row.recoveryTransitions?.at(-1);
+  return row.state === 'failed' && row.error === 'goal_browser_model_choice_denied' &&
+    row.requiresAuthorization === true && Boolean(row.owner) && helperConfirmedUnsent(row) &&
+    row.toolReceiptUncertain !== true && row.decisionOutput === undefined &&
+    row.recoveryFailure?.phase === 'pre_send_preparation' && row.recoveryFailure.retrySafe === true &&
+    transition?.from === 'browser' && transition.to === 'failed' &&
+    transition.phase === 'pre_send_preparation' && transition.reason === 'model-choice-unavailable';
+}
 function helperModelRetryAt(rows: readonly InputEntry[], model: string | null | undefined,
   effort: string | null | undefined): number | null {
   if (!model || !effort) return null;
   const matching = rows.filter(row => row.purpose === 'decision' && row.lifetime === 'temporary-planner' &&
     row.model === model && row.reasoningEffort === effort);
-  const deniedAt = matching.filter(row => helperAvailabilityFailure(row) &&
+  const failures = matching.filter(helperAvailabilityFailure);
+  const deniedAt = failures.filter(row => !legacyMissingChoiceFailure(row) &&
     (helperConfirmedUnsent(row) || browserHelperQuotaRejected(row)) &&
     row.toolReceiptUncertain !== true).map(row => row.recoveryTransitions?.at(-1)?.at)
     .filter((at): at is number => Number.isSafeInteger(at) && at! > 0);
-  if (!deniedAt.length) return null;
+  if (!deniedAt.length) return failures.length && failures.every(legacyMissingChoiceFailure) ? 0 : null;
   const latest = Math.max(...deniedAt);
   // A collected, accepted answer after the denial proves the exact pair worked.
   // A native Send alone or an ambiguous/private response never clears the wait.
@@ -3353,7 +3365,7 @@ function helperModelRetryAt(rows: readonly InputEntry[], model: string | null | 
       row.decisionOutput && row.deliveredAt! > latest)) return 0;
   return latest + BROWSER_HELPER_AVAILABILITY_RETRY_MS;
 }
-/** Read-only Goal projection. Zero means a later real helper answer recovered the pair. */
+/** Read-only Goal projection. Zero means no availability wait remains; it is not completion. */
 export function browserHelperModelRetryAt(model: string | null | undefined,
   effort: string | null | undefined): number | null {
   return helperModelRetryAt(entries ?? [], model, effort);
@@ -3361,18 +3373,28 @@ export function browserHelperModelRetryAt(model: string | null | undefined,
 /** Keep one existing failure receipt per held pair, not an unbounded retry history. */
 function helperModelCooldownCustodyIds(rows: readonly InputEntry[]): Set<string> {
   const latest = new Map<string, InputEntry>();
+  const legacy = new Map<string, InputEntry>();
   for (const row of rows) {
     if (!helperAvailabilityFailure(row) || !row.model || !row.reasoningEffort ||
         (!helperConfirmedUnsent(row) && !browserHelperQuotaRejected(row)) || row.toolReceiptUncertain === true) continue;
     const at = row.recoveryTransitions?.at(-1)?.at;
     if (!Number.isSafeInteger(at) || at! <= 0) continue;
-    const key = `${row.model}\0${row.reasoningEffort}`, previous = latest.get(key);
-    if (!previous || at! > previous.recoveryTransitions!.at(-1)!.at) latest.set(key, row);
+    const target = legacyMissingChoiceFailure(row) ? legacy : latest;
+    const key = `${row.model}\0${row.reasoningEffort}`, previous = target.get(key);
+    if (!previous || at! > previous.recoveryTransitions!.at(-1)!.at) target.set(key, row);
   }
-  return new Set([...latest.values()].filter(row => {
+  return new Set([...new Set([...latest.keys(), ...legacy.keys()])].flatMap(key => {
+    const row = latest.get(key) ?? legacy.get(key)!;
     const retryAt = helperModelRetryAt(rows, row.model, row.reasoningEffort);
-    return retryAt !== null && retryAt > 0;
-  }).map(row => row.id));
+    if (retryAt !== null && retryAt > 0) return latest.has(key) ? [latest.get(key)!.id] : [];
+    const missing = legacy.get(key);
+    if (retryAt !== 0 || !missing || rows.some(candidate => candidate.purpose === 'decision' &&
+        candidate.model === missing.model && candidate.reasoningEffort === missing.reasoningEffort &&
+        candidate.state === 'sent' && helperNativeSendConfirmed(candidate) && candidate.decisionOutput &&
+        candidate.deliveredAt! > missing.recoveryTransitions!.at(-1)!.at)) return [];
+    // One proof per pair also keeps an old false denial retryable until its recovery is observed.
+    return [missing.id];
+  }));
 }
 
 function helperNativeSendConfirmed(row: InputEntry): boolean {
@@ -3787,7 +3809,7 @@ export async function failBrowserInput(id: string, owner: string, error: string,
     // A native exact-choice denial is distinct from an unreadable/hydrating picker.
     // Only its elected, positively unsent decision owner can settle this obligation.
     // Provider availability may mean quota, entitlement or retirement; do not guess which.
-    const deniedModelChoice = (options.detail === 'model-choice-denied' || options.detail === 'model-choice-unavailable') &&
+    const deniedModelChoice = options.detail === 'model-choice-denied' &&
       error === 'Requested model or reasoning could not be confirmed';
     const usageLimit = (options.detail === 'usage-limit' || options.detail === undefined) &&
       /^you['’]ve (?:reached our limit of messages per hour|hit your limit)\. please try again later\.?$/i.test(error);
