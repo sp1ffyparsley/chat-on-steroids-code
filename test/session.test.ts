@@ -4028,14 +4028,16 @@ describe('recoverable manual deletion', () => {
     'requires a valid bounded archive primary despite a good backup (%s)', async cause => {
       const summary = await createSession({ conversationId: randomUUID() });
       await deleteSession(summary.id);
-      const file = path.join(sessionsRoot(), '.deleted-sessions', summary.id, 'meta.json');
-      const raw = await fs.readFile(file, 'utf8');
-      await fs.writeFile(path.join(path.dirname(file), 'meta.backup.json'), raw);
-      if (cause === 'corrupt') await fs.writeFile(file, '{');
-      if (cause === 'missing') await fs.unlink(file);
-      if (cause === 'oversized') await fs.writeFile(file, ' '.repeat(1024 * 1024 + 1));
-      if (cause === 'invalid-lineage') { const meta = JSON.parse(raw); meta.chatIds.push(' invalid '); await fs.writeFile(file, JSON.stringify(meta)); }
-      expect(await readDeletedSessionCustody(summary.id)).toBeNull();
+      try {
+        const file = path.join(sessionsRoot(), '.deleted-sessions', summary.id, 'meta.json');
+        const raw = await fs.readFile(file, 'utf8');
+        await fs.writeFile(path.join(path.dirname(file), 'meta.backup.json'), raw);
+        if (cause === 'corrupt') await fs.writeFile(file, '{');
+        if (cause === 'missing') await fs.unlink(file);
+        if (cause === 'oversized') await fs.writeFile(file, ' '.repeat(1024 * 1024 + 1));
+        if (cause === 'invalid-lineage') { const meta = JSON.parse(raw); meta.chatIds.push(' invalid '); await fs.writeFile(file, JSON.stringify(meta)); }
+        expect(await readDeletedSessionCustody(summary.id)).toBeNull();
+      } finally { await permanentlyDeleteSession(summary.id); }
     });
 
   it('does not recreate a retired session directory from a delayed metadata write', async () => {

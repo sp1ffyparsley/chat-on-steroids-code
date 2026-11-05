@@ -469,6 +469,9 @@ let deferredRevivals = [];
 // Opening custody is durable independently of a page receipt. Only the app's next outbox
 // publication retires an input id; navigation, user-close and MV3 suspension do not.
 let inputOpenings = {};
+// One-time compatibility retirement shares the normal serialized live-state write. Malformed,
+// conflicting or unassigned legacy custody is never interpreted as a safely migrated map.
+let legacyInputOpeningsMigration = null;
 // A terminal helper already needs a fresh empty-document proof before it can close. Keeping that
 // proven-empty page for another five minutes only compounds Chrome pressure during a failed
 // delivery burst, so retire it promptly while retaining enough time for the final SPA receipt.
@@ -554,7 +557,8 @@ async function loadOnce() {
   disconnected = stored.disconnected === true;
   persistedConnection = { port, token, disconnected, instanceId };
   deferredRevivals = Array.isArray(stored.deferredRevivals) ? stored.deferredRevivals.slice(-100) : [];
-  stored.inputOpenings = { ...(stored.desktopInputTabs || {}), ...(stored.inputOpenings || {}) };
+  const legacyOpenings = stored.desktopInputTabs, modernOpenings = stored.inputOpenings;
+  stored.inputOpenings = { ...(legacyOpenings || {}), ...(modernOpenings || {}) };
   inputOpenings = stored.inputOpenings && typeof stored.inputOpenings === 'object' && !Array.isArray(stored.inputOpenings)
     ? Object.fromEntries(Object.entries(stored.inputOpenings)
       .filter(([id, row]) => /^[a-f0-9-]{36}$/i.test(id) && row && (row.tab === null || Number.isInteger(row.tab)))
@@ -566,6 +570,23 @@ async function loadOnce() {
         // creating a duplicate immediately after an MV3 restart.
         electedAt: Number.isFinite(row.electedAt) ? row.electedAt : Date.now()
       }])) : {};
+  const openingMap = value => value && typeof value === 'object' && !Array.isArray(value);
+  const completeLegacyUnion = openingMap(legacyOpenings) &&
+    (modernOpenings === undefined || openingMap(modernOpenings)) &&
+    Object.keys(stored.inputOpenings).length <= 1000 &&
+    Object.entries(stored.inputOpenings).every(([id, row]) => /^[a-f0-9-]{36}$/i.test(id) &&
+      openingMap(row) && (row.tab === null || Number.isInteger(row.tab))) &&
+    Object.entries(legacyOpenings).every(([id, row]) => {
+      if (!Object.prototype.hasOwnProperty.call(modernOpenings || {}, id)) return true;
+      // This loader's missing-timestamp normalization is not conflicting ownership. Any
+      // other row difference remains retained in the legacy map rather than guessed away.
+      const normalized = !Object.prototype.hasOwnProperty.call(row, 'electedAt') && Number.isFinite(modernOpenings[id]?.electedAt)
+        ? { ...row, electedAt: modernOpenings[id].electedAt } : row;
+      return JSON.stringify(normalized) === JSON.stringify(modernOpenings[id]);
+    });
+  legacyInputOpeningsMigration = completeLegacyUnion && Object.keys(legacyOpenings).length > 0 &&
+    instanceId && token && port && !disconnected
+    ? { epoch: connectionEpoch, instanceId, token, port, count: Object.keys(legacyOpenings).length } : null;
   stopOpenings = stored.stopOpenings && typeof stored.stopOpenings === 'object' && !Array.isArray(stored.stopOpenings)
     ? Object.fromEntries(Object.entries(stored.stopOpenings).filter(([id, row]) => commandMarkerId(id) && row &&
       (row.tab === null || Number.isInteger(row.tab)) && cleanConversationId(row.conversationId) &&
@@ -882,8 +903,12 @@ function persist(snapshot = () => ({ port, token, disconnected, instanceId }), c
 let liveWriteQueue = Promise.resolve();
 
 function persistLive() {
-  const write = liveWriteQueue.then(() =>
-    Promise.all([
+  const write = liveWriteQueue.then(() => {
+    const migration = legacyInputOpeningsMigration;
+    const migrateLegacy = migration && migration.epoch === connectionEpoch &&
+      migration.instanceId === instanceId && migration.token === token && migration.port === port &&
+      !disconnected && !unassignedHistoryUncertain;
+    return Promise.all([
       chrome.storage.session.set({
         settled: settled.slice(-40),
         tabConversations,
@@ -910,13 +935,21 @@ function persistLive() {
         closeOutbox: instanceId === null && port === null && token === null || unassignedHistoryUncertain ? closeOutbox : closeOutbox.slice(-200),
         commandAckOutbox: commandAckOutbox.slice(-200),
         inputOpenings,
+        // Commit the complete current union AND retire its obsolete alias atomically. A
+        // later MV3 load must not resurrect rows Main already retired from this projection.
+        ...(migrateLegacy ? { desktopInputTabs: {} } : {}),
         stopOpenings,
         commandTabLeases,
         commandLeaseGeneration,
         deferredRevivals: deferredRevivals.slice(-100)
       })
-    ])
-  );
+    ]).then(() => {
+      if (migrateLegacy && legacyInputOpeningsMigration === migration) {
+        legacyInputOpeningsMigration = null;
+        console.info('[Chat On Steroids] migrated legacy input opening custody', migration.count);
+      }
+    });
+  });
   liveWriteQueue = write.then(
     () => undefined,
     () => undefined
@@ -6831,12 +6864,12 @@ async function maintainTabHygiene(policy, nonDiscardable, closable, additiveOrga
 function maintain(woken = false) {
   // Do not acquire helper/opening custody after reload's retained-owner snapshot. This is
   // a transient admission hold only; no command/input is claimed, failed, ACKed or dequeued.
-  if (companionReloadFlight) return maintenanceFlight || Promise.resolve();
+  if (companionReloadFlight) { maintenanceAgain = true; return maintenanceFlight || Promise.resolve(); }
   // Alarm, observation-drain and startup can arrive while tabs.create is awaiting Chrome.
   // Share the whole scan/create pass so one outbox UUID cannot acquire two tabs before ACK.
   if (maintenanceFlight) { maintenanceAgain ||= woken; return maintenanceFlight; }
   maintenanceFlight = (async () => {
-    do { maintenanceAgain = false; await maintainOnce(); } while (maintenanceAgain);
+    do { maintenanceAgain = false; await maintainOnce(); } while (maintenanceAgain && !companionReloadFlight);
   })().finally(() => { maintenanceFlight = null; });
   return maintenanceFlight;
 }
@@ -7996,10 +8029,27 @@ const HANDLERS = {
   async reloadCompanion(_message, sender) {
     if (!companionPopup(sender)) return { ok: false, error: 'popup_required' };
     if (companionReloadFlight) return { ok: false, error: 'reload_deferred', pendingWork: { reload: 1 } };
+    const epoch = connectionEpoch;
     const work = reloadCompanionSafely();
     companionReloadFlight = work;
-    try { return await work; }
-    finally { if (companionReloadFlight === work) companionReloadFlight = null; }
+    let outcome;
+    try { outcome = await work; return outcome; }
+    finally {
+      if (companionReloadFlight === work) {
+        companionReloadFlight = null;
+        // A deferred check can have held the only Main wake that retires a terminal opening.
+        // Reuse its normal owner only after release, never after accepted/unknown reload or
+        // across account replacement. No reload retry or Input custody is invented here.
+        if (maintenanceAgain && epoch === connectionEpoch && outcome?.ok === false && outcome.error === 'reload_deferred') {
+          // An older pass may have exited its loop but not released its flight yet. Joining
+          // that owner first avoids latching again onto an already-finished pass. Accepted
+          // intervening reloads clear the same latch, so this cannot revive post-reload work.
+          void Promise.resolve(maintenanceFlight).then(() => {
+            if (maintenanceAgain && epoch === connectionEpoch) return maintain(true);
+          }).catch(() => undefined);
+        } else maintenanceAgain = false;
+      }
+    }
   },
   async project_create(message, _sender, source) {
     if (!ownsDocument(source) || !/^[a-f0-9-]{36}$/i.test(String(message.id || '')) || !source.documentId)

@@ -1261,7 +1261,7 @@ describe('custody-preserving companion reload', () => {
     expect(worker.runtimeReload).not.toHaveBeenCalled();
   });
 
-  it('holds new maintenance, urgent-open and browser-control admission during the final inventory, then allows normal wake after deferral', async () => {
+  it.each(['deferred', 'accepted', 'account-changed'])('coalesces a held normal maintenance wake only after same-account reload deferral: %s', async outcome => {
     let socket!: { onmessage?: (event: { data: string }) => void };
     class WakeSocket {
       readyState = 1;
@@ -1278,7 +1278,10 @@ describe('custody-preserving companion reload', () => {
     const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }), session,
       browserController: { revoke: async () => undefined, ready: async () => undefined, pump }, WebSocket: WakeSocket,
       tabsQuery: async () => {
-        if (armed && ++inventories === 2) { finalInventory(); await gate; return [{ id: 1, url: `https://chatgpt.com/c/${conversationId}` }]; }
+        if (armed && ++inventories === 2) {
+          finalInventory(); await gate;
+          return outcome === 'deferred' ? [{ id: 1, url: `https://chatgpt.com/c/${conversationId}` }] : [];
+        }
         return [];
       },
       fetch: async input => {
@@ -1293,18 +1296,27 @@ describe('custody-preserving companion reload', () => {
     const reload = request(worker);
     await entered;
     socket.onmessage?.({ data: 'wake' });
+    socket.onmessage?.({ data: 'wake' });
     socket.onmessage?.({ data: 'browser-control' });
     socket.onmessage?.({ data: 'open-conversation' });
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(statusReads).toBe(0);
     expect(pump).not.toHaveBeenCalled();
     expect(session.data.modelCatalogOwner).toBeUndefined();
-    release();
-    expect(await reload).toMatchObject({ ok: false, error: 'reload_deferred', pendingWork: { openChatgptTabs: 1 } });
-    expect(worker.runtimeReload).not.toHaveBeenCalled();
+    if (outcome === 'account-changed') await worker.send({ type: 'unpair' });
     armed = false;
-    socket.onmessage?.({ data: 'wake' });
-    await vi.waitFor(() => { expect(statusReads).toBeGreaterThan(0); expect(pump).toHaveBeenCalled(); });
+    release();
+    if (outcome === 'deferred') {
+      expect(await reload).toMatchObject({ ok: false, error: 'reload_deferred', pendingWork: { openChatgptTabs: 1 } });
+      expect(worker.runtimeReload).not.toHaveBeenCalled();
+      await vi.waitFor(() => { expect(statusReads).toBe(1); expect(pump).toHaveBeenCalledTimes(1); });
+    } else {
+      expect(await reload).toMatchObject(outcome === 'accepted' ? { ok: true, reloading: true } : { ok: false, error: 'reload_deferred' });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(statusReads).toBe(0);
+      expect(pump).not.toHaveBeenCalled();
+      expect(worker.runtimeReload).toHaveBeenCalledTimes(outcome === 'accepted' ? 1 : 0);
+    }
   });
 
   it('forwards a second normal browser-control wake to the real incumbent re-poll while retaining its pending promises for reload', async () => {
@@ -1343,6 +1355,181 @@ describe('custody-preserving companion reload', () => {
     await vi.waitFor(() => expect(polls).toBe(2));
     expect(await request(worker)).toMatchObject({ ok: true, reloading: true });
   });
+
+  it.each([false, true])('a single held wake reconciles the complete Main opening projection without retiring a queued input: queued=%s', async queued => {
+    const id = 'a1111111-2222-4333-8444-555555555555';
+    const opening = { tab: 41, stage: 'ready', electedAt: Date.now() };
+    let socket!: { onmessage?: (event: { data: string }) => void }, release!: () => void, entered!: () => void;
+    class WakeSocket {
+      readyState = 1;
+      onmessage?: (event: { data: string }) => void;
+      constructor(readonly url: string) { socket = this; }
+      send() {}
+      close() { this.readyState = 3; }
+    }
+    const inventoryEntered = new Promise<void>(resolve => { entered = resolve; });
+    const inventoryGate = new Promise<void>(resolve => { release = resolve; });
+    let armed = false, statusReads = 0;
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token', inputOpenings: { [id]: opening } });
+    const worker = loadWorker({ local, session: new FakeStorageArea(), WebSocket: WakeSocket,
+      tabsQuery: async () => { if (armed) { entered(); await inventoryGate; } return []; },
+      fetch: async input => {
+        if (new URL(input).pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (new URL(input).pathname === '/status') {
+          statusReads++;
+          return response(200, { ok: true, inputs: [], inputOpeningIds: queued ? [id] : [], repairs: [] });
+        }
+        return response(200, { ok: true });
+      } });
+    await worker.send({ type: 'events', conversationId, entries: [{ conversationId,
+      event: { kind: 'progress', time: 1, text: 'establish wake channel' } }] });
+    armed = true;
+    const reloading = request(worker);
+    await inventoryEntered;
+    socket.onmessage?.({ data: 'wake' });
+    expect(statusReads).toBe(0);
+    armed = false;
+    release();
+    expect(await reloading).toMatchObject({ ok: false, error: 'reload_deferred', pendingWork: { inputOpenings: 1 } });
+    await vi.waitFor(() => {
+      expect(statusReads).toBe(1);
+      expect(local.data.inputOpenings).toEqual(queued ? { [id]: opening } : {});
+    });
+    expect(worker.tabsCreate).not.toHaveBeenCalled();
+    expect(worker.tabsRemove).not.toHaveBeenCalled();
+    expect(worker.runtimeReload).not.toHaveBeenCalled();
+  });
+
+  it.each([['deferred', true], ['deferred', false], ['accepted-intervening', true], ['unknown-intervening', true], ['account-changed', true]] as const)(
+    'joins the old maintenance flight release before replaying its held wake: %s, woken=%s', async (outcome, woken) => {
+      const maintainStart = backgroundSource.indexOf('function maintain(woken = false) {');
+      const maintainEnd = backgroundSource.indexOf('\n/**', maintainStart);
+      const reloadStart = backgroundSource.indexOf('  async reloadCompanion(_message, sender) {');
+      const reloadEnd = backgroundSource.indexOf('\n  async project_create(', reloadStart);
+      const reloadFunction = backgroundSource.slice(reloadStart, reloadEnd).trim()
+        .replace(/^async reloadCompanion\(/, 'async function reloadCompanion(').replace(/,$/, '');
+      let releaseReload!: () => void, releaseMaintenance!: () => void;
+      const reloadGate = new Promise<void>(resolve => { releaseReload = resolve; });
+      const maintenanceGate = new Promise<void>(resolve => { releaseMaintenance = resolve; });
+      const maintainOnce = vi.fn(async () => undefined);
+      const context = { maintenanceFlight: null as Promise<void> | null, maintenanceAgain: false,
+        companionReloadFlight: null, connectionEpoch: 1, companionPopup: () => true, maintainOnce,
+        reloadCompanionSafely: async () => { await reloadGate; return { ok: false, error: 'reload_deferred' }; }, Promise };
+      // Model a real pass that has left its loop but whose final flight-release continuation
+      // has not run yet. It must not absorb the deferred reload's only pending normal wake.
+      context.maintenanceFlight = maintenanceGate.finally(() => { context.maintenanceFlight = null; });
+      const owner = vm.runInNewContext(`${backgroundSource.slice(maintainStart, maintainEnd)}\n${reloadFunction}; ({ maintain, reloadCompanion });`, context);
+      const reload = owner.reloadCompanion({}, {});
+      void owner.maintain(woken);
+      releaseReload();
+      expect(await reload).toMatchObject({ ok: false, error: 'reload_deferred' });
+      expect(maintainOnce).not.toHaveBeenCalled();
+      if (outcome === 'account-changed') context.connectionEpoch++;
+      if (outcome === 'accepted-intervening') {
+        context.reloadCompanionSafely = async () => ({ ok: true, reloading: true } as any);
+        expect(await owner.reloadCompanion({}, {})).toMatchObject({ ok: true });
+      }
+      if (outcome === 'unknown-intervening') {
+        context.reloadCompanionSafely = async () => { throw new Error('reload outcome unknown'); };
+        await expect(owner.reloadCompanion({}, {})).rejects.toThrow('reload outcome unknown');
+      }
+      releaseMaintenance();
+      if (outcome === 'deferred') await vi.waitFor(() => expect(maintainOnce).toHaveBeenCalledTimes(1));
+      else {
+        await new Promise(resolve => setTimeout(resolve, 0));
+        expect(maintainOnce).not.toHaveBeenCalled();
+      }
+    });
+
+  it('does not resurrect terminal legacy opening projections after a complete Main status and MV3 restart', async () => {
+    const legacy = Object.fromEntries(Array.from({ length: 10 }, (_, index) => [
+      `a1111111-2222-4333-8444-${String(index).padStart(12, '0')}`, { tab: 400 + index, stage: 'ready', electedAt: Date.now() }
+    ]));
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token', instanceId: 'profile-reload', desktopInputTabs: legacy });
+    const worker = loadWorker({ local, session: new FakeStorageArea(), tabsQuery: async () => [], fetch: async input =>
+      response(200, new URL(input).pathname === '/hello'
+        ? { app: 'chat-on-steroids', paired: true, instanceId: 'profile-reload' }
+        : { ok: true, inputs: [], inputOpeningIds: [], repairs: [] }) });
+    await worker.fireAlarm();
+    expect(local.data.inputOpenings).toEqual({});
+    const restarted = loadWorker({ local, session: new FakeStorageArea() });
+    expect(await request(restarted)).toMatchObject({ ok: true, reloading: true });
+    expect(local.data.desktopInputTabs).toEqual({});
+    expect(restarted.tabsCreate).not.toHaveBeenCalled();
+  });
+
+  it('migrates the complete legacy and modern opening union in one successful write, retaining queued custody across restart', async () => {
+    const legacyId = 'a1111111-2222-4333-8444-555555555555', modernId = 'b1111111-2222-4333-8444-555555555555';
+    const legacy = { [legacyId]: { tab: 41, stage: 'ready' } };
+    // A prior loader/persist added exactly this compatibility timestamp to the duplicate.
+    const modern = { [legacyId]: { ...legacy[legacyId], electedAt: Date.now() },
+      [modernId]: { tab: 42, stage: 'ready', electedAt: Date.now() } };
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token', instanceId: 'profile-reload',
+      browserId: 'a'.repeat(32), desktopInputTabs: legacy, inputOpenings: modern });
+    const set = local.set.bind(local);
+    let fail = true;
+    const migrationWrites: Record<string, unknown>[] = [];
+    local.set = async values => {
+      if (Object.prototype.hasOwnProperty.call(values, 'desktopInputTabs')) {
+        migrationWrites.push(structuredClone(values));
+        if (fail) { fail = false; throw new Error('migration write failed'); }
+      }
+      await set(values);
+    };
+    const worker = loadWorker({ local, session: new FakeStorageArea(), tabsQuery: async () => [], fetch: async input =>
+      response(200, new URL(input).pathname === '/hello'
+        ? { app: 'chat-on-steroids', paired: true, instanceId: 'profile-reload' }
+        : { ok: true, inputs: [], inputOpeningIds: [legacyId, modernId], repairs: [] }) });
+    await worker.fireAlarm();
+    expect(local.data.desktopInputTabs).toEqual(legacy);
+    expect(local.data.inputOpenings).toEqual(modern);
+    await worker.fireAlarm();
+    expect(local.data.desktopInputTabs).toEqual({});
+    expect(local.data.inputOpenings).toEqual({ ...legacy, ...modern });
+    expect(migrationWrites).toHaveLength(2);
+    for (const write of migrationWrites) {
+      expect(write.desktopInputTabs).toEqual({});
+      expect(write.inputOpenings).toEqual({ ...legacy, ...modern });
+    }
+    const restarted = loadWorker({ local, session: new FakeStorageArea() });
+    expect(await request(restarted)).toMatchObject({ ok: false, error: 'reload_deferred', pendingWork: { inputOpenings: 2 } });
+    expect(worker.tabsCreate).not.toHaveBeenCalled();
+    expect(worker.tabsRemove).not.toHaveBeenCalled();
+  });
+
+  it.each(['legacy-array', 'invalid-id', 'invalid-row', 'modern-array', 'conflicting-row', 'over-limit', 'unassigned', 'account-changed'])(
+    'preserves the exact legacy alias when complete same-account migration is unproved: %s', async reason => {
+      const id = 'a1111111-2222-4333-8444-555555555555';
+      const row = { tab: 41, stage: 'ready', electedAt: Date.now() };
+      const legacy = reason === 'legacy-array' ? [row]
+        : reason === 'invalid-id' ? { 'not-an-input': row }
+        : reason === 'invalid-row' ? { [id]: { ...row, tab: 'unknown' } }
+        : reason === 'over-limit' ? Object.fromEntries(Array.from({ length: 1001 }, (_, index) => [
+          `a1111111-2222-4333-8444-${String(index).padStart(12, '0')}`, row])) : { [id]: row };
+      const modern = reason === 'modern-array' ? [] : reason === 'conflicting-row' ? { [id]: { ...row, tab: 42 } } : {};
+      const local = new FakeStorageArea({ browserId: 'a'.repeat(32), desktopInputTabs: legacy, inputOpenings: modern,
+        ...(reason === 'unassigned' ? { disconnected: true } : { port: 8765, token: 'paired-token', instanceId: 'profile-reload' }) });
+      let entered!: () => void, release!: () => void;
+      const statusEntered = new Promise<void>(resolve => { entered = resolve; });
+      const statusGate = new Promise<void>(resolve => { release = resolve; });
+      const worker = loadWorker({ local, session: new FakeStorageArea(), tabsQuery: async () => [], fetch: async input => {
+        if (new URL(input).pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true, instanceId: 'profile-reload' });
+        if (new URL(input).pathname === '/status') {
+          if (reason === 'account-changed') { entered(); await statusGate; }
+          return response(200, { ok: true, inputs: [], inputOpeningIds: Object.keys(legacy), repairs: [] });
+        }
+        return response(200, { ok: true });
+      } });
+      if (reason === 'unassigned') await worker.registerTab(1);
+      else {
+        const pass = worker.fireAlarm();
+        if (reason === 'account-changed') { await statusEntered; await worker.send({ type: 'unpair' }); release(); }
+        await pass;
+      }
+      expect(local.data.desktopInputTabs).toEqual(legacy);
+      expect(worker.tabsCreate).not.toHaveBeenCalled();
+      expect(worker.tabsRemove).not.toHaveBeenCalled();
+    });
 
   it('allows a second normal urgent-open wake to poll and acknowledge its new nonce while the first snapshot is delayed', async () => {
     let socket!: { onmessage?: (event: { data: string }) => void }, release!: () => void;

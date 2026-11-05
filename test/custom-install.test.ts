@@ -287,7 +287,7 @@ describe.runIf(process.platform === 'win32')('custom qualified install integrity
   it('keeps a Windows-owned process alive after forcibly closing its launcher tree', async () => {
     const shell = path.join(process.env.SystemRoot!, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
     const childCode = Buffer.from('Start-Sleep -Seconds 60', 'utf16le').toString('base64');
-    const code = `. ${ps(installScript)}; $p = Start-IndependentInstalledApp -Executable ${ps(shell)} -Arguments @('-NoProfile','-NonInteractive','-EncodedCommand','${childCode}'); Write-Output ("OWNED_PID=" + $p.Id); Start-Sleep -Seconds 60`;
+    const code = `Write-Output 'INDEPENDENT_LAUNCHER_STARTED'; . ${ps(installScript)}; Write-Output 'INDEPENDENT_LAUNCHER_SCRIPT_READY'; $p = Start-IndependentInstalledApp -Executable ${ps(shell)} -Arguments @('-NoProfile','-NonInteractive','-EncodedCommand','${childCode}'); Write-Output ("OWNED_PID=" + $p.Id); Start-Sleep -Seconds 60`;
     const launcher = spawn(shell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(code, 'utf16le').toString('base64')], { windowsHide: true });
     let ownedPid: number | undefined;
     let output = '';
