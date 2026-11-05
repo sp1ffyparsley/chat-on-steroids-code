@@ -5300,7 +5300,7 @@ require('node:module').syncBuiltinESMExports();
     expect(payload.bridge).toBe('127.0.0.1:8796');
     expect(payload.installedRuntimeChecked).toBe(false);
     expect(payload.developmentUpdateGates).toMatchObject({
-      appShellSourceSha256: 'D685C51CDF03056A64FF6C2EC679F79A27EDE061620978C0D30E270C76468C64',
+      appShellSourceSha256: '88EE49C1B84A0F2B7BDD9122778CFF9FE6B14AB0F5F8805407581C0881941C6A',
       htmlDocument: 'blocked-by-known-app-shell-navigation-guards',
       preloadCurrentRenderer: 'blocked-by-known-app-shell-navigation-guards',
       nativeRuntimeVerified: false,
@@ -5311,7 +5311,7 @@ require('node:module').syncBuiltinESMExports();
 
   it('pins the reviewed recovery shell to blocked navigation without qualifying modified shell bytes', () => {
     const reviewedBytes = readFileSync(path.join(project, 'src', 'main', 'index.ts'));
-    const reviewedHash = 'D685C51CDF03056A64FF6C2EC679F79A27EDE061620978C0D30E270C76468C64';
+    const reviewedHash = '88EE49C1B84A0F2B7BDD9122778CFF9FE6B14AB0F5F8805407581C0881941C6A';
     const source = reviewedBytes.toString('utf8');
     expect(createHash('sha256').update(reviewedBytes).digest('hex').toUpperCase()).toBe(reviewedHash);
     // The reviewed window body includes view-only recovery and exact-window close

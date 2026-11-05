@@ -1324,7 +1324,10 @@ if (checkOnly) {
       // Consumed startup controls no longer replay on native relaunch.
       // Both complete navigation owners retain the independently checked hashes above.
       // Still BLOCKED: this source classification grants no runtime or browser authority.
-      appShellSourceSha256 === 'D685C51CDF03056A64FF6C2EC679F79A27EDE061620978C0D30E270C76468C64';
+      appShellSourceSha256 === 'D685C51CDF03056A64FF6C2EC679F79A27EDE061620978C0D30E270C76468C64' ||
+      // Explicit cold-start Pause now persists before restored browser work. Both complete
+      // navigation-owner bodies remain window6c0662d9/globald2ba9316, still BLOCKED.
+      appShellSourceSha256 === '88EE49C1B84A0F2B7BDD9122778CFF9FE6B14AB0F5F8805407581C0881941C6A';
   const nativeDocumentGate = knownBlockedNavigationSource
     ? 'blocked-by-known-app-shell-navigation-guards'
     : 'source-unknown-requires-native-qualification';
