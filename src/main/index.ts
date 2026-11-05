@@ -676,9 +676,10 @@ async function reloadCompanionAfterExplicitRequest(state: PendingCompanionReload
   }
 }
 
-/** A cached extension origin never grants reload authority for a paused or replaced account. */
+/** Maintenance may run under Pause; the worker independently proves lossless reload safety.
+ * Pausing still fences task admission, and a cached origin never revives a replaced owner. */
 function companionReloadCurrent(state: PendingCompanionReload): boolean {
-  return !quitting && !state.deferredForProcess && getConfig().ui.automationPaused !== true && companionReloadOwnerCurrent(state);
+  return !quitting && !state.deferredForProcess && companionReloadOwnerCurrent(state);
 }
 
 /** Fresh bounded browser presence is reload eligibility, not proof of useful chat work. */
@@ -725,8 +726,8 @@ async function completePendingCompanionReload(state: PendingCompanionReload): Pr
 
 /**
  * Keeps one exact installed companion generation pending until this account proves its Chrome
- * extension origin, fresh paired presence and unpaused admission. Paused/unpaired Chrome can
- * still hold unassigned session-only journals: do not wipe them with a speculative Reload.
+ * extension origin and fresh signed-in paired presence. Global Pause remains in force while
+ * the normal worker reload owner drains journals and refuses open pages or retained custody.
  * This is process-lifetime work; a later eligible bridge change continues the same pending owner.
  */
 async function armPendingCompanionReload(fingerprint: string): Promise<void> {
@@ -761,7 +762,7 @@ async function reloadPairedCompanionAfterUpdate(fingerprint: string | null): Pro
       ? 'Changed browser companion bytes remain pending under an exact operator deferral for this process. Existing Chrome bytes were not verified updated.'
       : pendingCompanionReload.dispatched
       ? 'Browser companion reload was already requested; its exact bookkeeping remains held. No automatic replay will occur in this process. Inspect the account reload and receipt before restarting.'
-      : 'Browser companion was updated on disk; reload remains pending until this exact account is unpaused, signed in and freshly paired. Cached extension origin alone cannot authorize Reload.');
+      : 'Browser companion was updated on disk; reload remains pending until this exact account is signed in and freshly paired. Automation may remain paused; the worker still owns lossless reload checks. Cached extension origin alone cannot authorize Reload.');
   }
 }
 

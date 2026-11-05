@@ -134,7 +134,7 @@ async function companionReloadFixture(withControls = false) {
   expect(end).toBeGreaterThan(start);
   const status = { running: true, port: 8766, paired: true, present: true, authState: 'signed-in', lastSeenAt: Date.now() };
   const config = { ui: { automationPaused: false }, tunnel: { profileEpoch: 3 } };
-  const runtime = { profile: { id: 'profile-Delta', state: { mode: 'isolated' } }, stateRoot: 'retained-runtime' };
+  const runtime = { profile: { id: 'profile-delta', state: { mode: 'isolated' } }, stateRoot: 'retained-runtime' };
   const listeners = new Set<() => void>();
   const open = vi.fn(async (_url: string): Promise<void> => {});
   const write = vi.fn(async (_key: string, _fingerprint: string) => undefined);
@@ -185,8 +185,28 @@ async function companionReloadFixture(withControls = false) {
 }
 
 describe('automatic companion reload custody', () => {
+  it('requests the normal lossless companion reload while automation stays paused', async () => {
+    const fixture = await companionReloadFixture();
+    fixture.config.ui.automationPaused = true;
+    await fixture.start(); await fixture.settle();
+    expect(fixture.open).toHaveBeenCalledOnce();
+    expect(fixture.open.mock.calls[0]![0]).toMatch(/^chrome-extension:\/\/[a-p]{32}\/popup\.html\?clf-reload=1&nonce=[a-zA-Z0-9_-]+&close=1$/);
+    expect(fixture.config.ui.automationPaused).toBe(true);
+    expect(fixture.resume).not.toHaveBeenCalled();
+    expect(fixture.write).toHaveBeenCalledWith('companion-fingerprint', 'new-fingerprint');
+    expect(fixture.pending()).toBeNull();
+    // Only the normal popup/worker owner may decide whether its journals/documents permit reload.
+    const source = await readFile(path.join(repo, 'src/main/index.ts'), 'utf8');
+    const owner = source.slice(source.indexOf('async function completePendingCompanionReload('),
+      source.indexOf('async function armPendingCompanionReload('));
+    expect(owner).not.toContain('runtime.reload');
+    expect(owner).not.toContain('discard-unexportable');
+    fixture.changed(); await fixture.settle();
+    expect(fixture.open).toHaveBeenCalledOnce();
+  });
+
   const deferralArgs = (fingerprint = 'a'.repeat(64)) => ['app.exe', '--background',
-    '--cos-instance-runtime=profile-Delta', '--defer-companion-reload=profile-Delta',
+    '--cos-instance-runtime=profile-delta', '--defer-companion-reload=profile-delta',
     '--defer-companion-reload-pid=19', '--defer-companion-reload-generation=1700000000019',
     '--defer-companion-reload-epoch=3', `--defer-companion-reload-fingerprint=${fingerprint}`];
   const manualReloadArgs = (fingerprint = 'a'.repeat(64)) =>
@@ -201,8 +221,8 @@ describe('automatic companion reload custody', () => {
     fixture.control(manualReloadArgs(fingerprint)); await fixture.settle();
     expect(fixture.open).toHaveBeenCalledOnce();
     expect(fixture.open.mock.calls[0]![0]).toMatch(/^chrome-extension:\/\/[a-p]{32}\/popup\.html\?clf-reload=1&nonce=[a-zA-Z0-9_-]+&close=1$/);
-    expect(fixture.originSlot).toHaveBeenCalledWith('isolated', 'profile-Delta');
-    expect(fixture.secret).toHaveBeenCalledWith('isolated:profile-Delta:extension-origin');
+    expect(fixture.originSlot).toHaveBeenCalledWith('isolated', 'profile-delta');
+    expect(fixture.secret).toHaveBeenCalledWith('isolated:profile-delta:extension-origin');
     expect(fixture.config.ui.automationPaused).toBe(true); expect(fixture.resume).not.toHaveBeenCalled();
     expect(fixture.write).not.toHaveBeenCalled();
     expect(fixture.pending()).toBe(pending); expect(fixture.pending()?.dispatched).toBe(true);
@@ -223,7 +243,7 @@ describe('automatic companion reload custody', () => {
       if (hold === 'missing-approval') args = args.filter(arg => arg !== '--discard-unexportable-companion-buffers');
       else if (hold === 'duplicate-approval') args.push('--discard-unexportable-companion-buffers');
       else if (hold === 'resume') args.push('--resume-automation');
-      else if (hold === 'deferral') args.push('--defer-companion-reload=profile-Delta');
+      else if (hold === 'deferral') args.push('--defer-companion-reload=profile-delta');
       else if (hold === 'wrong-pid') args = args.map(arg => arg === '--reload-companion-pid=19' ? '--reload-companion-pid=20' : arg);
       else if (hold === 'stale-generation') args = args.map(arg => arg.startsWith('--reload-companion-generation=') ? '--reload-companion-generation=1700000000020' : arg);
       else if (hold === 'wrong-epoch') args = args.map(arg => arg === '--reload-companion-epoch=3' ? '--reload-companion-epoch=4' : arg);
@@ -247,12 +267,13 @@ describe('automatic companion reload custody', () => {
       fixture.config.ui.automationPaused = true; fixture.status.paired = false;
       const fingerprint = 'a'.repeat(64); await fixture.start(fingerprint);
       let release!: () => void;
+      fixture.secret.mockClear();
       fixture.secret.mockImplementationOnce(() => new Promise<string>(resolve => {
         release = () => resolve('chrome-extension://fcckeonnadegkheflpbppbddkpkdhjip');
       }));
       fixture.control(manualReloadArgs(fingerprint));
       await vi.waitFor(() => expect(fixture.secret).toHaveBeenCalledOnce());
-      if (change === 'profile-id') fixture.runtime.profile.id = 'profile-Epsilon';
+      if (change === 'profile-id') fixture.runtime.profile.id = 'profile-epsilon';
       else if (change === 'mode') fixture.runtime.profile.state.mode = 'legacy';
       else if (change === 'root') fixture.runtime.stateRoot = 'other-runtime';
       else if (change === 'epoch') fixture.config.tunnel.profileEpoch += 1;
@@ -281,11 +302,12 @@ describe('automatic companion reload custody', () => {
     const fixture = await companionReloadFixture(true);
     const fingerprint = 'a'.repeat(64);
     fixture.config.ui.automationPaused = true;
+    fixture.status.paired = false;
     fixture.ready();
     await fixture.start(fingerprint);
     const pending = fixture.pending();
     fixture.control(['app.exe', '--background', '--resume-automation',
-      '--cos-instance-runtime=profile-Delta', '--defer-companion-reload=profile-Delta',
+      '--cos-instance-runtime=profile-delta', '--defer-companion-reload=profile-delta',
       '--defer-companion-reload-pid=19', '--defer-companion-reload-generation=1700000000019',
       '--defer-companion-reload-epoch=3', `--defer-companion-reload-fingerprint=${fingerprint}`]);
     await fixture.settle();
@@ -297,6 +319,7 @@ describe('automatic companion reload custody', () => {
     expect(fixture.pending()?.fingerprint).toBe(fingerprint);
     expect(fixture.pending()?.deferredForProcess).toBe(true);
     expect(fixture.listeners.size).toBe(1);
+    fixture.status.paired = true;
     fixture.changed(); await fixture.settle();
     expect(fixture.open).not.toHaveBeenCalled();
   });
@@ -308,21 +331,22 @@ describe('automatic companion reload custody', () => {
       const fixture = await companionReloadFixture(true);
       const fingerprint = 'a'.repeat(64);
       fixture.config.ui.automationPaused = true; fixture.ready();
+      fixture.status.paired = false;
       await fixture.start(fingerprint);
       const pending = fixture.pending();
       let args = [...deferralArgs(fingerprint), '--resume-automation'];
-      if (change === 'profile') args = args.map(arg => arg === '--defer-companion-reload=profile-Delta' ? '--defer-companion-reload=profile-Epsilon' : arg);
+      if (change === 'profile') args = args.map(arg => arg === '--defer-companion-reload=profile-delta' ? '--defer-companion-reload=profile-epsilon' : arg);
       else if (change === 'pid') args = args.map(arg => arg === '--defer-companion-reload-pid=19' ? '--defer-companion-reload-pid=20' : arg);
       else if (change === 'generation') args = args.map(arg => arg.startsWith('--defer-companion-reload-generation=') ? '--defer-companion-reload-generation=1700000000020' : arg);
       else if (change === 'epoch') args = args.map(arg => arg === '--defer-companion-reload-epoch=3' ? '--defer-companion-reload-epoch=4' : arg);
       else if (change === 'fingerprint') args = args.map(arg => arg.startsWith('--defer-companion-reload-fingerprint=') ? `--defer-companion-reload-fingerprint=${'b'.repeat(64)}` : arg);
-      else if (change === 'selector') args = args.map(arg => arg === '--cos-instance-runtime=profile-Delta' ? '--cos-instance-runtime=profile-Epsilon' : arg);
+      else if (change === 'selector') args = args.map(arg => arg === '--cos-instance-runtime=profile-delta' ? '--cos-instance-runtime=profile-epsilon' : arg);
       else if (change === 'missing') args = args.filter(arg => arg !== '--defer-companion-reload-pid=19');
       else if (change === 'duplicate') args.push('--defer-companion-reload-pid=19');
       else if (change === 'unknown-option') args.push('--defer-companion-reload-other=never-print');
       else if (change === 'updated') args.push('--updated');
       else if (change === 'pause') args.push('--pause-automation');
-      else if (change === 'shutdown') args.push('--safe-close-for-update=profile-Delta');
+      else if (change === 'shutdown') args.push('--safe-close-for-update=profile-delta');
       else if (change === 'input') args.push('--cos-enqueue-input=3aaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
       else if (change === 'cancel') args.push('--cos-cancel-queued-input=3aaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
       else if (change === 'retry') args.push('--cos-retry-queued-input=3aaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '--cos-retry-queued-input-receipt=4aaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
@@ -330,7 +354,7 @@ describe('automatic companion reload custody', () => {
       else if (change === 'connection') args.push('--cos-connection-action=status');
       else if (change === 'creation') args.push('--cos-create-profile=Another', '--cos-profile-browser=Profile 11');
       else if (change === 'folders') args.push('--cos-shared-accounts=enable');
-      else if (change === 'helper') args.push('--set-helper-reasoning=high', '--helper-settings-profile=profile-Delta');
+      else if (change === 'helper') args.push('--set-helper-reasoning=high', '--helper-settings-profile=profile-delta');
       else if (change === 'alerts') args.push('--enable-signout-emergency-alerts');
       else fixture.context.quitting = true;
       fixture.control(args); await fixture.settle();
@@ -346,11 +370,12 @@ describe('automatic companion reload custody', () => {
     ('does not resume an obsolete deferred control after its %s owner changes while queued', async change => {
       const fixture = await companionReloadFixture(true);
       fixture.config.ui.automationPaused = true;
+      fixture.status.paired = false;
       const fingerprint = 'a'.repeat(64);
       await fixture.start(fingerprint);
       fixture.control([...deferralArgs(fingerprint), '--resume-automation']);
       expect(fixture.pending()?.deferredForProcess).toBe(true);
-      if (change === 'profile-id') fixture.runtime.profile.id = 'profile-Epsilon';
+      if (change === 'profile-id') fixture.runtime.profile.id = 'profile-epsilon';
       else if (change === 'mode') fixture.runtime.profile.state.mode = 'legacy';
       else if (change === 'root') fixture.runtime.stateRoot = 'different-runtime';
       else if (change === 'epoch') fixture.config.tunnel.profileEpoch += 1;
@@ -365,6 +390,7 @@ describe('automatic companion reload custody', () => {
     ('does not release a replacement %s owner while the actual pause-publication resume is awaiting', async change => {
       const fixture = await companionReloadFixture(true);
       fixture.config.ui.automationPaused = true; fixture.ready();
+      fixture.status.paired = false;
       const fingerprint = 'a'.repeat(64); await fixture.start(fingerprint);
       const ipc = await readFile(path.join(repo, 'src/main/ipc.ts'), 'utf8');
       const start = ipc.indexOf('export async function resumeAutomationAfterExplicitRequest');
@@ -391,7 +417,7 @@ describe('automatic companion reload custody', () => {
       });
       fixture.control([...deferralArgs(fingerprint), '--resume-automation']);
       await publishing;
-      if (change === 'profile-id') fixture.runtime.profile.id = 'profile-Epsilon';
+      if (change === 'profile-id') fixture.runtime.profile.id = 'profile-epsilon';
       else if (change === 'epoch') fixture.config.tunnel.profileEpoch += 1;
       else await fixture.start('b'.repeat(64));
       release(); await fixture.settle();
@@ -451,7 +477,7 @@ describe('automatic companion reload custody', () => {
     ('restores normal reload safety for a %s instead of persisting deferral', async replacement => {
       const fixture = await companionReloadFixture(true);
       const fingerprint = 'a'.repeat(64);
-      fixture.config.ui.automationPaused = true; await fixture.start(fingerprint);
+      fixture.config.ui.automationPaused = true; fixture.status.paired = false; await fixture.start(fingerprint);
       const old = fixture.pending(); fixture.control(deferralArgs(fingerprint));
       expect(old?.deferredForProcess).toBe(true);
       expect(fixture.write).not.toHaveBeenCalled();
@@ -462,6 +488,7 @@ describe('automatic companion reload custody', () => {
         return;
       }
       fixture.config.ui.automationPaused = false;
+      fixture.status.paired = true;
       if (replacement === 'new-epoch') fixture.config.tunnel.profileEpoch += 1;
       await fixture.start(replacement === 'new-fingerprint' ? 'b'.repeat(64) : fingerprint);
       await fixture.settle();
@@ -484,6 +511,7 @@ describe('automatic companion reload custody', () => {
   it.each(['deferral', 'manual'] as const)('consumes warm %s before transported input, maintenance and window activation', async action => {
     const fixture = await companionReloadFixture(true);
     fixture.config.ui.automationPaused = true; fixture.ready();
+    fixture.status.paired = false;
     const fingerprint = 'a'.repeat(64); await fixture.start(fingerprint);
     const source = await readFile(path.join(repo, 'src/main/index.ts'), 'utf8');
     const start = source.indexOf("app.on('second-instance'");
@@ -524,11 +552,11 @@ describe('automatic companion reload custody', () => {
     expect(fixture.write).not.toHaveBeenCalled();
   });
 
-  it.each(['paused', 'unpaired', 'absent', 'signed-out', 'unknown-auth'] as const)
+  it.each(['unpaired', 'absent', 'signed-out', 'unknown-auth'] as const)
     ('retains the pending fingerprint without opening a cached origin while %s', async (hold) => {
       const fixture = await companionReloadFixture();
-      if (hold === 'paused') fixture.config.ui.automationPaused = true;
-      else if (hold === 'unpaired') fixture.status.paired = false;
+      fixture.config.ui.automationPaused = true;
+      if (hold === 'unpaired') fixture.status.paired = false;
       else if (hold === 'absent') fixture.status.present = false;
       else fixture.status.authState = hold === 'signed-out' ? 'signed-out' : 'unknown';
       await fixture.start(); await fixture.settle();
@@ -540,15 +568,18 @@ describe('automatic companion reload custody', () => {
   it('uses the same pending owner after a positive paired bridge change and activates once', async () => {
     const fixture = await companionReloadFixture();
     fixture.config.ui.automationPaused = true;
+    fixture.status.paired = false;
     await fixture.start(); await fixture.settle();
     const pending = fixture.pending();
     expect(pending?.fingerprint).toBe('new-fingerprint');
-    fixture.config.ui.automationPaused = false;
+    fixture.status.paired = true;
     fixture.changed(); await fixture.settle();
     expect(fixture.open).toHaveBeenCalledTimes(1);
     expect(fixture.write).toHaveBeenCalledWith('companion-fingerprint', 'new-fingerprint');
     expect(fixture.pending()).toBeNull();
     expect(fixture.listeners.size).toBe(0);
+    expect(fixture.config.ui.automationPaused).toBe(true);
+    expect(fixture.resume).not.toHaveBeenCalled();
     fixture.changed(); await fixture.settle();
     expect(fixture.open).toHaveBeenCalledTimes(1);
   });
@@ -564,23 +595,39 @@ describe('automatic companion reload custody', () => {
     expect(fixture.pending()).toBeNull();
   });
 
-  it.each(['pause', 'withdraw-pair', 'profile-epoch', 'profile-id', 'quit'] as const)
+  it.each(['withdraw-pair', 'profile-epoch', 'profile-id', 'profile-mode', 'profile-root', 'quit'] as const)
     ('does not open or spend a fingerprint after %s during the origin read', async (change) => {
       const fixture = await companionReloadFixture();
       let release!: (origin: string) => void;
       fixture.secret.mockImplementationOnce(() => new Promise<string>(resolve => { release = resolve; }));
       const starting = fixture.start();
       await vi.waitFor(() => expect(fixture.secret).toHaveBeenCalledTimes(1));
-      if (change === 'pause') fixture.config.ui.automationPaused = true;
-      else if (change === 'withdraw-pair') fixture.status.paired = false;
+      if (change === 'withdraw-pair') fixture.status.paired = false;
       else if (change === 'profile-epoch') fixture.config.tunnel.profileEpoch += 1;
-      else if (change === 'profile-id') fixture.runtime.profile.id = 'profile-Epsilon';
+      else if (change === 'profile-id') fixture.runtime.profile.id = 'profile-epsilon';
+      else if (change === 'profile-mode') fixture.runtime.profile.state.mode = 'legacy';
+      else if (change === 'profile-root') fixture.runtime.stateRoot = 'replacement-root';
       else fixture.context.quitting = true;
       release('chrome-extension://fcckeonnadegkheflpbppbddkpkdhjip');
       await starting; await fixture.settle();
       expect(fixture.open).not.toHaveBeenCalled();
       expect(fixture.write).not.toHaveBeenCalled();
     });
+
+  it('keeps task admission paused when Pause arrives during the normal reload origin read', async () => {
+    const fixture = await companionReloadFixture();
+    let release!: (origin: string) => void;
+    fixture.secret.mockImplementationOnce(() => new Promise<string>(resolve => { release = resolve; }));
+    const starting = fixture.start();
+    await vi.waitFor(() => expect(fixture.secret).toHaveBeenCalledOnce());
+    fixture.config.ui.automationPaused = true;
+    release('chrome-extension://fcckeonnadegkheflpbppbddkpkdhjip');
+    await starting; await fixture.settle();
+    expect(fixture.open).toHaveBeenCalledOnce();
+    expect(fixture.write).toHaveBeenCalledOnce();
+    expect(fixture.config.ui.automationPaused).toBe(true);
+    expect(fixture.resume).not.toHaveBeenCalled();
+  });
 
   it('records one requested reload when that reload itself disconnects the companion', async () => {
     const fixture = await companionReloadFixture();
@@ -622,10 +669,12 @@ describe('automatic companion reload custody', () => {
   it('allows an explicit same-fingerprint rearm for a changed profile epoch without reviving the old owner', async () => {
     const fixture = await companionReloadFixture();
     fixture.config.ui.automationPaused = true;
+    fixture.status.paired = false;
     await fixture.start(); await fixture.settle();
     const old = fixture.pending();
     fixture.config.tunnel.profileEpoch += 1;
     fixture.config.ui.automationPaused = false;
+    fixture.status.paired = true;
     fixture.changed(); await fixture.settle();
     expect(fixture.open).not.toHaveBeenCalled();
     await vm.runInContext('armPendingCompanionReload("new-fingerprint")', fixture.context);
@@ -635,7 +684,7 @@ describe('automatic companion reload custody', () => {
     expect(old?.dispatched).toBe(false);
   });
 
-  it('retains a dispatched owner without reopening after pause arrives during the receipt write', async () => {
+  it('finishes maintenance bookkeeping without reopening or unpausing when pause arrives during the receipt write', async () => {
     const fixture = await companionReloadFixture();
     let release!: () => void;
     fixture.write.mockImplementationOnce(() => new Promise<undefined>(resolve => { release = () => resolve(undefined); }));
@@ -643,9 +692,9 @@ describe('automatic companion reload custody', () => {
     await vi.waitFor(() => expect(fixture.write).toHaveBeenCalledTimes(1));
     fixture.config.ui.automationPaused = true;
     release(); await starting; await fixture.settle();
-    expect(fixture.pending()?.dispatched).toBe(true);
-    expect(fixture.context.logWarn).toHaveBeenCalledWith(expect.stringContaining('No automatic replay will occur'));
-    fixture.config.ui.automationPaused = false;
+    expect(fixture.pending()).toBeNull();
+    expect(fixture.config.ui.automationPaused).toBe(true);
+    expect(fixture.resume).not.toHaveBeenCalled();
     fixture.changed(); await fixture.settle();
     expect(fixture.open).toHaveBeenCalledTimes(1);
     expect(fixture.write).toHaveBeenCalledTimes(1);

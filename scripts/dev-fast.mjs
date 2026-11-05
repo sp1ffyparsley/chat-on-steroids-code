@@ -1327,7 +1327,8 @@ if (checkOnly) {
       appShellSourceSha256 === 'D685C51CDF03056A64FF6C2EC679F79A27EDE061620978C0D30E270C76468C64' ||
       // Explicit cold-start Pause now persists before restored browser work. Both complete
       // navigation-owner bodies remain window6c0662d9/globald2ba9316, still BLOCKED.
-      appShellSourceSha256 === '88EE49C1B84A0F2B7BDD9122778CFF9FE6B14AB0F5F8805407581C0881941C6A';
+      appShellSourceSha256 === '88EE49C1B84A0F2B7BDD9122778CFF9FE6B14AB0F5F8805407581C0881941C6A' ||
+      appShellSourceSha256 === '8C8AAE632D67BBADC423F14BE5BAA655FEA9D5BAA0EBCA42060CC6F30236C4B1';
   const nativeDocumentGate = knownBlockedNavigationSource
     ? 'blocked-by-known-app-shell-navigation-guards'
     : 'source-unknown-requires-native-qualification';
