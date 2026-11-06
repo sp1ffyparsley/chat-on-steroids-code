@@ -2251,6 +2251,7 @@ describe('alternate shell turn/message provenance', () => {
     'orphan execution result', 'execution result request mismatch', 'execution child result missing',
     'pending canonical group', 'pending header mismatch', 'missing system header', 'visible system header', 'foreign header scope',
     'unfinished execution', 'unfinished execution result', 'foreign retained parent',
+    'core receipt missing', 'core resource foreign', 'core request foreign', 'core request and receipt foreign',
     'missing retained header parent', 'missing retained execution parent', 'off-path retained parent', 'later retained parent', 'cached conflict',
     'unselected call', 'missing live branch', 'system accessor'] as const)(
     'recovers folded native execution ownership from an exact provider group: %s', async variant => {
@@ -2286,6 +2287,12 @@ describe('alternate shell turn/message provenance', () => {
           mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: JSON.stringify({
             content: [{ type: 'text', text: 'PRIVATE_TOOL_RESULT' }],
             structuredContent: { cosResultReceipt: { version: 1, id: 'a'.repeat(48) } } }) };
+          if (variant === 'core receipt missing' || variant === 'core request and receipt foreign')
+            mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: '{"content":[]}' };
+          if (variant === 'core resource foreign')
+            mapping[RESULT].message.metadata.invoked_resource.app_name = 'PRIVATE_FOREIGN_RESULT_APP';
+          if (variant === 'core request foreign' || variant === 'core request and receipt foreign')
+            mapping[RESULT].message.metadata.request_id = 'PRIVATE_OTHER_CORE_REQUEST';
           if (variant.startsWith('pending ')) { entry.turn.messageIds = [USER, CALL]; mapping[CALL].message.status = 'in_progress'; }
           if (variant === 'pending header mismatch') mapping[HEADER].message.metadata.working_turn_id = 'foreign';
           if (variant === 'missing system header') { mapping[EXEC].parent = USER; delete mapping[HEADER]; }
@@ -2350,6 +2357,18 @@ describe('alternate shell turn/message provenance', () => {
           requestId: accepted || variant === 'pending canonical group' ? REQUEST : null, answered: accepted });
         if (accepted || variant === 'pending canonical group')
           expect(page.fiber.turns[0].requests.filter((row: any) => row.requestId === REQUEST)).toEqual([expect.objectContaining({ messageId: EXEC })]);
+        if (variant.startsWith('core ')) {
+          const facet = variant.startsWith('core request') ? 'request' : variant === 'core receipt missing' ? 'receipt' : 'resource';
+          const trace = diagnosticLogs.find(line => line.includes('native result-reference recovery diagnostic'))!;
+          expect(trace).toContain('anchorBranch=core-result');
+          expect(trace).toContain(`anchorCoreResultFacet=${facet}`);
+          expect(page.fiber.turns[0].endMessageId).toBeNull();
+          expect(page.fiber.turns[0].calls[0]).toMatchObject({ requestId: null, answered: false });
+          for (const value of [USER, ASSISTANT, CALL, RESULT, REQUEST, EXEC, EXEC_RESULT, HEADER,
+            'PRIVATE_TOOL_RESULT', 'PRIVATE_OTHER_CORE_REQUEST', 'PRIVATE_FOREIGN_RESULT_APP'])
+            expect(trace).not.toContain(value);
+          expect(JSON.stringify(page.fiber)).not.toContain('anchorCoreResultFacet');
+        }
         if (variant.endsWith('final anchor') || variant === 'different final body anchor') {
           const facet = variant === 'duplicate final anchor' ? 'final-count' : variant === 'off-path final anchor'
             ? 'path-tail' : variant === 'nonterminal final anchor' ? 'native-terminal' : 'body-or-reference';

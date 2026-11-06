@@ -2341,7 +2341,7 @@
     let nativeAnchorBranch = 'none';
     let nativeAnchorRetainedParent = 'none', nativeAnchorRetainedMember = 'none';
     let nativeAnchorRetainedPosition = 'none', nativeAnchorRetainedLocation = 'none';
-    let nativeAnchorFinalFacet = 'none';
+    let nativeAnchorFinalFacet = 'none', nativeAnchorCoreResultFacet = 'none';
     const finalFacet = facet => { if (nativeAnchorFinalFacet === 'none') nativeAnchorFinalFacet = facet; };
     let nativeAnchorMember = 'none', nativeAnchorMemberTerminal = false, nativeAnchorMemberTyped = false;
     const mountedNativeScope = (() => {
@@ -2475,9 +2475,18 @@
               nativeCalls.add(id); execution.calls.push(id); executionGroups.set(id, execution);
             } else if (role === 'tool' && nativeField(author, 'name') === 'api_tool.call_tool' && recipient === 'all') {
               const resource = nativeField(metadata, 'invoked_resource');
-              if (!execution || str(nativeField(metadata, 'request_id')) !== execution.request || !coreResultReceipt(message) ||
-                  !ownResult({ app: str(nativeField(resource, 'app_name')), resource: str(nativeField(resource, 'resource_uri')) }))
+              // Keep the original short-circuit refusal order. The fixed first facet
+              // survives legacy workers in the bounded console trace; it grants no
+              // request identity and never exports provider names, paths or output.
+              const resultFacet = !execution ? 'execution'
+                : str(nativeField(metadata, 'request_id')) !== execution.request ? 'request'
+                  : !coreResultReceipt(message) ? 'receipt'
+                    : !ownResult({ app: str(nativeField(resource, 'app_name')), resource: str(nativeField(resource, 'resource_uri')) })
+                      ? 'resource' : 'none';
+              if (resultFacet !== 'none') {
+                nativeAnchorCoreResultFacet = resultFacet;
                 return refuse('nativeScopeBranchConflict', 'core-result');
+              }
               const receiptId = coreResultReceipt(message);
               if (receiptIds.has(receiptId)) return refuse('nativeScopeBranchConflict', 'duplicate-receipt');
               receiptIds.add(receiptId); execution.results.push(id);
@@ -2843,7 +2852,7 @@
             shape.selectedMissingCalls, shape.nativeMissingCalls, shape.typedUserPresent, shape.typedUserSelected,
             selectedRequestIdsPresent, selectedRequestIdsMissing, identityRefusalCalls,
             nativeAnchorReason, nativeAnchorBranch, nativeAnchorRetainedParent, nativeAnchorRetainedMember,
-            nativeAnchorRetainedPosition, nativeAnchorRetainedLocation, nativeAnchorFinalFacet, nativeAnchorMember, nativeAnchorMemberTerminal, nativeAnchorMemberTyped, ...Object.values(identityRefusalReasons), selectedToolResults, witnessedToolResults,
+            nativeAnchorRetainedPosition, nativeAnchorRetainedLocation, nativeAnchorFinalFacet, nativeAnchorCoreResultFacet, nativeAnchorMember, nativeAnchorMemberTerminal, nativeAnchorMemberTyped, ...Object.values(identityRefusalReasons), selectedToolResults, witnessedToolResults,
             missingWithChild, missingWithWitness, ...Object.values(resultShapes)].join(':');
           if (!nativeReferenceTraceKeys.has(key) && nativeReferenceTraceKeys.size < MAX_TURNS) {
             nativeReferenceTraceKeys.add(key);
@@ -2855,6 +2864,7 @@
               ` requestIdPresent=${selectedRequestIdsPresent} requestIdMissing=${selectedRequestIdsMissing}` +
               ` identityRefusals=${identityRefusalCalls} nativeScope=${Boolean(mountedNativeScope)}` +
               ` anchorReason=${nativeAnchorReason} anchorBranch=${nativeAnchorBranch} anchorFinalFacet=${nativeAnchorFinalFacet} anchorMember=${nativeAnchorMember}` +
+              ` anchorCoreResultFacet=${nativeAnchorCoreResultFacet}` +
               ` anchorRetainedParent=${nativeAnchorRetainedParent} anchorRetainedMember=${nativeAnchorRetainedMember}` +
               ` anchorRetainedPosition=${nativeAnchorRetainedPosition} anchorRetainedLocation=${nativeAnchorRetainedLocation}` +
               ` anchorMemberTerminal=${nativeAnchorMemberTerminal} anchorMemberTyped=${nativeAnchorMemberTyped}` +

@@ -478,3 +478,8 @@ Update133 installation timing: optional seed reuse was dominated by old-backup m
 ### Source-only helper picker readiness follow-up (November 6)
 
 The exact-model helper selector now observes a temporarily disabled native trigger until it becomes enabled, within the existing observation budget and original preparation deadline. It never clicks disabled controls, changes model policy, renews the deadline, or retries denied choices. Five new regression cases cover both disabled forms, persistent disablement, lost ownership, and expiry. Four reproduced failures preceded the fix; all 106 picker tests, JavaScript syntax, and TypeScript checks pass. This source change is not part of the previously qualified/installed recorder 144 package and still needs release qualification and activation before runtime claims.
+
+
+### Source-only first Core-result refusal facet (November 6)
+
+The bounded native result-reference console trace now identifies which original grouped Core-result prerequisite failed: execution owner, request equality, terminal receipt, or owned resource. It keeps the existing short-circuit acceptance predicates and exports no message IDs, provider names, resource paths or tool output. Four failure-first tests cover missing receipt, foreign resource, foreign request and first-refusal precedence. All 552 shell compatibility tests pass. This is diagnostic source only, not a qualified or installed release, and does not resolve missing original result custody by itself.
