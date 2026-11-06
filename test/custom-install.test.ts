@@ -2462,14 +2462,22 @@ if(@(Get-ChildItem -LiteralPath $destinationRelease -Force | Where-Object {$_.Na
     const root = mkdtempSync(path.join(tmpdir(), 'cos-qualification-proposal-'));
     try {
       const reviewRoot = path.join(root, 'review');
-      const clone = spawnSync('git.exe', ['clone', '--local', '--no-hardlinks', '--no-checkout', '--', repoRoot, reviewRoot], {
+      // Review this one immutable commit, rather than copying every historical
+      // object from a long-lived private checkout. Fetch writes independent local
+      // objects; no shared alternates/hardlinks or mutable working files are used.
+      const clone = spawnSync('git.exe', ['init', '--quiet', `--object-format=${pinnedGitCommit.length === 64 ? 'sha256' : 'sha1'}`, '--', reviewRoot], {
         encoding: 'utf8', windowsHide: true, timeout: 180_000
       });
-      expect(clone.status, clone.stderr || clone.stdout).toBe(0);
+      expect(clone.status, clone.error?.message || clone.stderr || clone.stdout).toBe(0);
+      const fetch = spawnSync('git.exe', ['-C', reviewRoot, 'fetch', '--depth=1', '--no-tags', '--no-recurse-submodules', '--', repoRoot, pinnedGitCommit], {
+        encoding: 'utf8', windowsHide: true, timeout: 180_000
+      });
+      expect(fetch.status, fetch.error?.message || fetch.stderr || fetch.stdout).toBe(0);
+      expect(existsSync(path.join(reviewRoot, '.git', 'objects', 'info', 'alternates'))).toBe(false);
       const checkout = spawnSync('git.exe', ['-C', reviewRoot, 'checkout', '--detach', pinnedGitCommit, '--'], {
         encoding: 'utf8', windowsHide: true, timeout: 180_000
       });
-      expect(checkout.status, checkout.stderr || checkout.stdout).toBe(0);
+      expect(checkout.status, checkout.error?.message || checkout.stderr || checkout.stdout).toBe(0);
       symlinkSync(path.join(repoRoot, 'node_modules'), path.join(reviewRoot, 'node_modules'), 'junction');
       const command = [
         "$ErrorActionPreference='Stop'",
