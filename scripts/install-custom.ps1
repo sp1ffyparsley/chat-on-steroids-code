@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
   [switch]$LaunchInstaller,
   [switch]$WaitForSafeQuit,
@@ -18,22 +18,22 @@ $ErrorActionPreference = 'Stop'
 $script:QualifiedCandidate = [pscustomobject]@{
   Version = '2.1.39'
   InstallerFile = 'Chat-On-Steroids-Setup-x64.exe'
-  InstallerSize = [int64]162764706
-  InstallerSha256 = '74e098c30647ee6a0959f4db4e8766c8ebba03fb4e3311fb59d1327ace66820a'
-  InstallerSha512 = 'CzUg9wSbdO1dBHa71NPq9dbGH4bk5U9BeRGRIlhJzSN1DWlHlD6z6udl9ODvW4mcZnsjfDU7lDF0y2agy0Ecwg=='
-  LatestYmlSha256 = '990ad70829ac9c92d18f31b57e88a2dd3dc9a8b66bf4fd56cb76885fe305223b'
-  ReleaseDate = '2026-11-05T14:18:13.000Z'
-  AppExecutableSha256 = 'cc00f36f49d081f230020393147baa88c1ed0da6a828b894a9f5cc466dd83daf'
-  AppAsarSha256 = '23110fa4b6af2c88a29f4f9b31dc9896b2fffec308643a761acb068b68f10231'
-  ExtensionBackgroundSha256 = '526de684788d98af44087823453f32b10b884e2e9b5807b4074f113ac3884b50'
+  InstallerSize = [int64]162766956
+  InstallerSha256 = '11cb2289543a5d9423d703af72c50dc08b661a08deee8065b4c6ca631dc5bb41'
+  InstallerSha512 = '3tbfn3F3gaB+7bAfTQhEGFGQFM0HILN8X7Ob9jcfEsP3LiedZiR5RUhvxNJUIqa1hK7aC6HxVUcR/bugjPdiag=='
+  LatestYmlSha256 = '4124f6e925cefa0099cbdf8b42d6adf01c20b4fdff731c64e5fe0cdc5eba5209'
+  ReleaseDate = '2026-11-06T04:13:45.000Z'
+  AppExecutableSha256 = 'f381164f440e18a9a7eeeed76269cad7208e27e041236e88c50ffbb8cdd535a7'
+  AppAsarSha256 = '9edec1f1c707a4ca7ca4f3612276f961b9738a21886e5e2c006e5b6917243981'
+  ExtensionBackgroundSha256 = 'a6a4eb74fe166852f3b357893cf29b1468827edefa872892be7159e26923aee7'
   FileVersion = '2.1.39'
   ProductVersion = '2.1.39.0'
   CustomBuildText = 'Chat On Steroids local custom build. Update through scripts/update-custom.ps1 and reinstall from this checkout.'
-  SourceProvenanceSha256 = 'bc12bdb47eb1057cf396bbebc3770216f4cf7dd385f5f70e9c7cdd15f33d4616'
+  SourceProvenanceSha256 = '146c8f0b464705c47ce2112880496d3d7f75c3e39924e7750c7a20b490719cba'
   SourceProvenanceSchema = 2
   GitObjectFormat = 'sha1'
-  GitCommit = '506c7068dad0db00556346813602efdf7f85c677'
-  GitTree = '4f835146ecfc62eabec5080b80a3ad2caeac123b'
+  GitCommit = 'e30eb8e9b28eaa56bb821cc587680dc16c55e37a'
+  GitTree = 'fef29050cef0e8d1b42e2b9003b3442d95eb2963'
   SourceDirty = $false
   StrictBuild = $true
   PackageJsonSha256 = 'd8732af0620064ae96a51d5a63cb1e93ceaae4a037a696a0e82a21a910af7ae4'
@@ -132,15 +132,15 @@ $script:InstalledUpgradeBaseline = [pscustomobject]@{
   Version = '2.1.39'
   SafeCloseForUpdate = $true
   FileCount = 291
-  TotalBytes = 575507254
-  TreeSha256 = 'c5aa2437f252d91cafe8105795e8a0c058065f8dbf864bc422994c6a87666ee8'
+  TotalBytes = 575509775
+  TreeSha256 = 'b128fc0f66921ba56fb78b0af7eb7d423e0f459871f87d77c1b33f08a96eda75'
   FileVersion = '2.1.39'
   ProductVersion = '2.1.39.0'
-  ExeSha256 = 'c171d0185609d64248274689470d2315bcd3aa71aafd44d35bd188ef6e47c4f1'
-  AppAsarSha256 = '6053cca183ed8e9800816405045dc598ce9239dd1ff9c155077db9f047d9a47b'
+  ExeSha256 = 'f381164f440e18a9a7eeeed76269cad7208e27e041236e88c50ffbb8cdd535a7'
+  AppAsarSha256 = '9edec1f1c707a4ca7ca4f3612276f961b9738a21886e5e2c006e5b6917243981'
   ExtensionVersion = '2.1.39'
-  ExtensionBackgroundSha256 = 'a433cb348084a5c31826fc598b13cce492c7ff08e5ae9ccc41049faf5d1f4d18'
-  SourceProvenanceSha256 = '09f0b60b75687c8621472a756242e198a695cc935e72cc47a75da00ea52387b6'
+  ExtensionBackgroundSha256 = 'a6a4eb74fe166852f3b357893cf29b1468827edefa872892be7159e26923aee7'
+  SourceProvenanceSha256 = '146c8f0b464705c47ce2112880496d3d7f75c3e39924e7750c7a20b490719cba'
   CustomBuildText = 'Chat On Steroids local custom build. Update through scripts/update-custom.ps1 and reinstall from this checkout.'
 }
 

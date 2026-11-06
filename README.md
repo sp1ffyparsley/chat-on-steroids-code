@@ -1,8 +1,14 @@
 # Chat On Steroids - code research mirror
 
-## Recorder144 source: staged picker hydration
+## Recorder144 independently installed privately
 
-A failure-first native-picker regression showed that an unrelated bucket can hydrate before the requested model/effort. The existing bounded observation now waits for that exact pair (available or denied) before its sole retry, under the original owner/deadline. All101picker checks passed; no model fallback, extra Send, availability inference or ancestry relaxation was added. Existing post143 matching and refusal-diagnostic repairs below are included in this source. A real native qualification failure also exposed an initially empty Windows capture item for a painted window. Capture now reobserves that same HWND only within its existing shared3-second deadline, retaining the32MP cap and exact geometry checks;23real capture/native/frame checks passed. Canonical qualification is in progress; source publication is not installation or fleet-autonomy proof.
+Recorder144 build3 passed96preliminary and13,562Main checks with62existing conditional skips;33post-pin installer checks and read-only readiness passed. Independent protected-store and full-program verification completed before app launch. Compiled private source is `e30eb8e9b28eaa56bb821cc587680dc16c55e37a`; that provenance hash is not a public Git object. Use this mirror's public commit for retrieval. The private installer SHA-256 is `11cb2289543a5d9423d703af72c50dc08b661a08deee8065b4c6ca631dc5bb41`; no public binary release is supplied.
+
+A useful source repair was independently checked with19passing audio-adapter tests, and one source-bound helper to native executor ACK to automatic settled-turn reconciliation successor was observed. Original native parent/result attribution remains unresolved in that pilot (structural header retained-parent conflict/off-path). This is useful bounded continuation, not verified normal native completion or sustained fleet autonomy. First two candidate failures remain failed history; the exact accepted144 predecessor metadata is now pinned for future updates with a failure-first assertion.
+
+## Recorder144 staged picker hydration and capture readiness
+
+A failure-first native-picker regression showed that an unrelated bucket can hydrate before the requested model/effort. The existing bounded observation now waits for that exact pair (available or denied) before its sole retry, under the original owner/deadline. All101picker checks passed; no model fallback, extra Send, availability inference or ancestry relaxation was added. Existing post143 matching and refusal-diagnostic repairs below are included in this source. A real native qualification failure also exposed an initially empty Windows capture item for a painted window. Capture now reobserves that same HWND only within its existing shared3-second deadline, retaining the32MP cap and exact geometry checks;23real capture/native/frame checks passed. The independent installation is described above; these source checks alone are not fleet-autonomy proof.
 
 ## Source-only pre-Send model-refusal preservation
 
