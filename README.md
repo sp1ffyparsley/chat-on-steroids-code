@@ -1,5 +1,11 @@
 # Chat On Steroids - code research mirror
 
+## Source146: same-turn recovery after activity transport returns
+
+A completed Goal turn could exhaust its five-minute settling window while activity receipts were unavailable, retain its once-only claim, and fail to restart that observer after the app returned. The normal activity feed now re-arms only that same claimed turn after a fresh integer-zero tool census, under unchanged document, navigation epoch, native user and assistant-node identities. It reruns the entire settling and Main authorization path. Unknown/busy counts wait; a new user, navigation, changed answer or Off discards the page-only pickup. No receipt is synthesized and no task is replayed.
+
+The failure reproduced3failing cases with3negative controls. All6focused cases and2,848checks across3whole affected suites passed; TypeScript, JavaScript syntax and whitespace checks passed. Source content/background markers are146. This repair is **not built or installed**; recorder145 remains the accepted installed package.
+
 ## Source-only follow-up: exact header refusal
 
 The existing native header guard now records only its first failed fixed condition in bounded console diagnostics. It preserves the original short-circuit checks, refuses unsupported getters, exports no native identifiers or text, and changes no completion/Send authority. Nine new assertions failed before repair; the complete shell suite passed560cases afterward. TypeScript and JavaScript syntax checks passed. This follow-up is not in the installed recorder145 package; a live header cause has not yet been captured.

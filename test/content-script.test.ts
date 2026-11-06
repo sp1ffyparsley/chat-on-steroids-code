@@ -27735,6 +27735,46 @@ describe('the goal loop', () => {
   const peeks = (harnessed: Harness): number =>
     harnessed.sent.filter((message) => message.type === 'activity').length;
 
+  it.each(['same turn', 'busy tools', 'unknown tools', 'off', 'new user', 'navigation'] as const)(
+    'resumes an unavailable settle window only after a fresh same-turn idle receipt: %s', async variant => {
+      let unavailable = true;
+      const response = feed()();
+      live = await harness(`https://chatgpt.com/c/${CHAT}`, {
+        ...goalReplies(),
+        activity: message => !Object.prototype.hasOwnProperty.call(message, 'coreDiagnostic') && unavailable
+          ? { ok: false, error: 'app_not_found' } : response
+      }, document => {
+        userTurn(document, 'settle-source-user', 'finish the same task', { sent: false });
+        const section = assistantTurn(document, 'settle-source-answer', []);
+        prose(document, section, 'settle-source-final', 'One useful unit finished.');
+      });
+      await live.hook.pullActivity();
+      const ended = (live.window as any).CLF_DOM.turns().find((turn: any) => turn.id === 'settle-source-answer');
+      live.hook.noteGoalTurn(ended, 'completed', 'settle-source-owner');
+      await settle(8000);
+      expect(drafts(live)).toHaveLength(0);
+      expect(live.document.querySelector('.clf-stage')?.textContent).toContain('valid activity receipt');
+      unavailable = false;
+      if (variant === 'busy tools') response.data.pendingTools = 1;
+      if (variant === 'unknown tools') response.data.pendingTools = null;
+      if (variant === 'off') response.data.goal.enabled = false;
+      if (variant === 'new user') userTurn(live.document, 'new-settle-user', 'a newer request', { sent: false });
+      if (variant === 'navigation') {
+        live.window.history.pushState({}, '', '/c/bbbbbbbb-cccc-dddd-eeee-ffffffffffff');
+        live.hook.observe();
+      }
+      await live.hook.pullActivity(); await settle(800);
+      expect(drafts(live)).toHaveLength(variant === 'same turn' ? 1 : 0);
+      if (variant === 'busy tools' || variant === 'unknown tools') {
+        response.data.pendingTools = 0;
+        await live.hook.pullActivity(); await settle(800);
+        expect(drafts(live)).toHaveLength(1);
+      }
+      await live.hook.pullActivity(); await settle(200);
+      expect(drafts(live)).toHaveLength(['same turn', 'busy tools', 'unknown tools'].includes(variant) ? 1 : 0);
+      expect(live.document.querySelector('#prompt-textarea')!.textContent).toBe('');
+    });
+
   it('collects an exact durable Loop reply immediately when the companion wakes the live page', async () => {
     let offered = false;
     let draftAttempts = 0;

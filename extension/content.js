@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 145;
+  const RECORDER_VERSION = 146;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -1443,6 +1443,9 @@
    * and this is the near-side half of the same rule.
    */
   let goalTurnId = null;
+  // Only an already-claimed completed turn whose activity transport was unavailable.
+  // The normal activity feed may restore this observer, never a Send or draft receipt.
+  let goalSettlePending = null;
   /**
    * Retries already spent on the claimed turn, and the wait the next one was announced with.
    *
@@ -2344,6 +2347,7 @@
     // chat must not draft twice. The watch loop itself notices the change on its own tick and
     // exits; what it leaves behind is what this clears.
     goalTurnId = null;
+    goalSettlePending = null;
     goalRetries = 0;
     goalRetryWaitMs = 0;
     goalTicketId = null;
@@ -8334,6 +8338,7 @@
     const forId = conversationId;
     const forEpoch = epoch;
     const nicknameInstance = status.instanceId;
+    let settledToolCensus = null;
     const nicknameAccountIntent = statusAccountIntent;
     const ownScope = { work: ownPull, conversationId: forId, epoch: forEpoch };
     pullingOwner = ownScope;
@@ -8357,6 +8362,7 @@
       }
       if (!current()) return;
       const data = reply.data;
+      settledToolCensus = Number.isSafeInteger(data.pendingTools) && data.pendingTools >= 0 ? data.pendingTools : null;
       nativeApprovalPolicy = typeof data.automationPaused === 'boolean'
         ? { paused: data.automationPaused, conversationId: forId, epoch: forEpoch, at: Date.now() } : null;
       applyFollowOutput(data.followOutput);
@@ -8594,6 +8600,7 @@
     if (current() && CLF_DOM.conversationId() === forId) await maybeResumePendingCompaction(forId, forEpoch);
     if (current() && CLF_DOM.conversationId() === forId) maybeRecoverResumeGoalTurn();
     if (current() && CLF_DOM.conversationId() === forId) maybeRecoverDurableGoalTurn();
+    if (current() && CLF_DOM.conversationId() === forId) maybeRecoverUnavailableGoalTurn(settledToolCensus);
     // Same reason, same place: this types into the composer and can wait on the page, and it
     // needs the draft this pull just delivered.
     if (current() && CLF_DOM.conversationId() === forId) await maybeSendGoalReply();
@@ -12386,6 +12393,7 @@
     if (goalTurnId === endedTurnId) return;
     if (goalBusy) return;
     goalTurnId = endedTurnId;
+    goalSettlePending = null;
     goalRetries = 0;
     setGoalPhase('');
     // Goal is now authoritative for this exact completed turn. Raising the sender tab is a
@@ -12540,11 +12548,36 @@
    * itself, and the message this loop was about to write is about a turn that is no longer
    * the last one.
    */
+  function maybeRecoverUnavailableGoalTurn(pendingToolsReceipt) {
+    const held = goalSettlePending;
+    if (!held) return;
+    const latestUser = CLF_DOM.messages().filter(message => message?.role === 'user').at(-1)?.id;
+    if (!alive || conversationId !== held.conversationId || epoch !== held.epoch ||
+        CLF_DOM.conversationId() !== held.conversationId || goalTurnId !== held.turnId ||
+        !goalUsable() || userStopped || latestUser !== held.userMessageId) {
+      goalSettlePending = null;
+      return;
+    }
+    if (pendingToolsReceipt !== 0 || goalBusy || goalDraft || goalConfig?.pending || goalConfig?.queuePending ||
+        generating || CLF_DOM.generating() || CLF_DOM.approvalWaiting() || nativeBusy || job?.busy) return;
+    const ended = currentAssistantTurn();
+    if (!ended?.node?.isConnected || ended.node !== held.ended.node) {
+      goalSettlePending = null;
+      return;
+    }
+    // Claim synchronously before another activity wake can enter. The entire original
+    // settling barrier runs again; a recovered zero is not permission to skip it.
+    goalSettlePending = null;
+    console.info('[Chat On Steroids] activity receipt restored; rechecking the same completed Goal turn. No continuation sent.');
+    void watchGoalTurn(ended, held.turnId);
+  }
+
   async function watchGoalTurn(ended, forTurn) {
     goalBusy = true;
     setGoalPhase('settling');
     const forId = conversationId;
     const forEpoch = epoch;
+    const userMessageId = CLF_DOM.messages().filter(message => message?.role === 'user').at(-1)?.id;
     const current = () => alive && conversationId === forId && epoch === forEpoch && goalTurnId === forTurn;
     try {
       const deadline = Date.now() + GOAL_WATCH_MS;
@@ -12590,6 +12623,8 @@
       // unstable model answer, and an approval card must never authorize a helper request.
       // Keep the existing Main-owned pickup/recovery; do not invent a page retry or Send.
       console.warn(`[Chat On Steroids] Goal settle window ended: ${heldBy}; no draft requested.`);
+      if (heldBy === 'unavailable' && current() && userMessageId)
+        goalSettlePending = { ended, turnId: forTurn, conversationId: forId, epoch: forEpoch, userMessageId };
       setGoalPhase('settling', heldBy === 'unavailable'
         ? 'Could not verify running tools because the app did not return a valid activity receipt. No continuation was sent.'
         : heldBy === 'changing-answer' ? 'the answer never stopped changing, so nothing was written' : '');
