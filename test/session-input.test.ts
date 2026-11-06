@@ -6548,7 +6548,8 @@ describe('Astra delivery boundaries and stacked direct input', () => {
     expect(refused).toHaveBeenCalledExactlyOnceWith('authorization-lease');
     expect(await listInputs()).toEqual(authorized);
   });
-  it.each(['authorization-policy', 'authorization-scope', 'authorization-route', 'authorization-lease'])(
+  it.each(['authorization-policy', 'authorization-scope', 'authorization-route', 'authorization-lease',
+    'model-choice-unavailable', 'model-unconfirmed'])(
     'retains fixed pre-click refusal %s in the existing recovery history without resetting its budget', async detail => {
       const row = await enqueueInput(input());
       expect(await claimBrowserInput(row.id, 'exact-unsent-page', binding.conversationId, true)).not.toBeNull();
@@ -6566,6 +6567,20 @@ describe('Astra delivery boundaries and stacked direct input', () => {
       resetInputForTests();
       expect((await listInputs())[0]).toMatchObject({ preSendReoffers: 1, recoveryFailure: held.recoveryFailure,
         recoveryTransitions: held.recoveryTransitions });
+    });
+  it.each(['model-choice-unavailable-extra', 'model-private-detail'])(
+    'does not persist an unrecognized model refusal label (%s)', async detail => {
+      const row = await enqueueInput(input());
+      expect(await claimBrowserInput(row.id, 'exact-unsent-page', binding.conversationId, true)).not.toBeNull();
+      expect(await failBrowserInput(row.id, 'exact-unsent-page', 'Native Send was not attempted.', {
+        confirmedUnsent: true, conversationId: binding.conversationId, detail
+      })).toBe(true);
+      const held = (await listInputs())[0]!;
+      expect(held.recoveryTransitions?.at(-1)?.reason).not.toContain(detail);
+      expect(held.recoveryFailure?.detail).not.toContain(detail);
+      expect(held.preSendReoffers).toBe(1);
+      expect(held.sendAuthorizedAt).toBeUndefined();
+      expect(held.messageId).toBeUndefined();
     });
   it.each([null, { kind: 'turn_end', outcome: 'unknown', turnId: 'unknown', time: 1000 }])('requires confirmed terminal evidence for an existing Astra chat (%j)', async end => {
     binding.end = end;

@@ -1,5 +1,9 @@
 # Chat On Steroids - code research mirror
 
+## Source-only pre-Send model-refusal preservation
+
+The incumbent confirmed-unsent preparation path previously dropped the fixed model-choice-unavailable and model-unconfirmed refusal details while retaining authorization refusal details. Two genuine failing regressions reproduced that diagnostic loss. The same bounded allowlist now preserves those two model enums in the existing recovery history and count-only log, without changing retry classification, attempt budgets, model choice, authorization, Send or receipt authority. Unrecognized model detail labels remain excluded. The whole Input suite passed845checks with2existing skips; typecheck passed. This is SOURCE-ONLY, outside installed143, and does not itself repair an unavailable native picker or historical missing result bindings.
+
 ## Source-only matching diagnostic refinement — outside qualified143
 
 The existing bounded result-reference console trace now distinguishes the first rejected retained-parent edge: missing versus conflicting metadata parent, fixed member class, header/first/later position, and on-path versus off-path location. It exports no IDs, text, arguments or mappings and adds nothing to Fiber evidence packets. The original ancestry refusal and all completion/receipt predicates remain unchanged. This narrows the next investigation; it does not repair or certify missing historical request/result matches.

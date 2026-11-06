@@ -3952,7 +3952,7 @@ export async function failBrowserInput(id: string, owner: string, error: string,
       });
       // Preserve only fixed pre-click diagnostics in the incumbent history. This
       // adds no evidence to the classifier and cannot change retry/Send authority.
-      const refusalDetail = detail && /^(?:authorization-(?:policy|scope|route|lease|timeout)|app-refused|lease-lost|provider-blocked)$/.test(detail)
+      const refusalDetail = detail && /^(?:authorization-(?:policy|scope|route|lease|timeout)|app-refused|lease-lost|provider-blocked|model-(?:choice-unavailable|unconfirmed))$/.test(detail)
         ? detail : undefined;
       if (refusalDetail) recoveryFailure.detail += ` Refusal: ${refusalDetail}.`;
       let next = current.map(row => sameDelivery(entry, row) ? {
