@@ -128,6 +128,18 @@ public static class CosWindowsCapture {
     var clock = Stopwatch.StartNew();
     var item = CreateItem(window);
     int width = item.Size.Width, height = item.Size.Height;
+    // A newly painted HWND can precede its DWM capture surface. Reobserve only an
+    // empty item, inside the SAME capture deadline; never allocate from zero or
+    // guess dimensions from another window/desktop. Positive oversized items
+    // still fail immediately through the unchanged allocation guard below.
+    while (width == 0 || height == 0) {
+      if (!IsWindow(window) || IsIconic(window)) throw new InvalidOperationException("CAPTURE_FAILED: target window is closed or minimized");
+      if (clock.ElapsedMilliseconds >= TimeoutMs)
+        throw new TimeoutException("CAPTURE_FAILED: target capture surface remained empty (hwnd=" + window.ToInt64() + ", width=" + width + ", height=" + height + ")");
+      Thread.Sleep(5);
+      item = CreateItem(window);
+      width = item.Size.Width; height = item.Size.Height;
+    }
     ValidateCaptureSize(window, width, height);
     RECT bounds = CaptureBounds(window, width, height, "item");
     using (var device = CreateDevice())

@@ -2,7 +2,7 @@
 
 ## Recorder144 source: staged picker hydration
 
-A failure-first native-picker regression showed that an unrelated bucket can hydrate before the requested model/effort. The existing bounded observation now waits for that exact pair (available or denied) before its sole retry, under the original owner/deadline. All101picker checks passed; no model fallback, extra Send, availability inference or ancestry relaxation was added. Existing post143 matching and refusal-diagnostic repairs below are included in this source. Canonical qualification is in progress; source publication is not installation or fleet-autonomy proof.
+A failure-first native-picker regression showed that an unrelated bucket can hydrate before the requested model/effort. The existing bounded observation now waits for that exact pair (available or denied) before its sole retry, under the original owner/deadline. All101picker checks passed; no model fallback, extra Send, availability inference or ancestry relaxation was added. Existing post143 matching and refusal-diagnostic repairs below are included in this source. A real native qualification failure also exposed an initially empty Windows capture item for a painted window. Capture now reobserves that same HWND only within its existing shared3-second deadline, retaining the32MP cap and exact geometry checks;23real capture/native/frame checks passed. Canonical qualification is in progress; source publication is not installation or fleet-autonomy proof.
 
 ## Source-only pre-Send model-refusal preservation
 
