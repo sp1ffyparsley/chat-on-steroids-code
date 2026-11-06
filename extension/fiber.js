@@ -2341,7 +2341,7 @@
     let nativeAnchorBranch = 'none';
     let nativeAnchorRetainedParent = 'none', nativeAnchorRetainedMember = 'none';
     let nativeAnchorRetainedPosition = 'none', nativeAnchorRetainedLocation = 'none';
-    let nativeAnchorFinalFacet = 'none', nativeAnchorCoreResultFacet = 'none';
+    let nativeAnchorFinalFacet = 'none', nativeAnchorCoreResultFacet = 'none', nativeAnchorHeaderFacet = 'none';
     const finalFacet = facet => { if (nativeAnchorFinalFacet === 'none') nativeAnchorFinalFacet = facet; };
     let nativeAnchorMember = 'none', nativeAnchorMemberTerminal = false, nativeAnchorMemberTyped = false;
     const mountedNativeScope = (() => {
@@ -2393,11 +2393,19 @@
           const headerMeta = nativeField(header, 'metadata');
           const headerWorking = str(nativeField(headerMeta, 'working_turn_id'));
           const headerExchange = str(nativeField(headerMeta, 'turn_exchange_id'));
-          if (!headerWorking || !headerExchange || hasUserScope && (working !== headerWorking || exchange !== headerExchange) ||
-              nativeField(header, 'recipient') !== 'all' || nativeField(header, 'status') !== 'finished_successfully' ||
-              nativeField(headerMeta, 'is_visually_hidden_from_conversation') !== true ||
-              nativeField(headerMeta, 'message_type') !== 'next' || nativeField(headerMeta, 'rebase_developer_message') !== false)
+          // Preserve the guard's exact order and short-circuit reads. Report only
+          // its first fixed refusal; provider values and identities stay local.
+          const headerFacet = !headerWorking ? 'working-missing' : !headerExchange ? 'exchange-missing'
+            : hasUserScope && (working !== headerWorking || exchange !== headerExchange) ? 'user-scope'
+            : nativeField(header, 'recipient') !== 'all' ? 'recipient'
+            : nativeField(header, 'status') !== 'finished_successfully' ? 'status'
+            : nativeField(headerMeta, 'is_visually_hidden_from_conversation') !== true ? 'visible'
+            : nativeField(headerMeta, 'message_type') !== 'next' ? 'message-type'
+            : nativeField(headerMeta, 'rebase_developer_message') !== false ? 'rebase' : null;
+          if (headerFacet) {
+            nativeAnchorHeaderFacet = headerFacet;
             return refuse('nativeScopeBranchConflict', 'header-shape');
+          }
           working = headerWorking; exchange = headerExchange;
           const pending = entry.turn.status === 'in_progress';
           if (!pending) {
@@ -2852,7 +2860,7 @@
             shape.selectedMissingCalls, shape.nativeMissingCalls, shape.typedUserPresent, shape.typedUserSelected,
             selectedRequestIdsPresent, selectedRequestIdsMissing, identityRefusalCalls,
             nativeAnchorReason, nativeAnchorBranch, nativeAnchorRetainedParent, nativeAnchorRetainedMember,
-            nativeAnchorRetainedPosition, nativeAnchorRetainedLocation, nativeAnchorFinalFacet, nativeAnchorCoreResultFacet, nativeAnchorMember, nativeAnchorMemberTerminal, nativeAnchorMemberTyped, ...Object.values(identityRefusalReasons), selectedToolResults, witnessedToolResults,
+            nativeAnchorRetainedPosition, nativeAnchorRetainedLocation, nativeAnchorFinalFacet, nativeAnchorCoreResultFacet, nativeAnchorHeaderFacet, nativeAnchorMember, nativeAnchorMemberTerminal, nativeAnchorMemberTyped, ...Object.values(identityRefusalReasons), selectedToolResults, witnessedToolResults,
             missingWithChild, missingWithWitness, ...Object.values(resultShapes)].join(':');
           if (!nativeReferenceTraceKeys.has(key) && nativeReferenceTraceKeys.size < MAX_TURNS) {
             nativeReferenceTraceKeys.add(key);
@@ -2865,6 +2873,7 @@
               ` identityRefusals=${identityRefusalCalls} nativeScope=${Boolean(mountedNativeScope)}` +
               ` anchorReason=${nativeAnchorReason} anchorBranch=${nativeAnchorBranch} anchorFinalFacet=${nativeAnchorFinalFacet} anchorMember=${nativeAnchorMember}` +
               ` anchorCoreResultFacet=${nativeAnchorCoreResultFacet}` +
+              ` anchorHeaderFacet=${nativeAnchorHeaderFacet}` +
               ` anchorRetainedParent=${nativeAnchorRetainedParent} anchorRetainedMember=${nativeAnchorRetainedMember}` +
               ` anchorRetainedPosition=${nativeAnchorRetainedPosition} anchorRetainedLocation=${nativeAnchorRetainedLocation}` +
               ` anchorMemberTerminal=${nativeAnchorMemberTerminal} anchorMemberTyped=${nativeAnchorMemberTyped}` +

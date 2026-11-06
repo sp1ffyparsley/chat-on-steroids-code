@@ -2250,6 +2250,8 @@ describe('alternate shell turn/message provenance', () => {
     'duplicate final anchor', 'off-path final anchor', 'nonterminal final anchor', 'different final body anchor',
     'orphan execution result', 'execution result request mismatch', 'execution child result missing',
     'pending canonical group', 'pending header mismatch', 'missing system header', 'visible system header', 'foreign header scope',
+    'missing header working', 'missing header exchange', 'user header scope mismatch', 'header recipient',
+    'header unfinished', 'header message type', 'header rebase flag', 'header rebase accessor',
     'unfinished execution', 'unfinished execution result', 'foreign retained parent',
     'core receipt missing', 'core resource foreign', 'core request foreign', 'core request and receipt foreign',
     'missing retained header parent', 'missing retained execution parent', 'off-path retained parent', 'later retained parent', 'cached conflict',
@@ -2298,6 +2300,16 @@ describe('alternate shell turn/message provenance', () => {
           if (variant === 'missing system header') { mapping[EXEC].parent = USER; delete mapping[HEADER]; }
           if (variant === 'visible system header') mapping[HEADER].message.metadata.is_visually_hidden_from_conversation = false;
           if (variant === 'foreign header scope') mapping[HEADER].message.metadata.working_turn_id = 'foreign';
+          if (variant === 'missing header working') delete mapping[HEADER].message.metadata.working_turn_id;
+          if (variant === 'missing header exchange') delete mapping[HEADER].message.metadata.turn_exchange_id;
+          if (variant === 'user header scope mismatch') Object.assign(mapping[USER].message.metadata, {
+            working_turn_id: 'PRIVATE_OTHER_USER_SCOPE', turn_exchange_id: 'PRIVATE_OTHER_USER_EXCHANGE' });
+          if (variant === 'header recipient') mapping[HEADER].message.recipient = 'PRIVATE_HEADER_RECIPIENT';
+          if (variant === 'header unfinished') mapping[HEADER].message.status = 'in_progress';
+          if (variant === 'header message type') mapping[HEADER].message.metadata.message_type = 'PRIVATE_HEADER_TYPE';
+          if (variant === 'header rebase flag') mapping[HEADER].message.metadata.rebase_developer_message = true;
+          if (variant === 'header rebase accessor') Object.defineProperty(mapping[HEADER].message.metadata, 'rebase_developer_message', {
+            get() { getterReads++; throw new Error('PRIVATE_HEADER_REBASE_GETTER'); } });
           if (variant === 'unfinished execution') mapping[EXEC].message.status = 'in_progress';
           if (variant === 'unfinished execution result') mapping[EXEC_RESULT].message.status = 'in_progress';
           if (variant === 'foreign retained parent') mapping[EXEC].message.metadata.parent_id = USER;
@@ -2357,6 +2369,21 @@ describe('alternate shell turn/message provenance', () => {
           requestId: accepted || variant === 'pending canonical group' ? REQUEST : null, answered: accepted });
         if (accepted || variant === 'pending canonical group')
           expect(page.fiber.turns[0].requests.filter((row: any) => row.requestId === REQUEST)).toEqual([expect.objectContaining({ messageId: EXEC })]);
+        const headerFacets: Record<string, string> = {
+          'missing header working': 'working-missing', 'missing header exchange': 'exchange-missing',
+          'user header scope mismatch': 'user-scope', 'header recipient': 'recipient', 'header unfinished': 'status',
+          'visible system header': 'visible', 'header message type': 'message-type',
+          'header rebase flag': 'rebase', 'header rebase accessor': 'rebase'
+        };
+        const headerFacet = headerFacets[variant];
+        if (headerFacet) {
+          const trace = diagnosticLogs.find(line => line.includes('native result-reference recovery diagnostic'))!;
+          expect(trace).toContain('anchorBranch=header-shape');
+          expect(trace).toContain(`anchorHeaderFacet=${headerFacet}`);
+          expect(JSON.stringify(page.fiber)).not.toContain('anchorHeaderFacet');
+          for (const value of [USER, HEADER, 'PRIVATE_OTHER_USER_SCOPE', 'PRIVATE_OTHER_USER_EXCHANGE',
+            'PRIVATE_HEADER_RECIPIENT', 'PRIVATE_HEADER_TYPE', 'PRIVATE_HEADER_REBASE_GETTER']) expect(trace).not.toContain(value);
+        }
         if (variant.startsWith('core ')) {
           const facet = variant.startsWith('core request') ? 'request' : variant === 'core receipt missing' ? 'receipt' : 'resource';
           const trace = diagnosticLogs.find(line => line.includes('native result-reference recovery diagnostic'))!;

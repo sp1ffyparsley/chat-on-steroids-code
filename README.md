@@ -1,5 +1,9 @@
 # Chat On Steroids - code research mirror
 
+## Source-only follow-up: exact header refusal
+
+The existing native header guard now records only its first failed fixed condition in bounded console diagnostics. It preserves the original short-circuit checks, refuses unsupported getters, exports no native identifiers or text, and changes no completion/Send authority. Nine new assertions failed before repair; the complete shell suite passed560cases afterward. TypeScript and JavaScript syntax checks passed. This follow-up is not in the installed recorder145 package; a live header cause has not yet been captured.
+
 ## Recorder145 source: helper readiness and fixed refusal custody
 
 The exact helper picker now observes a temporarily disabled native trigger both before and after the Work-to-Chat transition, within its original owner and finite deadline. It never presses a disabled control, changes the requested model, renews the deadline or sends a message. The post-transition race reproduced four failures before repair; the complete picker suite passed111checks.
