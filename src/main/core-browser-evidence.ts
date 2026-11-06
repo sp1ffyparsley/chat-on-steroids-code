@@ -725,10 +725,12 @@ export function retainNativeRequestIdsFromDurableReceipts(conversation: string,
       pending.calls < 1 || pending.codeCalls !== 0 || !pending.coreCallMessageIds ||
       pending.coreCallMessageIds.length !== pending.calls || !pending.codeCallMessageIds || pending.codeCallMessageIds.length !== 0 ||
       final.callInventoryComplete === false || final.calls !== pending.calls || final.codeCalls !== 0 ||
-      native.sourceUserMessageId !== pending.sourceUserMessageId || !final.allCoreRequestIds ||
-      requestIds.length !== pending.calls || final.allCoreRequestIds.length !== pending.calls ||
+      native.sourceUserMessageId !== pending.sourceUserMessageId ||
+      requestIds.length !== pending.calls ||
+      final.allCoreRequestIds != null && final.allCoreRequestIds.length !== pending.calls ||
       pending.coreCallMessageIds.some((id, at) => native.coreCallMessageIds[at] !== id) ||
-      requestIds.some((id, at) => typeof id !== 'string' || !id || id.length > 100 || final.allCoreRequestIds![at] !== id)) return false;
+      requestIds.some((id, at) => typeof id !== 'string' || !id || id.length > 100 ||
+        final.allCoreRequestIds != null && final.allCoreRequestIds[at] !== id)) return false;
   pending.allCoreRequestIds = [...requestIds];
   return true;
 }

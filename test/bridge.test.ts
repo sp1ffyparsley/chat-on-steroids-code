@@ -9410,7 +9410,7 @@ describe('activity feed', () => {
     'different request', 'known request half', 'missing digest', 'missing receipt', 'changed digest',
     'changed args', 'foreign receipt copy', 'pending Input', 'unknown Send', 'source changes during receipt check',
     'source changes during final Input check',
-    'wrong checkpoint profile'] as const)(
+    'wrong checkpoint profile', 'browser omitted requests', 'browser omitted requests and no bound parent'] as const)(
     'recovers only the missing original request half from exact durable owned receipts after a new document (%s)', async variant => {
     const recorder = await import('../src/main/session/recorder.js');
     const store = await import('../src/main/session/store.js');
@@ -9466,18 +9466,20 @@ describe('activity feed', () => {
       await store.upsertMessageEvent(sessionId, { ...user, time: Date.now(),
         message: { text: 'A different original instruction', chars: 32, truncated: false } });
     };
+    if (variant.startsWith('browser omitted requests')) delete (final as { allCoreRequestIds?: string[] }).allCoreRequestIds;
     if (variant === 'source edited') await editSource();
     if (variant === 'foreign current question') final.sourceUserMessageId = randomUUID();
     if (variant === 'reordered parents') final.coreCallMessageIds = [...messageIds].reverse();
     if (variant === 'different parent') final.coreCallMessageIds = [randomUUID(), messageIds[1]!];
     if (variant === 'different request') final.allCoreRequestIds = ['wfr_foreign_request', requestId];
-    if (['missing receipt', 'changed digest', 'changed args'].includes(variant)) {
+    if (['missing receipt', 'changed digest', 'changed args', 'browser omitted requests and no bound parent'].includes(variant)) {
       const files = await fs.readdir(path.join(store.sessionsRoot(), sessionId, 'messages'));
       for (const name of files) {
         const file = path.join(store.sessionsRoot(), sessionId, 'messages', name);
         const raw = await fs.readFile(file, 'utf8'), row = JSON.parse(raw);
         if (row.kind !== 'tool_call' || row.call.nativeCallMessageId !== messageIds[0]) continue;
         if (variant === 'missing receipt') delete row.call.resultReceiptId;
+        if (variant === 'browser omitted requests and no bound parent') delete row.call.nativeCallMessageId;
         if (variant === 'changed digest') row.call.invocationSha256 = 'f'.repeat(64);
         if (variant === 'changed args') row.call.args = { text: 'Changed original args', chars: 21, truncated: false };
         await fs.writeFile(file, JSON.stringify(row));
@@ -9547,7 +9549,7 @@ describe('activity feed', () => {
       expect(sameOwner).toBe(true);
       response = { status: 200 };
     } else response = await report(final, true);
-    if (variant !== 'exact' && variant !== 'concurrent controls') {
+    if (variant !== 'exact' && variant !== 'concurrent controls' && variant !== 'browser omitted requests') {
       expect(coreBrowserEvidence(conversationId)!.pendingCompletion).toEqual(original);
       expect(await input.listInputs()).toEqual(priorInputs);
       expect(await fs.readFile(journal)).toEqual(bytes);
@@ -9561,7 +9563,14 @@ describe('activity feed', () => {
     expect((await store.readSessionNativeCompletionFenceCheckpoint(sessionId, conversationId, profile))?.fence)
       .toEqual({ version: 1, profileId: profile, sessionId, conversationId, ...original,
         allCoreRequestIds: [requestId, requestId] });
-    expect((await report({ ...final, reason: 'associated', openCalls: 0, openRequestIds: [] }, true)).status).toBe(200);
+    if (variant === 'browser omitted requests') {
+      // Identity repair alone cannot declare terminal completion from an omitted page half.
+      await report({ ...final, reason: 'associated', openCalls: 0, openRequestIds: [] }, true);
+      expect(coreBrowserEvidence(conversationId)!.pendingCompletion).toEqual({ ...original,
+        allCoreRequestIds: [requestId, requestId] });
+    }
+    expect((await report({ ...final, allCoreRequestIds: [requestId, requestId],
+      reason: 'associated', openCalls: 0, openRequestIds: [] }, true)).status).toBe(200);
     expect(coreBrowserEvidence(conversationId)!.pendingCompletion).toBeNull();
     expect(await fs.readFile(journal)).toEqual(bytes);
   });

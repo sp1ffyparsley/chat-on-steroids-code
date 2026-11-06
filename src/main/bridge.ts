@@ -12405,7 +12405,8 @@ async function reconcileOwnedNativeRequestIdentity(conversationId: string, sessi
       !native || native.sourceUserMessageId !== original.sourceUserMessageId ||
       native.coreCallMessageIds.length !== original.calls || native.codeCallMessageIds.length !== 0 ||
       original.coreCallMessageIds.some((id, at) => native.coreCallMessageIds[at] !== id) ||
-      !snapshot?.ordinaryFinal?.allCoreRequestIds || snapshot.ordinaryFinal.allCoreRequestIds.length !== original.calls) return false;
+      !snapshot?.ordinaryFinal ||
+      snapshot.ordinaryFinal.allCoreRequestIds != null && snapshot.ordinaryFinal.allCoreRequestIds.length !== original.calls) return false;
   const profile = getActiveInstanceRuntime().profile.id;
   const current = () => {
     const next = settledNativeTurnCandidate(conversationId), observed = coreBrowserEvidence(conversationId);
@@ -12437,6 +12438,8 @@ async function reconcileOwnedNativeRequestIdentity(conversationId: string, sessi
       (!['sent', 'failed', 'cancelled'].includes(row.state) ||
        row.sendAuthorizedAt !== undefined && (row.deliveredAt === undefined || !row.messageId)));
     if (!await inputCurrent()) return false;
+    // An omitted page projection adds no authority: derive the request half only
+    // from the already-bound exact native parent below. A supplied conflict still vetoes.
     const owned: Extract<SessionEvent, { kind: 'tool_call' }>[] = [];
     const requestIds: string[] = [];
     for (const [at, nativeId] of original.coreCallMessageIds.entries()) {
@@ -12444,7 +12447,8 @@ async function reconcileOwnedNativeRequestIdentity(conversationId: string, sessi
         row.kind === 'tool_call' && row.call.nativeCallMessageId === nativeId);
       const row = matches[0], call = row?.call;
       if (matches.length !== 1 || !row || !call || row.source !== 'mcp' ||
-          call.conversationId !== conversationId || call.requestId !== snapshot.ordinaryFinal.allCoreRequestIds[at] ||
+          call.conversationId !== conversationId ||
+          snapshot.ordinaryFinal.allCoreRequestIds != null && call.requestId !== snapshot.ordinaryFinal.allCoreRequestIds[at] ||
           !call.requestId || !/^[a-f0-9]{64}$/.test(call.invocationSha256 ?? '') ||
           !/^[a-f0-9]{48}$/.test(call.resultReceiptId ?? '') || !isReturnedToolOutcome(call.outcome) ||
           call.process && !call.process.completedAt || !ownedReceiptHeaderCompatible(call, sessionId)) return false;
@@ -12466,7 +12470,7 @@ async function reconcileOwnedNativeRequestIdentity(conversationId: string, sessi
     const pending = snapshot.pendingCompletion!;
     if (!retainNativeRequestIdsFromDurableReceipts(conversationId, pending, requestIds)) return false;
     if (!await persistNativeCompletionCheckpoint(sessionId, conversationId)) return false;
-    logInfo('native Core original request identity recovered from exact owned execution receipts; original result debt retained');
+    logInfo(`native Core original request identity recovered from exact owned execution receipts; pageRequestProjection=${snapshot.ordinaryFinal.allCoreRequestIds == null ? 'omitted' : 'matched'}; original result debt retained`);
     return true;
   } catch { return false; }
 }
