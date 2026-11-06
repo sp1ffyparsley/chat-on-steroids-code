@@ -4186,8 +4186,21 @@ var CLF_DOM = (() => {
         // enter here directly, without the New Chat reuse/catalog preparation.
         // Wait for that surface, then use the same owned Chat transition before
         // interpreting account choices. Work's picker is not a denied Chat model.
-        const ready = await readyTrigger();
+          let ready = await readyTrigger();
         if (!ready) return failed('trigger_missing');
+          // A pristine helper can mount its native trigger before account/model readiness.
+          // Observe only until it becomes enabled, inside the caller's original budget.
+          // Never click a disabled control, renew the deadline, or treat this as a denial.
+          if ((ready.disabled || ready.getAttribute('aria-disabled') === 'true') &&
+              options.exact === true && Number.isFinite(options.deadline)) {
+            ready = await wait(async () => {
+              await readPickerState();
+              const button = trigger();
+              return button && !button.disabled && button.getAttribute('aria-disabled') !== 'true' ? button : null;
+            }, Number.isFinite(options.observationMs)
+              ? Math.min(15000, Math.max(0, options.observationMs)) : 15000);
+            if (!ready) return failed('choice_unavailable');
+          }
         if (ready.disabled || ready.getAttribute('aria-disabled') === 'true') return failed('choice_unavailable');
         if (!await prepareChatModelSurface(stillCurrent)) return failed('surface_unconfirmed');
         // A retained exit-animation node is not an open native menu.

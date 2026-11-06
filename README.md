@@ -473,3 +473,8 @@ This sanitized export independently passed typechecking and25 focused real conte
 
 
 Update133 installation timing: optional seed reuse was dominated by old-backup metadata reads (105279ms for4991seed stats in the first5000-file sample). Fresh full copying kept the same source/destination/recheck hashes and independent verification; first5000files took38292ms versus180356ms with seed reuse, with different inventory warmth. Full133864-file capture took778705ms at the checkpoint owner; independent verify took444283ms. No timestamp-only/USN shortcut was introduced. The old nsisMs timer includes pre-NSIS callback/capture time and must not be read as installer-only duration.
+
+
+### Source-only helper picker readiness follow-up (November 6)
+
+The exact-model helper selector now observes a temporarily disabled native trigger until it becomes enabled, within the existing observation budget and original preparation deadline. It never clicks disabled controls, changes model policy, renews the deadline, or retries denied choices. Five new regression cases cover both disabled forms, persistent disablement, lost ownership, and expiry. Four reproduced failures preceded the fix; all 106 picker tests, JavaScript syntax, and TypeScript checks pass. This source change is not part of the previously qualified/installed recorder 144 package and still needs release qualification and activation before runtime claims.

@@ -400,6 +400,46 @@ it.each(['trigger_missing', 'snapshot_missing'] as const)('classifies one bounde
     { failure, deadline: win.Date.now() + 100, observationMs: 10, exact: true })).toBe(false);
   expect(failure).toHaveBeenCalledExactlyOnceWith(reason);
 });
+it.each(['aria-disabled', 'disabled'] as const)(
+  'waits for the same native helper picker to become enabled within its original budget (%s)', async attribute => {
+    const f = fixture(), win = page.window, trigger = win.document.querySelector('button')!, failure = vi.fn();
+    const presses = vi.fn(), send = vi.fn();
+    trigger.setAttribute(attribute, 'true');
+    trigger.addEventListener('keydown', presses);
+    win.document.querySelector('[data-testid="send-button"]')!.addEventListener('click', send);
+    const deadline = win.Date.now() + 1000;
+    const selection = f.api.selectModelSettings('gpt-5-6-thinking', 'high', () => true,
+      { exact: true, deadline, observationMs: 200, failure });
+    expect(presses).not.toHaveBeenCalled();
+    win.setTimeout(() => trigger.removeAttribute(attribute), 30);
+    expect(await selection).toBe(true);
+    expect(presses).toHaveBeenCalledTimes(1);
+    expect(f.api.visibleModelSelection()).toEqual({ model: 'gpt-5-6-thinking', reasoningEffort: 'high' });
+    expect(failure).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(win.Date.now()).toBeLessThan(deadline);
+  });
+it.each(['stays-disabled', 'owner-changed', 'deadline'] as const)(
+  'does not open a disabled helper picker after its readiness authority ends (%s)', async cause => {
+    const f = fixture(), win = page.window, trigger = win.document.querySelector('button')!, failure = vi.fn();
+    const presses = vi.fn(), send = vi.fn();
+    let current = true;
+    trigger.setAttribute('aria-disabled', 'true');
+    trigger.addEventListener('keydown', presses);
+    win.document.querySelector('[data-testid="send-button"]')!.addEventListener('click', send);
+    const deadline = win.Date.now() + (cause === 'deadline' ? 80 : 500);
+    win.setTimeout(() => {
+      if (cause === 'owner-changed') current = false;
+      if (cause !== 'stays-disabled') trigger.removeAttribute('aria-disabled');
+    }, cause === 'deadline' ? 160 : 20);
+    expect(await f.api.selectModelSettings('gpt-5-6-thinking', 'high', () => current,
+      { exact: true, deadline, observationMs: cause === 'deadline' ? 200 : 60, failure })).toBe(false);
+    expect(failure).toHaveBeenCalledExactlyOnceWith(cause === 'owner-changed' ? 'owner_changed'
+      : cause === 'deadline' ? 'preparation_expired' : 'choice_unavailable');
+    expect(presses).not.toHaveBeenCalled();
+    expect(f.actions).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+  });
 it.each(['disabled', 'denied', 'unavailable', 'owner_changed', 'expired'] as const)(
   'does not classify explicit refusal or lost ownership as transient (%s)', async cause => {
     const f = fixture(), failure = vi.fn(), doc = page.window.document;
