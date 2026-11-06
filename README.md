@@ -1,5 +1,9 @@
 # Chat On Steroids - code research mirror
 
+## Recorder144 source: staged picker hydration
+
+A failure-first native-picker regression showed that an unrelated bucket can hydrate before the requested model/effort. The existing bounded observation now waits for that exact pair (available or denied) before its sole retry, under the original owner/deadline. All101picker checks passed; no model fallback, extra Send, availability inference or ancestry relaxation was added. Existing post143 matching and refusal-diagnostic repairs below are included in this source. Canonical qualification is in progress; source publication is not installation or fleet-autonomy proof.
+
 ## Source-only pre-Send model-refusal preservation
 
 The incumbent confirmed-unsent preparation path previously dropped the fixed model-choice-unavailable and model-unconfirmed refusal details while retaining authorization refusal details. Two genuine failing regressions reproduced that diagnostic loss. The same bounded allowlist now preserves those two model enums in the existing recovery history and count-only log, without changing retry classification, attempt budgets, model choice, authorization, Send or receipt authority. Unrecognized model detail labels remain excluded. The whole Input suite passed845checks with2existing skips; typecheck passed. This is SOURCE-ONLY, outside installed143, and does not itself repair an unavailable native picker or historical missing result bindings.

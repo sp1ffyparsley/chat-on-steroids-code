@@ -436,7 +436,7 @@ it.each(['trigger_missing', 'snapshot_missing'] as const)('reobserves the actual
   expect(failure).toHaveBeenCalledTimes(1);
   expect(f.api.visibleModelSelection()).toEqual({ model: 'gpt-5-6-thinking', reasoningEffort: 'high' });
 });
-it.each(['after-baseline', 'before-baseline'] as const)(
+it.each(['after-baseline', 'before-baseline', 'unrelated-first'] as const)(
   'reobserves one missing exact pair in the same selector invocation after native hydration (%s)', async timing => {
     const f = fixture(), win = page.window, doc = win.document, failure = vi.fn();
     let closes = 0;
@@ -448,7 +448,13 @@ it.each(['after-baseline', 'before-baseline'] as const)(
     doc.addEventListener('keydown', event => {
       if (event.key !== 'Escape' || ++closes !== 1) return;
       if (timing === 'before-baseline') queueMicrotask(hydrate);
-      else win.setTimeout(hydrate, 10);
+      else if (timing === 'unrelated-first') {
+        win.setTimeout(() => {
+          f.selections[0]!.push({ ...hydrated, bucket: 5, modelSlug: 'unrelated-model' });
+          doc.querySelector('form')!.setAttribute('data-native-picker-partial', 'true');
+        }, 10);
+        win.setTimeout(hydrate, 100);
+      } else win.setTimeout(hydrate, 10);
     });
     const deadline = win.Date.now() + 1000;
     expect(await f.api.selectModelSettings('gpt-6-thinking', 'high', () => true,

@@ -4428,17 +4428,12 @@ var CLF_DOM = (() => {
     if (!missingPair || refusal !== 'choice_unavailable' || options.exact !== true ||
         !model || !effort || !Number.isFinite(options.deadline) || !current()) return failed();
     const ui = modelPickerAccess(current, options);
-    let baseline;
     const changed = await ui.state(state => {
       // Hydration may have completed during the first close. Do not wait for a second
       // mutation when the current exact pair already became available or was denied.
-      if (state.choices.some(choice => requestedPickerChoice(choice, model, effort))) return true;
-      const signature = JSON.stringify([state.version, state.currentBucket,
-        state.versions.map(version => [version.id, version.label]),
-        state.choices.map(choice => [choice.bucket, choice.id, choice.familyId, choice.effort, choice.available]),
-        state.lanes ?? null]);
-      if (baseline === undefined) { baseline = signature; return false; }
-      return signature !== baseline;
+      // A different bucket/version can hydrate first. Only the requested pair can
+      // end this bounded observation; unrelated mutations must not spend its retry.
+      return state.choices.some(choice => requestedPickerChoice(choice, model, effort));
     }, Number.isFinite(options.observationMs) ? Math.min(15000, Math.max(0, options.observationMs)) : 15000);
     if (!changed || !current()) return failed();
     if (changed.choices.some(choice => requestedPickerChoice(choice, model, effort) && choice.available === false)) {
