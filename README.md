@@ -1,5 +1,11 @@
 # Chat On Steroids - code research mirror
 
+## Recorder145 source: helper readiness and fixed refusal custody
+
+The exact helper picker now observes a temporarily disabled native trigger both before and after the Work-to-Chat transition, within its original owner and finite deadline. It never presses a disabled control, changes the requested model, renews the deadline or sends a message. The post-transition race reproduced four failures before repair; the complete picker suite passed111checks.
+
+Fixed allowlisted picker failure codes now survive into existing durable Input recovery details and transitions on both ordinary pre-Send reoffers and terminal helper failures. Foreign owners, arbitrary text and authorized/uncertain Sends cannot acquire positively-unsent status from a diagnostic label. Three whole affected suites passed2,680checks with2existing skips; TypeScript and JavaScript syntax checks passed. No new queue, dependency or retry budget was added. This source follows the earlier bounded first-Core-result refusal diagnostic. The final private145package is still qualifying; installed144 and live automatic recovery remain separate claims.
+
 ## Recorder144 independently installed privately
 
 Recorder144 build3 passed96preliminary and13,562Main checks with62existing conditional skips;33post-pin installer checks and read-only readiness passed. Independent protected-store and full-program verification completed before app launch. Compiled private source is `e30eb8e9b28eaa56bb821cc587680dc16c55e37a`; that provenance hash is not a public Git object. Use this mirror's public commit for retrieval. The private installer SHA-256 is `11cb2289543a5d9423d703af72c50dc08b661a08deee8065b4c6ca631dc5bb41`; no public binary release is supplied.

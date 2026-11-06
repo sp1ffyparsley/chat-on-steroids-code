@@ -739,6 +739,48 @@ it.each([false, true])('selects a worker model from the native Work surface afte
   expect(await f.api.selectModelSettings('future-model', 'ultra')).toBe(true);
   expect(f.switchChat).toHaveBeenCalledTimes(1);
 });
+it.each(['disabled', 'aria-disabled'] as const)(
+  'observes helper trigger readiness again after Work changes to Chat (%s)', async attribute => {
+    const f = workSurfaceFixture(false), win = page.window;
+    const trigger = win.document.querySelector<HTMLButtonElement>('form button')!;
+    const disabledPresses = vi.fn(), sends = vi.fn();
+    trigger.addEventListener('keydown', () => {
+      if (trigger.disabled || trigger.getAttribute('aria-disabled') === 'true') disabledPresses();
+    });
+    win.document.querySelector('[data-testid="send-button"]')!.addEventListener('click', sends);
+    f.chat.addEventListener('click', () => {
+      trigger.setAttribute(attribute, 'true');
+      win.setTimeout(() => trigger.removeAttribute(attribute), 30);
+    });
+    const deadline = win.Date.now() + 1000, failure = vi.fn();
+    expect(await f.api.selectModelSettings('future-model', 'ultra', () => true,
+      { exact: true, deadline, observationMs: 200, failure })).toBe(true);
+    expect(f.switchChat).toHaveBeenCalledTimes(1);
+    expect(f.state.currentSelection).toMatchObject({ modelSlug: 'future-model', thinkingEffort: 'ultra' });
+    expect(disabledPresses).not.toHaveBeenCalled();
+    expect(sends).not.toHaveBeenCalled();
+    expect(failure).not.toHaveBeenCalled();
+    expect(win.Date.now()).toBeLessThan(deadline);
+  });
+it.each(['stays-disabled', 'owner-changed', 'deadline'] as const)(
+  'keeps post-transition helper readiness within its original authority (%s)', async cause => {
+    const f = workSurfaceFixture(false), win = page.window;
+    const trigger = win.document.querySelector('form button')!, presses = vi.fn(), failure = vi.fn();
+    let current = true;
+    trigger.addEventListener('keydown', presses);
+    f.chat.addEventListener('click', () => {
+      trigger.setAttribute('aria-disabled', 'true');
+      if (cause === 'owner-changed') win.setTimeout(() => { current = false; }, 20);
+      if (cause === 'deadline') win.setTimeout(() => trigger.removeAttribute('aria-disabled'), 180);
+    });
+    const deadline = win.Date.now() + (cause === 'deadline' ? 80 : 500);
+    expect(await f.api.selectModelSettings('future-model', 'ultra', () => current,
+      { exact: true, deadline, observationMs: cause === 'deadline' ? 200 : 60, failure })).toBe(false);
+    expect(failure).toHaveBeenCalledExactlyOnceWith(cause === 'owner-changed' ? 'owner_changed'
+      : cause === 'deadline' ? 'preparation_expired' : 'choice_unavailable');
+    expect(presses).not.toHaveBeenCalled();
+    expect(f.actions).not.toHaveBeenCalled();
+  });
 it('refuses model selection when the owned page changes during the Work to Chat transition', async () => {
   const f = workSurfaceFixture(false);
   let current = true;

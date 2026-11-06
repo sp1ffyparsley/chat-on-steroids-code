@@ -3851,6 +3851,9 @@ export async function failBrowserInput(id: string, owner: string, error: string,
     }
     const detail = typeof options.detail === 'string' && /^[a-z-]{1,40}$/.test(options.detail)
       ? options.detail : undefined;
+    // Shape-only picker diagnostics, never provider labels or new retry authority.
+    const refusalDetail = detail && /^(?:authorization-(?:policy|scope|route|lease|timeout)|app-refused|lease-lost|provider-blocked|model-(?:trigger-missing|snapshot-missing|choice-unavailable|surface-unconfirmed|selection-unconfirmed|selection-ambiguous|picker-not-closed|composer-unwritable|owner-changed|preparation-expired|unconfirmed))$/.test(detail)
+      ? detail : undefined;
     const recoveryWithdrawal = exactPreSendRelease &&
       error === 'After-turn pickup was withdrawn before Send.' &&
       Boolean(entry.recovery || entry.silenceBoundary || entry.completedTurnId || entry.sourceHelperId);
@@ -3952,8 +3955,6 @@ export async function failBrowserInput(id: string, owner: string, error: string,
       });
       // Preserve only fixed pre-click diagnostics in the incumbent history. This
       // adds no evidence to the classifier and cannot change retry/Send authority.
-      const refusalDetail = detail && /^(?:authorization-(?:policy|scope|route|lease|timeout)|app-refused|lease-lost|provider-blocked|model-(?:choice-unavailable|unconfirmed))$/.test(detail)
-        ? detail : undefined;
       if (refusalDetail) recoveryFailure.detail += ` Refusal: ${refusalDetail}.`;
       let next = current.map(row => sameDelivery(entry, row) ? {
         ...row,
@@ -4005,6 +4006,15 @@ export async function failBrowserInput(id: string, owner: string, error: string,
       deliveredAtPresent: entry.deliveredAt !== undefined,
       error
     });
+    // Decisions use this terminal branch rather than the generic reoffer above.
+    // Retain their first fixed refusal too, but never call authorized/uncertain
+    // or already-receipted delivery positively unsent from a supplied label.
+    const unsentRefusal = refusalDetail && entry.requiresAuthorization === true &&
+      entry.sendAuthorizedAt === undefined && entry.messageId === undefined &&
+      entry.deliveredAt === undefined && entry.deliveredSessionId === undefined &&
+      entry.response === undefined && entry.toolReceiptUncertain !== true
+      ? refusalDetail : undefined;
+    if (unsentRefusal) recoveryFailure.detail += ` Refusal: ${unsentRefusal}.`;
     let next = current.map((row) => sameDelivery(entry, row)
       ? {
         ...row,
@@ -4020,7 +4030,7 @@ export async function failBrowserInput(id: string, owner: string, error: string,
     const released = confirmedUnsent ? releaseSameChatFollowerAfterConfirmedUnsent(next, entry) : { rows: next, releasedId: null };
     next = released.rows;
     await commit(next);
-    logWarn(`input ${entry.id}: browser_send_failure phase=${recoveryFailure.phase} detail=${detail === 'model-unconfirmed' ? detail : 'unspecified'} disposition=${entry.companionInputId ? 'cancelled-with-companion' : 'failed'}`);
+    logWarn(`input ${entry.id}: browser_send_failure phase=${recoveryFailure.phase} detail=${unsentRefusal ?? 'unspecified'} disposition=${entry.companionInputId ? 'cancelled-with-companion' : 'failed'}`);
     if (released.releasedId)
       logInfo(`input ${released.releasedId}: released same-chat explicit follower after ${entry.id} failed before native Send authorization`);
     rejectDecision('goal_browser_send_failed: ' + error.slice(0, 200));

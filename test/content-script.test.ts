@@ -3581,7 +3581,7 @@ describe('desktop input delivery and helper ownership', () => {
         .toHaveLength(0);
       expect(live.sent.find(message => message.type === 'desktop_input' && message.fail)?.detail)
         .toBe(reason === 'choice_denied' ? 'model-choice-denied'
-          : reason === 'choice_unavailable' ? 'model-choice-unavailable' : 'model-unconfirmed');
+          : `model-${(reason === 'unknown' ? 'selection_unconfirmed' : reason).replaceAll('_', '-')}`);
       const stages = live.sent.filter(message => message.stage).map(message => message.stage);
       expect(stages).toContain(`model:ordinary:${reason === 'unknown' ? 'selection_unconfirmed' : reason}`);
       expect(stages.filter(stage => stage.startsWith('model:ordinary:'))).toHaveLength(1);
@@ -3676,7 +3676,8 @@ describe('desktop input delivery and helper ownership', () => {
         const failure = live.sent.find(message => message.type === 'desktop_input' && message.fail);
         expect(failure).toMatchObject({ id: inputId, error: 'Requested model or reasoning could not be confirmed',
           detail: ['choice_denied', 'retry-choice-denied'].includes(cause) ? 'model-choice-denied'
-            : cause === 'choice_unavailable' ? 'model-choice-unavailable' : 'model-unconfirmed' });
+            : cause === 'choice_unavailable' ? 'model-choice-unavailable'
+              : cause === 'twice-missing' ? 'model-snapshot-missing' : 'model-unconfirmed' });
       }
     });
 

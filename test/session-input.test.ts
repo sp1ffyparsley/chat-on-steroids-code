@@ -5429,6 +5429,52 @@ describe('browser decision lifetime', () => {
     expect((await listInputs())[0]?.state).toBe('failed');
   });
 
+  it.each(['model-trigger-missing', 'model-snapshot-missing', 'model-choice-unavailable',
+    'model-surface-unconfirmed', 'model-selection-unconfirmed', 'model-selection-ambiguous',
+    'model-picker-not-closed', 'model-composer-unwritable', 'model-owner-changed',
+    'model-preparation-expired', 'model-unconfirmed', 'model-private-detail'])(
+    'retains only fixed helper refusal diagnostics without changing decision custody (%s)', async detail => {
+      const answer = requestBrowserDecision('Choose one', new AbortController().signal);
+      const rejection = expect(answer).rejects.toThrow('goal_browser_send_failed');
+      const row = (await listInputs())[0]!;
+      expect(await claimBrowserInput(row.id, 'model-failure-owner', null, true)).not.toBeNull();
+      expect(await failBrowserInput(row.id, 'foreign-owner', 'Requested model or reasoning could not be confirmed', { detail })).toBe(false);
+      expect(await failBrowserInput(row.id, 'model-failure-owner', 'Requested model or reasoning could not be confirmed', { detail })).toBe(true);
+      await rejection;
+      const held = (await listInputs())[0]!;
+      expect(held).toMatchObject({ id: row.id, state: 'failed', owner: 'model-failure-owner',
+        requiresAuthorization: true, recoveryFailure: { phase: 'pre_send_preparation', retrySafe: true } });
+      expect(held.preSendReoffers).toBeUndefined();
+      expect(held.sendAuthorizedAt).toBeUndefined(); expect(held.messageId).toBeUndefined();
+      expect(held.deliveredAt).toBeUndefined(); expect(held.response).toBeUndefined();
+      for (const diagnostic of [held.recoveryFailure?.detail, held.recoveryTransitions?.at(-1)?.reason]) {
+        if (detail === 'model-private-detail') expect(diagnostic).not.toContain(detail);
+        else expect(diagnostic).toContain(detail);
+      }
+      expect(getLog().filter(event => event.message.includes(row.id) &&
+        event.message.includes(`detail=${detail === 'model-private-detail' ? 'unspecified' : detail}`))).toHaveLength(1);
+      resetInputForTests();
+      expect((await listInputs())[0]).toMatchObject({ id: row.id, state: 'failed',
+        recoveryFailure: held.recoveryFailure, recoveryTransitions: held.recoveryTransitions });
+    });
+
+  it('does not turn an authorized helper into an unsent picker failure from a fixed diagnostic label', async () => {
+    const answer = requestBrowserDecision('Choose one', new AbortController().signal);
+    const rejection = expect(answer).rejects.toThrow('goal_browser_send_failed');
+    const row = (await listInputs())[0]!;
+    expect(await claimBrowserInput(row.id, 'authorized-model-owner', null, true)).not.toBeNull();
+    expect(await authorizeBrowserInput(row.id, 'authorized-model-owner', null)).toBe(true);
+    expect(await failBrowserInput(row.id, 'authorized-model-owner', 'Requested model or reasoning could not be confirmed',
+      { detail: 'model-trigger-missing' })).toBe(true);
+    await rejection;
+    const held = (await listInputs())[0]!;
+    expect(held.sendAuthorizedAt).toBeDefined();
+    expect(held.recoveryFailure?.retrySafe).toBe(false);
+    expect(held.recoveryFailure?.detail).not.toContain('model-trigger-missing');
+    expect(held.recoveryTransitions?.at(-1)?.reason).not.toContain('model-trigger-missing');
+    expect(held.preSendReoffers).toBeUndefined();
+  });
+
   it.each([false, true])('holds an exact deterministic envelope refusal only before native authorization (authorized: %s)', async authorized => {
     const refusal = 'Required prompt header/footer validation failed before Send. Check the companion status and repair the prepared input before retrying.';
     const answer = requestBrowserDecision('Private original task must remain retained', new AbortController().signal);
