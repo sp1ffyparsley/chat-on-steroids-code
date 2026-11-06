@@ -2250,7 +2250,8 @@ describe('alternate shell turn/message provenance', () => {
     'duplicate final anchor', 'off-path final anchor', 'nonterminal final anchor', 'different final body anchor',
     'orphan execution result', 'execution result request mismatch', 'execution child result missing',
     'pending canonical group', 'pending header mismatch', 'missing system header', 'visible system header', 'foreign header scope',
-    'unfinished execution', 'unfinished execution result', 'foreign retained parent', 'cached conflict',
+    'unfinished execution', 'unfinished execution result', 'foreign retained parent',
+    'missing retained header parent', 'missing retained execution parent', 'off-path retained parent', 'later retained parent', 'cached conflict',
     'unselected call', 'missing live branch', 'system accessor'] as const)(
     'recovers folded native execution ownership from an exact provider group: %s', async variant => {
       let getterReads = 0;
@@ -2293,6 +2294,20 @@ describe('alternate shell turn/message provenance', () => {
           if (variant === 'unfinished execution') mapping[EXEC].message.status = 'in_progress';
           if (variant === 'unfinished execution result') mapping[EXEC_RESULT].message.status = 'in_progress';
           if (variant === 'foreign retained parent') mapping[EXEC].message.metadata.parent_id = USER;
+          if (variant === 'missing retained header parent') delete mapping[HEADER].message.metadata.parent_id;
+          if (variant === 'missing retained execution parent') {
+            mapping[EXEC].message.metadata.parent_id = '';
+            // A later conflicting edge must not replace the first refusal shape.
+            mapping[CALL].message.metadata.parent_id = USER;
+          }
+          if (variant === 'off-path retained parent') {
+            mapping.PRIVATE_RETAINED_BRANCH = { id: 'PRIVATE_RETAINED_BRANCH', parent: USER,
+              message: { id: 'PRIVATE_RETAINED_BRANCH', author: { role: 'assistant' }, recipient: 'all',
+                status: 'finished_successfully', metadata: { ...scope, parent_id: USER },
+                content: { content_type: 'text', parts: ['PRIVATE_RETAINED_BRANCH_TEXT'] } } };
+            mapping[EXEC].message.metadata.parent_id = 'PRIVATE_RETAINED_BRANCH';
+          }
+          if (variant === 'later retained parent') mapping[CALL].message.metadata.parent_id = USER;
           if (variant === 'unselected call') entry.turn.messageIds = [USER, ASSISTANT];
           if (variant === 'system accessor') Object.defineProperty(mapping[HEADER].message.metadata,
             'is_visually_hidden_from_conversation', { get() { getterReads++; throw new Error('PRIVATE_SYSTEM_GETTER'); } });
@@ -2358,7 +2373,27 @@ describe('alternate shell turn/message provenance', () => {
             'PRIVATE_ORPHAN_EXEC_RESULT', 'PRIVATE_OTHER_EXEC_REQUEST'])
             expect(trace).not.toContain(value);
         }
+        if (['foreign retained parent', 'missing retained header parent', 'missing retained execution parent',
+          'off-path retained parent', 'later retained parent'].includes(variant)) {
+          const missing = variant.startsWith('missing retained');
+          const header = variant === 'missing retained header parent';
+          const later = variant === 'later retained parent';
+          const trace = diagnosticLogs.find(line => line.includes('native result-reference recovery diagnostic'))!;
+          expect(trace).toContain('anchorReason=nativeScopeBranchConflict');
+          expect(trace).toContain('anchorBranch=group-retained-parent');
+          expect(trace).toContain(`anchorRetainedParent=${missing ? 'missing' : 'conflict'}`);
+          expect(trace).toContain(`anchorRetainedMember=${header ? 'header' : later ? 'core-call' : 'code-call'}`);
+          expect(trace).toContain(`anchorRetainedPosition=${header ? 'header' : later ? 'later-member' : 'first-member'}`);
+          expect(trace).toContain(`anchorRetainedLocation=${missing ? 'none' : variant === 'off-path retained parent' ? 'off-path' : 'on-path'}`);
+          expect(page.fiber.turns[0].requests).not.toContainEqual(expect.objectContaining({ requestId: REQUEST, messageId: CALL }));
+          expect(page.fiber.turns[0].endMessageId).toBeNull();
+          for (const value of [USER, ASSISTANT, CALL, RESULT, REQUEST, EXEC, EXEC_RESULT, HEADER,
+            'PRIVATE_RETAINED_BRANCH', 'PRIVATE_RETAINED_BRANCH_TEXT', 'PRIVATE_SYSTEM_TEXT',
+            'native-group-working', 'native-group-exchange', 'retired-header-parent', 'retired-exec-parent'])
+            expect(trace).not.toContain(value);
+        }
         expect(getterReads).toBe(0);
+        expect(JSON.stringify(page.fiber)).not.toContain('anchorRetained');
         expect(JSON.stringify(page.fiber)).not.toMatch(/PRIVATE_SYSTEM_TEXT|PRIVATE_SYSTEM_GETTER|retired-header-parent|retired-exec-parent/);
       } finally { page.dom.window.close(); }
     });

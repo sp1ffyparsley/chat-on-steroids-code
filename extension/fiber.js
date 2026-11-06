@@ -2339,6 +2339,8 @@
     // Retain the first failed prerequisite in the existing bounded console trace.
     let nativeAnchorReason = 'none';
     let nativeAnchorBranch = 'none';
+    let nativeAnchorRetainedParent = 'none', nativeAnchorRetainedMember = 'none';
+    let nativeAnchorRetainedPosition = 'none', nativeAnchorRetainedLocation = 'none';
     let nativeAnchorFinalFacet = 'none';
     const finalFacet = facet => { if (nativeAnchorFinalFacet === 'none') nativeAnchorFinalFacet = facet; };
     let nativeAnchorMember = 'none', nativeAnchorMemberTerminal = false, nativeAnchorMemberTyped = false;
@@ -2422,8 +2424,22 @@
             if (nativeField(node, 'id') !== id || nativeField(message, 'id') !== id)
               return refuse('nativeScopeBranchConflict', 'group-node');
             if (parent !== currentPath[at - 1]) return refuse('nativeScopeBranchConflict', 'group-parent');
-            if (!retainedParent || retainedParent !== parent && own.call(mapping, retainedParent))
+            if (!retainedParent || retainedParent !== parent && own.call(mapping, retainedParent)) {
+              // Fixed shape of the first refused edge only. Do not export either
+              // parent, inspect its node or change the original ancestry guard.
+              try {
+                const name = nativeField(author, 'name');
+                nativeAnchorRetainedParent = retainedParent ? 'conflict' : 'missing';
+                nativeAnchorRetainedPosition = at === 1 ? 'header' : at === 2 ? 'first-member' : 'later-member';
+                nativeAnchorRetainedLocation = !retainedParent ? 'none' : currentIds.has(retainedParent) ? 'on-path' : 'off-path';
+                nativeAnchorRetainedMember = at === 1 ? 'header' : role === 'assistant'
+                  ? recipient === 'functions.exec' ? 'code-call' : recipient === 'api_tool.call_tool' ? 'core-call' : 'assistant-other'
+                  : role === 'tool'
+                    ? name === 'functions.exec' ? 'code-result' : name === 'api_tool.call_tool' ? 'core-result' : 'other-tool-result'
+                    : role === 'user' ? 'user' : 'other';
+              } catch { /* Optional diagnostics never change the existing refusal. */ }
               return refuse('nativeScopeBranchConflict', 'group-retained-parent');
+            }
             if (str(nativeField(metadata, 'working_turn_id')) !== working)
               return refuse('nativeScopeBranchConflict', 'group-working-turn');
             if (str(nativeField(metadata, 'turn_exchange_id')) !== exchange)
@@ -2826,7 +2842,8 @@
           const key = [shape.typedCalls, shape.missingReferences, shape.liveMapping, shape.currentPathNodes,
             shape.selectedMissingCalls, shape.nativeMissingCalls, shape.typedUserPresent, shape.typedUserSelected,
             selectedRequestIdsPresent, selectedRequestIdsMissing, identityRefusalCalls,
-            nativeAnchorReason, nativeAnchorBranch, nativeAnchorFinalFacet, nativeAnchorMember, nativeAnchorMemberTerminal, nativeAnchorMemberTyped, ...Object.values(identityRefusalReasons), selectedToolResults, witnessedToolResults,
+            nativeAnchorReason, nativeAnchorBranch, nativeAnchorRetainedParent, nativeAnchorRetainedMember,
+            nativeAnchorRetainedPosition, nativeAnchorRetainedLocation, nativeAnchorFinalFacet, nativeAnchorMember, nativeAnchorMemberTerminal, nativeAnchorMemberTyped, ...Object.values(identityRefusalReasons), selectedToolResults, witnessedToolResults,
             missingWithChild, missingWithWitness, ...Object.values(resultShapes)].join(':');
           if (!nativeReferenceTraceKeys.has(key) && nativeReferenceTraceKeys.size < MAX_TURNS) {
             nativeReferenceTraceKeys.add(key);
@@ -2838,6 +2855,8 @@
               ` requestIdPresent=${selectedRequestIdsPresent} requestIdMissing=${selectedRequestIdsMissing}` +
               ` identityRefusals=${identityRefusalCalls} nativeScope=${Boolean(mountedNativeScope)}` +
               ` anchorReason=${nativeAnchorReason} anchorBranch=${nativeAnchorBranch} anchorFinalFacet=${nativeAnchorFinalFacet} anchorMember=${nativeAnchorMember}` +
+              ` anchorRetainedParent=${nativeAnchorRetainedParent} anchorRetainedMember=${nativeAnchorRetainedMember}` +
+              ` anchorRetainedPosition=${nativeAnchorRetainedPosition} anchorRetainedLocation=${nativeAnchorRetainedLocation}` +
               ` anchorMemberTerminal=${nativeAnchorMemberTerminal} anchorMemberTyped=${nativeAnchorMemberTyped}` +
               ` identityReasons=${Object.entries(identityRefusalReasons).map(([kind, count]) => kind + ":" + count).join(',')}` +
               ` selectedResults=${selectedToolResults} witnessedResults=${witnessedToolResults}` +

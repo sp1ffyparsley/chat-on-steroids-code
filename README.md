@@ -1,5 +1,11 @@
 # Chat On Steroids - code research mirror
 
+## Source-only matching diagnostic refinement — outside qualified143
+
+The existing bounded result-reference console trace now distinguishes the first rejected retained-parent edge: missing versus conflicting metadata parent, fixed member class, header/first/later position, and on-path versus off-path location. It exports no IDs, text, arguments or mappings and adds nothing to Fiber evidence packets. The original ancestry refusal and all completion/receipt predicates remain unchanged. This narrows the next investigation; it does not repair or certify missing historical request/result matches.
+
+Five failure-first diagnostic cases were reproduced. All 548 shell compatibility checks passed in the reviewed mirror, including exact-group positives, foreign-parent negatives, privacy and first-refusal preservation. These diagnostics are source-only and are NOT included in the already-qualified143 installer below. No new release, installation or recovered automatic turn is claimed.
+
 ## Source143 picker hydration and hourly recovery — qualified, installed142 unchanged
 
 Canonical build 2 of source143 passed 96 preliminary and 13,551 main checks (62 existing conditional skips) in 810.20 seconds. Its exact independently cross-checked package passed all 33 post-pin checks in 220.63 seconds and read-only activation readiness. This cut is QUALIFIED, not installed or verified in live recovery; installed142 remains the accepted deployed version recorded below. Source content/background markers are paired at143, which does not establish executing browser bytes. Working chats were not stopped for this source change. Four retained helper preparation failures reported `model-choice-unavailable`; that missing-choice observation is not a definitive model denial or proof of account exhaustion. Usage exhaustion for those four accounts remains unverified.
