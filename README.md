@@ -4,7 +4,7 @@
 
 A completed Goal turn could exhaust its five-minute settling window while activity receipts were unavailable, retain its once-only claim, and fail to restart that observer after the app returned. The normal activity feed now re-arms only that same claimed turn after a fresh integer-zero tool census, under unchanged document, navigation epoch, native user and assistant-node identities. It reruns the entire settling and Main authorization path. Unknown/busy counts wait; a new user, navigation, changed answer or Off discards the page-only pickup. No receipt is synthesized and no task is replayed.
 
-The failure reproduced3failing cases with3negative controls. All6focused cases and2,848checks across3whole affected suites passed; TypeScript, JavaScript syntax and whitespace checks passed. Source content/background markers are146. This repair is **not built or installed**; recorder145 remains the accepted installed package.
+The failure reproduced3failing cases with3negative controls. All6focused cases and2,848checks across3whole affected suites passed; TypeScript, JavaScript syntax and whitespace checks passed. Source content/background markers are146. Recorder146 has now passed the complete private strict build (13,603 Main checks, 96 preliminary checks, 62 existing skips), independent installer-payload/source verification, all 33 post-pin installer checks and read-only activation readiness. It is **qualified but not installed**. Recorder145 remains installed while productive native answers and a handoff finish; no original task prompts were resent.
 
 ## Source-only follow-up: exact header refusal
 
@@ -20,7 +20,7 @@ Fixed allowlisted picker failure codes now survive into existing durable Input r
 
 The qualified installer completed with exit0. Independent before/after verification matched all141,821protected files (6,987,823,945bytes) before eight successor app profiles launched. The complete291-file installed program matches the qualified source and package; its tree is `0a4e9e44ded6c9abf202b0ec790cd01acf8a8ad264cb7d310580542226015d20`. All original application settings revisions were restored exactly through the application. The future-upgrade predecessor baseline was advanced only after this proof; the old baseline assertion failed first and the updated exact assertion passed. Read-only post-install readiness passed; no second installation or runtime rebuild was performed.
 
-Remaining limitations are explicit: original native parent/result identities still block existing turns, and one observed profile still reports page145/background136. A same-document reader refresh confirmed the new first-failure diagnostic (header-shape/turn identity mismatch), without sending a message. No normal automatic145successor has been independently certified.
+Current observations supersede the earlier mixed-worker report on two inspected documents: both now execute content145/background145. An automatic compaction successor has native source and destination Send receipts, and an independent real project API regression passed with unchanged source/test hashes. A separate automatic settled-turn reconciliation also started a recorded successor. These bounded proofs do not establish full-fleet autonomy or normal original-parent/result completion: original native identities remain unresolved in other turns. The new first-header-refusal diagnostic still needs live146 activation before identifying that exact guard failure.
 
 ## Historical recorder144 acceptance
 
