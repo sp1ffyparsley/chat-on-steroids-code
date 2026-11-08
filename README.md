@@ -1,5 +1,11 @@
 # Chat On Steroids - code research mirror
 
+## Recorder 154 source and verification
+
+This source mirror includes the recorder 147–154 changes. It covers exact native request/result attribution, the immediately preceding completed turn, same-user Retry scope, retained helper and continuation custody, and strict Windows test isolation. Recorder 154 carries executing content and background versions through the existing activity envelope when the native census is unavailable. It also reports the first guarded reason an eligible queued input was withheld. Both changes preserve existing completion and Send gates.
+
+The private Windows candidate passed 113 preliminary tests, 13,861 main tests, 33 installer tests and the readiness check, with 62 existing conditional skips. Recorder 153 remains the accepted installed build after the safe shutdown deadline expired during the first 154 activation. The browser's executing generation and an automatic next turn still need live verification. This mirror passed TypeScript and 364 targeted tests. This mirror publishes reviewed source and tests. Private installer pins, deployment data and operational prompt libraries live outside this mirror.
+
 ## Source146: same-turn recovery after activity transport returns
 
 A completed Goal turn could exhaust its five-minute settling window while activity receipts were unavailable, retain its once-only claim, and fail to restart that observer after the app returned. The normal activity feed now re-arms only that same claimed turn after a fresh integer-zero tool census, under unchanged document, navigation epoch, native user and assistant-node identities. It reruns the entire settling and Main authorization path. Unknown/busy counts wait; a new user, navigation, changed answer or Off discards the page-only pickup. No receipt is synthesized and no task is replayed.

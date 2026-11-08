@@ -157,6 +157,14 @@ describe('account-scoped operator input', () => {
     }
     if (variant === 'accessor') Object.defineProperty(providerUI, 'selectorMatches', {
       get() { getterReads++; throw new Error('private provider accessor must not run'); } });
+    const inputPolicy: any = variant === 'null-entry' ? null : variant === 'summary-incomplete' ? undefined : {
+      browserAllowed: variant === 'unknown-code' ? 'private malformed boolean' : variant === 'valid',
+      manualBrowserProbe: variant === 'summary-code', stoppedIdle: variant === 'summary-overflow',
+      privatePayload: 'private input transport details'
+    };
+    if (variant === 'accessor') Object.defineProperty(inputPolicy, 'manualBrowserProbe', {
+      get() { getterReads++; throw new Error('private input policy accessor must not run'); } });
+    if (variant === 'summary-duplicate') delete inputPolicy.stoppedIdle;
     const config = await import('../src/main/config.js'), bridge = await import('../src/main/bridge.js');
     const store = await import('../src/main/session/store.js'), durable = await import('../src/main/durable.js');
     const root = await mkdtemp(path.join(os.tmpdir(), 'cos-session-inspection-'));
@@ -171,6 +179,7 @@ describe('account-scoped operator input', () => {
       nextCursor: { id: sessionId, updatedAt: 1 } } as Awaited<ReturnType<typeof store.listSessionPage>>);
     const controls = vi.spyOn(bridge, 'sessionControlsFor').mockResolvedValue({ sessionId, conversationId, activeTurnId: null,
       automation: 'loop', objective: 'private saved objective', finishHeld: false, blocked: '', plan: null,
+      inputPolicy,
       goalDraft: { stage: 'failed', stageStartedAt: 1, model: 'private model', text: 'private helper answer', error: 'private bearer' }, goalWait: { reason: 'attention', detail: 'private draft' },
       nativeEvidence: { reason: 'open-code', fresh: true, sourceObserved: true, finalObserved: false, openCalls: 3, openCodeCalls: 1,
         settledCandidate: false, physicalIdle: true, physicalHold: null, observerBusy: true,
@@ -203,6 +212,10 @@ describe('account-scoped operator input', () => {
         expect(JSON.stringify(response)).not.toContain('private');
         if (action === 'controls') expect(response.snapshot).toMatchObject({ activeTurnId: null,
           automation: 'loop', automationPaused: true, objectiveChars: 23, goalWait: { reason: 'attention' },
+          inputPolicy: ['null-entry', 'unknown-code', 'accessor', 'summary-incomplete', 'summary-duplicate'].includes(variant) ? null : {
+            browserAllowed: variant === 'valid', manualBrowserProbe: variant === 'summary-code',
+            stoppedIdle: variant === 'summary-overflow'
+          },
           nativeEvidence: { reason: 'open-code', fresh: true, sourceObserved: true, finalObserved: false, openCalls: 3,
             openCodeCalls: 1, settledCandidate: false, physicalIdle: true, physicalHold: null, observerBusy: true,
             inventoryIncomplete: true, inventoryCurrentTurnMatched: false,

@@ -1494,7 +1494,7 @@ export function registerIpc(
       sessionId: id,
       trigger: 'user selected Resume for this exact chat while global automation is paused'
     });
-    const paused = (await pausedBrowserHelpers()).filter(helper => helper.sourceSessionId === id);
+    const paused = (await pausedBrowserHelpers({ reviewedSourceSessionId: id })).filter(helper => helper.sourceSessionId === id);
     const exact = paused.at(-1);
     if (exact) await retryGoalBrowserHelper(id, exact.id);
     return resumeAutomationChats({ sessionId: id, trigger: 'user selected Resume for this exact chat' });
@@ -1632,9 +1632,13 @@ export function registerIpc(
     return reorderQueuedInputs(sessionId, ids);
   });
   handle('sessions:retryBrowser', async (payload) => retryQueuedInputBrowser(z.object({ id: z.string().uuid() }).parse(payload).id));
-  handle('sessions:pausedHelpers', async () => pausedBrowserHelpers());
+  handle('sessions:pausedHelpers', async payload => {
+    const options = z.object({ reviewedSourceSessionId: z.string().min(8).max(64).optional() }).strict().optional().parse(payload);
+    return pausedBrowserHelpers(options);
+  });
   handle('sessions:retryHelper', async (payload) => {
     const { id, sourceSessionId } = z.object({ id: z.string().uuid(), sourceSessionId: z.string().min(8).max(64) }).parse(payload);
+    if (getConfig().ui.automationPaused === true) return false;
     return retryGoalBrowserHelper(sourceSessionId, id);
   });
   handle('sessions:retryPausedHelpers', async () => {

@@ -1081,9 +1081,24 @@ export async function recoverMissingMcpLoopReplyNow(
  * the next normal snapshot's retirement, even if no unrelated writer runs. This predicate
  * grants no delivery authority; activation still rechecks the exact source and every boundary.
  */
-export function automaticLoopReplyRecoveryDue(conversationId: string, now = Date.now()): boolean {
+export function automaticLoopReplyRecoveryDue(conversationId: string, now = Date.now(), latestFailure?: {
+  sessionId: string; turnId: string; seq: number; time: number; outcome: string;
+  reason?: 'thinking_failed' | 'model_cooldown' | 'conversation_limit'; detail?: string;
+}): boolean {
   const reply = goalReplies.get(conversationId);
   if (!reply) return true;
+  // A later observed failure can supersede an untouched generated recovery ticket.
+  // Authored finals and spent helper circuits remain owned by their original source.
+  // The caller supplies the latest canonical boundary; activation still serializes
+  // against Input and rechecks native work/source before creating its next checkpoint.
+  if (latestFailure && reply.state === 'pending' && reply.explicitActivation === true &&
+      reply.replyId === `activation:${reply.turnId}`.slice(0, 200) && !reply.helperFailureCount &&
+      !reply.recoveryStopClaimed && !reply.silenceSourceTurnId &&
+      latestFailure.sessionId === reply.sessionId && latestFailure.turnId !== reply.turnId &&
+      Number.isSafeInteger(latestFailure.seq) && latestFailure.seq > reply.eventSeq &&
+      Number.isFinite(latestFailure.time) && latestFailure.time > 0 &&
+      now >= latestFailure.time + AUTOMATIC_LOOP_RECOVERY_GRACE_MS &&
+      recoverableLoopFailure(latestFailure)) return true;
   const expiredPending = reply.state === 'pending' && now - reply.acceptedAt >= GOAL_REPLY_TTL_MS;
   return (reply.state === 'handled' || expiredPending) && now >= reply.acceptedAt + AUTOMATIC_LOOP_RECOVERY_GRACE_MS;
 }
@@ -2141,12 +2156,13 @@ export function recoverableLoopFailure(end: {
 }
 
 export async function setGoalReplyActiveNow(conversationId: string, active: boolean, current: (silenceSourceTurnId?: string) => boolean = () => true,
-  deliberateResume = false): Promise<boolean> {
-  return active ? withGoalReplyActivationInput(conversationId, () => setGoalReplyActiveOwned(conversationId, active, current, deliberateResume))
+  deliberateResume = false, staleFailureReply?: NonNullable<ReturnType<typeof goalPendingReplyFor>>): Promise<boolean> {
+  return active ? withGoalReplyActivationInput(conversationId,
+    () => setGoalReplyActiveOwned(conversationId, active, current, deliberateResume, staleFailureReply), staleFailureReply)
     : setGoalReplyActiveOwned(conversationId, active, current, false);
 }
 async function setGoalReplyActiveOwned(conversationId: string, active: boolean, current: (silenceSourceTurnId?: string) => boolean,
-  deliberateResume: boolean): Promise<boolean> {
+  deliberateResume: boolean, staleFailureReply?: NonNullable<ReturnType<typeof goalPendingReplyFor>>): Promise<boolean> {
   const activationReply = goalReplies.get(conversationId);
   const silenceSource = (activationReply?.listenUntil ?? 0) <= Date.now() ? activationReply?.silenceSourceTurnId : undefined;
   const stillCurrent = () => (!silenceSource || goalReplies.get(conversationId) === activationReply) && current(silenceSource);
@@ -2162,12 +2178,28 @@ async function setGoalReplyActiveOwned(conversationId: string, active: boolean, 
     const [end] = session && (!session.activeTurnId || session.activeTurnId === silenceSource)
       ? await readRecentEvents(session.id, 1, { kinds: ['turn_start', 'turn_end', 'user_message'] }) : [];
     const terminalFailure = end?.kind === 'turn_end' && recoverableLoopFailure(end) ? end : undefined;
+    if (staleFailureReply && session) {
+      const latest = await getSession(session.id);
+      const draft = drafts.get(conversationId);
+      if (!latest || latest.conversationId !== conversationId || latest.activeTurnId ||
+          latest.events !== session.events || (draft && !draft.acknowledged)) return false;
+    }
     const idleAfterRead = idleAtActivation ? stillCurrent() : false;
     // A recorded failure identifies a possible checkpoint, never an exemption from
     // the caller's current physical-work, native-generation or delivery vetoes.
     if (!idleAfterRead || control !== goalSwitches.get(conversationId) || !goalArmedFor(conversationId) ||
         (session?.activeTurnId && session.activeTurnId !== silenceSource)) return false;
     const held = goalReplies.get(conversationId);
+    // Background recovery may replace this generated checkpoint only after reading
+    // the newest boundary inside the existing serialized Input owner. A newer
+    // user/turn, changed ticket or unrecognized failure must not re-arm the old one.
+    if (staleFailureReply && (!session || !terminalFailure?.turnId || !held ||
+        held.sessionId !== staleFailureReply.sessionId || held.replyId !== staleFailureReply.replyId ||
+        held.turnId !== staleFailureReply.turnId || held.eventSeq !== staleFailureReply.eventSeq ||
+        held.acceptedAt !== staleFailureReply.acceptedAt ||
+        !automaticLoopReplyRecoveryDue(conversationId, Date.now(), {
+          ...terminalFailure, turnId: terminalFailure.turnId, sessionId: session.id
+        }))) return false;
     if (deliberateResume && idleAfterRead && session && end?.kind === 'turn_end' && end.outcome === 'stopped' && end.turnId &&
         !session.activeTurnId && getConfig().goal.continuationPolicy === 'settled-turn' &&
         goalSwitchFor(conversationId).mode === 'loop' && loopAfterTurnFor(conversationId)) {
@@ -2229,8 +2261,10 @@ async function setGoalReplyActiveOwned(conversationId: string, active: boolean, 
         (!held || held.eventSeq < end.seq)) {
       await acceptGoalReplyNow({ conversationId, sessionId: session.id, turnId: end.turnId,
         replyId: `activation:${end.turnId}`.slice(0, 200), eventSeq: end.seq, blocked: false,
-        current: () => stillCurrent() && control === goalSwitches.get(conversationId) && goalArmedFor(conversationId) && !session.activeTurnId });
+        current: () => stillCurrent() && control === goalSwitches.get(conversationId) && goalArmedFor(conversationId) &&
+          !session.activeTurnId && (!staleFailureReply || goalReplies.get(conversationId) === held) });
       if (!stillCurrent() || control !== goalSwitches.get(conversationId) || !goalArmedFor(conversationId)) return false;
+      if (staleFailureReply && goalReplies.get(conversationId)?.turnId !== end.turnId) return false;
     }
   }
   const draft = drafts.get(conversationId);

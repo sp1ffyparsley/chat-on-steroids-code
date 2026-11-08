@@ -478,6 +478,84 @@ it('does not let a late older V2 helper downgrade the current reader', () => {
   } finally { dom.window.close(); }
 });
 
+it('retains the current producer when an older same-wire worker injects its listener', () => {
+  const dom = new JSDOM('<main><div id="stamp"></div></main>', {
+    url: `https://chatgpt.com/c/${THREAD}`, runScripts: 'outside-only'
+  });
+  const win = dom.window as unknown as Window & typeof globalThis & Record<string, any>;
+  const replies: any[] = []; win.postMessage = value => { replies.push(value); };
+  const channel = /const ASK = '([^']+)';/.exec(source)![1];
+  try {
+    win.eval(source);
+    const current = win.__clfFiberHelperV2.listener;
+    // Frozen recorder145 registration semantics. Its wire19 helper used the protocol
+    // number as its only generation, so a delayed same-wire injection replaced newer
+    // code, its refusal diagnostics and the native DOM stamps for that scan nonce.
+    win.eval(`(() => {
+      const VERSION = 19;
+      const prior = window.__clfFiberHelperV2;
+      if (prior && Number.isSafeInteger(prior.version) && prior.version > VERSION &&
+          typeof prior.listener === 'function') return;
+      if (prior && typeof prior.listener === 'function')
+        window.removeEventListener('message', prior.listener);
+      const listener = event => {
+        if (event.source !== window || event.data?.source !== '${channel}') return;
+        document.getElementById('stamp').setAttribute('data-clf-fiber-v2', 'old-producer-stamp');
+        window.postMessage({ source: 'clf-fiber-reply', nonce: event.data.nonce,
+          v: VERSION, oldProducer: true }, location.origin);
+      };
+      window.addEventListener('message', listener);
+      window.__clfFiberHelperV2 = { version: VERSION, listener };
+    })();`);
+    expect(win.__clfFiberHelperV2.listener).toBe(current);
+    win.dispatchEvent(new win.MessageEvent('message', { source: win,
+      data: { source: channel, nonce: 'same-wire-old-producer' } }));
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({ nonce: 'same-wire-old-producer', v: 19 });
+    expect(replies[0].oldProducer).toBeUndefined();
+    expect(win.document.getElementById('stamp')!.getAttribute('data-clf-fiber-v2')).not.toBe('old-producer-stamp');
+  } finally { dom.window.close(); }
+});
+
+it('repairs the same producer while retaining a newer producer on the same wire', () => {
+  const dom = new JSDOM('<main></main>', { url: `https://chatgpt.com/c/${THREAD}`, runScripts: 'outside-only' });
+  const win = dom.window as unknown as Window & typeof globalThis & Record<string, any>;
+  const replies: any[] = []; win.postMessage = value => { replies.push(value); };
+  const producer = Number(/const PRODUCER_VERSION = (\d+);/.exec(source)?.[1]);
+  const wire = Number(/const VERSION = (\d+);/.exec(source)?.[1]);
+  const channel = /const ASK = '([^']+)';/.exec(source)![1];
+  try {
+    expect(Number.isSafeInteger(producer)).toBe(true);
+    win.eval(source);
+    const original = win.__clfFiberHelperV2.listener;
+    win.eval(source);
+    expect(win.__clfFiberHelperV2.listener).not.toBe(original);
+    win.eval(source.replace(/const PRODUCER_VERSION = \d+;/, `const PRODUCER_VERSION = ${producer + 1};`));
+    const newer = win.__clfFiberHelperV2.listener;
+    expect(win.__clfFiberHelperV2).toMatchObject({ version: producer + 1, wireVersion: wire });
+    win.eval(source);
+    expect(win.__clfFiberHelperV2.listener).toBe(newer);
+    win.dispatchEvent(new win.MessageEvent('message', { source: win,
+      data: { source: channel, nonce: 'newer-producer-preserved' } }));
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({ nonce: 'newer-producer-preserved', v: wire });
+  } finally { dom.window.close(); }
+});
+
+it('retains a newer legacy wire owner without producer metadata', () => {
+  const dom = new JSDOM('<main></main>', { url: `https://chatgpt.com/c/${THREAD}`, runScripts: 'outside-only' });
+  const win = dom.window as unknown as Window & typeof globalThis & Record<string, any>;
+  const wire = Number(/const VERSION = (\d+);/.exec(source)?.[1]);
+  const listener = () => undefined;
+  try {
+    win.__clfFiberHelperV2 = { version: wire + 1, listener };
+    win.addEventListener('message', listener);
+    win.eval(source);
+    expect(win.__clfFiberHelperV2.listener).toBe(listener);
+    expect(win.__clfFiberHelperV2.version).toBe(wire + 1);
+  } finally { dom.window.close(); }
+});
+
 describe('reading a row out of the page', () => {
   /**
    * The regression the whole batch exists for. The group node is exactly `MAX_CLIMB`
@@ -1589,6 +1667,39 @@ describe('a payload the page stored truncated', () => {
 });
 
 describe('what may leave the page', () => {
+  it.each(['exact', 'wrong prefix', 'text output', 'extra text', 'duplicate carrier', 'nested receipt',
+    'legacy receipt', 'missing digest', 'unfinished', 'missing status', 'wrong image type', 'no image',
+    'foreign parent', 'foreign tool', 'extra root field'] as const)(
+    'reads only the exact native multimodal structured-output receipt (%s)', async variant => {
+      const witness = 'bd'.repeat(24), digest = 'c'.repeat(64);
+      const asked = request('image-carrier-owner', 'read');
+      const returned = answer('image-carrier-result', asked.id, 'read');
+      returned.author.name = 'api_tool.call_tool';
+      returned.status = 'finished_successfully';
+      const value: any = { cosResultReceipt: { version: 2, id: witness, invocationSha256: digest } };
+      if (variant === 'legacy receipt') value.cosResultReceipt = { version: 1, id: witness };
+      if (variant === 'missing digest') delete value.cosResultReceipt.invocationSha256;
+      if (variant === 'extra root field') value.privateOutput = 'PRIVATE_IMAGE_OUTPUT';
+      let carrier = 'Structured tool output: ' + JSON.stringify(variant === 'nested receipt' ? { content: value } : value);
+      if (variant === 'wrong prefix') carrier = 'Tool output: ' + JSON.stringify(value);
+      if (variant === 'extra text') carrier += '\nPRIVATE_IMAGE_OUTPUT';
+      const parts: any[] = [carrier, { content_type: variant === 'wrong image type' ? 'text' : 'image_asset_pointer',
+        asset_pointer: 'PRIVATE_IMAGE_ASSET', metadata: { private: 'PRIVATE_IMAGE_OUTPUT' } }];
+      if (variant === 'duplicate carrier') parts.push(carrier);
+      if (variant === 'no image') parts.pop();
+      returned.content = { content_type: variant === 'text output' ? 'text' : 'multimodal_text', parts };
+      if (variant === 'unfinished') returned.status = 'in_progress';
+      if (variant === 'missing status') delete returned.status;
+      if (variant === 'foreign parent') returned.metadata!.parent_id = 'another-native-parent';
+      if (variant === 'foreign tool')
+        (returned.metadata!.invoked_resource as Record<string, unknown>).resource_uri = `/${ASDK}/${LINK}/exec_command`;
+      const messages = [asked, returned];
+      const { turns } = await scan([rowInTurn(messages, messages)], [{ id: 'image-carrier-turn', messages }]);
+      const call = turns[0]!.calls[0];
+      if (variant === 'exact') expect(call).toMatchObject({ resultReceiptId: witness, invocationSha256: digest });
+      else expect(call).not.toHaveProperty('resultReceiptId');
+      expect(JSON.stringify(turns)).not.toMatch(/PRIVATE_IMAGE|Structured tool output/);
+    });
   const receiptResource = (id: string) => ({ type: 'resource', resource: {
     uri: 'urn:cos:result-receipt:v1:' + id,
     mimeType: 'application/vnd.chat-on-steroids.result-receipt+json',

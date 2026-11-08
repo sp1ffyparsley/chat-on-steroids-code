@@ -1457,6 +1457,76 @@ describe('endpoint hardening', () => {
       requestId, nativeCallMessageId: natives[0]!, tool: 'read', resultReceiptId: witnesses[0]! })).toBe(false);
   });
 
+  it('acknowledges repeated owned receipt observations without publishing another session change', async () => {
+    const recorder = await import('../src/main/session/recorder.js');
+    const store = await import('../src/main/session/store.js');
+    // Earlier receipt tests can retire a fake clock with the recorder's pending
+    // notification still on it. Drain durable work, then start a fresh recorder
+    // fixture so that an orphaned timer cannot suppress the first binding here.
+    await recorder.flushRecorder();
+    recorder.resetRecorderForTests();
+    const conversationId = randomUUID(), requestId = 'wfr_owned_repeat_' + randomUUID();
+    const nativeCallMessageId = randomUUID();
+    const session = await createSession({ conversationId });
+    observeRequestCorrelation({ requestId, conversationId, sessionId: session.id,
+      messageId: nativeCallMessageId, nativeCallMessageId, tool: 'read', observedAt: Date.now() });
+    // A workflow with two native calls leaves the original execution unbound
+    // until this exact returned witness identifies its native result.
+    const sibling = randomUUID();
+    observeRequestCorrelation({ requestId, conversationId, sessionId: session.id,
+      messageId: sibling, nativeCallMessageId: sibling, tool: 'read', observedAt: Date.now() });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const changed = vi.fn();
+    const stopChanges = recorder.onSessionChange(changed);
+    const bindingLogs: string[] = [];
+    const stopLogs = onLog(row => {
+      if (row.message.includes('native Core result bound to its original owned execution')) bindingLogs.push(row.message);
+    });
+    try {
+      const returned = await modern('tools/call', { name: 'read',
+        arguments: { paths: ['/workspace/notes.txt'] } }, { 'x-request-id': requestId + '/attempt1' });
+      const resultReceiptId = returned.body?.result?.structuredContent?.cosResultReceipt?.id;
+      expect(resultReceiptId).toMatch(/^[a-f0-9]{48}$/);
+      await recorder.flushRecorder();
+      await vi.advanceTimersByTimeAsync(400);
+      changed.mockClear();
+      const input = { conversationId, sessionId: session.id, requestId,
+        nativeCallMessageId, tool: 'read', resultReceiptId };
+      expect(await recorder.attachNativeCoreResultReceipt(input)).toBe(true);
+      await vi.advanceTimersByTimeAsync(400);
+      expect(changed).toHaveBeenCalledTimes(1);
+      expect(bindingLogs).toHaveLength(1);
+      changed.mockClear();
+      const bound = await readEvents(session.id, { kinds: ['tool_call'], requireIntegrity: true });
+      for (let repeat = 0; repeat < 3; repeat++) {
+        expect(await recorder.attachNativeCoreResultReceipt(input)).toBe(true);
+        await vi.advanceTimersByTimeAsync(500);
+      }
+      expect(changed).not.toHaveBeenCalled();
+      expect(bindingLogs).toHaveLength(1);
+      expect(await readEvents(session.id, { kinds: ['tool_call'], requireIntegrity: true })).toEqual(bound);
+      // An unchanged receipt still has to cross the actual durability barrier;
+      // suppressing a notification must not cache an earlier successful ACK.
+      const canonical = path.join(store.sessionsRoot(), session.id, 'messages',
+        createHash('sha256').update(`tool_call\u0000${(bound[0] as Extract<SessionEvent, { kind: 'tool_call' }>).call.callId}`).digest('hex') + '.json');
+      const open = fs.open.bind(fs);
+      const deniedSync = vi.spyOn(fs, 'open').mockImplementation((async (file, flags, ...rest) => {
+        if (String(file) === canonical && flags === 'r+') throw new Error('injected repeated receipt sync failure');
+        return (open as (...args: unknown[]) => ReturnType<typeof fs.open>)(file, flags, ...rest);
+      }) as typeof fs.open);
+      try { expect(await recorder.attachNativeCoreResultReceipt(input)).toBe(false); }
+      finally { deniedSync.mockRestore(); }
+      expect(await recorder.attachNativeCoreResultReceipt(input)).toBe(true);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(changed).not.toHaveBeenCalled();
+      expect(bindingLogs).toHaveLength(1);
+    } finally {
+      stopChanges();
+      stopLogs();
+      vi.useRealTimers();
+    }
+  });
+
   it('returns one unpredictable headerless Core result witness only AFTER its exact durable Unattributed recorder commit', async () => {
     const { flushRecorder } = await import('../src/main/session/recorder.js');
     const { indexedSessions } = await import('../src/main/session/store.js');

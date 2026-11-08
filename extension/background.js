@@ -62,6 +62,28 @@ const BATCH = 100;
 const SHELL_SCAN_MAX = 400;
 const RETRY_ALARM = 'clf-bridge-drain';
 
+/** Current execution provenance is independent of whether a native census is available. */
+function readerProvenanceDiagnostic(raw, scan) {
+  let upstream = {};
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    try {
+      for (const key of ['fiberWire', 'fiberKeys', 'contentRecorder', 'contentKeys']) {
+        const descriptor = Object.getOwnPropertyDescriptor(raw, key);
+        if (!descriptor) continue;
+        const value = descriptor.value;
+        if (!('value' in descriptor) || !Number.isInteger(value) || value < 0 ||
+            value > (key.endsWith('Keys') ? SHELL_SCAN_MAX : 1_000_000)) { upstream = {}; break; }
+        upstream[key] = value;
+      }
+    } catch { upstream = {}; }
+  }
+  // Missing scan means no observed Fiber/counter capability, even if a sender retains
+  // older values. The worker always supplies its own executing generation, never raw's.
+  if (!scan) for (const key of ['fiberWire', 'fiberKeys', 'contentKeys']) delete upstream[key];
+  return { ...upstream, workerRecorder: PAGE_RECORDER_VERSION,
+    ...(scan ? { workerKeys: Object.keys(scan.rejects).length } : {}) };
+}
+
 /** Rebuild the untrusted page diagnostic using only the fixed, non-content counter schema. */
 function shellScanDiagnostic(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) ||
@@ -7092,7 +7114,11 @@ async function performBrowserRepairs(repairs, policy) {
     policy.automationProfile === 'rotation';
   for (let index = 0; index < repairs.length; index += 1) {
     const { conversationId, token, action, focus, requiresClaim, reason, retryControlPending } = repairs[index];
-    const observedReloadRecovery = reason === 'unattributed' || reason === 'silence';
+    // An unsent handoff can wait behind a healthy native answer for minutes.
+    // Its reload fallback needs the same exact idle-document proof as silence
+    // recovery; the Bridge's zero running-tool census alone misses time between calls.
+    const observedReloadRecovery = reason === 'unattributed' || reason === 'silence' ||
+      reason === 'compaction' && action === 'reload';
     const repairConnectionEpoch = connectionEpoch;
     const repairAdmission = conversationAdmission(null, conversationId);
     const guardedGoalRecovery = requiresClaim && action === 'reload' &&
@@ -8327,6 +8353,20 @@ const HANDLERS = {
     return call('/usage', { method: 'POST', body });
   },
   async desktop_input(message, sender, source) {
+    // New refusal diagnostics are fixed observations, never a fallback claim or
+    // arbitrary page text. Inspect only own data and preserve legacy stage names.
+    const stageDescriptor = Object.getOwnPropertyDescriptor(message, 'stage');
+    if (stageDescriptor && (!('value' in stageDescriptor) ||
+        stageDescriptor.value !== undefined && typeof stageDescriptor.value !== 'string'))
+      return { ok: false, error: 'invalid_input_stage' };
+    const stage = stageDescriptor?.value;
+    const preparationRefusal = typeof stage === 'string' && stage.startsWith('prepare:refused:');
+    if (preparationRefusal && Object.keys(message).some(key =>
+        !['type', 'id', 'owner', 'conversationId', 'stage', 'navigationEpoch'].includes(key)))
+      return { ok: false, error: 'invalid_input_stage' };
+    if (preparationRefusal && !['editor-missing', 'chat-changed', 'account-restricted', 'page-busy',
+        'editor-disabled', 'draft-empty', 'prompt-envelope-missing', 'draft-changed', 'send-not-ready']
+      .some(reason => stage === `prepare:refused:${reason}`)) return { ok: false, error: 'invalid_input_stage' };
     let admittedConversation = cleanConversationId(message.conversationId) ?? cleanConversationId(tabConversations[String(source.tab)]);
     const admission = conversationAdmission(source);
     const currentAdmission = () => admission(admittedConversation);
@@ -8336,11 +8376,13 @@ const HANDLERS = {
     const tab = await chrome.tabs.get(source.tab);
     if (!currentAdmission()) return conversationAdmissionRefusal(source);
     const conversationId = conversationFromUrl(tab.url);
+    if (preparationRefusal && message.conversationId !== conversationId)
+      return { ok: false, error: 'stale_document' };
     admittedConversation = conversationId ?? admittedConversation;
     if (!currentAdmission()) return conversationAdmissionRefusal(source);
     const prefix = `${source.tab}:${sender.documentId}:`;
     const completed = message.ack === true || message.fail === true || typeof message.response === 'string' ||
-      typeof message.partial === 'string' || typeof message.stage === 'string';
+      typeof message.partial === 'string' || typeof stage === 'string';
     const owner = completed ? String(message.owner || '') : `${prefix}${source.navigationEpoch}`;
     if (completed) {
       if (!owner.startsWith(prefix) || !currentAdmission()) return { ok: false };
@@ -8381,8 +8423,8 @@ const HANDLERS = {
       if (!currentAdmission()) return conversationAdmissionRefusal(source);
       return currentAdmission() ? result : { ok: false, error: 'stale_document' };
     }
-    const result = await call(typeof message.stage === 'string' ? '/input/stage' : typeof message.partial === 'string' ? '/input/progress' : typeof message.response === 'string' ? '/input/answer' : message.fail === true ? '/input/fail' : message.ack === true ? '/input/ack' : '/input/claim', {
-      method: 'POST', body: JSON.stringify({ id, owner, conversationId, silenceBusyTurnId: typeof message.silenceBusyTurnId === 'string' ? message.silenceBusyTurnId : undefined, requiresAuthorization: message.requiresAuthorization === true, freshTurnProtocol: message.freshTurnProtocol === 1 ? 1 : undefined, authorize: message.authorize === true, confirmedUnsent: message.confirmedUnsent === true, stage: typeof message.stage === 'string' ? message.stage.slice(0, 64) : undefined, partial: typeof message.partial === 'string' ? message.partial.slice(-8000) : undefined, messageId: typeof message.messageId === 'string' ? message.messageId : undefined, error: message.error, detail: typeof message.detail === 'string' && /^[a-z-]{1,40}$/.test(message.detail) ? message.detail : undefined, response: typeof message.response === 'string' ? message.response.slice(0, 16001) : undefined, project: typeof message.project === 'string' && /^g-p-[0-9a-f]{32}$/.test(message.project) ? message.project : undefined })
+    const result = await call(typeof stage === 'string' ? '/input/stage' : typeof message.partial === 'string' ? '/input/progress' : typeof message.response === 'string' ? '/input/answer' : message.fail === true ? '/input/fail' : message.ack === true ? '/input/ack' : '/input/claim', {
+      method: 'POST', body: JSON.stringify({ id, owner, conversationId, silenceBusyTurnId: typeof message.silenceBusyTurnId === 'string' ? message.silenceBusyTurnId : undefined, requiresAuthorization: message.requiresAuthorization === true, freshTurnProtocol: message.freshTurnProtocol === 1 ? 1 : undefined, authorize: message.authorize === true, confirmedUnsent: message.confirmedUnsent === true, stage: typeof stage === 'string' ? stage.slice(0, 64) : undefined, partial: typeof message.partial === 'string' ? message.partial.slice(-8000) : undefined, messageId: typeof message.messageId === 'string' ? message.messageId : undefined, error: message.error, detail: typeof message.detail === 'string' && /^[a-z-]{1,40}$/.test(message.detail) ? message.detail : undefined, response: typeof message.response === 'string' ? message.response.slice(0, 16001) : undefined, project: typeof message.project === 'string' && /^g-p-[0-9a-f]{32}$/.test(message.project) ? message.project : undefined })
     }, false, currentAdmission);
     if (!currentAdmission()) return conversationAdmissionRefusal(source);
     if (message.authorize === true && result.ok && result.data?.ok === true) {
@@ -8858,6 +8900,8 @@ const HANDLERS = {
         const shellDiscovery = ['compatible', 'failed', 'unknown'].includes(raw.shellDiscovery)
           ? raw.shellDiscovery : 'unknown';
         const shellScan = shellScanDiagnostic(raw.shellScan);
+        const readerDescriptor = Object.getOwnPropertyDescriptor(raw, 'reader');
+        const reader = readerProvenanceDiagnostic(readerDescriptor ? readerDescriptor.value : shellScan?.reader, shellScan);
         const ordinaryFinal = ordinaryFinalDiagnostic(raw.ordinaryFinal);
         const requestIds = [...new Set((Array.isArray(raw.requestIds) ? raw.requestIds : [])
           .filter(value => typeof value === 'string' && value.length > 0 && value.length <= 100))].slice(0, 16);
@@ -8866,6 +8910,7 @@ const HANDLERS = {
         coreDiagnostic = {
           shell,
           shellDiscovery,
+          reader,
           shellScan,
           ordinaryFinal,
           requestIds,
@@ -10647,7 +10692,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 146;
+const PAGE_RECORDER_VERSION = 154;
 
 let deferredRecoveryWork = null;
 

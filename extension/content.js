@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 146;
+  const RECORDER_VERSION = 154;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -6198,8 +6198,25 @@
   function coreBrowserEvidenceProjection(input) {
     const scan = input.ordinaryFinal;
     const blocked = settledFinalProjectionBlocked();
+    // Execution provenance survives an unavailable census. Never borrow the last scan or
+    // accept a page's claim about the isolated recorder/worker which is executing now.
+    let upstream = {};
+    try {
+      const reader = input.shellScan && Object.getOwnPropertyDescriptor(input.shellScan, 'reader')?.value;
+      for (const key of ['fiberWire', 'fiberKeys']) {
+        const descriptor = reader && typeof reader === 'object' ? Object.getOwnPropertyDescriptor(reader, key) : null;
+        if (!descriptor) continue;
+        const value = descriptor.value;
+        if (!('value' in descriptor) || !Number.isInteger(value) || value < 0 ||
+            value > (key.endsWith('Keys') ? 400 : 1_000_000)) { upstream = {}; break; }
+        upstream[key] = value;
+      }
+    } catch { upstream = {}; }
+    const reader = { ...upstream, contentRecorder: RECORDER_VERSION,
+      ...(input.shellScan ? { contentKeys: Object.keys(input.shellScan.rejects).length } : {}) };
     return {
       shell: input.shell,
+      reader,
       shellDiscovery: input.shellDiscovery,
       ordinaryFinal: scan ? { reason: blocked ? 'busy' : scan.reason, questions: scan.questions,
         calls: scan.calls, openCalls: scan.openCalls,
@@ -10718,7 +10735,7 @@
     // document has already observed the next generation. Only replace that neutral wait
     // caption; saved replies, errors, paused admission and unknown completion stay intact.
     if (input.generating === true && goal?.enabled === true && !goal.opening && !goal.draft && !goal.error &&
-        goal.wait?.reason === 'recovery' && goalView?.kind === 'goal' &&
+        ['idle', 'recovery'].includes(goal.wait?.reason) && goalView?.kind === 'goal' &&
         !['paused', 'stalled', 'blocked'].includes(goal.health?.state)) {
       return goalStageView({ ...goal, phase: 'settling', wait: { reason: 'answer' } });
     }
@@ -11254,7 +11271,9 @@
       job, progress: operationProgress, changedAt: lastChangeAt,
       nativeRestriction: CLF_DOM.errors().find(error => error.blocking === true && error.reason === 'account_restricted'),
       summary: compactionSummaryProgress(),
-      generating: generating && CLF_DOM.generating(),
+      // Native Stop can precede the recorder's turn-start edge or survive reload.
+      // This is presentation only, never turn, helper, Stop or Send authority.
+      generating: CLF_DOM.generating(),
       goal: goalInput && { ...goalInput, evidenceHoldSince: goalEvidenceHoldSince }
     });
     if (!view) {
@@ -16442,7 +16461,8 @@
       // Helpers can stall before Send too. Use the same bounded, owner-checked stage diagnostic
       // as ordinary inputs; stages contain no prompt/answer text and never authorize delivery.
       const stage = (name, timeoutMs = 0) =>
-        ask({ type: 'desktop_input', id: input.id, owner: input.owner, stage: name }, null, timeoutMs);
+        ask({ type: 'desktop_input', id: input.id, owner: input.owner, stage: name,
+          ...(name.startsWith('prepare:refused:') ? { conversationId: target } : {}) }, null, timeoutMs);
       await stage('claimed');
       // ChatGPT restores its shared home draft even in a newly opened input tab.
       // This exact claimed bootstrap owns replacement text; existing chats and
@@ -16967,6 +16987,14 @@
               onTarget() && userSendReceipt === heldReceipt)
             return fail('Required prompt header/footer validation failed before Send. Check the companion status and repair the prepared input before retrying.');
         }
+        // Keep the native adapter's first fixed refusal visible even when it
+        // stopped before authorization. The existing envelope-refusal owner
+        // above retains first action and its own post-await receipt checks.
+        if (claimedInput && !sendAuthorizationRequested && !sendAttempted && !receipt && onTarget() &&
+            preClickSendReceipt !== null && userSendReceipt === preClickSendReceipt &&
+            ['editor-missing', 'chat-changed', 'account-restricted', 'page-busy', 'editor-disabled',
+              'draft-empty', 'prompt-envelope-missing', 'draft-changed', 'send-not-ready'].includes(withdrawReason))
+          await stage(`prepare:refused:${withdrawReason}`, DESKTOP_INPUT_PRECLICK_REPLY_MS).catch(() => undefined);
         return false;
       }
       if (!receipt || !sendingTarget()) return false;

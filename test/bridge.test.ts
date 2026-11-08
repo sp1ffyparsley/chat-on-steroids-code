@@ -14,7 +14,7 @@ import { promises as fs } from 'node:fs';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import sharp from 'sharp';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { WebSocket } from 'ws';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
@@ -519,6 +519,29 @@ describe('opt-in settled-turn Loop forward-readiness', () => {
     expect(await f.input.listInputs()).toEqual(before);
   });
 
+  it.each(['browser-idle', 'manual-idle-probe', 'stopped-idle', 'refused'] as const)(
+    'projects only the already sampled manual transport policy without rereading or dispatching: %s', async state => {
+      const f = await stoppedResumeFixture();
+      const projected = { browserAllowed: state === 'browser-idle',
+        manualBrowserProbe: state === 'manual-idle-probe', stoppedIdle: state === 'stopped-idle' };
+      const sampled = vi.spyOn(f.input, 'sessionInputPolicy').mockResolvedValue({
+        queueAtFinish: false, canInject: false, injectionTurnId: null, directTurn: null, settled: false,
+        browserAllowed: projected.browserAllowed,
+        ...(projected.manualBrowserProbe ? { manualBrowserProbe: true } : {}),
+        ...(projected.stoppedIdle ? { stoppedIdle: true } : {})
+      });
+      onTestFinished(() => sampled.mockRestore());
+      const before = await f.input.listInputs();
+      const nativeBefore = coreBrowserEvidence(f.conversationId);
+      const control = await sessionControlsFor(f.sessionId);
+      expect(control).toMatchObject({ inputPolicy: projected });
+      expect(Object.keys(control.inputPolicy!).sort())
+        .toEqual(['browserAllowed', 'manualBrowserProbe', 'stoppedIdle']);
+      expect(sampled).toHaveBeenCalledTimes(1);
+      expect(await f.input.listInputs()).toEqual(before);
+      expect(coreBrowserEvidence(f.conversationId)).toEqual(nativeBefore);
+    });
+
   it('projects exact provider shell/selector shape, unknown scan and mapping failure without native completion authority', async () => {
     const f = await stoppedResumeFixture();
     const before = await f.input.listInputs();
@@ -528,7 +551,8 @@ describe('opt-in settled-turn Loop forward-readiness', () => {
     const publish = async (discovery: 'failed' | 'compatible', shellScan: unknown) =>
       request('POST', `/activity?conversationId=${f.conversationId}`, { body: {
         coreDiagnostic: { ...f.diagnostic, observedAt: Date.now(), turnId: f.turnId,
-          shellDiscovery: discovery, shellScan }, observationOnly: true
+          shellDiscovery: discovery, shellScan,
+          ordinaryFinal: { ...f.diagnostic.ordinaryFinal, sourceUserMessageId: f.userId } }, observationOnly: true
       } });
     expect((await publish('failed', null)).status).toBe(200);
     expect((await sessionControlsFor(f.sessionId)).nativeEvidence?.providerUI).toMatchObject({
@@ -545,6 +569,111 @@ describe('opt-in settled-turn Loop forward-readiness', () => {
     expect(await f.input.listInputs()).toEqual(before);
     expect(await readEvents(f.sessionId, { kinds: ['tool_call'] })).toEqual([]);
   });
+
+  async function canonicalDiagnosticFixture(exchange = 'dom') {
+    const f = await stoppedResumeFixture(false);
+    const userId = randomUUID(), turnId = 'g-diagnostic-' + randomUUID();
+    await recordChatObservations(f.conversationId, [
+      { kind: 'user_message', messageId: userId, text: 'Continue this exact current question.', time: Date.now() - 1_000 },
+      { kind: 'turn_start', turnId, time: Date.now() - 1_000 }
+    ]);
+    const diagnostic = { ...f.diagnostic, observedAt: Date.now(),
+      documentId: exchange === 'reloaded' ? 'reloaded-current-question' : f.diagnostic.documentId,
+      navigationEpoch: exchange === 'reloaded' ? 5 : 4,
+      turnId: exchange === 'fiber' ? 'g-native-exchange-' + randomUUID() : randomUUID(),
+      ordinaryFinal: { ...f.diagnostic.ordinaryFinal, sourceUserMessageId: userId, callInventoryComplete: false }
+    };
+    expect((await request('POST', `/activity?conversationId=${f.conversationId}`, {
+      body: { observationOnly: true, coreDiagnostic: diagnostic }
+    })).status).toBe(200);
+    return { ...f, userId, turnId, diagnostic };
+  }
+
+  it.each(['dom', 'fiber', 'reloaded'])('matches the canonical question across distinct exchange/user/generation namespaces (%s)', async exchange => {
+    const f = await canonicalDiagnosticFixture(exchange);
+    expect(new Set([f.diagnostic.turnId, f.userId, f.turnId]).size).toBe(3);
+    const before = { inputs: await f.input.listInputs(), events: await readEvents(f.sessionId),
+      native: coreBrowserEvidence(f.conversationId), commands: pendingCommands() };
+    const controls = await sessionControlsFor(f.sessionId);
+    expect(controls.nativeEvidence?.providerUI?.currentTurnMatched).toBe(true);
+    expect(controls.nativeEvidence?.inventoryCurrentTurnMatched).toBe(true);
+    expect(controls.nativeEvidence?.inventoryIncomplete).toBe(true);
+    expect(settledForwardBridge.goalNativeCompletionReady(f.conversationId)).toBe(false);
+    expect(await f.input.listInputs()).toEqual(before.inputs);
+    expect(await readEvents(f.sessionId)).toEqual(before.events);
+    expect(coreBrowserEvidence(f.conversationId)).toEqual(before.native);
+    expect(pendingCommands()).toEqual(before.commands);
+  });
+
+  it.each(['foreign', 'superseded', 'unanchored', 'ambiguous', 'source-missing'] as const)(
+    'does not match a recorder-looking exchange key without the current canonical question (%s)', async changed => {
+      const f = await canonicalDiagnosticFixture();
+      if (changed === 'superseded') await recordChatObservations(f.conversationId, [
+        { kind: 'user_message', messageId: randomUUID(), text: 'A newer question.', time: Date.now() },
+        { kind: 'turn_start', turnId: 'g-newer-diagnostic', time: Date.now() }
+      ]);
+      if (changed === 'unanchored') await recordChatObservations(f.conversationId, [
+        { kind: 'turn_start', turnId: 'g-unanchored-diagnostic', time: Date.now() }
+      ]);
+      if (changed === 'ambiguous') await sessionStoreModule.appendEvent(f.sessionId, {
+        source: 'extension', kind: 'turn_start', turnId: f.turnId, time: Date.now() });
+      const session = await getSession(f.sessionId);
+      const diagnostic = { ...f.diagnostic, observedAt: Date.now(), turnId: session!.activeTurnId,
+        ordinaryFinal: { ...f.diagnostic.ordinaryFinal,
+          sourceUserMessageId: changed === 'foreign' ? randomUUID() : changed === 'source-missing' ? undefined : f.userId } };
+      await request('POST', `/activity?conversationId=${f.conversationId}`, { body: { observationOnly: true, coreDiagnostic: diagnostic } });
+      const before = { inputs: await f.input.listInputs(), commands: pendingCommands() };
+      const controls = await sessionControlsFor(f.sessionId);
+      expect(controls.nativeEvidence?.providerUI?.currentTurnMatched).toBe(false);
+      expect(controls.nativeEvidence?.inventoryCurrentTurnMatched).toBe(false);
+      expect(await f.input.listInputs()).toEqual(before.inputs);
+      expect(pendingCommands()).toEqual(before.commands);
+    });
+
+  it.each(['generation', 'question', 'question-revision', 'conversation', 'native-frame',
+    'native-epoch', 'native-exchange', 'native-source', 'same-source-refresh'] as const)(
+    'rechecks immutable canonical question identity during %s', async changed => {
+      const f = await canonicalDiagnosticFixture();
+      const original = sessionStoreModule.readLatestUserMessage;
+      const originalSession = sessionStoreModule.getSession;
+      let injected = false, rebound = false;
+      const lookup = vi.spyOn(sessionStoreModule, 'getSession').mockImplementation(async id => {
+        const session = await originalSession(id);
+        return rebound && id === f.sessionId && session ? { ...session, conversationId: 'rebound-diagnostic-conversation' } : session;
+      });
+      const spy = vi.spyOn(sessionStoreModule, 'readLatestUserMessage').mockImplementation(async id => {
+        const question = await original(id);
+        if (id === f.sessionId && !injected) {
+          injected = true;
+          if (changed === 'generation') await sessionStoreModule.appendEvent(id, {
+            source: 'extension', kind: 'turn_start', turnId: 'g-raced-diagnostic', time: Date.now() });
+          else if (changed === 'conversation') rebound = true;
+          else if (changed === 'question' || changed === 'question-revision') await sessionStoreModule.upsertMessageEvent(id, {
+            source: 'extension', kind: 'user_message', messageId: changed === 'question-revision' ? f.userId : randomUUID(), time: Date.now(),
+            message: { text: 'A newer canonical question.', chars: 27, truncated: false } });
+          else expect((await import('../src/main/core-browser-evidence.js')).noteCoreBrowserEvidence({
+            ...f.diagnostic, conversationId: f.conversationId, observedAt: Date.now(),
+            ...(changed === 'native-frame' ? { documentId: 'newer-raced-native-document' } : {}),
+            ...(changed === 'native-epoch' ? { navigationEpoch: f.diagnostic.navigationEpoch + 1 } : {}),
+            ...(changed === 'native-exchange' ? { turnId: randomUUID() } : {}),
+            ...(changed === 'native-source' ? { ordinaryFinal: {
+              ...f.diagnostic.ordinaryFinal, sourceUserMessageId: randomUUID() } } : {}),
+            ...(changed === 'same-source-refresh' ? { shellScan: { selectorMatches: 3, mapped: 2,
+              rejects: { fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0 } } } : {})
+          })).toBe(true);
+        }
+        return question;
+      });
+      const before = { inputs: await f.input.listInputs(), commands: pendingCommands() };
+      try {
+        const controls = await sessionControlsFor(f.sessionId);
+        expect(injected).toBe(true);
+        expect(controls.nativeEvidence?.providerUI?.currentTurnMatched).toBe(changed === 'same-source-refresh');
+        expect(controls.nativeEvidence?.inventoryCurrentTurnMatched).toBe(changed === 'same-source-refresh');
+        expect(await f.input.listInputs()).toEqual(before.inputs);
+        expect(pendingCommands()).toEqual(before.commands);
+      } finally { spy.mockRestore(); lookup.mockRestore(); }
+    });
 
   it('retains an unanswered native call across a newer completed-looking frame without binding an older scan to a new turn', async () => {
     const f = await stoppedResumeFixture();
@@ -676,7 +805,7 @@ describe('opt-in settled-turn Loop forward-readiness', () => {
       expect(shape).not.toContain(secret);
   });
 
-  it('projects a truncated native inventory as a current capability failure, never completion or Goal delivery', async () => {
+  it('projects a truncated native inventory without guessing its current question, never completion or Goal delivery', async () => {
     const f = await stoppedResumeFixture();
     const before = await f.input.listInputs();
     const publish = (ordinaryFinal: Record<string, unknown>, incomplete: boolean) => request('POST',
@@ -689,9 +818,9 @@ describe('opt-in settled-turn Loop forward-readiness', () => {
       codeCalls: 0, openCodeCalls: 0, activeTurnMapped: false, callInventoryComplete: false };
     expect((await publish(incomplete, true)).status).toBe(200);
     expect((await sessionControlsFor(f.sessionId)).nativeEvidence?.providerUI).toMatchObject({
-      currentTurnMatched: true, rejects: { callInventoryIncomplete: 1 } });
+      currentTurnMatched: false, rejects: { callInventoryIncomplete: 1 } });
     expect((await sessionControlsFor(f.sessionId)).nativeEvidence?.inventoryIncomplete).toBe(true);
-    expect((await sessionControlsFor(f.sessionId)).nativeEvidence?.inventoryCurrentTurnMatched).toBe(true);
+    expect((await sessionControlsFor(f.sessionId)).nativeEvidence?.inventoryCurrentTurnMatched).toBe(false);
     expect(coreBrowserEvidence(f.conversationId)?.pendingCompletion).toMatchObject({
       reason: 'inventory-incomplete', calls: 200, sourceUserMessageId: null });
     expect(settledForwardBridge.goalNativeCompletionReady(f.conversationId)).toBe(false);
@@ -2573,6 +2702,84 @@ describe('opt-in settled-turn Loop forward-readiness', () => {
     expect((await input.listInputs()).find(row => row.id === outgoing!.id)).toMatchObject({ state: 'sent', messageId: expect.any(String) });
     expect(nativeFinalEvidenceWait(coreBrowserEvidence(f.conversationId))?.reason).toBe('evidence');
   });
+  it.each(['unchanged', 'changed-source', 'concurrent-recording'] as const)(
+  'collects a recorded Loop helper only beyond its own observation boundary (%s)', async condition => {
+    const blocked = condition !== 'unchanged';
+    const f = await settledFixture(false);
+    const goal = await import('../src/main/goal.js');
+    const input = await import('../src/main/session/input.js');
+    goal.configureLoopForwardReadiness(settledForwardBridge.settledTurnContinuationAllowed);
+    input.configureInputDelivery({ applyAutomation: async () => {}, changed: () => {},
+      settledTurnForwardReadiness: settledForwardBridge.settledTurnInputForwardProof });
+    expect((await request('POST', '/goal/draft', { body: {
+      conversationId: f.conversationId, turnId: f.turnId, clientId: 'recorded-loop-source'
+    } })).status).toBe(200);
+    let helper: Awaited<ReturnType<typeof input.listInputs>>[number] | undefined;
+    await vi.waitFor(async () => {
+      helper = (await input.listInputs()).find(row => row.purpose === 'decision' && row.decisionSourceSessionId === f.sessionId);
+      expect(helper).toBeDefined();
+    });
+    const { tmpdir } = await import('node:os');
+    onTestFinished(() => fs.rm(path.join(tmpdir(), 'CoS-helper-outputs', `${helper!.id}.json`), { force: true }));
+    const helperChat = randomUUID(), userId = randomUUID(), owner = 'recorded-loop-helper';
+    expect(await input.claimBrowserInput(helper!.id, owner, null, true)).toMatchObject({ id: helper!.id });
+    expect(await input.authorizeBrowserInput(helper!.id, owner, null)).toBe(true);
+    expect((await request('POST', '/input/ack', { body: {
+      id: helper!.id, owner, conversationId: helperChat, messageId: userId
+    } })).body.ok).toBe(true);
+    if (condition === 'changed-source') expect((await request('POST', '/events', { body: { conversationId: f.conversationId,
+      events: [{ kind: 'user_message', messageId: randomUUID(), text: 'A newer real task correction.', time: Date.now() }]
+    } })).status).toBe(200);
+    const response = JSON.stringify({ action: 'continue', reply: 'Continue the original authorized work from its saved checkpoint.' });
+    const events = [
+      { kind: 'user_message', messageId: userId, text: helper!.text, time: Date.now() },
+      { kind: 'assistant_message', messageId: randomUUID(), turnId: 'recorded-helper-final', text: response,
+        state: 'final', final: true, time: Date.now() }
+    ];
+    let releaseRecording = () => {};
+    let separateRecording: Promise<Reply> | undefined;
+    let recordSpy: ReturnType<typeof vi.spyOn> | undefined;
+    if (condition === 'concurrent-recording') {
+      const recorder = await import('../src/main/session/recorder.js');
+      const record = recorder.recordChatObservations, separateChat = randomUUID();
+      let entered = () => {};
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      const gate = new Promise<void>(resolve => { releaseRecording = resolve; });
+      recordSpy = vi.spyOn(recorder, 'recordChatObservations').mockImplementation(async (...args) => {
+        if (args[0] === separateChat) { entered(); await gate; }
+        return record(...args);
+      });
+      separateRecording = request('POST', '/events', { body: { conversationId: separateChat,
+        events: [{ kind: 'user_message', messageId: randomUUID(), text: 'Independent native observation.', time: Date.now() }]
+      } });
+      await started;
+    }
+    try {
+      expect((await request('POST', '/events', { body: { conversationId: helperChat, events } })).status).toBe(200);
+    } finally {
+      releaseRecording();
+      if (separateRecording) expect((await separateRecording).status).toBe(200);
+      recordSpy?.mockRestore();
+    }
+    const collected = (await input.listInputs()).find(row => row.id === helper!.id)!;
+    expect(collected).toMatchObject({ state: blocked ? 'failed' : 'sent', messageId: userId,
+      decisionOutput: { sha256: createHash('sha256').update(response).digest('hex') } });
+    if (condition === 'concurrent-recording') expect(collected.goalDecisionRejection).toBe('native_completion_unverified');
+    const outgoing = (await input.listInputs()).filter(row => row.sourceHelperId === helper!.id);
+    expect(outgoing).toHaveLength(blocked ? 0 : 1);
+    if (!blocked) {
+      expect(outgoing[0]).toMatchObject({ state: 'queued', owner: null, sessionId: f.sessionId,
+        sourceHelperAcceptedAt: expect.any(Number) });
+      await vi.waitFor(() => expect(goal.goalViewFor(f.conversationId)).toMatchObject({
+        stage: 'no-reply', outboxContinuationOwned: true
+      }));
+    }
+    // Retrying the exact committed observation cannot collect twice or mint another Send.
+    expect((await request('POST', '/events', { body: { conversationId: helperChat, events } })).status).toBe(200);
+    expect((await input.listInputs()).filter(row => row.sourceHelperId === helper!.id)).toEqual(outgoing);
+    expect(nativeFinalEvidenceWait(coreBrowserEvidence(f.conversationId))?.reason).toBe('evidence');
+  });
+
   it('continues an opt-in finite Goal through the real helper and outbox without certifying completion', async () => {
     const f = await settledFixture();
     await setGoalSwitchNow(f.conversationId, 'goal', true);
@@ -5290,6 +5497,156 @@ describe('committed Resume native terminal pickup after restart', () => {
       text: 'The exact resumed production pass is complete.', state: 'final', final: true };
     return { from, chat, userId, finalId, sessionId, token, text, answer, retained, input };
   };
+
+  it.each(['current', 'streamed-final', 'foreign-question', 'foreign-final', 'newer-question',
+    'missing-receipt', 'unretired-source', 'wrong-epoch', 'duplicate-input', 'mutated-final-after-proof',
+    'changed-receipt-after-proof'] as const)(
+    'keeps renewed committed Resume source exact without inventing a watchdog (%s)', async condition => {
+    const { chat, userId, finalId, sessionId, answer, input } = await setup();
+    await saveConfig({ ...getConfig(), goal: { ...getConfig().goal, continuationPolicy: 'settled-turn' } });
+    if (condition === 'streamed-final') await request('POST', '/events', { body: { conversationId: chat,
+      events: [{ ...answer, text: 'The exact resumed pass is still working.', state: 'streaming', final: false }] } });
+    await request('POST', '/events', { body: { conversationId: chat, events: [answer] } });
+    await request('POST', '/status', { body: { openConversations: [], inventoryComplete: false, authState: 'signed-in' } });
+    const diagnostic = { documentId: 'renewed-resume-final-source', navigationEpoch: 2,
+      observedAt: Date.now(), shell: 'alternate', shellDiscovery: 'compatible', requestIds: [], turnId: null,
+      ordinaryFinal: { reason: 'associated', questions: 1, calls: 0, openCalls: 0,
+        codeCalls: 0, openCodeCalls: 0, activeTurnMapped: false, sourceUserMessageId: userId,
+        settledFinalMessageId: finalId, coreCallMessageIds: [], codeCallMessageIds: [] } };
+    await request('POST', '/activity?conversationId=' + chat, { body: { observationOnly: true, coreDiagnostic: diagnostic } });
+    const initial = goalPendingReplyFor(chat)!;
+    const initialRefusals: string[] = [];
+    const before = await settledForwardBridge.settledTurnContinuationProof(sessionId, chat, initial.turnId,
+      { onRefusal: reason => initialRefusals.push(reason) });
+    expect(await before?.(), initialRefusals.join(';')).toBe(true);
+    await request('POST', '/settings', { body: { conversationId: chat, loop: false } });
+    await request('POST', '/settings', { body: { conversationId: chat, loop: true } });
+    const pending = goalPendingReplyFor(chat)!;
+    expect(pending).toMatchObject({ replyId: finalId, turnId: 'reply:' + finalId });
+    const retained = snapshotContinuations().entries.find(row => row.to === chat)!;
+    expect(retained.acceptedDestinationFinalEpochRevoked).toBe(true);
+    if (condition === 'streamed-final') {
+      const canonical = (await readEvents(sessionId, { kinds: ['assistant_message'] })).find(row => row.kind === 'assistant_message' && row.messageId === finalId)!;
+      if (canonical.kind !== 'assistant_message') throw new Error('Expected canonical streamed final');
+      expect(canonical.finalContentSeq).toBeGreaterThan(canonical.origin ?? canonical.seq);
+      expect(pending.eventSeq).toBe(canonical.origin ?? canonical.seq);
+    }
+    if (condition === 'foreign-question' || condition === 'foreign-final') await request('POST', '/activity?conversationId=' + chat,
+      { body: { observationOnly: true, coreDiagnostic: { ...diagnostic, observedAt: Date.now(), ordinaryFinal: {
+        ...diagnostic.ordinaryFinal, ...(condition === 'foreign-question'
+          ? { sourceUserMessageId: randomUUID() } : { settledFinalMessageId: randomUUID() }) } } } });
+    if (condition === 'newer-question') await request('POST', '/events', { body: { conversationId: chat,
+      events: [{ kind: 'user_message', messageId: randomUUID(), text: 'A newer question.', time: Date.now() }] } });
+    if (condition === 'missing-receipt') resetContinuationsForTests();
+    if (condition === 'unretired-source' || condition === 'wrong-epoch') {
+      const wal = snapshotContinuations();
+      for (const row of wal.entries) if (row.to === chat) {
+        if (condition === 'unretired-source') row.sourceClosed = false;
+        else row.acceptedDestinationFinalAt = pending.acceptedAt;
+      }
+      resetContinuationsForTests(); await restoreContinuations(wal);
+    }
+    if (condition === 'duplicate-input') await input.enqueueInput({ id: randomUUID(), sessionId,
+      text: 'A conflicting outstanding delivery.', mode: 'auto', dueAt: Date.now(), model: null, reasoningEffort: null });
+    const rows = await input.listInputs(), commands = pendingCommands();
+    const refusals: string[] = [];
+    const proof = await settledForwardBridge.settledTurnContinuationProof(sessionId, chat, pending.turnId,
+      { onRefusal: reason => refusals.push(reason) });
+    const current = ['current', 'streamed-final', 'mutated-final-after-proof', 'changed-receipt-after-proof'].includes(condition);
+    expect(proof ? await proof() : false, refusals.join(';')).toBe(current);
+    if (condition === 'mutated-final-after-proof') {
+      const canonical = (await readEvents(sessionId, { kinds: ['assistant_message'] })).find(row => row.kind === 'assistant_message' && row.messageId === finalId)!;
+      if (canonical.kind !== 'assistant_message') throw new Error('Expected canonical final');
+      await sessionStoreModule.upsertMessageEvent(sessionId, { ...canonical,
+        message: { text: 'A mutated answer after proof.', chars: 29, truncated: false } });
+      expect(await proof!()).toBe(false);
+    }
+    if (condition === 'changed-receipt-after-proof') {
+      resetContinuationsForTests();
+      expect(await proof!()).toBe(false);
+    }
+    expect(await input.listInputs()).toEqual(rows);
+    expect(pendingCommands()).toEqual(commands);
+  });
+
+  it.each(['current', 'current-final-edit', 'current-native-pair', 'current-navigation',
+    'current-receipt-loss', 'current-pending-input', 'current-pause',
+    'wrong-question', 'wrong-final', 'missing-native', 'missing-resume-receipt',
+    'newer-question', 'pending-input'] as const)(
+    'recovers only the exact committed Resume source for a strictly complete unaliased final: %s', async condition => {
+      const { chat, userId, finalId, sessionId, answer, token, input } = await setup();
+      await saveConfig({ ...getConfig(), goal: { ...getConfig().goal, continuationPolicy: 'settled-turn',
+        backend: 'chatgpt', loopBackend: 'chatgpt' } });
+      await request('POST', '/events', { body: { conversationId: chat, events: [answer] } });
+      const pending = goalPendingReplyFor(chat)!;
+      expect(pending).toMatchObject({ sessionId, replyId: finalId, turnId: 'reply:' + finalId });
+      const goal = await import('../src/main/goal.js');
+      expect(await goal.loopReplyHasAuthority(sessionId, chat, pending.turnId)).toBe(true);
+      expect(await goal.goalReplySourceTurn(sessionId, pending.turnId)).toBeUndefined();
+      expect((await readEvents(sessionId, { kinds: ['assistant_message'] })).at(-1)).toMatchObject({
+        messageId: finalId, providerMessageId: finalId, inputReplyTo: userId, goalEligible: true
+      });
+      expect(snapshotContinuations().entries.find(row => row.token === token)).toMatchObject({
+        state: 'committed', sourceClosed: true,
+        destinationSend: { state: 'sent', conversationId: chat, messageId: userId }
+      });
+      await request('POST', '/status', { body: { openConversations: [], inventoryComplete: false, authState: 'signed-in' } });
+      const diagnostic = { documentId: 'strict-resume-source', navigationEpoch: 2,
+        observedAt: Date.now(), shell: 'alternate', shellDiscovery: 'compatible', requestIds: [], turnId: null,
+        ordinaryFinal: { reason: 'associated', questions: 1, calls: 0, openCalls: 0,
+          codeCalls: 0, openCodeCalls: 0, activeTurnMapped: false,
+          sourceUserMessageId: condition === 'wrong-question' ? randomUUID() : userId,
+          settledFinalMessageId: condition === 'wrong-final' ? randomUUID() : finalId,
+          coreCallMessageIds: [], codeCallMessageIds: [] } };
+      if (condition === 'missing-native') delete (diagnostic.ordinaryFinal as Record<string, unknown>).settledFinalMessageId;
+      await request('POST', '/activity?conversationId=' + chat,
+        { body: { observationOnly: true, coreDiagnostic: diagnostic } });
+      expect(nativeFinalEvidenceWait(coreBrowserEvidence(chat))).toBeNull();
+      expect(coreBrowserEvidence(chat)?.pendingCompletion).toBeNull();
+      if (condition === 'missing-resume-receipt') resetContinuationsForTests();
+      if (condition === 'newer-question') await request('POST', '/events', { body: { conversationId: chat,
+        events: [{ kind: 'user_message', messageId: randomUUID(), text: 'A later instruction.', time: Date.now() }] } });
+      if (condition === 'pending-input') await input.enqueueInput({ id: randomUUID(), sessionId,
+        text: 'A pending correction.', mode: 'auto', dueAt: Date.now(), model: null, reasoningEffort: null });
+      const before = await readEvents(sessionId), rows = await input.listInputs();
+      const refusals: string[] = [];
+      const proof = await settledForwardBridge.settledTurnContinuationProof(sessionId, chat, pending.turnId,
+        { onRefusal: reason => refusals.push(reason) });
+      expect(proof ? await proof() : false, refusals.join(';')).toBe(condition.startsWith('current'));
+      expect(await readEvents(sessionId)).toEqual(before);
+      expect(await input.listInputs()).toEqual(rows);
+      if (condition === 'current-final-edit') {
+        const eventCount = (await getSession(sessionId))?.events;
+        const final = before.findLast(row => row.kind === 'assistant_message')!;
+        if (final.kind !== 'assistant_message') throw new Error('Missing canonical Resume final');
+        await sessionStoreModule.upsertMessageEvent(sessionId, { ...final,
+          message: { text: 'A changed canonical final.', chars: 26, truncated: false } });
+        expect((await getSession(sessionId))?.events).toBe(eventCount);
+      }
+      if (condition === 'current-native-pair' || condition === 'current-navigation') {
+        await request('POST', '/activity?conversationId=' + chat, { body: { observationOnly: true,
+          coreDiagnostic: { ...diagnostic, observedAt: Date.now(),
+            navigationEpoch: condition === 'current-navigation' ? 3 : diagnostic.navigationEpoch,
+            ordinaryFinal: { ...diagnostic.ordinaryFinal,
+              sourceUserMessageId: condition === 'current-native-pair' ? randomUUID() : userId } } } });
+      }
+      if (condition === 'current-receipt-loss') resetContinuationsForTests();
+      if (condition === 'current-pending-input') await input.enqueueInput({ id: randomUUID(), sessionId,
+        text: 'A correction admitted after proof.', mode: 'auto', dueAt: Date.now(), model: null, reasoningEffort: null });
+      if (condition === 'current-pause') await saveConfig({ ...getConfig(), ui: { ...getConfig().ui, automationPaused: true } });
+      if (condition.startsWith('current-')) expect(await proof!()).toBe(false);
+      if (condition === 'current') {
+        goal.configureLoopForwardReadiness(settledForwardBridge.settledTurnContinuationAllowed,
+          settledForwardBridge.goalNativeCompletionReady);
+        const drafted = await request('POST', '/goal/draft', { body: { conversationId: chat,
+          turnId: pending.turnId, clientId: 'strict-resume-source' } });
+        expect(drafted.status, JSON.stringify(drafted.body)).toBe(200);
+        await vi.waitFor(async () => expect((await input.listInputs()).filter(row => row.purpose === 'decision'))
+          .toEqual([expect.objectContaining({ decisionSourceSessionId: sessionId, decisionSourceTurnId: pending.turnId })]));
+        expect(await readEvents(sessionId)).toEqual(before);
+      }
+    }
+  );
 
   it.each(['goal', 'loop', 'loop-serialized-path', 'loop-serialized-tilde', 'loop-interleaved-commentary',
     'goal-late-question-watchdog', 'loop-late-question-watchdog', 'loop-late-question-watchdog-stopped',
@@ -34411,6 +34768,45 @@ it('retires an already armed ordinary Goal repair when its conversation is now A
   } finally { resetGoalStateForTests(); await setSecret('openRouterApiKey', ''); await saveConfig(previous); vi.useRealTimers(); }
 });
 
+it.each(['manual', 'background', 'eligible'] as const)(
+  'reports first admission reasons only for an explicit zero-eligible Resume (%s)', async variant => {
+  const previous = getConfig();
+  const lines: string[] = [];
+  const release = onLog(row => {
+    if (row.message.startsWith('bridge: explicit Resume admission ')) lines.push(row.message);
+  });
+  try {
+    await saveConfig({ ...previous, goal: { ...previous.goal, enabled: false },
+      ui: { ...previous.ui, automationPaused: false } });
+    await pair();
+    const normalChat = 'a6262626-1111-4111-8111-000000000006';
+    const helperChat = 'a6363636-1111-4111-8111-000000000007';
+    const normal = await createSession({ conversationId: normalChat, title: 'PRIVATE_NORMAL_TITLE' });
+    await createSession({ conversationId: helperChat, title: 'PRIVATE_HELPER_TITLE',
+      origin: { kind: 'helper', fromSessionId: null, agentId: null, task: 'PRIVATE_HELPER_TASK' } });
+    if (variant === 'eligible') {
+      await setSecret('openRouterApiKey', 'PRIVATE_RESUME_KEY');
+      await setSessionAutomation(normal.id, 'loop');
+    }
+    const resumed = await resumeAutomationChats({ startBrowser: false,
+      ...(variant === 'background' ? { maxQueued: 1 } : {}) });
+    expect(resumed).toEqual({ eligible: variant === 'eligible' ? 1 : 0,
+      queued: 0, alreadyActive: 0, recovering: 0, rearmed: 0, skipped: 2 });
+    if (variant === 'manual') expect(lines).toEqual([
+      'bridge: explicit Resume admission eligible=0 firstSkips=goal-inactive:1,helper:1'
+    ]);
+    else expect(lines).toEqual([]);
+    expect(lines.join('\n')).not.toMatch(/PRIVATE|a6262626|a6363636/);
+    expect((await request('GET', '/status')).body.repairs).toEqual([]);
+    expect(recoveryBrowserWake).not.toHaveBeenCalled();
+    const { listInputs } = await import('../src/main/session/input.js');
+    expect(await listInputs()).toEqual([]);
+  } finally {
+    release(); resetGoalStateForTests();
+    await setSecret('openRouterApiKey', ''); await saveConfig(previous);
+  }
+});
+
 it('stages every Resume-all root but hands out only configured capacity and replenishes after a slot is free', async () => {
   const previous = getConfig();
   vi.useFakeTimers({ toFake: ['Date'] });
@@ -35112,6 +35508,67 @@ it('reconstructs one exact canonical Goal reply only for deliberate Resume', asy
     await saveConfig(previous);
   }
 });
+
+it.each(['recognized', 'unrecognized', 'newer-user', 'queued-input'] as const)(
+  'reconciles an older generated Loop failure checkpoint only for its current recognized failure (%s)', async shape => {
+    const previous = getConfig();
+    const goal = await import('../src/main/goal.js');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      await setSecret('openRouterApiKey', 'test-stale-generated-failure');
+      await pair();
+      const chat = randomUUID();
+      const recorded = await request('POST', '/events', { body: { conversationId: chat, events: [
+        { kind: 'user_message', messageId: 'original-failure-question', text: 'Keep improving this project', time: Date.now() },
+        { kind: 'turn_start', turnId: 'older-failure', time: Date.now() + 1 },
+        { kind: 'turn_end', turnId: 'older-failure', outcome: 'failed',
+          detail: 'Message delivery timed out. Please try again. Retry', time: Date.now() + 2 }
+      ] } });
+      const sessionId = recorded.body.sessionId as string;
+      await setGoalObjectiveNow(chat, 'Keep improving this project');
+      await setGoalSwitchNow(chat, 'loop', true, true);
+      const oldEnd = (await readEvents(sessionId, { kinds: ['turn_end'] })).at(-1)!;
+      await goal.acceptGoalReplyNow({ conversationId: chat, sessionId, turnId: 'older-failure',
+        replyId: 'activation:older-failure', eventSeq: oldEnd.seq, blocked: false });
+      const saved = goal.snapshotGoalReplies();
+      goal.restoreGoalReplies({ ...saved, replies: saved.replies.map(row => row.conversationId === chat
+        ? { ...row, explicitActivation: true } : row) });
+      const before = goalPendingReplyFor(chat)!;
+      await request('POST', '/events', { body: { conversationId: chat, events: [
+        { kind: 'turn_start', turnId: 'newer-failure', time: Date.now() + 3 },
+        { kind: 'turn_end', turnId: 'newer-failure', outcome: 'failed',
+          detail: shape === 'unrecognized' ? 'Unrecognized failure' : 'Message delivery timed out. Please try again. Retry',
+          time: Date.now() + 4 },
+        ...(shape === 'newer-user' ? [{ kind: 'user_message', messageId: 'later-human-question',
+          text: 'A newer instruction', time: Date.now() + 5 }] : [])
+      ] } });
+      vi.setSystemTime(Date.now() + 2 * AUTOMATIC_LOOP_RECOVERY_GRACE_MS + 100);
+      const input = await import('../src/main/session/input.js');
+      const queuedId = shape === 'queued-input' ? randomUUID() : null;
+      if (queuedId) await input.enqueueInput({ id: queuedId, sessionId, text: 'Keep this already saved message.',
+        mode: 'auto', dueAt: Date.now() + 60_000, model: null, reasoningEffort: null });
+      const result = await resumeAutomationChats({ startBrowser: false, maxQueued: 1 });
+      if (shape === 'recognized') {
+        expect(result.rearmed).toBe(1);
+        const next = goalPendingReplyFor(chat)!;
+        expect(next).toMatchObject({ turnId: 'newer-failure', replyId: 'activation:newer-failure' });
+        expect(next.acceptedAt).toBeGreaterThan(before.acceptedAt);
+        expect((await resumeAutomationChats({ startBrowser: false, maxQueued: 1 })).rearmed).toBe(0);
+      } else {
+        expect(result.rearmed).toBe(0);
+        expect(goalPendingReplyFor(chat)).toEqual(before);
+      }
+      expect((await getSession(sessionId))?.userMessages).toBe(shape === 'newer-user' ? 2 : 1);
+      if (queuedId) expect((await input.listInputs()).find(row => row.id === queuedId))
+        .toMatchObject({ state: 'queued', text: 'Keep this already saved message.' });
+      expect(opened).toEqual([]);
+    } finally {
+      resetGoalStateForTests();
+      await setSecret('openRouterApiKey', '');
+      await saveConfig(previous);
+      vi.useRealTimers();
+    }
+  });
 
 it('reconstructs a lost explicit Loop ticket after grace even when a status row followed the final', async () => {
   const previous = getConfig();
@@ -35832,6 +36289,10 @@ it('projects Working only while exact main execution is current', async () => {
 
 it('does not let unattributed tool execution refresh every automated chat presentation', async () => {
   const previous = getConfig();
+  const attributionLogs: string[] = [];
+  const stopLogs = onLog(row => {
+    if (row.message.startsWith('bridge: automation presentation ignored unattributed')) attributionLogs.push(row.message);
+  });
   let releaseUnattributed = () => {};
   let releaseExact = () => {};
   let unattributedTool: Promise<void> = Promise.resolve();
@@ -35870,6 +36331,17 @@ it('does not let unattributed tool execution refresh every automated chat presen
           reason: expect.stringContaining('no exact reply') })
       ]));
     }
+    expect(attributionLogs).toHaveLength(1);
+    const scoped = await Promise.all(conversations.map(id => findSessionByConversation(id)));
+    // Native per-chat activity/status reads must not replace the fleet's log
+    // transition cursor with a different subset or an empty scope on every poll.
+    for (let poll = 0; poll < 3; poll++) {
+      await automationSupervisorSnapshot([], observationAt);
+      await automationSupervisorSnapshot([scoped[0]!], observationAt);
+      await automationSupervisorSnapshot([scoped[1]!], observationAt);
+      await automationSupervisorSnapshot(undefined, observationAt);
+    }
+    expect(attributionLogs).toHaveLength(1);
     releaseUnattributed();
     await unattributedTool;
 
@@ -35883,6 +36355,7 @@ it('does not let unattributed tool execution refresh every automated chat presen
         reason: expect.stringContaining('no exact reply') })
     ]));
   } finally {
+    stopLogs();
     releaseUnattributed();
     releaseExact();
     await Promise.all([unattributedTool, exactTool]);
@@ -36610,6 +37083,68 @@ describe('helper HTTP refusal diagnostics', () => {
 
 
 describe('diagnostic-only original scope reasons', () => {
+  it.each(['missing', 'malformed', 'accessor', 'reader-accessor', 'foreign-only'] as const)(
+    'never carries old reader provenance or executes untrusted getters when a fresh missing-census frame is %s', async mode => {
+      const { noteCoreBrowserEvidence, coreBrowserEvidence } = await import('../src/main/core-browser-evidence.js');
+      resetCoreBrowserEvidenceForTests();
+      const conversationId = '78787878-1111-4222-8333-444444444447';
+      let getterReads = 0;
+      const base = { conversationId, documentId: 'provenance-descriptor', navigationEpoch: 0,
+        observedAt: Date.now(), shell: 'alternate' as const, shellDiscovery: 'failed' as const,
+        shellScan: null, ordinaryFinal: null, requestIds: [], turnId: null };
+      expect(noteCoreBrowserEvidence({ ...base, reader: { contentRecorder: 152, workerRecorder: 152 } })).toBe(true);
+      const reader: any = { contentRecorder: 153, workerRecorder: 153, privateText: 'PRIVATE_READER' };
+      if (mode === 'malformed') reader.contentRecorder = 1_000_001;
+      if (mode === 'accessor') Object.defineProperty(reader, 'contentRecorder', { get() { getterReads++; return 153; } });
+      const next: any = { ...base, observedAt: base.observedAt + 1, reader: mode === 'foreign-only'
+        ? { mainKeys: 399, privateText: 'PRIVATE_READER' } : reader };
+      if (mode === 'missing') delete next.reader;
+      if (mode === 'reader-accessor') Object.defineProperty(next, 'reader', { get() { getterReads++; return reader; } });
+      expect(noteCoreBrowserEvidence(next)).toBe(true);
+      const actual = coreBrowserEvidence(conversationId)!;
+      expect(actual.reader).toBeUndefined();
+      expect(actual.shellScan).toBeNull();
+      expect(actual.pendingCompletion ?? null).toBeNull();
+      expect(getterReads).toBe(0);
+      expect(JSON.stringify(actual)).not.toContain('PRIVATE_READER');
+      resetCoreBrowserEvidenceForTests();
+    });
+
+  it('projects executing reader generations through real activity and controls when the census is unavailable without clearing debt', async () => {
+    await pair(); resetCoreBrowserEvidenceForTests();
+    const { noteCoreBrowserEvidence, coreBrowserEvidence } = await import('../src/main/core-browser-evidence.js');
+    const conversationId = '78787878-1111-4222-8333-444444444446';
+    const created = await request('POST', '/events', { body: { conversationId, events: [{
+      kind: 'user_message', time: Date.now(), text: 'Keep exact result custody.', messageId: 'reader-missing-user'
+    }] } });
+    const observedAt = Date.now();
+    noteCoreBrowserEvidence({ conversationId, documentId: 'reader-original', navigationEpoch: 0, observedAt,
+      shell: 'alternate', shellDiscovery: 'compatible', requestIds: [], turnId: 'original-reader-turn',
+      ordinaryFinal: { reason: 'open-call', questions: 1, calls: 1, openCalls: 1, codeCalls: 0,
+        openCodeCalls: 0, activeTurnMapped: false, sourceUserMessageId: 'reader-missing-user' } });
+    const retained = coreBrowserEvidence(conversationId)!.pendingCompletion;
+    const beforeInputs = structuredClone(await (await import('../src/main/session/input.js')).listInputs());
+    const beforeCommands = structuredClone(pendingCommands());
+    const reply = await request('POST', `/activity?conversationId=${conversationId}`, { body: {
+      observationOnly: true, coreDiagnostic: { documentId: 'reader-replacement', navigationEpoch: 1,
+        observedAt: observedAt + 1, shell: 'alternate', shellDiscovery: 'failed', shellScan: null,
+        ordinaryFinal: null, requestIds: [], turnId: null,
+        reader: { contentRecorder: 153, workerRecorder: 153, mainKeys: 399, privateText: 'PRIVATE_READER' } }
+    } });
+    expect(reply).toMatchObject({ status: 200, body: { observationOnly: true, observationAccepted: true, completionVerified: false } });
+    const native = coreBrowserEvidence(conversationId)!;
+    expect(native.shellScan).toBeNull();
+    expect(native.pendingCompletion).toEqual(retained);
+    const controls = await sessionControlsFor(created.body.sessionId);
+    expect(controls.nativeEvidence?.providerUI).toMatchObject({ discovery: 'failed', selectorMatches: null,
+      mapped: null, rejects: null, reader: { contentRecorder: 153, workerRecorder: 153 } });
+    expect(controls.nativeEvidence?.providerUI?.reader).not.toHaveProperty('mainKeys');
+    expect(JSON.stringify(controls.nativeEvidence?.providerUI)).not.toContain('PRIVATE_READER');
+    expect(pendingCommands()).toEqual(beforeCommands);
+    expect(await (await import('../src/main/session/input.js')).listInputs()).toEqual(beforeInputs);
+    resetCoreBrowserEvidenceForTests();
+  });
+
   it('keeps fixed current-scan identity reasons in provider UI when no current turn matches', async () => {
     await pair();
     resetCoreBrowserEvidenceForTests();

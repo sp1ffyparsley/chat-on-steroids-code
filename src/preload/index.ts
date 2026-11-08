@@ -350,7 +350,8 @@ const api = {
   retryInputBrowser: (id: string) => call<InputEntry | null>('sessions:retryBrowser', { id }),
   listInputs: () => call<InputEntry[]>('sessions:outbox'),
   decisionHelperCustody: (id: string) => call<SessionDecisionHelperCustody | null>('sessions:helperCustody', { id }),
-  listPausedHelpers: () => call<Array<{ id: string; sourceSessionId: string }>>('sessions:pausedHelpers'),
+  listPausedHelpers: (reviewedSourceSessionId?: string) => call<Array<{ id: string; sourceSessionId: string; reviewRequired?: true }>>(
+    'sessions:pausedHelpers', reviewedSourceSessionId ? { reviewedSourceSessionId } : undefined),
   retryHelper: (id: string, sourceSessionId: string) => call<boolean>('sessions:retryHelper', { id, sourceSessionId }),
   retryPausedHelpers: () => call<HelperBulkRestartResult>('sessions:retryPausedHelpers'),
   editQueuedInput: (id: string, text: string, afterTurn?: boolean) => call<boolean>('sessions:editInput', { id, text, afterTurn }),

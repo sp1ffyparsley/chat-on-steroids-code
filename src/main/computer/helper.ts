@@ -1056,6 +1056,7 @@ function Capture-Target($request, [Nullable[int64]]$forcedWindow) {
     Initialize-WindowsCapture
     try {
       $direct = [CosWindowsCapture]::Capture([int64]$id, $maxW, [string]$request.file) -split ','
+      [Console]::Error.WriteLine('[cos-capture] done')
     } catch {
       # PowerShell wraps C# exceptions in invocation text; retain the native error
       # code so callers distinguish stale geometry from a transport/helper failure.

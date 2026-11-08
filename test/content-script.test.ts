@@ -3778,6 +3778,68 @@ describe('desktop input delivery and helper ownership', () => {
       });
     });
 
+  it.each(['editor-missing', 'editor-disabled', 'page-busy'] as const)(
+    'reports the exact native pre-authorization refusal after Core and Send preparation (%s)', async reason => {
+      live = await harness(`https://chatgpt.com/?cos-input=${inputId}`, {
+        desktop_input: message => {
+          if (message.stage === 'send:ready') {
+            const editor = live!.document.querySelector('#prompt-textarea')!;
+            if (reason === 'editor-missing') editor.remove();
+            if (reason === 'editor-disabled') editor.setAttribute('aria-disabled', 'true');
+            if (reason === 'page-busy') startGenerating(live!.document);
+          }
+          return { ok: true, data: message.stage || message.fail || message.authorize || message.ack
+            ? { ok: true } : { input: claimed() } };
+        }
+      });
+      const sends = watchSend(live.document);
+      expect(await live.runtimeMessage({ type: 'clf-desktop-input', id: inputId, conversationId: null })).toEqual({ ok: false });
+      expect(live.sent.filter(message => message.stage).map(message => message.stage)).toEqual([
+        'claimed', 'model:start', 'model:confirmed', 'core:start', 'prompt:inserted', 'core:attached', 'send:ready',
+        `prepare:refused:${reason}`
+      ]);
+      expect(sends()).toBe(0);
+      expect(live.sent.some(message => message.authorize || message.ack || message.confirmedUnsent)).toBe(false);
+    });
+
+  it.each(['first-known', 'unknown', 'malformed', 'accessor', 'unknown-first', 'route-changed', 'manual-send', 'authorized',
+    'diagnostic-route-change', 'diagnostic-manual-send', 'diagnostic-refused'] as const)(
+    'bounds pre-authorization refusal diagnostics to one fixed same-owner zero-click observation (%s)', async boundary => {
+      live = await harness(`https://chatgpt.com/?cos-input=${inputId}`, {
+        desktop_input: message => {
+          if (message.stage?.startsWith('prepare:refused:')) {
+            if (boundary === 'diagnostic-route-change') live!.dom.reconfigure({ url: `https://chatgpt.com/c/${chatB}` });
+            if (boundary === 'diagnostic-manual-send') live!.document.querySelector<HTMLButtonElement>('[data-testid="send-button"]')!.click();
+            if (boundary === 'diagnostic-refused') return { ok: true, data: { ok: false } };
+          }
+          return { ok: true, data: message.stage || message.fail || message.authorize || message.ack
+            ? { ok: true } : { input: claimed() } };
+        }
+      });
+      const api = (live.window as any).CLF_DOM;
+      let getterReads = 0;
+      const malformed = Object.defineProperty({}, 'toString', { get() { getterReads++; throw new Error('PRIVATE_REFUSAL'); } });
+      api.send = vi.fn(async (options: any) => {
+        if (boundary === 'route-changed') live!.dom.reconfigure({ url: `https://chatgpt.com/c/${chatB}` });
+        if (boundary === 'manual-send') live!.document.querySelector<HTMLButtonElement>('[data-testid="send-button"]')!.click();
+        if (boundary === 'authorized') await options.beforeSend(() => true);
+        options.explain(boundary === 'unknown' || boundary === 'unknown-first' ? 'PRIVATE_REFUSAL'
+          : boundary === 'malformed' ? 7 : boundary === 'accessor' ? malformed : 'editor-disabled');
+        options.explain('page-busy');
+        return false;
+      });
+      const sends = watchSend(live.document);
+      expect(await live.runtimeMessage({ type: 'clf-desktop-input', id: inputId, conversationId: null })).toEqual({ ok: false });
+      const refusals = live.sent.filter(message => message.stage?.startsWith('prepare:refused:'));
+      expect(refusals).toEqual(boundary === 'first-known' || boundary.startsWith('diagnostic-')
+        ? [expect.objectContaining({ id: inputId, owner: 'input-owner', stage: 'prepare:refused:editor-disabled' })] : []);
+      expect(sends()).toBe(boundary === 'manual-send' || boundary === 'diagnostic-manual-send' ? 1 : 0);
+      expect(live.sent.some(message => message.ack)).toBe(false);
+      expect(live.sent.filter(message => message.authorize)).toHaveLength(boundary === 'authorized' ? 1 : 0);
+      expect(getterReads).toBe(0);
+      expect(JSON.stringify(live.sent.filter(message => message.stage || message.fail))).not.toContain('PRIVATE_REFUSAL');
+    });
+
   it.each(['current', 'route-changed', 'stage-refused', 'manual-send'])('reports an owned envelope refusal only while its no-click custody remains current (%s)', async boundary => {
     live = await harness(`https://chatgpt.com/?temporary-chat=true&cos-input=${inputId}`, {
       desktop_input: message => {
@@ -17676,6 +17738,7 @@ describe('the activity feed', () => {
     expect(poll?.coreDiagnostic).toEqual({
       shell: 'alternate',
       shellDiscovery: 'unknown',
+      reader: { contentRecorder: currentRecorderVersion },
       ordinaryFinal: null,
       shellScan: null,
       requestIds: [],
@@ -17699,6 +17762,17 @@ describe('the activity feed', () => {
       contentRecorder: expect.any(Number), contentKeys: 4 });
     expect(scan?.reader.contentRecorder).toBe(currentRecorderVersion);
     expect(JSON.stringify(scan)).not.toContain('PRIVATE_FRAME');
+    expect(live.sent.filter(message => message.type === 'activity').at(-1)?.coreDiagnostic?.reader)
+      .toEqual({ fiberWire, fiberKeys: 88, contentRecorder: currentRecorderVersion, contentKeys: 4 });
+
+    // Losing the next census cannot retain the previous frame's Fiber generation/counts.
+    await replyFiber([], [], null, true, null, false, { selectorMatches: 1.5, mapped: 0,
+      rejects: { fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0 }, reader });
+    live.sent.length = 0;
+    await live.hook.pullActivity();
+    const unavailable = live.sent.filter(message => message.type === 'activity').at(-1)?.coreDiagnostic;
+    expect(unavailable?.shellScan).toBeNull();
+    expect(unavailable?.reader).toEqual({ contentRecorder: currentRecorderVersion });
   });
 
   it('preserves bounded completion veto diagnostics and rejects malformed optional counts', async () => {
@@ -20481,6 +20555,35 @@ describe('truthful quiet operation status', () => {
 
 describe('the field above the composer', () => {
   const view = (over: Record<string, unknown>) => live!.hook.stageView({ job: null, ...over });
+
+  it.each([true, false])('keeps the idle caption truthful when native generation is %s', async generating => {
+    live = await harness();
+    const goal = { enabled: true, mode: 'loop', draft: null, wait: { reason: 'idle' } };
+    const saved = JSON.stringify(goal);
+    const result = view({ generating, goal });
+    expect(result?.stage).toBe(generating ? 'Loop is on · waiting for this answer'
+      : 'Loop is on · ready for the next completed answer');
+    expect(result?.detail?.includes('confirms no work is executing')).toBe(!generating);
+    expect(JSON.stringify(goal)).toBe(saved);
+    expect(live.sent.some(row => ['goal_draft', 'goal_prepare', 'goal_ack', 'compact', 'settings_set'].includes(row.type))).toBe(false);
+  });
+
+  it('shows native generation before the local recorder has observed its opening edge', async () => {
+    const goal = { enabled: true, mode: 'loop', draft: null, wait: { reason: 'idle' } };
+    live = await harness(undefined, { activity: () => ({ ok: true, data: { entries: [], job: null, goal } }) });
+    await live.hook.pullActivity();
+    expect(live.document.querySelector('.clf-stage')?.textContent).toContain('ready for the next completed answer');
+    startGenerating(live.document);
+    const stop = vi.fn();
+    live.document.querySelector('[data-testid="stop-button"]')!.addEventListener('click', stop);
+    // Deliberately no observe()/await: native Stop already exists, but the local
+    // generation event has not run. Painting is observational, not a turn start.
+    live.hook.injectStage();
+    expect(live.document.querySelector('.clf-stage')?.textContent).toContain('waiting for this answer');
+    expect(live.document.querySelector('.clf-stage')?.textContent).not.toContain('confirms no work is executing');
+    expect(stop).not.toHaveBeenCalled();
+    expect(live.sent.some(row => ['goal_draft', 'goal_prepare', 'goal_ack', 'compact', 'settings_set'].includes(row.type))).toBe(false);
+  });
 
   it.each(['native generation', 'exact Core operation', 'fresh native activity'])
     ('shows the current answer rather than a prior recovery countdown during %s', async activity => {

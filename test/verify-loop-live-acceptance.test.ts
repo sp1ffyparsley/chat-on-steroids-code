@@ -372,6 +372,56 @@ describe('read-only Loop live acceptance verifier', () => {
     expect(result.report.remainingLiveGates).toContain('browser-window-group-ownership');
   });
 
+  it.each([0, 1])('requires renewed selection at or after the exact next-user timestamp despite a 38ms earlier receipt (offset: %ims)', async offset => {
+    const nextAt = 1_794_145_788_964;
+    const root = fixture({ selectedObservedAt: nextAt - 38 });
+    // Reproduce the observed boundary with realistic integer millisecond timestamps. Keep
+    // receipt identities and chronological origins unchanged; the 38ms gap alone cannot
+    // prove whether provider observation or canonical publication caused the difference.
+    const files = ['anchor.json', 'final.json', 'next.json', 'next-final.json'];
+    for (const file of files) {
+      const row = JSON.parse(readFileSync(path.join(root, 'messages', file), 'utf8'));
+      row.time = nextAt + (row.time - 6) * 100;
+      put(path.join(root, 'messages'), file, row);
+    }
+    const journal = path.join(root, 'events.jsonl');
+    const rows = readFileSync(journal, 'utf8').trim().split('\n').map(line => {
+      const row = JSON.parse(line);
+      return { ...row, time: nextAt + (row.time - 6) * 100 };
+    });
+    writeFileSync(journal, rows.map(row => JSON.stringify(row)).join('\n') + '\n', 'utf8');
+    const meta = JSON.parse(readFileSync(path.join(root, 'meta.json'), 'utf8'));
+    const staleMeta = readFileSync(path.join(root, 'meta.json'));
+    const stale = await verifyDirect(root);
+    expect(stale.pass).toBe(false);
+    expect(stale.gates.currentSelectionRetention).toMatchObject({ pass: false,
+      evidence: { observedAt: nextAt - 38, notBefore: nextAt } });
+    expect(stale.gates.subsequentFinal.pass).toBe(true);
+    expect(stale.gates.noInputReplay.pass).toBe(true);
+    expect(readFileSync(path.join(root, 'meta.json'))).toEqual(staleMeta);
+
+    // A newly persisted compatible observation satisfies the existing boundary. Renewing
+    // its timestamp must not manufacture the subsequent final or weaken replay checks.
+    meta.selectedModel.observedAt = nextAt + offset;
+    put(root, 'meta.json', meta);
+    const renewedMeta = readFileSync(path.join(root, 'meta.json'));
+    const renewed = await verifyDirect(root);
+    expect(renewed.gates.currentSelectionRetention).toMatchObject({ pass: true,
+      evidence: { observedAt: nextAt + offset, notBefore: nextAt } });
+    expect(renewed.gates.subsequentFinal.pass).toBe(true);
+    expect(renewed.gates.noInputReplay.pass).toBe(true);
+    expect(renewed.pass).toBe(true);
+    expect(renewed.releaseAccepted).toBe(false);
+    expect(readFileSync(path.join(root, 'meta.json'))).toEqual(renewedMeta);
+
+    const final = JSON.parse(readFileSync(path.join(root, 'messages', 'next-final.json'), 'utf8'));
+    put(path.join(root, 'messages'), 'next-final.json', { ...final, goalEligible: false });
+    const missingFinal = await verifyDirect(root);
+    expect(missingFinal.gates.currentSelectionRetention.pass).toBe(true);
+    expect(missingFinal.gates.subsequentFinal.pass).toBe(false);
+    expect(missingFinal.pass).toBe(false);
+  });
+
   it('accepts an exact native Goal ACK history row without inventing a second outbox input', () => {
     // recordAutomaticGoalInput stamps an app-owned Goal origin against the provider message
     // ID. A subsequent sparse page echo changes the row source to extension, but keeps origin.
@@ -496,7 +546,7 @@ describe('read-only Loop live acceptance verifier', () => {
       ['Primary', 'local-instance', 8765, 'Profile 3', 'legacy'],
       ['Zeta', 'profile-Zeta', 8768, 'Default', 'isolated'],
       ['Alpha', 'profile-Alpha', 8767, 'Profile 4', 'isolated'],
-      ['Beta', 'profile-garry', 8766, 'Profile 5', 'isolated']
+      ['Garry Fixture', 'profile-garry', 8766, 'Profile 5', 'isolated']
     ] as const;
     const profiles = profileRows.map(([name, id, port, profileDirectory, mode]) => ({
       id, displayName: name, accountLabel: name, enabled: true,
@@ -532,7 +582,7 @@ describe('read-only Loop live acceptance verifier', () => {
       requiredProfiles
     });
     expect(collision.gates.profilePersistenceAndRouting.pass).toBe(false);
-    expect(collision.gates.profilePersistenceAndRouting.evidence.profiles.find((row: any) => row.name === 'Beta')).toMatchObject({
+    expect(collision.gates.profilePersistenceAndRouting.evidence.profiles.find((row: any) => row.name === 'Garry Fixture')).toMatchObject({
       pass: false, bridgePort: 8766, runtime: { pass: false, samePath: false }
     });
     expect(collision.remainingLiveGates).toContain('garry-route');

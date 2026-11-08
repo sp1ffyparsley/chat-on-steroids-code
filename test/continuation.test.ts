@@ -125,6 +125,15 @@ const CHAT_A = 'chat-a';
 const CHAT_B = 'chat-b';
 const CHAT_C = 'chat-c';
 
+/** Publish the canonical question before a later assistant-only observer catches it up. */
+async function stageCanonicalResumeUser(sessionId: string, user: {
+  messageId: string; text: string; time: number; textOrigin?: 'provider' | 'rendered'
+}): Promise<void> {
+  await store.upsertMessageEvent(sessionId, { kind: 'user_message', source: 'extension',
+    messageId: user.messageId, textOrigin: user.textOrigin, time: user.time,
+    message: { text: user.text, truncated: false, chars: user.text.length } });
+}
+
 beforeAll(async () => {
   dir = await makeTempDir('clf-continuation-');
   initConfigPath(dir);
@@ -675,28 +684,51 @@ describe('committing', () => {
     expect(await releaseContinuationDestinationSendNow(token)).toBe(false);
   });
 
-  it('catches up the exact canonical Resume question after ACK-first commit and an assistant-only frame', async () => {
+  it.each(['canonical/source-open', 'canonical/source-retired', 'authenticated/source-open'] as const)(
+    'catches up the exact canonical Resume question after ACK-first commit and an assistant-only frame (%s)', async mode => {
+    const sourceRetired = mode === 'canonical/source-retired';
     const { sessionId, token } = await readyContinuation();
     await claimContinuationNow(token, 'canonical-ack-first-owner');
     await beginContinuationDestinationSendNow(token);
     await dispatchContinuationDestinationSendNow(token);
     await commitContinuation(token, CHAT_B);
+    const committed = snapshotContinuations().entries.find(entry => entry.token === token)!;
+    const binding = await getSession(sessionId);
+    expect(committed).toMatchObject({ state: 'committed', sourceClosed: false,
+      destinationSend: { state: 'dispatched-unresolved', conversationId: null, messageId: null } });
     const handoff = await store.readHandoff(sessionId, snapshotContinuations().entries[0]!.handoffId!);
     const messageId = 'aa130001-1111-4111-8111-000000000001';
-    await recordChatObservations(CHAT_B, [{ kind: 'user_message', messageId,
-      textOrigin: 'provider', text: resumeBootstrapText(handoff!.text, token), time: Date.now() }]);
-    // The exact native user was recorded, then the source retirement receipt landed. The
-    // current document can legitimately expose only its assistant, not repeat the user row.
-    await acknowledgeSupersededSourceRetirementNow(CHAT_A, '13131313131313131313131313131313');
+    await stageCanonicalResumeUser(sessionId, { messageId,
+      textOrigin: 'provider', text: resumeBootstrapText(handoff!.text, token), time: Date.now() });
+    expect(snapshotContinuations().entries.find(entry => entry.token === token)?.destinationSend?.state)
+      .toBe('dispatched-unresolved');
+    // The existing authenticated marker binder already accepts this identical committed,
+    // source-open transaction. Canonical catch-up must finish the same receipt independently.
+    if (mode === 'authenticated/source-open') {
+      expect(await bindContinuationDestinationMessageNow(token, CHAT_B, messageId)).toBe(true);
+    }
+    // Canonical destination receipt custody is independent of retiring its old source.
+    // The current document can expose only its assistant, not repeat the native user row.
+    if (sourceRetired) await acknowledgeSupersededSourceRetirementNow(CHAT_A, '13131313131313131313131313131313');
     await recordChatObservations(CHAT_B, [{ kind: 'assistant_message',
       messageId: 'aa130002-1111-4111-8111-000000000002', providerMessageId: 'aa130002-1111-4111-8111-000000000002',
       text: 'The actual resumed answer.', state: 'final', final: true, time: Date.now() }]);
-    expect(snapshotContinuations().entries.find(entry => entry.token === token)?.destinationSend).toEqual({
-      state: 'sent', conversationId: CHAT_B, messageId
-    });
+    const after = snapshotContinuations().entries.find(entry => entry.token === token)!;
+    expect(after).toEqual({ ...committed, touchedAt: after.touchedAt, sourceClosed: sourceRetired,
+      sourceCloseReceiptId: sourceRetired ? '13131313131313131313131313131313' : null,
+      destinationSend: { state: 'sent', conversationId: CHAT_B, messageId } });
     expect((await getSession(sessionId))?.conversationId).toBe(CHAT_B);
+    expect((await getSession(sessionId))?.chatIds).toEqual(binding?.chatIds);
+    expect((await getSession(sessionId))?.lastCommittedResumeHandoffId).toBe(binding?.lastCommittedResumeHandoffId);
+    expect(supersededSourceConversations().includes(CHAT_A)).toBe(!sourceRetired);
+    const receipt = await (await import('../src/main/session/continuation.js')).committedResumeNativeReceipt(
+      sessionId, CHAT_B, messageId, resumeBootstrapText(handoff!.text, token));
+    if (sourceRetired) expect(receipt?.sourceClosed).toBe(true);
+    else expect(receipt).toBeNull(); // Sent custody alone grants no retired-source completion proof.
     expect(goalPendingReplyFor(CHAT_B)).toBeNull();
     expect(await beginContinuationDestinationSendNow(token)).toBeNull();
+    expect(await dispatchContinuationDestinationSendNow(token)).toBe(false);
+    expect(await releaseContinuationDestinationSendNow(token)).toBe(false);
   });
 
   it.each(['saved-history', 'extra-prefix', 'changed-history', 'foreign-leading-marker'] as const)(
@@ -715,8 +747,8 @@ describe('committing', () => {
       if (mode === 'changed-history') text = text.replace('older_native_receipt_02', 'unproved_native_receipt');
       if (mode === 'foreign-leading-marker') text = text.replace(`[[CLF-RESUME:${token}]]`, '[[CLF-RESUME:foreign_native_receipt]]');
       const messageId = 'aa130009-1111-4111-8111-000000000009';
-      await recordChatObservations(CHAT_B, [{ kind: 'user_message', messageId,
-        textOrigin: 'provider', text, time: Date.now() }]);
+      await stageCanonicalResumeUser(sessionId, { messageId,
+        textOrigin: 'provider', text, time: Date.now() });
       await acknowledgeSupersededSourceRetirementNow(CHAT_A, '17171717171717171717171717171717');
       await recordChatObservations(CHAT_B, [{ kind: 'assistant_message',
         messageId: 'aa130010-1111-4111-8111-000000000010', text: 'Continued the saved original project.',
@@ -746,7 +778,7 @@ describe('committing', () => {
       const encoded = resumeBootstrapText(handoff!.text).replace(/([\\`*_#<>.\-])/g, '\\$1').replace(/\n/g, '\\\n');
       const escapedToken = token.replace(/([_-])/g, '\\$1');
       const text = '[$core](app://asdk_app_exact)\n' + `[[CLF-RESUME:${escapedToken}]]\\\n\\\n${encoded}`;
-      await recordChatObservations(CHAT_B, [{ kind: 'user_message', messageId, textOrigin: 'provider', text, time: Date.now() }]);
+      await stageCanonicalResumeUser(sessionId, { messageId, textOrigin: 'provider', text, time: Date.now() });
       await acknowledgeSupersededSourceRetirementNow(CHAT_A, '16161616161616161616161616161616');
       await recordChatObservations(CHAT_B, [{ kind: 'assistant_message', messageId: 'aa130008-1111-4111-8111-000000000008',
         text: 'The resumed native answer.', state: 'final', final: true, time: Date.now() }]);
@@ -782,8 +814,8 @@ describe('committing', () => {
         text = '[$fern-windows-core](app://asdk_app_6ab32f2e0ab48191a04696c05459f90c)\n' +
           `[[CLF-RESUME:${token}]]\\\n\\\n${serialized}`;
       }
-      await recordChatObservations(CHAT_B, [{ kind: 'user_message', messageId,
-        textOrigin: 'provider', text, time: Date.now() }]);
+      await stageCanonicalResumeUser(sessionId, { messageId,
+        textOrigin: 'provider', text, time: Date.now() });
       await acknowledgeSupersededSourceRetirementNow(CHAT_A, '14141414141414141414141414141414');
       if (mode === 'restart') {
         const saved = snapshotContinuations();
@@ -807,13 +839,13 @@ describe('committing', () => {
     }
   );
 
-  it.each(['unknown origin', 'rendered origin', 'app-authored row', 'invalid native id', 'truncated', 'attached draft',
+  it.each((['unknown origin', 'rendered origin', 'app-authored row', 'invalid native id', 'truncated', 'attached draft',
     'before opening', 'marker only', 'partial',
     'duplicate marker', 'duplicate Core', 'foreign token', 'body correction', 'newer user', 'same-id edit',
-    'source not retired', 'aborted', 'missing claimant', 'not dispatched', 'conflicting destination',
+    'missing native user', 'ambiguous WAL', 'aborted', 'missing claimant', 'not dispatched', 'conflicting destination',
     'conflicting native id', 'foreign source', 'foreign handoff', 'superseded route', 'superseded handoff',
-    'next handoff', 'other conversation'] as const)(
-    'refuses canonical Resume receipt catch-up without exact current ownership (%s)', async reason => {
+    'next handoff', 'other conversation'] as const).flatMap(reason => [false, true].map(sourceRetired => [reason, sourceRetired] as const)))(
+    'refuses canonical Resume receipt catch-up without exact current ownership (%s; source retired: %s)', async (reason, sourceRetired) => {
       const { sessionId, token } = await readyContinuation();
       await claimContinuationNow(token, 'canonical-negative-owner');
       await beginContinuationDestinationSendNow(token);
@@ -828,9 +860,9 @@ describe('committing', () => {
       if (reason === 'duplicate Core') text = '[$core](app://asdk_app_exact)\n[$core](app://asdk_app_exact)\n' + text;
       if (reason === 'foreign token') text = text.replace(token, 'foreign_0123456789abcdef');
       if (reason === 'body correction') text += '\nThis changes the actual request.';
-      await recordChatObservations(CHAT_B, [{ kind: 'user_message', messageId, text,
+      if (reason !== 'missing native user') await stageCanonicalResumeUser(sessionId, { messageId, text,
         ...(reason === 'unknown origin' ? {} : { textOrigin: reason === 'rendered origin' ? 'rendered' as const : 'provider' as const }),
-        time: Date.now() }]);
+        time: Date.now() });
       if (reason === 'truncated') {
         await store.upsertMessageEvent(sessionId, { kind: 'user_message', source: 'extension', time: Date.now(),
           messageId, textOrigin: 'provider', message: { text, truncated: true, chars: text.length } });
@@ -849,7 +881,10 @@ describe('committing', () => {
           messageId: reason === 'same-id edit' ? messageId : 'aa130006-1111-4111-8111-000000000006',
           textOrigin: 'provider', text: 'A genuine newer correction.', time: Date.now() }]);
       }
-      if (reason !== 'source not retired') {
+      // Source-not-retired used to be a refusal here. The paired positive regression above
+      // proves the changed receipt contract against the authenticated binder; every actual
+      // ownership contradiction below remains a veto with either source retirement state.
+      if (sourceRetired) {
         await acknowledgeSupersededSourceRetirementNow(CHAT_A, '15151515151515151515151515151515');
       }
       if (reason === 'superseded route') await store.rebindSession(sessionId, CHAT_B, CHAT_C);
@@ -864,6 +899,7 @@ describe('committing', () => {
       if (reason === 'conflicting native id') row.destinationSend!.messageId = 'aa130007-1111-4111-8111-000000000007';
       if (reason === 'foreign source') row.from = CHAT_C;
       if (reason === 'foreign handoff') row.handoffId = 'foreign-handoff';
+      if (reason === 'ambiguous WAL') saved.entries.push({ ...row, token: 'ambiguous_wal_owner_0123456789' });
       resetContinuationsForTests();
       await restoreContinuations(saved);
       const before = snapshotContinuations();
@@ -884,8 +920,8 @@ describe('committing', () => {
     await commitContinuation(token, CHAT_B);
     const handoff = await store.readHandoff(sessionId, snapshotContinuations().entries[0]!.handoffId!);
     const messageId = 'aa130009-1111-4111-8111-000000000009';
-    await recordChatObservations(CHAT_B, [{ kind: 'user_message', messageId, textOrigin: 'provider',
-      text: resumeBootstrapText(handoff!.text, token), time: Date.now() }]);
+    await stageCanonicalResumeUser(sessionId, { messageId, textOrigin: 'provider',
+      text: resumeBootstrapText(handoff!.text, token), time: Date.now() });
     await acknowledgeSupersededSourceRetirementNow(CHAT_A, '16161616161616161616161616161616');
     const durable = await import('../src/main/durable.js');
     const write = vi.spyOn(durable, 'writeDurableNow').mockRejectedValueOnce(new Error('receipt write failed'));
@@ -901,8 +937,9 @@ describe('committing', () => {
     expect(await store.readEvents(sessionId, { kinds: ['assistant_message'] })).toHaveLength(1);
   });
 
-  it.each(['newer question', 'same-id edit', 'superseded route', 'superseded handoff', 'next generation'] as const)(
-    'reproves canonical Resume ownership after awaiting the handoff (%s)', async mutation => {
+  it.each((['newer question', 'same-id edit', 'superseded route', 'superseded handoff', 'next generation', 'replaced WAL'] as const)
+    .flatMap(mutation => [false, true].map(sourceRetired => [mutation, sourceRetired] as const)))(
+    'reproves canonical Resume ownership after awaiting the handoff (%s; source retired: %s)', async (mutation, sourceRetired) => {
       const { sessionId, token } = await readyContinuation();
       await claimContinuationNow(token, 'canonical-race-owner');
       await beginContinuationDestinationSendNow(token);
@@ -910,9 +947,9 @@ describe('committing', () => {
       await commitContinuation(token, CHAT_B);
       const handoff = await store.readHandoff(sessionId, snapshotContinuations().entries[0]!.handoffId!);
       const messageId = 'aa130011-1111-4111-8111-000000000011';
-      await recordChatObservations(CHAT_B, [{ kind: 'user_message', messageId, textOrigin: 'provider',
-        text: resumeBootstrapText(handoff!.text, token), time: Date.now() }]);
-      await acknowledgeSupersededSourceRetirementNow(CHAT_A, '17171717171717171717171717171717');
+      await stageCanonicalResumeUser(sessionId, { messageId, textOrigin: 'provider',
+        text: resumeBootstrapText(handoff!.text, token), time: Date.now() });
+      if (sourceRetired) await acknowledgeSupersededSourceRetirementNow(CHAT_A, '17171717171717171717171717171717');
       const read = store.readHandoff;
       vi.spyOn(store, 'readHandoff').mockImplementationOnce(async (...args) => {
         const answer = await read(...args);
@@ -925,6 +962,11 @@ describe('committing', () => {
         if (mutation === 'superseded route') await store.rebindSession(sessionId, CHAT_B, CHAT_C);
         if (mutation === 'superseded handoff') await store.ensureCommittedResumeHandoff(sessionId, CHAT_B, 'next-handoff');
         if (mutation === 'next generation') await openContinuationNow(sessionId, CHAT_B);
+        if (mutation === 'replaced WAL') {
+          const saved = snapshotContinuations();
+          resetContinuationsForTests();
+          await restoreContinuations(saved);
+        }
         return answer;
       });
       await recordChatObservations(CHAT_B, [{ kind: 'assistant_message',

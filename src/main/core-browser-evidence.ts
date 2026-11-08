@@ -260,6 +260,8 @@ export interface CoreBrowserEvidenceSnapshot {
   observedAt: number;
   shell: CoreBrowserShell;
   shellDiscovery: CoreShellDiscovery;
+  /** Fresh same-envelope execution provenance; absence never borrows a previous scan. */
+  reader?: CoreReaderDiagnostic;
   shellScan?: CoreShellScanDiagnostic | null;
   ordinaryFinal?: OrdinaryFinalDiagnostic | null;
   /** An unresolved prior native result is not erased by a missing frame or a reload. */
@@ -395,8 +397,8 @@ export function retainAdditionalNativeCompletionUncertainty(conversation: string
   return true;
 }
 
-type CoreBrowserEvidenceInput = Omit<CoreBrowserEvidenceSnapshot, 'shellScan' | 'ordinaryFinal' | 'pendingCompletion' | 'retainedObservations'> &
-  { shellScan?: unknown; ordinaryFinal?: unknown };
+type CoreBrowserEvidenceInput = Omit<CoreBrowserEvidenceSnapshot, 'reader' | 'shellScan' | 'ordinaryFinal' | 'pendingCompletion' | 'retainedObservations'> &
+  { reader?: unknown; shellScan?: unknown; ordinaryFinal?: unknown };
 
 function openNativeCompletion(final: OrdinaryFinalDiagnostic | null | undefined): final is OrdinaryFinalDiagnostic & {
   reason: 'open-call' | 'open-code'
@@ -579,6 +581,12 @@ export function noteCoreBrowserEvidence(input: CoreBrowserEvidenceInput): boolea
       return id ? [id] : [];
     }))].slice(0, 16);
   const turnId = bounded(input.turnId, 200);
+  const shellScan = shellScanDiagnostic(input.shellScan);
+  const readerDescriptor = Object.getOwnPropertyDescriptor(input, 'reader');
+  const reader = coreReaderDiagnostic(readerDescriptor ? readerDescriptor.value : shellScan?.reader);
+  if (!shellScan) for (const key of ['fiberWire', 'fiberKeys', 'contentKeys', 'workerKeys'] as const) delete reader[key];
+  // Count only the fields actually normalized from this census. Null is unavailable, not zero.
+  if (shellScan) reader.mainKeys = Object.keys(shellScan.rejects).length;
   const row: CoreBrowserEvidenceSnapshot = {
     conversationId: input.conversationId,
     documentId,
@@ -586,7 +594,8 @@ export function noteCoreBrowserEvidence(input: CoreBrowserEvidenceInput): boolea
     observedAt: input.observedAt,
     shell,
     shellDiscovery,
-    shellScan: shellScanDiagnostic(input.shellScan),
+    shellScan,
+    ...(Object.keys(reader).length ? { reader } : {}),
     ordinaryFinal: ordinaryFinalDiagnostic(input.ordinaryFinal),
     requestIds,
     turnId
@@ -928,6 +937,7 @@ export function coreBrowserEvidence(conversation: string): CoreBrowserEvidenceSn
   const row = snapshots.get(conversation);
   return row ? {
     ...row,
+    ...(row.reader ? { reader: { ...row.reader } } : {}),
     shellScan: row.shellScan ? { ...row.shellScan, rejects: { ...row.shellScan.rejects },
       ...(row.shellScan.reader ? { reader: { ...row.shellScan.reader } } : {}) } : null,
     // The returned snapshot is observational. Neither a renderer nor a

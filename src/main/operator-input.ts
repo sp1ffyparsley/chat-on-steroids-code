@@ -265,6 +265,17 @@ function inspectedProviderUI(raw: unknown) {
       ...(Object.keys(reader).length ? { reader } : {}) };
   } catch { return null; }
 }
+/** Preserve absent/malformed policy as unknown, never as three fabricated false values. */
+function inspectedInputPolicy(raw: unknown): SessionControlsView['inputPolicy'] | null {
+  try {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const browserAllowed = Object.getOwnPropertyDescriptor(raw, 'browserAllowed')?.value;
+    const manualBrowserProbe = Object.getOwnPropertyDescriptor(raw, 'manualBrowserProbe')?.value;
+    const stoppedIdle = Object.getOwnPropertyDescriptor(raw, 'stoppedIdle')?.value;
+    return [browserAllowed, manualBrowserProbe, stoppedIdle].every(value => typeof value === 'boolean')
+      ? { browserAllowed, manualBrowserProbe, stoppedIdle } : null;
+  } catch { return null; }
+}
 /** Project only fixed owner fields. Text, helper answers, tokens and arbitrary errors never enter this lane. */
 function inspectedSessionControls(view: SessionControlsView, automationPaused: boolean) {
   const draft = (value: SessionControlsView['goalDraft']) => value ? { stage: value.stage, stageStartedAt: value.stageStartedAt,
@@ -280,6 +291,7 @@ function inspectedSessionControls(view: SessionControlsView, automationPaused: b
     loopAfterTurn: view.loopAfterTurn, proLoopDelivery: view.proLoopDelivery,
     finishHeld: view.finishHeld, finishWaiting: view.finishWaiting, queueAtFinish: view.queueAtFinish,
     canInject: view.canInject, canSendDirectly: view.canSendDirectly, stopPending: view.stopPending,
+    inputPolicy: inspectedInputPolicy(Object.getOwnPropertyDescriptor(view, 'inputPolicy')?.value),
     goalDraft: draft(view.goalDraft), finishGoalDraft: draft(view.finishGoalDraft),
     goalWait: view.goalWait ? { reason: view.goalWait.reason, until: view.goalWait.until, active: view.goalWait.active, limit: view.goalWait.limit } : null,
     nativeEvidence: view.nativeEvidence ? {

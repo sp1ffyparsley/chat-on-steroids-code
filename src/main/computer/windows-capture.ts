@@ -122,10 +122,12 @@ public static class CosWindowsCapture {
   }
 
   public static string Capture(long handle, int maxWidth, string file) {
+    Console.Error.WriteLine("[cos-capture] support-check");
     if (!GraphicsCaptureSession.IsSupported()) throw new NotSupportedException("CAPTURE_FAILED: Windows.Graphics.Capture is unavailable");
     IntPtr window = new IntPtr(handle);
     if (!IsWindow(window) || IsIconic(window)) throw new InvalidOperationException("CAPTURE_FAILED: target window is closed or minimized");
     var clock = Stopwatch.StartNew();
+    Console.Error.WriteLine("[cos-capture] item-create");
     var item = CreateItem(window);
     int width = item.Size.Width, height = item.Size.Height;
     // A newly painted HWND can precede its DWM capture surface. Reobserve only an
@@ -140,62 +142,75 @@ public static class CosWindowsCapture {
       item = CreateItem(window);
       width = item.Size.Width; height = item.Size.Height;
     }
+    Console.Error.WriteLine("[cos-capture] item-ready");
     ValidateCaptureSize(window, width, height);
     RECT bounds = CaptureBounds(window, width, height, "item");
-    using (var device = CreateDevice())
-    using (var pool = Direct3D11CaptureFramePool.CreateFreeThreaded(device, DirectXPixelFormat.B8G8R8A8UIntNormalized, 1, item.Size))
-    using (var session = pool.CreateCaptureSession(item)) {
-      // One-shot tool screenshots must not flash Windows' yellow capture border.
-      // Configure before StartCapture; older Windows keeps its system indicator.
-      var border = (object)session as IGraphicsCaptureSession3;
-      if (border != null) border.IsBorderRequired = false;
-      session.StartCapture();
-      Direct3D11CaptureFrame frame = null;
-      while (frame == null) {
-        if (clock.ElapsedMilliseconds >= TimeoutMs) throw new TimeoutException("CAPTURE_FAILED: no Windows.Graphics.Capture frame arrived");
-        frame = pool.TryGetNextFrame();
-        if (frame == null) Thread.Sleep(5);
-      }
-      using (frame) {
-        RECT after = CaptureBounds(window, width, height, "after-frame");
-        if (after.Left != bounds.Left || after.Top != bounds.Top || after.Right != bounds.Right || after.Bottom != bounds.Bottom)
-          throw new InvalidOperationException("STALE_FRAME: window bounds changed during capture (phase=after-frame, hwnd=" + window.ToInt64() + ", before=" + bounds.Left + "," + bounds.Top + "," + width + "x" + height + "; after=" + after.Left + "," + after.Top + "," + (after.Right - after.Left) + "x" + (after.Bottom - after.Top) + ")");
-        // GraphicsCaptureItem.Size can include the invisible resize border while the received
-        // frame marks only its DWM content as valid. ContentSize is not a resize race when it
-        // exactly matches another live Windows geometry authority; crop the unused pool tail.
-        int contentWidth = frame.ContentSize.Width, contentHeight = frame.ContentSize.Height;
-        if (contentWidth <= 0 || contentHeight <= 0 || contentWidth > width || contentHeight > height)
-          throw new InvalidOperationException("STALE_FRAME: capture returned invalid content dimensions (phase=content, hwnd=" + window.ToInt64() + ", item=" + width + "x" + height + ", frame=" + contentWidth + "x" + contentHeight + ")");
-        RECT contentBounds = CaptureBounds(window, contentWidth, contentHeight, "content");
-        using (var surface = frame.Surface)
-        using (var software = CopySurface(surface, clock)) {
-          if (software.PixelWidth != width || software.PixelHeight != height) throw new InvalidOperationException("STALE_FRAME: copied surface dimensions changed (phase=readback, hwnd=" + window.ToInt64() + ")");
-          byte[] pixels = new byte[checked(width * height * 4)];
-          var pixelBuffer = new Windows.Storage.Streams.Buffer((uint)pixels.Length);
-          software.CopyToBuffer(pixelBuffer);
-          using (var reader = Windows.Storage.Streams.DataReader.FromBuffer(pixelBuffer)) reader.ReadBytes(pixels);
-          using (var bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb)) {
-            var locked = bitmap.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
-            try { Marshal.Copy(pixels, 0, locked.Scan0, pixels.Length); }
-            finally { bitmap.UnlockBits(locked); }
-            Bitmap content = bitmap, cropped = null;
-            try {
-              if (contentWidth != width || contentHeight != height) {
-                cropped = bitmap.Clone(new Rectangle(0, 0, contentWidth, contentHeight), PixelFormat.Format32bppArgb);
-                content = cropped;
+    Console.Error.WriteLine("[cos-capture] device-create");
+    using (var device = CreateDevice()) {
+      Console.Error.WriteLine("[cos-capture] pool-create");
+      using (var pool = Direct3D11CaptureFramePool.CreateFreeThreaded(device, DirectXPixelFormat.B8G8R8A8UIntNormalized, 1, item.Size)) {
+        Console.Error.WriteLine("[cos-capture] session-create");
+        using (var session = pool.CreateCaptureSession(item)) {
+          // One-shot tool screenshots must not flash Windows' yellow capture border.
+          // Configure before StartCapture; older Windows keeps its system indicator.
+          Console.Error.WriteLine("[cos-capture] border-config");
+          var border = (object)session as IGraphicsCaptureSession3;
+          if (border != null) border.IsBorderRequired = false;
+          Console.Error.WriteLine("[cos-capture] session-start");
+          session.StartCapture();
+          Direct3D11CaptureFrame frame = null;
+          Console.Error.WriteLine("[cos-capture] frame-wait");
+          while (frame == null) {
+            if (clock.ElapsedMilliseconds >= TimeoutMs) throw new TimeoutException("CAPTURE_FAILED: no Windows.Graphics.Capture frame arrived");
+            frame = pool.TryGetNextFrame();
+            if (frame == null) Thread.Sleep(5);
+          }
+          using (frame) {
+            RECT after = CaptureBounds(window, width, height, "after-frame");
+            if (after.Left != bounds.Left || after.Top != bounds.Top || after.Right != bounds.Right || after.Bottom != bounds.Bottom)
+              throw new InvalidOperationException("STALE_FRAME: window bounds changed during capture (phase=after-frame, hwnd=" + window.ToInt64() + ", before=" + bounds.Left + "," + bounds.Top + "," + width + "x" + height + "; after=" + after.Left + "," + after.Top + "," + (after.Right - after.Left) + "x" + (after.Bottom - after.Top) + ")");
+            // GraphicsCaptureItem.Size can include the invisible resize border while the received
+            // frame marks only its DWM content as valid. ContentSize is not a resize race when it
+            // exactly matches another live Windows geometry authority; crop the unused pool tail.
+            int contentWidth = frame.ContentSize.Width, contentHeight = frame.ContentSize.Height;
+            if (contentWidth <= 0 || contentHeight <= 0 || contentWidth > width || contentHeight > height)
+              throw new InvalidOperationException("STALE_FRAME: capture returned invalid content dimensions (phase=content, hwnd=" + window.ToInt64() + ", item=" + width + "x" + height + ", frame=" + contentWidth + "x" + contentHeight + ")");
+            RECT contentBounds = CaptureBounds(window, contentWidth, contentHeight, "content");
+            Console.Error.WriteLine("[cos-capture] copy-start");
+            using (var surface = frame.Surface)
+            using (var software = CopySurface(surface, clock)) {
+              Console.Error.WriteLine("[cos-capture] copy-complete");
+              if (software.PixelWidth != width || software.PixelHeight != height) throw new InvalidOperationException("STALE_FRAME: copied surface dimensions changed (phase=readback, hwnd=" + window.ToInt64() + ")");
+              byte[] pixels = new byte[checked(width * height * 4)];
+              var pixelBuffer = new Windows.Storage.Streams.Buffer((uint)pixels.Length);
+              software.CopyToBuffer(pixelBuffer);
+              using (var reader = Windows.Storage.Streams.DataReader.FromBuffer(pixelBuffer)) reader.ReadBytes(pixels);
+              using (var bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb)) {
+                var locked = bitmap.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+                try { Marshal.Copy(pixels, 0, locked.Scan0, pixels.Length); }
+                finally { bitmap.UnlockBits(locked); }
+                Bitmap content = bitmap, cropped = null;
+                try {
+                  if (contentWidth != width || contentHeight != height) {
+                    cropped = bitmap.Clone(new Rectangle(0, 0, contentWidth, contentHeight), PixelFormat.Format32bppArgb);
+                    content = cropped;
+                  }
+                  int outputWidth = maxWidth > 0 ? Math.Min(maxWidth, contentWidth) : contentWidth;
+                  int outputHeight = Math.Max(1, (int)Math.Round((double)contentHeight * outputWidth / contentWidth));
+                  Console.Error.WriteLine("[cos-capture] encode-start");
+                  if (outputWidth == contentWidth) content.Save(file, ImageFormat.Png);
+                  else using (var scaled = new Bitmap(outputWidth, outputHeight))
+                  using (var graphics = Graphics.FromImage(scaled)) {
+                    graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                    graphics.DrawImage(content, new Rectangle(0, 0, outputWidth, outputHeight));
+                    scaled.Save(file, ImageFormat.Png);
+                  }
+                  Console.Error.WriteLine("[cos-capture] dispose-start");
+                  return contentBounds.Left + "," + contentBounds.Top + "," + contentWidth + "," + contentHeight + "," + outputWidth + "," + outputHeight;
+                } finally {
+                  if (cropped != null) cropped.Dispose();
+                }
               }
-              int outputWidth = maxWidth > 0 ? Math.Min(maxWidth, contentWidth) : contentWidth;
-              int outputHeight = Math.Max(1, (int)Math.Round((double)contentHeight * outputWidth / contentWidth));
-              if (outputWidth == contentWidth) content.Save(file, ImageFormat.Png);
-              else using (var scaled = new Bitmap(outputWidth, outputHeight))
-              using (var graphics = Graphics.FromImage(scaled)) {
-                graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-                graphics.DrawImage(content, new Rectangle(0, 0, outputWidth, outputHeight));
-                scaled.Save(file, ImageFormat.Png);
-              }
-              return contentBounds.Left + "," + contentBounds.Top + "," + contentWidth + "," + contentHeight + "," + outputWidth + "," + outputHeight;
-            } finally {
-              if (cropped != null) cropped.Dispose();
             }
           }
         }
@@ -209,6 +224,7 @@ public static class CosWindowsCapture {
 export const WINDOWS_CAPTURE_BOOTSTRAP = String.raw`
 function Initialize-WindowsCapture {
 if ('CosWindowsCapture' -as [type]) { return }
+[Console]::Error.WriteLine('[cos-capture] compile-start')
 $captureRuntime = [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
 $captureReferences = @('System.dll', 'System.Core.dll', 'System.Runtime.dll', 'System.Runtime.WindowsRuntime.dll', 'System.Drawing.dll') | ForEach-Object { Join-Path $captureRuntime $_ }
 $captureReferences += Get-ChildItem -LiteralPath (Join-Path $env:windir 'System32\WinMetadata') -Filter '*.winmd' | ForEach-Object { $_.FullName }
@@ -227,5 +243,6 @@ if ($captureCompiled.Errors.HasErrors) {
 }
 $null = $captureCompiled.CompiledAssembly
 } finally { $captureCompiler.Dispose() }
+[Console]::Error.WriteLine('[cos-capture] compiled')
 }
 `;

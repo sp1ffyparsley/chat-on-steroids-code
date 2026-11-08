@@ -1382,10 +1382,12 @@ export async function bindContinuationDestinationMessageNow(
 /** Finish an ACK-first receipt from the committed canonical question, not the current DOM.
  * A later assistant-only observation may no longer expose the already-sent native user.
  * This joins that retained provider identity to its exact current WAL and full handoff; it
- * cannot claim, commit, reopen a Send, or recover an aborted/ambiguous opening attempt. */
+ * cannot claim, commit, reopen a Send, or recover an aborted/ambiguous opening attempt.
+ * Destination receipt custody is independent of retiring the old source, just as in the
+ * authenticated marker binder; source-close and completion gates retain their own proof. */
 export async function reconcileRecordedContinuationDestinationNow(sessionId: string, conversationId: string): Promise<boolean> {
   const candidates = [...byToken.values()].filter(entry => entry.sessionId === sessionId &&
-    entry.state === 'committed' && entry.sourceClosed && entry.to === conversationId && entry.from !== conversationId &&
+    entry.state === 'committed' && entry.to === conversationId && entry.from !== conversationId &&
     !!entry.claimedBy && !!entry.handoffId && entry.destinationSend.state === 'dispatched-unresolved' &&
     entry.destinationSend.messageId === null &&
     (entry.destinationSend.conversationId === null || entry.destinationSend.conversationId === conversationId));
@@ -1393,7 +1395,7 @@ export async function reconcileRecordedContinuationDestinationNow(sessionId: str
   const entry = candidates[0]!;
   return withCheckpointLock(entry.token, async () => {
     const current = (): boolean => byToken.get(entry.token) === entry && entry.state === 'committed' &&
-      entry.sourceClosed && entry.sessionId === sessionId && entry.to === conversationId && entry.from !== conversationId &&
+      entry.sessionId === sessionId && entry.to === conversationId && entry.from !== conversationId &&
       !!entry.claimedBy && !!entry.handoffId && entry.destinationSend.state === 'dispatched-unresolved' &&
       entry.destinationSend.messageId === null &&
       (entry.destinationSend.conversationId === null || entry.destinationSend.conversationId === conversationId) &&

@@ -9062,7 +9062,7 @@ function paintDeliveryQueue(all: InputEntry[], belongsToSelection: (entry: Input
 async function refreshInputQueue(): Promise<void> {
   const request = ++inputQueueGeneration;
   const selection = selectionGeneration;
-  const [all, pausedHelpers] = await Promise.all([run(api.listInputs()), run(api.listPausedHelpers())]);
+  const [all, pausedHelpers] = await Promise.all([run(api.listInputs()), run(api.listPausedHelpers(selectedId ?? undefined))]);
   if (selection !== selectionGeneration || request !== inputQueueGeneration) return;
   if (!all) {
     if (!inputQueueReadUnverified) {
@@ -9073,7 +9073,7 @@ async function refreshInputQueue(): Promise<void> {
   }
   const recoveredQueueRead = inputQueueReadUnverified;
   inputQueueReadUnverified = false;
-  const pausedSources = new Set((pausedHelpers ?? []).map(helper => helper.sourceSessionId));
+  const pausedSources = new Set((pausedHelpers ?? []).filter(helper => !helper.reviewRequired).map(helper => helper.sourceSessionId));
   const bulkHelpers = $<HTMLButtonElement>('retryPausedHelpers');
   bulkHelpers.hidden = pausedSources.size === 0;
   $('retryPausedHelpersLabel').textContent = t('Restart {0} helper chats', [pausedSources.size]);
@@ -9294,7 +9294,9 @@ async function refreshInputQueue(): Promise<void> {
       console.warn('[Chat On Steroids] selected-chat recovery IPC rejected; saved work unchanged');
     };
     if (helperExhausted && goalDraftView?.message) row.append(el('span', '', () => goalDraftView!.message!));
-    if (selectedHelpers.length > 0) row.append(el('span', '', () => t(selectedHelpers.length === 1
+    if (helper?.reviewRequired) row.append(el('span', '', () => t(
+      "Saved helper answer needs review. Its original receipt is retained. Restart requests one fresh decision; no message is replayed or permissions changed.")));
+    else if (selectedHelpers.length > 0) row.append(el('span', '', () => t(selectedHelpers.length === 1
       ? "This exact saved turn has one unconfirmed helper owner. No message will be replayed."
       : "{0} old helper owners were collapsed behind this one exact saved turn. No message will be replayed.", [selectedHelpers.length])));
     else row.append(el('span', '', () => t("This exact saved turn is still owed. Restarting it does not replay any user message.")));

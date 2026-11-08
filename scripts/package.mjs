@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
@@ -65,6 +65,59 @@ function run(command, commandArgs, { cwd = root, env = process.env, stdio = 'inh
 
 function runText(command, commandArgs, options = {}) {
   return String(run(command, commandArgs, { ...options, stdio: 'pipe', encoding: 'utf8' }).stdout ?? '').trim();
+}
+
+export const STRICT_VERIFY_TIMEOUT_MS = 60 * 60_000;
+/** Bound this owner's verification only. A timeout never qualifies the candidate. */
+export async function runStrictVerification(npmCli, { cwd = root, env = process.env,
+  timeoutMs = STRICT_VERIFY_TIMEOUT_MS, windowsShell = process.env.ComSpec } = {}) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > STRICT_VERIFY_TIMEOUT_MS)
+    throw new Error('Strict verification requires a positive deadline of at most 60 minutes');
+  let taskkill = null;
+  if (process.platform === 'win32') {
+    const system32 = path.join(realpathSync(process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows'), 'System32');
+    if (!windowsShell || realpathSync(windowsShell).toLowerCase() !== path.join(system32, 'cmd.exe').toLowerCase())
+      throw new Error('Strict verification cleanup requires the proven System32 command host');
+    taskkill = realpathSync(path.join(system32, 'taskkill.exe'));
+    if (path.dirname(taskkill).toLowerCase() !== system32.toLowerCase())
+      throw new Error('Strict verification cleanup escaped System32');
+  }
+  await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [npmCli, 'run', 'verify:ci'], {
+      cwd, env, stdio: 'inherit', windowsHide: true, detached: process.platform !== 'win32'
+    });
+    let finished = false, timedOut = false, cleanupFailure = null, cleanupTimer = null;
+    const complete = (code, error) => {
+      if (finished) return;
+      finished = true; clearTimeout(deadline); clearTimeout(cleanupTimer);
+      if (timedOut) reject(new Error(`Strict verification timed out after ${timeoutMs}ms; owned process tree cleanup ${cleanupFailure ? `failed (${cleanupFailure})` : 'completed'}`));
+      else if (error) reject(error);
+      else if (code !== 0) reject(new Error(`Strict verification exited ${code}`));
+      else resolve();
+    };
+    child.once('error', error => complete(null, error));
+    child.once('close', code => complete(code));
+    const deadline = setTimeout(() => {
+      // Keep the ChildProcess handle owned while selecting its exact tree. Do not
+      // enumerate processes, match names, or kill a PID after this owner exited.
+      if (finished || child.exitCode !== null || child.signalCode !== null) return;
+      timedOut = true;
+      try {
+        if (!Number.isSafeInteger(child.pid) || child.pid <= 0) throw new Error('missing owned PID');
+        if (process.platform === 'win32') {
+          // Synchronous taskkill keeps Node from releasing the owned native handle
+          // during this lookup. PID reuse cannot redirect cleanup to another child.
+          const stopped = spawnSync(taskkill, ['/PID', String(child.pid), '/T', '/F'], {
+            cwd, env, stdio: 'ignore', windowsHide: true, timeout: 15_000
+          });
+          if (stopped.error || stopped.status !== 0) cleanupFailure = 'taskkill refused or timed out';
+        } else process.kill(-child.pid, 'SIGKILL'); // Dedicated group created by this exact spawn.
+      } catch { cleanupFailure = 'owned tree termination refused'; }
+      cleanupTimer = setTimeout(() => {
+        cleanupFailure ??= 'owned child did not exit'; complete(null);
+      }, 10_000);
+    }, timeoutMs);
+  });
 }
 
 function sha256Bytes(bytes) {
@@ -1008,7 +1061,7 @@ async function main() {
   // after producing the candidate. Publication still happens later, in the activation owner, and
   // therefore remains impossible unless this gate succeeds.
   if (strict) {
-    run(process.execPath, [npmCli, 'run', 'verify:ci'], { cwd: root, env: childEnv });
+    await runStrictVerification(npmCli, { cwd: root, env: childEnv, windowsShell: hostTools.paths.shell });
     // Vitest writes only its result cache here during a successful verification run. It is not a
     // locked dependency and must not become an undeclared build input or invalidate the sealed
     // dependency tree after the tests themselves have passed.

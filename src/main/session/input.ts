@@ -27,7 +27,7 @@ import { exactChatModelAvailableAfter } from '../chat-models.js';
 import { noteChatOrigin } from './recorder.js';
 import { isAstraModel, isProModel } from '../../shared/chat-models.js';
 import { inFlightToolCalls } from '../mcp/call-context.js';
-import { automaticFinishEnabled, confirmDeliveredGoalReplyNow, consumeGoalReplyForInputNow, deliberateStoppedLoopResumeFor, goalArmedFor, goalSwitchFor, goalObjectiveFor, goalPendingReplyFor, goalDraftBusy, goalBrowserHelperRunActive, snapshotGoalReplies, snapshotGoalSwitches } from '../goal.js';
+import { automaticFinishEnabled, confirmDeliveredGoalReplyNow, consumeGoalReplyForInputNow, deliberateStoppedLoopResumeFor, goalArmedFor, goalSwitchFor, goalObjectiveFor, goalPendingReplyFor, goalViewFor, goalDraftBusy, goalBrowserHelperRunActive, snapshotGoalReplies, snapshotGoalSwitches } from '../goal.js';
 import { classifyProviderRecoveryFailure } from './recovery-failure.js';
 import { continuationForSession, committedResumeNativeReceipt } from './continuation.js';
 import { finishInstruction } from '../../shared/finish.js';
@@ -650,48 +650,56 @@ async function stalledManualToolFallbackAllowed(
     Number.isFinite(end.time) && end.time >= entry.createdAt &&
     (session.lastToolCallAt ?? 0) <= end.time;
 }
-async function browserInputAllowed(entry: InputEntry): Promise<boolean> {
+async function browserInputAllowed(entry: InputEntry, firstRefusal?: (reason: BrowserAllowRefusal) => void): Promise<boolean> {
+  // Same guards and order as before; the callback only names the first refusal for the
+  // read-only publication trace above and otherwise never runs.
+  const disallow = (reason: BrowserAllowRefusal): false => { firstRefusal?.(reason); return false; };
   if (entry.workflow && entry.sessionId) {
     const session = await getSession(entry.sessionId);
-    if (session?.conversationId && goalArmedFor(session.conversationId)) return false;
+    if (session?.conversationId && goalArmedFor(session.conversationId)) return disallow('workflow-goal-armed');
   }
-  if (!routedInputAllowed(entry)) return false;
-  if (browserDecisionSignedOut) return false;
-  if (entry.purpose === 'decision' && getConfig().ui.automationPaused) return false;
+  if (!routedInputAllowed(entry)) return disallow('route-refused');
+  if (browserDecisionSignedOut) return disallow('browser-signed-out');
+  if (entry.purpose === 'decision' && getConfig().ui.automationPaused) return disallow('decision-account-paused');
   if (entry.purpose === 'rotation' && (!entry.sessionId || !entry.conversationId || !entry.directTurn ||
       !await rotationSourceCurrent(entry.sessionId, entry.conversationId, entry.directTurn.id,
-        entry.state === 'browser' ? entry.offeredAt : undefined))) return false;
-  if (entry.attachmentDelivery === 'tool') return false;
+        entry.state === 'browser' ? entry.offeredAt : undefined))) return disallow('rotation-source-stale');
+  if (entry.attachmentDelivery === 'tool') return disallow('tool-attachment-route');
   // A generated Goal continuation may have been saved just before the user
   // disabled that mode. Its durable existence is not fresh Send permission.
   if (entry.sourceHelperId && (!entry.conversationId || !goalArmedFor(entry.conversationId))) {
-    noteInputContinuationHold(entry, 'automation_not_armed'); return false;
+    noteInputContinuationHold(entry, 'automation_not_armed'); return disallow('helper-automation-not-armed');
   }
-  if (entry.recovery?.episode?.startsWith('interruption:')) return interruptedInputCurrent(entry);
+  if (entry.recovery?.episode?.startsWith('interruption:')) return await interruptedInputCurrent(entry)
+    ? true : disallow('interrupted-source-stale');
   if (!manualInput(entry)) {
     const rotationConversation = entry.conversationId ?? (entry.sessionId ? (await getSession(entry.sessionId))?.conversationId : null);
-    if (rotationConversation && !automationRotationAdmits(rotationConversation)) return false;
+    if (rotationConversation && !automationRotationAdmits(rotationConversation)) return disallow('automation-rotation-refused');
   }
   if (entry.mode === 'finish' && entry.sessionId && entry.afterTurn !== true) {
     const session = await getSession(entry.sessionId);
     const selection = session?.selectedModel;
-    if (selection?.conversationId === session?.conversationId && isAstraModel(selection?.model, selection?.reasoningEffort)) return false;
+    if (selection?.conversationId === session?.conversationId && isAstraModel(selection?.model, selection?.reasoningEffort)) return disallow('finish-model-astra');
   }
-  if (!entry.sessionId) return entry.transportIntent !== 'tool';
+  if (!entry.sessionId) return entry.transportIntent !== 'tool' ? true : disallow('tool-transport-unguarded');
   // Silence can leave the recorder's original turn open. Its durable ticket
   // proves the exact unchanged work; the native page must still be idle for Send.
-  if (entry.silenceBoundary) return await eligibleStageEnd(entry) === entry.silenceBoundary.turnId;
+  if (entry.silenceBoundary) return await eligibleStageEnd(entry) === entry.silenceBoundary.turnId
+    ? true : disallow('silence-end-mismatch');
   const policy = await sessionInputPolicy(entry.sessionId);
   if (await manualIdleBrowserProbeAllowed(entry, policy)) return true;
   if (entry.completedTurnId && (entry.sourceHelperId
     ? await sourceHelperContinuationTurn(entry)
-    : await eligibleStageEnd(entry)) !== entry.completedTurnId) return false;
+    : await eligibleStageEnd(entry)) !== entry.completedTurnId) return disallow('completed-turn-mismatch');
   if (entry.directTurn) {
     const session = await getSession(entry.sessionId);
-    if (!session || session.conversationId !== entry.conversationId) return false;
-    if (session.activeTurnId) return policy.directTurn?.id === entry.directTurn.id;
+    if (!session || session.conversationId !== entry.conversationId) return disallow('direct-turn-conversation-changed');
+    if (session.activeTurnId) return policy.directTurn?.id === entry.directTurn.id
+      ? true : disallow('direct-turn-active-mismatch');
     const [end] = await readRecentEvents(entry.sessionId, 1, { kinds: ['turn_start', 'turn_end'] });
-    return (policy.browserAllowed || typedAfterStop(entry, policy)) && end?.kind === 'turn_end' && end.turnId === entry.directTurn.id;
+    return (policy.browserAllowed || typedAfterStop(entry, policy)) && end?.kind === 'turn_end' && end.turnId === entry.directTurn.id
+      ? true : disallow((policy.browserAllowed || typedAfterStop(entry, policy)) && end?.kind === 'turn_end'
+        ? 'direct-turn-end-mismatch' : 'browser-policy-unverified');
   }
   // Only a never-offered ordinary input may change routes after positive terminal evidence.
   // A tool handout or ambiguous browser claim retains its original exclusive custody.
@@ -701,10 +709,14 @@ async function browserInputAllowed(entry: InputEntry): Promise<boolean> {
     const [end] = await readRecentEvents(entry.sessionId, 1, { kinds: ['turn_start', 'turn_end'] });
     noteInputContinuationHold(entry, `browser_policy active=${Boolean(session?.activeTurnId)} possible=${activity?.possible === true} exact=${activity?.exact === true} executing=${inFlightToolCalls(entry.conversationId ?? '') > 0} terminal=${end?.kind === 'turn_end' && end.outcome !== 'unknown'}`);
   }
-  return (policy.browserAllowed || typedAfterStop(entry, policy)) && (entry.transportIntent !== 'tool' ||
-    (entry.mode === 'auto' && !entry.finishOwner && entry.purpose !== 'decision' && entry.state === 'queued' &&
-      entry.owner === null && entry.offeredAt === undefined &&
-      (policy.settled || await stalledManualToolFallbackAllowed(entry, policy))));
+  const allowedByPolicy = policy.browserAllowed || typedAfterStop(entry, policy);
+  if (!allowedByPolicy) return disallow('browser-policy-unverified');
+  if (entry.transportIntent === 'tool' &&
+      !(entry.mode === 'auto' && !entry.finishOwner && entry.purpose !== 'decision' && entry.state === 'queued' &&
+        entry.owner === null && entry.offeredAt === undefined &&
+        (policy.settled || await stalledManualToolFallbackAllowed(entry, policy))))
+    return disallow('tool-fallback-unguarded');
+  return true;
 }
 /** The native page still proves idle and Send; this is never a helper/recovery grant. */
 function typedAfterStop(entry: InputEntry, policy: { stoppedIdle?: boolean }): boolean {
@@ -713,6 +725,30 @@ function typedAfterStop(entry: InputEntry, policy: { stoppedIdle?: boolean }): b
 const inputListeners = new Set<() => void>();
 /** Last recovery-release reason logged per exact ticket; repeated page offers stay visible, not noisy. */
 const recoveryReleaseTold = new Map<string, string>();
+/**
+ * Fixed first-refusal enums for the browser publication/claim boundary. This is a
+ * read-only diagnostic lane exactly like the Fiber anchor traces: it names which
+ * guarded stage held a due, otherwise-ready input from pendingBrowserInputs, so an
+ * unclaimed authored recovery input reports a stop reason instead of silence. It
+ * never changes eligibility, never grants Send and never widens any conversation.
+ */
+type BrowserAllowRefusal =
+  'workflow-goal-armed' | 'route-refused' | 'browser-signed-out' | 'decision-account-paused' |
+  'rotation-source-stale' | 'tool-attachment-route' | 'helper-automation-not-armed' |
+  'interrupted-source-stale' | 'automation-rotation-refused' | 'finish-model-astra' |
+  'tool-transport-unguarded' | 'silence-end-mismatch' | 'completed-turn-mismatch' |
+  'direct-turn-conversation-changed' | 'direct-turn-active-mismatch' | 'direct-turn-end-mismatch' |
+  'browser-policy-unverified' | 'tool-fallback-unguarded';
+const claimTraceTold = new Map<string, string>();
+function noteClaimTraceOnce(entryId: string, stage: string, detail?: string): void {
+  const line = detail ? `${stage}:${detail}` : stage;
+  const key = `claim:${entryId}`;
+  if (claimTraceTold.get(key) === line) return;
+  claimTraceTold.set(key, line);
+  if (claimTraceTold.size > 200)
+    for (const old of [...claimTraceTold.keys()].slice(0, 50)) claimTraceTold.delete(old);
+  logInfo(`input ${entryId}: browser publish held stage=${line}; saved input retained, no Send authorized`);
+}
 /** Shape-only diagnosis in the existing bounded ticket log; never changes eligibility. */
 export function noteInputContinuationHold(entry: Readonly<Pick<InputEntry, 'id' | 'sourceHelperId' | 'purpose'>>, reason: string): void {
   if (!entry.sourceHelperId && entry.purpose !== 'decision') return;
@@ -1689,9 +1725,16 @@ export async function retentionHeldInputSessions(sessions: readonly Pick<Session
 /** Goal activation shares the native input serializer through its whole durable write.
  * The awaited after-send settings hook already owns this lease; only that exact live context
  * may reenter. Detached callbacks after release/failure enqueue normally, never borrow it. */
-export function withGoalReplyActivationInput(conversationId: string, work: () => Promise<boolean>): Promise<boolean> {
+export function withGoalReplyActivationInput(conversationId: string, work: () => Promise<boolean>,
+  staleFailure?: { sessionId: string; turnId: string }): Promise<boolean> {
   const activate = async () => {
     const rows = await load();
+    // Replacing a generated checkpoint must not replace its authored delivery or
+    // retire a helper that already owns the earlier failure. Check under this lock.
+    if (staleFailure && rows.some(row => row.purpose === 'decision'
+      ? row.decisionSourceSessionId === staleFailure.sessionId && row.decisionSourceTurnId === staleFailure.turnId
+      : (row.sessionId === staleFailure.sessionId || row.conversationId === conversationId) &&
+        (['queued', 'browser', 'tool'].includes(row.state) || row.completedTurnId === staleFailure.turnId))) return false;
     if (rows.some(row => row.conversationId === conversationId && row.purpose !== 'decision' && row.sourceHelperId &&
       ((row.state === 'browser' && !!row.owner) || row.state === 'tool' ||
         (row.sendAuthorizedAt !== undefined && (!row.messageId || !Number.isFinite(row.deliveredAt)))))) return false;
@@ -2399,12 +2442,21 @@ async function ordinaryInputTerminalTurn(sessionId: string, conversationId: stri
   // checkpoint. Bind both to the current durable pickup, never an old activation bit.
   const activation = policy && policy.at > deliveredAt
     ? snapshotGoalReplies().replies.find(row => row.conversationId === conversationId) : undefined;
-  const renewedPolicy = Boolean(settledWatchdog &&
+  // A committed Resume can finish before this document observed any local
+  // generation. Its exact consume-once native final still owns a deliberate
+  // renewal; never require an invented watchdog just to bind that same reply.
+  const renewedResume = Boolean(match && resumeReceipt?.sourceClosed &&
+    resumeReceipt.acceptedDestinationFinal === final.messageId &&
+    resumeReceipt.acceptedDestinationFinalEpochRevoked === true &&
+    Number.isFinite(resumeReceipt.acceptedDestinationFinalAt) &&
+    activation?.acceptedAt! > resumeReceipt.acceptedDestinationFinalAt! &&
+    activation?.eventSeq === (final.origin ?? final.seq));
+  const renewedPolicy = Boolean((settledWatchdog || renewedResume) &&
     (policy?.mode === 'loop' || (policy?.mode === 'goal' && match !== null)) &&
     activation?.state === 'pending' && activation.explicitActivation === true &&
     activation.sessionId === sessionId && activation.turnId === turnId && activation.acceptedAt >= policy.at &&
     activation.replyId === (match ? final.messageId : ('activation:' + turnId).slice(0, 200)) &&
-    activation.eventSeq === (match ? final.finalContentSeq ?? final.origin ?? final.seq : end?.seq));
+    (renewedResume || activation.eventSeq === (match ? final.finalContentSeq ?? final.origin ?? final.seq : end?.seq)));
   if (!policy?.enabled || (policy.at > deliveredAt && !renewedPolicy) ||
       deliveredAt > Date.now() + 60_000 ||
       rows.some(row => !ignoredIds.includes(row.id) &&
@@ -2426,7 +2478,11 @@ async function ordinaryInputTerminalTurn(sessionId: string, conversationId: stri
   if (resumeReceipt) {
     const currentResume = await committedResumeNativeReceipt(sessionId, conversationId, user.messageId!, user.message.text);
     if (getConfig().ui.automationPaused === true || browserDecisionSignedOut || !currentResume ||
-        !resumeEpochCurrent(currentResume)) return null;
+        !resumeEpochCurrent(currentResume) || (renewedResume &&
+          (currentResume.token !== resumeReceipt.token || currentResume.handoffId !== resumeReceipt.handoffId ||
+            !currentResume.sourceClosed || currentResume.acceptedDestinationFinal !== final.messageId ||
+            currentResume.acceptedDestinationFinalAt !== resumeReceipt.acceptedDestinationFinalAt ||
+            currentResume.acceptedDestinationFinalEpochRevoked !== true))) return null;
   }
   const currentPolicy = snapshotGoalSwitches().switches.find(row => row.conversationId === conversationId);
   const currentActivation = renewedPolicy ? goalPendingReplyFor(conversationId) : null;
@@ -2849,34 +2905,44 @@ export function pendingBrowserInputs(): Promise<Array<{ id: string; conversation
       browserHead = directBrowserHead(current);
     }
     for (const entry of ordered(current)) {
-      if (companionOf(current, entry)) continue;
-      if (!preparable(entry) || entry.dueAt > Date.now() || !workflowInputReady(entry, current)) continue;
-      if (manualInput(entry) && !queuedFollowup(entry) && entry.transportIntent !== 'tool' && browserHead?.id !== entry.id) continue;
-      if (queuedFollowup(entry) && !(entry.state === 'browser' && entry.completedTurnId) && !(await completedStageBoundary(entry, current))) continue;
-      if (!(await browserInputAllowed(entry))) continue;
-      try {
-        const conversationId = await target(entry);
-        // A new chat linked to a native ChatGPT Project is offered only after that Project has
-        // a verified provider id. Existing chats, decisions, and short-lived helpers keep their
-        // incumbent routes and never inherit provider-Project authority from a local folder.
-        const chatgptProject = !conversationId && entry.projectId && entry.purpose !== 'decision' && !entry.lifetime
-          ? (await getProject(entry.projectId))?.chatgpt : undefined;
-        if (chatgptProject && chatgptProject.state !== 'linked') continue;
-        const [end] = !entry.silenceBoundary && manualInput(entry) && entry.sessionId
-          ? await readRecentEvents(entry.sessionId, 1, { kinds: ['turn_start', 'turn_end'] }) : [];
-        const silenceTurnId = entry.silenceBoundary?.turnId ?? (end?.kind === 'turn_end' && end.outcome === 'failed' &&
-          end.reason === 'thinking_failed' && end.turnId && await eligibleStageEnd(entry) === end.turnId ? end.turnId : undefined);
-        const preclaimRecovery = temporaryDecisionPreclaimProof(entry);
-        result.push({ id: entry.id, conversationId,
-          ...(preclaimRecovery ? { preclaimRecovery } : {}),
-          ...(entry.purpose === 'rotation' ? { purpose: 'rotation' as const } : {}),
-          ...(silenceTurnId ? { silenceTurnId } : {}),
-          ...(entry.directTurn ? { directTurn: entry.directTurn } : {}),
-          ...(entry.state === 'queued' && entry.purpose !== 'decision' && entry.sessionId && entry.conversationId && entry.conversationId !== conversationId
-            ? { supersededConversationId: entry.conversationId } : {}),
-          ...(entry.lifetime ? { lifetime: entry.lifetime } : {}),
-          ...(chatgptProject?.state === 'linked' ? { project: chatgptProject.id } : {}) });
-      } catch { /* blocked/deleted stays user-visible */ }
+      // Read-only first-refusal trace: one fixed log per input while the same stage
+      // holds it. Never changes eligibility, ordering or the published shapes below.
+      let stage: string, browserRefusal: BrowserAllowRefusal | null = null;
+      if (companionOf(current, entry)) stage = 'companion-input';
+      else if (!preparable(entry)) stage = 'not-preparable';
+      else if (entry.dueAt > Date.now()) stage = 'not-due';
+      else if (!workflowInputReady(entry, current)) stage = 'workflow-input-not-ready';
+      else if (manualInput(entry) && !queuedFollowup(entry) && entry.transportIntent !== 'tool' && browserHead?.id !== entry.id) stage = 'manual-not-fifo-head';
+      else if (queuedFollowup(entry) && !(entry.state === 'browser' && entry.completedTurnId) && !(await completedStageBoundary(entry, current))) stage = 'followup-stage-boundary-missing';
+      else if (!(await browserInputAllowed(entry, refusal => { browserRefusal = refusal; }))) stage = 'browser-policy';
+      else {
+        try {
+          const conversationId = await target(entry);
+          // A new chat linked to a native ChatGPT Project is offered only after that Project has
+          // a verified provider id. Existing chats, decisions, and short-lived helpers keep their
+          // incumbent routes and never inherit provider-Project authority from a local folder.
+          const chatgptProject = !conversationId && entry.projectId && entry.purpose !== 'decision' && !entry.lifetime
+            ? (await getProject(entry.projectId))?.chatgpt : undefined;
+          if (chatgptProject && chatgptProject.state !== 'linked') { noteClaimTraceOnce(entry.id, 'project-not-linked'); continue; }
+          const [end] = !entry.silenceBoundary && manualInput(entry) && entry.sessionId
+            ? await readRecentEvents(entry.sessionId, 1, { kinds: ['turn_start', 'turn_end'] }) : [];
+          const silenceTurnId = entry.silenceBoundary?.turnId ?? (end?.kind === 'turn_end' && end.outcome === 'failed' &&
+            end.reason === 'thinking_failed' && end.turnId && await eligibleStageEnd(entry) === end.turnId ? end.turnId : undefined);
+          const preclaimRecovery = temporaryDecisionPreclaimProof(entry);
+          result.push({ id: entry.id, conversationId,
+            ...(preclaimRecovery ? { preclaimRecovery } : {}),
+            ...(entry.purpose === 'rotation' ? { purpose: 'rotation' as const } : {}),
+            ...(silenceTurnId ? { silenceTurnId } : {}),
+            ...(entry.directTurn ? { directTurn: entry.directTurn } : {}),
+            ...(entry.state === 'queued' && entry.purpose !== 'decision' && entry.sessionId && entry.conversationId && entry.conversationId !== conversationId
+              ? { supersededConversationId: entry.conversationId } : {}),
+            ...(entry.lifetime ? { lifetime: entry.lifetime } : {}),
+            ...(chatgptProject?.state === 'linked' ? { project: chatgptProject.id } : {}) });
+          continue;
+        } catch { noteClaimTraceOnce(entry.id, 'target-custody-unverified'); }
+        continue;
+      }
+      noteClaimTraceOnce(entry.id, stage, stage === 'browser-policy' ? browserRefusal ?? undefined : undefined);
     }
     return result;
   });
@@ -3307,15 +3373,55 @@ export function resetInputForTests(): void {
   if (inputSerialOwner) inputSerialOwner.live = false;
   inputSerialOwner = null;
   retainedExecutionResumes.clear();
-  entries = null; chain = Promise.resolve(); offered.clear(); decisionWaiters.clear(); recoveryReleaseTold.clear(); browserHelperBackoffUntil = 0; browserDecisionSignedOut = false; browserDecisionSignedInObserved = false;
+  entries = null; chain = Promise.resolve(); offered.clear(); decisionWaiters.clear(); recoveryReleaseTold.clear(); claimTraceTold.clear(); browserHelperBackoffUntil = 0; browserDecisionSignedOut = false; browserDecisionSignedInObserved = false;
 }
 
-export async function pausedBrowserHelpers(): Promise<Array<{ id: string; sourceSessionId: string }>> {
-  // A temporary helper may gain its native /c/ route before the answer waiter expires.
-  // That route is receipt evidence, not permission to hide the saved recovery control.
-  return (await listInputs()).filter(row => row.purpose === 'decision' && row.state === 'cancelled' &&
+export type BrowserHelperRecoveryView = { id: string; sourceSessionId: string; reviewRequired?: true };
+
+export async function pausedBrowserHelpers(
+  options: { reviewedSourceSessionId?: string } = {}
+): Promise<BrowserHelperRecoveryView[]> {
+  // Default and bulk callers retain the cancelled-only recovery view. A selected
+  // source may additionally inspect one verified archived safety rejection.
+  const rows = await listInputs();
+  const paused: BrowserHelperRecoveryView[] = rows.filter(row => row.purpose === 'decision' && row.state === 'cancelled' &&
     !(row.goalSourceSuperseded && helperNativeSendConfirmed(row)) && row.decisionSourceSessionId)
     .map(row => ({ id: row.id, sourceSessionId: row.decisionSourceSessionId! }));
+  if (!options.reviewedSourceSessionId) return paused;
+  for (const row of rows) {
+    if (row.decisionSourceSessionId === options.reviewedSourceSessionId &&
+        await reviewedSafetyHelperCurrent(rows, row)) {
+      paused.push({ id: row.id, sourceSessionId: options.reviewedSourceSessionId, reviewRequired: true });
+    }
+  }
+  return paused;
+}
+
+/** Read-only review eligibility; this neither accepts the old answer nor authorizes Send. */
+async function reviewedSafetyHelperCurrent(rows: readonly InputEntry[], row: InputEntry): Promise<boolean> {
+  if (getConfig().ui.automationPaused === true || !rejectedBrowserDecision(row) ||
+      !isAutomaticDecisionHoldCode(row.goalDecisionRejection) || !helperNativeSendConfirmed(row) ||
+      row.toolReceiptUncertain === true || row.goalSourceSuperseded === true || !row.decisionOutput ||
+      !row.decisionSourceSessionId || !row.decisionSourceTurnId) return false;
+  const source = await getSession(row.decisionSourceSessionId);
+  if (!source?.conversationId || source.activeTurnId || source.origin?.kind === 'helper' ||
+      source.origin?.kind === 'worker' || isChatBlocked(source.conversationId) || !goalArmedFor(source.conversationId)) return false;
+  const pending = goalPendingReplyFor(source.conversationId);
+  const draft = goalViewFor(source.conversationId);
+  if (draft?.stage !== 'failed' || draft.error !== row.goalDecisionRejection || draft.turnId !== row.decisionSourceTurnId) return false;
+  if (!pending || pending.sessionId !== source.id || pending.turnId !== row.decisionSourceTurnId ||
+      pending.acceptedAt > row.createdAt || rows.some(entry => entry.decisionSourceSessionId === source.id && !terminal(entry)) ||
+      rows.filter(entry => entry.purpose === 'decision' && entry.lifetime === 'temporary-planner' &&
+        entry.decisionSourceSessionId === source.id && entry.decisionSourceTurnId === pending.turnId).length !== 1) return false;
+  if (!await decisionOutputArchiveMatches(row)) return false;
+  // Recheck the selected pickup after asynchronous archive IO. A later acceptance
+  // or account pause must not expose an old answer as the current recovery action.
+  const latestSource = await getSession(source.id);
+  return latestSource?.conversationId === source.conversationId && !latestSource.activeTurnId &&
+    latestSource.origin?.kind !== 'helper' && latestSource.origin?.kind !== 'worker' &&
+    !isChatBlocked(source.conversationId) && getConfig().ui.automationPaused !== true && goalArmedFor(source.conversationId) &&
+    JSON.stringify(goalPendingReplyFor(source.conversationId)) === JSON.stringify(pending) &&
+    goalViewFor(source.conversationId)?.token === draft.token;
 }
 
 /** Positive durable proof that this decision helper never crossed native Send. */
@@ -3605,6 +3711,13 @@ export function authorizeBrowserHelperRetry(
         // decision without pretending that the original native Send was unsent.
         (entry.state === 'sent' && entry.lifetime === 'temporary-planner' &&
           !!sourceTurnId && entry.decisionSourceTurnId === sourceTurnId) ||
+        // A collected safety rejection is terminal evidence, not an ambiguous Send.
+        // Only this exact deliberate retry may reconcile its archived answer; the
+        // Goal owner must still durably grant one explicit activation afterward.
+        (rejectedBrowserDecision(entry) && isAutomaticDecisionHoldCode(entry.goalDecisionRejection) &&
+          helperNativeSendConfirmed(entry) && entry.toolReceiptUncertain !== true &&
+          entry.goalSourceSuperseded !== true && !!entry.decisionOutput &&
+          !!sourceTurnId && entry.decisionSourceTurnId === sourceTurnId) ||
         // Explicit recovery of a repaired deterministic envelope may replace
         // this exact positively unsent helper; ordinary polling cannot grant it.
         (entry.state === 'failed' && entry.lifetime === 'temporary-planner' &&
@@ -3623,6 +3736,15 @@ export function authorizeBrowserHelperRetry(
       entry.state === 'cancelled' && !helperConfirmedUnsent(entry)))) {
       logInfo('browser helper bulk retry held: source retains uncertain or native Send custody');
       return false;
+    }
+    if (rejectedBrowserDecision(row) && isAutomaticDecisionHoldCode(row.goalDecisionRejection)) {
+      // Match the existing requestBrowserDecision one-replacement bound. A stale
+      // activation bit or another retained owner cannot authorize a third helper.
+      if (!await reviewedSafetyHelperCurrent(current, row)) return false;
+      // Preserve the failed decision, its rejection, native receipt and archive.
+      // This readback never accepts its payload or grants a project continuation.
+      logInfo('browser helper explicit retry: archived safety decision verified; replacement still requires current Goal activation');
+      return true;
     }
     if (row.state === 'failed' && row.error === 'goal_browser_model_choice_denied') {
       // Spend this explicit per-helper action in the incumbent outbox. A stale
@@ -4497,6 +4619,13 @@ export async function browserDecisionOutputSaved(id: string, owner: string, conv
   if (!row || row.conversationId !== (conversationId ?? null) || !['sent', 'failed', 'cancelled'].includes(row.state)) return false;
   if (!row.decisionOutput) return row.state !== 'sent' &&
     (helperConfirmedUnsent(row) || browserHelperQuotaRejected(row));
+  return decisionOutputArchiveMatches(row);
+}
+
+/** Verify the already-selected outbox row without nesting another serialized queue read. */
+async function decisionOutputArchiveMatches(row: InputEntry): Promise<boolean> {
+  if (!row.decisionOutput) return false;
+  const { id, owner } = row;
   try {
     const file = decisionOutputFile(id);
     if ((await fs.lstat(file)).isSymbolicLink() || (await fs.stat(file)).size > 150_000) return false;

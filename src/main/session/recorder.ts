@@ -1618,8 +1618,13 @@ export async function attachNativeCoreResultReceipt(input: {
         input.nativeCallMessageId, fullHistory.reduce((seq, row) => Math.max(seq, row.seq), 0))) return false;
       if (!await receiptDurableOwnerUnique(input.resultReceiptId, input.sessionId,
         input.nativeCallMessageId, owned.call.callId)) return false;
-      logInfo('native Core result bound to its original owned execution; workflow ambiguity and header preserved');
-      notifyChanged();
+      // Reobserving an already-bound result still rechecks canonical/global
+      // custody and durability above, but changes no session state. Repeated
+      // observer notifications can themselves schedule more recorder readers.
+      if (!owned.call.nativeCallMessageId) {
+        logInfo('native Core result bound to its original owned execution; workflow ambiguity and header preserved');
+        notifyChanged();
+      }
       return true;
     }
     // Legacy witnesses retain the single-native-call workflow gate. A v2

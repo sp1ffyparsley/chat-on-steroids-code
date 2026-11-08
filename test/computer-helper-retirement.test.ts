@@ -158,6 +158,13 @@ describe('desktop helper retirement ordering', () => {
     ['[cos-desktop] windows-enumeration\n', ' Last reported desktop stage: windows-enumeration.'],
     ['[cos-desktop] windows-enumerated\n', ' Last reported desktop stage: windows-enumerated.'],
     ['[cos-desktop] Private startup details\n', ''],
+    ...['compile-start', 'compiled', 'support-check', 'item-create', 'item-ready', 'device-create',
+      'pool-create', 'session-create', 'border-config', 'session-start', 'frame-wait',
+      'copy-start', 'copy-complete', 'encode-start', 'dispose-start', 'done'].map(stage =>
+      [`[cos-capture] ${stage}\n`, ` Last reported capture stage: ${stage}.`] as const),
+    ['[cos-capture] private-provider-details\n', ''],
+    ['[cos-capture] frame-wait private-window-title\n', ''],
+    ['[cos-desktop] request-dispatch\n[cos-capture] session-start\n', ' Last reported capture stage: session-start.'],
     ['[cos-desktop] compiled\n[cos-uia] root-window\n', ' Last reported UIA stage: root-window.'],
     ['[cos-uia] done\n[cos-desktop] windows-enumeration\n', ' Last reported desktop stage: windows-enumeration.']
   ] as const)(

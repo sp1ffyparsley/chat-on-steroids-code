@@ -34,6 +34,7 @@ vi.mock('electron', () => ({
 const {
   createLocalInstanceProfile,
   defaultConfig,
+  getConfig,
   initConfigPath,
   loadConfig,
   saveConfig,
@@ -3483,6 +3484,121 @@ describe('native browser Loop stop rejection custody', () => {
     await expect(next).rejects.toThrow('goal_browser_cancelled');
     expect(goal.goalObjectiveFor(source.conversationId)).toBe(source.objective);
   }));
+
+  it.each(['loop', 'goal'] as const)('allows one explicit %s replacement of an exact archived safety decision', async mode =>
+    withIsolatedNativeInputOutbox(async () => {
+      const source = await seed('explicit-archived-safety-' + mode, mode);
+      goal.startGoalDraft({ conversationId: source.conversationId, sessionId: source.sessionId, turnId: source.sourceTurnId });
+      const seen: string[] = [], first = await nextHelper(source, seen);
+      const raw = '{"action":"continue","reply":"[[COS_EXTERNAL_HOLD]]"}';
+      expect(await browserInput.completeBrowserDecision(first.id, first.owner, raw, null)).toBe(true);
+      expect(await settled(source.conversationId)).toMatchObject({ stage: 'failed', error: 'goal_external_hold', retryable: false });
+      browserInput.resetInputForTests();
+      const original = (await browserInput.listInputs()).find(row => row.id === first.id)!;
+      expect(await browserInput.browserDecisionOutputSaved(first.id, first.owner, null)).toBe(true);
+      expect(await browserInput.pausedBrowserHelpers()).toEqual([]);
+      expect(await browserInput.pausedBrowserHelpers({ reviewedSourceSessionId: source.sessionId })).toEqual([
+        { id: first.id, sourceSessionId: source.sessionId, reviewRequired: true }
+      ]);
+      await expect(browserInput.requestBrowserDecision('Automatic polling cannot replace this safety hold',
+        new AbortController().signal, { sourceSessionId: source.sessionId, sourceTurnId: source.sourceTurnId,
+          lifetime: 'temporary-planner' })).rejects.toThrow('goal_external_hold');
+      expect(await browserInput.authorizeBrowserHelperRetry(first.id, source.sessionId, source.sourceTurnId,
+        { confirmedUnsentOnly: true })).toBe(false);
+      expect(await goal.retryGoalBrowserHelper(source.sessionId, first.id)).toBe(true);
+      const second = await nextHelper(source, seen);
+      expect(second.text).toContain(source.objective);
+      expect((await readDurable<ReturnType<typeof goal.snapshotGoalReplies>>(goal.GOAL_REPLIES_STATE))?.replies
+        .find(row => row.conversationId === source.conversationId)).toMatchObject({
+          state: 'pending', sessionId: source.sessionId, turnId: source.sourceTurnId, explicitActivation: true });
+      expect((await browserInput.listInputs()).find(row => row.id === first.id)).toEqual(original);
+      expect((await browserInput.listInputs()).filter(row => row.sourceHelperId === first.id)).toEqual([]);
+      // A retained explicit bit cannot authorize a third helper after the one replacement.
+      expect(await browserInput.completeBrowserDecision(second.id, second.owner, raw, null)).toBe(true);
+      expect(await settled(source.conversationId)).toMatchObject({ stage: 'failed', error: 'goal_external_hold', retryable: false });
+      expect(await goal.retryGoalBrowserHelper(source.sessionId, second.id)).toBe(false);
+      const rows = await browserInput.listInputs();
+      expect(rows.filter(row => row.decisionSourceSessionId === source.sessionId)).toHaveLength(2);
+      expect(rows.filter(row => row.sourceHelperId)).toEqual([]);
+      expect(rows.find(row => row.id === first.id)).toEqual(original);
+      expect(await browserInput.browserDecisionOutputSaved(first.id, first.owner, null)).toBe(true);
+      expect(goal.goalObjectiveFor(source.conversationId)).toBe(source.objective);
+    }));
+
+  it('hides reviewed safety recovery if its source starts working during archive readback', async () => withIsolatedNativeInputOutbox(async () => {
+    const source = await seed('archived-safety-source-io-race');
+    goal.startGoalDraft({ conversationId: source.conversationId, sessionId: source.sessionId, turnId: source.sourceTurnId });
+    const helper = await nextHelper(source, []);
+    expect(await browserInput.completeBrowserDecision(helper.id, helper.owner,
+      '{"action":"continue","reply":"[[COS_EXTERNAL_HOLD]]"}', null)).toBe(true);
+    expect(await settled(source.conversationId)).toMatchObject({ stage: 'failed', error: 'goal_external_hold' });
+    const { tmpdir } = await import('node:os');
+    const archiveFile = path.join(tmpdir(), 'CoS-helper-outputs', helper.id + '.json');
+    const readFile = fs.readFile.bind(fs);
+    let changed = false;
+    const spy = vi.spyOn(fs, 'readFile');
+    spy.mockImplementation((async (...args: Parameters<typeof fs.readFile>) => {
+      const result = await readFile(...args);
+      if (!changed && String(args[0]) === archiveFile) {
+        changed = true;
+        await appendEvent(source.sessionId, { source: 'extension', time: Date.now(),
+          kind: 'turn_start', turnId: 'newer-native-turn-during-archive' });
+      }
+      return result;
+    }) as typeof fs.readFile);
+    try {
+      expect(await browserInput.pausedBrowserHelpers({ reviewedSourceSessionId: source.sessionId })).toEqual([]);
+      expect(changed).toBe(true);
+      expect(await goal.retryGoalBrowserHelper(source.sessionId, helper.id)).toBe(false);
+      expect((await browserInput.listInputs()).filter(row => row.decisionSourceSessionId === source.sessionId)).toHaveLength(1);
+    } finally { spy.mockRestore(); }
+  }));
+
+  it.each(['wrong source', 'wrong turn', 'uncertain receipt', 'missing native receipt', 'missing archive',
+    'changed archive', 'multiple owners', 'newer source', 'newer pickup', 'goal off', 'account pause'] as const)(
+    'refuses explicit archived safety recovery with %s', async variant => withIsolatedNativeInputOutbox(async () => {
+      const source = await seed('rejected-safety-retry-' + variant.replaceAll(' ', '-'));
+      goal.startGoalDraft({ conversationId: source.conversationId, sessionId: source.sessionId, turnId: source.sourceTurnId });
+      const helper = await nextHelper(source, []);
+      const raw = '{"action":"continue","reply":"[[COS_EXTERNAL_HOLD]]"}';
+      expect(await browserInput.completeBrowserDecision(helper.id, helper.owner, raw, null)).toBe(true);
+      expect(await settled(source.conversationId)).toMatchObject({ stage: 'failed', error: 'goal_external_hold', retryable: false });
+      const { tmpdir } = await import('node:os');
+      const file = path.join(tmpdir(), 'CoS-helper-outputs', helper.id + '.json');
+      const archive = await fs.readFile(file, 'utf8');
+      try {
+        let rows = await browserInput.listInputs();
+        if (variant === 'uncertain receipt' || variant === 'missing native receipt') {
+          rows = rows.map(row => row.id !== helper.id ? row : { ...row,
+            ...(variant === 'uncertain receipt' ? { toolReceiptUncertain: true } : { messageId: undefined }) });
+          await writeDurableNow('session-input', rows); browserInput.resetInputForTests();
+        } else if (variant === 'multiple owners') {
+          await writeDurableNow('session-input', [...rows, { ...rows.find(row => row.id === helper.id)!, id: randomUUID() }]);
+          browserInput.resetInputForTests();
+        } else if (variant === 'missing archive') await fs.unlink(file);
+        else if (variant === 'changed archive') await fs.writeFile(file, archive.replace('[[COS_EXTERNAL_HOLD]]', 'another private answer'));
+        else if (variant === 'newer source') {
+          await goal.acceptGoalReplyNow({ conversationId: source.conversationId, sessionId: source.sessionId,
+            turnId: source.sourceTurnId + '-newer', replyId: 'newer-final', eventSeq: 2, blocked: false });
+        } else if (variant === 'newer pickup') {
+          await goal.acceptGoalReplyNow({ conversationId: source.conversationId, sessionId: source.sessionId,
+            turnId: source.sourceTurnId, replyId: 'newer-same-turn-final', eventSeq: 2, blocked: false });
+        } else if (variant === 'goal off') await goal.setGoalSwitchNow(source.conversationId, 'loop', false);
+        else if (variant === 'account pause') await saveConfig({ ...getConfig(), ui: {
+          ...getConfig().ui, automationPaused: true } });
+        const before = await browserInput.listInputs();
+        if (!['wrong source', 'wrong turn'].includes(variant))
+          expect(await browserInput.pausedBrowserHelpers({ reviewedSourceSessionId: source.sessionId })).toEqual([]);
+        if (variant === 'wrong source' || variant === 'wrong turn')
+          expect(await browserInput.authorizeBrowserHelperRetry(helper.id,
+            source.sessionId + (variant === 'wrong source' ? '-foreign' : ''),
+            source.sourceTurnId + (variant === 'wrong turn' ? '-foreign' : ''))).toBe(false);
+        else expect(await goal.retryGoalBrowserHelper(source.sessionId, helper.id)).toBe(false);
+        expect(await browserInput.listInputs()).toEqual(before);
+        expect(before.filter(row => row.sourceHelperId)).toEqual([]);
+        expect(goal.goalObjectiveFor(source.conversationId)).toBe(source.objective);
+      } finally { await fs.writeFile(file, archive); }
+    }));
 
   it.each([false, true])('does not manufacture another automatic helper for a deterministic envelope hold while retaining transient retries (envelope: %s)', async envelope => withIsolatedNativeInputOutbox(async () => {
     const source = await seed(`envelope-admission-${envelope}`);
@@ -7268,6 +7384,31 @@ describe('a chat driven towards a specific goal', () => {
       expect(goal.automaticLoopReplyRecoveryDue(conversationId)).toBe(false);
       expect(await browserInput.listInputs()).toEqual(inputsBefore);
     } finally { vi.useRealTimers(); }
+  });
+
+  it('admits only a newer recognized failure behind a stale generated recovery checkpoint', async () => {
+    const conversationId = 'stale-failure-checkpoint';
+    const session = await createSession({ conversationId });
+    const now = Date.now();
+    const old = { conversationId, sessionId: session.id, replyId: 'activation:older-failure',
+      turnId: 'older-failure', eventSeq: 10, acceptedAt: now - 3 * goal.AUTOMATIC_LOOP_RECOVERY_GRACE_MS,
+      state: 'pending' as const, explicitActivation: true as const };
+    const next = { sessionId: session.id, turnId: 'newer-failure', seq: 12,
+      time: now - goal.AUTOMATIC_LOOP_RECOVERY_GRACE_MS - 1,
+      outcome: 'failed', detail: 'Message delivery timed out. Please try again. Retry' };
+    goal.restoreGoalReplies({ version: 1, savedAt: now, replies: [old] });
+    expect(goal.automaticLoopReplyRecoveryDue(conversationId, now, next)).toBe(true);
+    expect(goal.automaticLoopReplyRecoveryDue(conversationId, now)).toBe(false);
+    for (const change of [
+      { sessionId: 'foreign' }, { turnId: old.turnId }, { seq: old.eventSeq },
+      { time: now }, { outcome: 'completed' }, { detail: 'Unrecognized failure' },
+      { reason: 'model_cooldown' as const }, { reason: 'conversation_limit' as const }
+    ]) expect(goal.automaticLoopReplyRecoveryDue(conversationId, now, { ...next, ...change })).toBe(false);
+    for (const change of [{ replyId: 'retained-authored-final' }, { explicitActivation: undefined },
+      { helperFailureCount: 1, helperFailureAt: now - 1 }]) {
+      goal.restoreGoalReplies({ version: 1, savedAt: now, replies: [{ ...old, ...change }] });
+      expect(goal.automaticLoopReplyRecoveryDue(conversationId, now, next)).toBe(false);
+    }
   });
 
   it.each(['Error in message stream Retry', ' Error in message stream\nRetry '])(

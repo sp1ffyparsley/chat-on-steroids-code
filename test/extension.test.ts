@@ -45,6 +45,14 @@ describe('extension release metadata', () => {
     const backgroundVersion = Number(/const PAGE_RECORDER_VERSION = (\d+);/.exec(backgroundSource)?.[1]);
     expect(backgroundVersion).toBe(currentRecorderVersion);
   });
+  it('keeps the MAIN producer epoch aligned without advancing its wire schema', async () => {
+    const fiber = await fs.readFile(path.join(process.cwd(), 'extension', 'fiber.js'), 'utf8');
+    const producer = Number(/const PRODUCER_VERSION = (\d+);/.exec(fiber)?.[1]);
+    const wire = Number(/const VERSION = (\d+);/.exec(fiber)?.[1]);
+    const expectedWire = Number(/const FIBER_VERSION = (\d+);/.exec(contentSource)?.[1]);
+    expect(producer).toBe(currentRecorderVersion);
+    expect(wire).toBe(expectedWire);
+  });
   it.each(['visible', 'hidden', 'navigation', 'focus-roundtrip', 'pairing-change', 'disabled', 'permission-denied'])('captures debug pixels only for a stable visible exact document: %s', async mode => {
     const start = backgroundSource.indexOf('async function captureBrowserDebug(offer) {');
     const end = backgroundSource.indexOf('\nasync function deliverJournalBatch', start);
@@ -184,7 +192,7 @@ describe('extension release metadata', () => {
     expect(resultStart).toBeGreaterThanOrEqual(0);
     expect(resultEnd).toBeGreaterThan(resultStart);
     const resultReader = code.slice(resultStart, resultEnd);
-    expect(resultReader.match(/JSON\.parse/g)).toHaveLength(2);
+    expect(resultReader.match(/JSON\.parse/g)).toHaveLength(3);
     expect(resultReader).toContain('JSON.parse(raw)');
     // The second decoder is exclusively the own, self-contained MCP resource
     // after its URI/MIME/size gates. Request arguments and nested text remain
@@ -194,6 +202,19 @@ describe('extension release metadata', () => {
     expect(resultReader).toContain("Object.keys(resource).length !== 3");
     expect(resultReader).toContain("resource.uri !== 'urn:cos:result-receipt:v1:' + receipt.id");
     expect(resultReader).toContain("resource.mimeType === 'application/vnd.chat-on-steroids.result-receipt+json'");
+    // The third decoder is exclusively ChatGPT's observed image-result carrier,
+    // never a search through tool prose. It accepts only a canonical v2 root
+    // receipt and image pointers; no payload or pointer leaves the reader.
+    expect(resultReader).toContain("type?.value === 'multimodal_text'");
+    expect(resultReader).toContain("const prefix = 'Structured tool output: '");
+    expect(resultReader).toContain('!carrier.startsWith(prefix)');
+    expect(resultReader).toContain('parts.length < 2 || parts.length > 17');
+    expect(resultReader).toContain("imageType.value !== 'image_asset_pointer'");
+    expect(resultReader).toContain('JSON.parse(payload)');
+    expect(resultReader).toContain('Object.keys(value).length !== 1');
+    expect(resultReader).toContain('JSON.stringify(value) !== payload');
+    expect(resultReader).toContain('value.cosResultReceipt?.version !== 2');
+    expect(resultReader.match(/JSON\.stringify/g)).toHaveLength(1);
 
     expect(resultReader).toContain("message.author?.role !== 'tool'");
     expect(resultReader).toContain("content.content_type !== 'code' || content.language !== 'json'");
@@ -1910,6 +1931,51 @@ describe('model discovery command custody', () => {
 });
 
 describe('accepted helper tab cleanup', () => {
+  it.each(['editor-missing', 'chat-changed', 'account-restricted', 'page-busy', 'editor-disabled',
+    'draft-empty', 'prompt-envelope-missing', 'draft-changed', 'send-not-ready',
+    'unknown', 'malformed', 'accessor', 'foreign-owner', 'route-changed', 'combined-ack', 'combined-authorize', 'private-extra'] as const)(
+    'forwards only a fixed owned pre-Send refusal stage without changing delivery custody (%s)', async reason => {
+      const conversationId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+      const inputId = 'ffffffff-1111-4222-8333-444444444444';
+      const sourceDocument = 'document-1-0';
+      let route = `https://chatgpt.com/c/${conversationId}`, getterReads = 0;
+      const requests: Array<{ route: string; body: any }> = [];
+      const session = new FakeStorageArea();
+      const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token' }), session,
+        tabsGet: async () => ({ id: 1, url: route, status: 'complete' }),
+        fetch: async (input, init) => {
+          const url = new URL(input);
+          if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+          requests.push({ route: url.pathname, body: JSON.parse(String(init?.body || '{}')) });
+          return response(200, { ok: true });
+        } });
+      await worker.registerTab(1, sourceDocument);
+      await worker.send({ type: 'bind', conversationId }, 1, sourceDocument);
+      requests.length = 0;
+      const before = structuredClone(session.data);
+      const message: Record<string, unknown> = { type: 'desktop_input', id: inputId,
+        owner: reason === 'foreign-owner' ? '2:foreign-document:0' : `1:${sourceDocument}:0`, conversationId,
+        stage: reason === 'malformed' ? 7 : `prepare:refused:${reason === 'unknown' ? 'PRIVATE_REFUSAL' :
+          ['accessor', 'foreign-owner', 'route-changed', 'combined-ack', 'combined-authorize', 'private-extra'].includes(reason) ? 'editor-disabled' : reason}` };
+      if (reason === 'accessor') Object.defineProperty(message, 'stage', {
+        get() { getterReads++; throw new Error('PRIVATE_REFUSAL'); } });
+      if (reason === 'route-changed') route = 'https://chatgpt.com/c/bbbbbbbb-cccc-4ddd-8eee-ffffffffffff';
+      if (reason === 'combined-ack') Object.assign(message, { ack: true, messageId: 'PRIVATE_REFUSAL' });
+      if (reason === 'combined-authorize') message.authorize = true;
+      if (reason === 'private-extra') message.error = 'PRIVATE_REFUSAL';
+      const result = await worker.send(message, 1, sourceDocument);
+      const accepted = !['unknown', 'malformed', 'accessor', 'foreign-owner', 'route-changed',
+        'combined-ack', 'combined-authorize', 'private-extra'].includes(reason);
+      expect(result.ok).toBe(accepted);
+      expect(requests).toEqual(accepted ? [{ route: '/input/stage', body: expect.objectContaining({
+        id: inputId, owner: `1:${sourceDocument}:0`, conversationId, stage: `prepare:refused:${reason}` }) }] : []);
+      expect(getterReads).toBe(0);
+      expect(JSON.stringify(requests)).not.toContain('PRIVATE_REFUSAL');
+      expect(session.data.commandAckOutbox).toEqual(before.commandAckOutbox);
+      expect(session.data.pendingInputReceipts).toEqual(before.pendingInputReceipts);
+      expect(worker.tabsRemove).not.toHaveBeenCalled();
+    });
+
   it.each([undefined, 1, 2])('forwards only the loaded content fresh-turn capability (%s)', async capability => {
     const chat = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
     const bodies: Record<string, unknown>[] = [];
@@ -3128,7 +3194,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     expect(deferred).toEqual(['foreground']);
   });
 
-  it.each(['unattributed', 'silence'])('keeps a natively streaming chat alive during %s recovery', async (reason) => {
+  it.each(['unattributed', 'silence', 'compaction'])('keeps a natively streaming chat alive during %s recovery', async (reason) => {
     let armed = false;
     let handed = false;
     const deferred: string[] = [];
@@ -6838,8 +6904,10 @@ describe('returned R58 repair reply and document boundaries', () => {
     }
   });
 
-  it.each(['stable', 'unknown-streaming', 'wrong-epoch', 'wrong-conversation', 'document-replaced', 'pending-navigation'])(
-    'binds silence reload to explicit nonstreaming evidence from the same document: %s', async mode => {
+  it.each(['silence', 'compaction'].flatMap(reason =>
+    ['stable', 'unknown-streaming', 'wrong-epoch', 'wrong-conversation', 'document-replaced', 'pending-navigation']
+      .map(mode => ({ reason, mode }))))(
+    'binds $reason reload to explicit nonstreaming evidence from the same document: $mode', async ({ reason, mode }) => {
       let armed = false, handed = false, changed = false;
       let pendingUrl: string | undefined;
       const receipts: string[] = [];
@@ -6855,7 +6923,7 @@ describe('returned R58 repair reply and document boundaries', () => {
             if (url.searchParams.has('repaired')) receipts.push(url.searchParams.get('repairAction')!);
             if (url.searchParams.has('repairFailed')) failures.push(url.searchParams.get('repairFailure')!);
             if (armed && !handed) { handed = true; return response(200, { repairs: [{
-              conversationId: CHAT, token: 'r58-silence', reason: 'silence', action: 'reload', requiresClaim: true
+              conversationId: CHAT, token: 'r58-silence', reason, action: 'reload', requiresClaim: true
             }] }); }
             return response(200, { repairs: [] });
           }
@@ -10157,6 +10225,177 @@ describe('extension observation journal', () => {
       { SHELL_SCAN_MAX: 400, PAGE_RECORDER_VERSION: 133, raw: { selectorMatches: 1, mapped: 1, rejects: {
         fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0, ...pair } } })).toBeNull();
   });
+
+  it.each(['small', 'large', 'observation-only'] as const)(
+    'retains diagnostic stages through shipped content projection, elected activity transport and Main (%s)', async mode => {
+      const { CORE_SHELL_CALL_REJECTION_KEYS, noteCoreBrowserEvidence, coreBrowserEvidence } =
+        await import('../src/main/core-browser-evidence.js');
+      const conversationId = mode === 'small' ? 'e1000000-1111-4111-8111-111111111111'
+        : mode === 'large' ? 'e2000000-1111-4111-8111-111111111111' : 'e3000000-1111-4111-8111-111111111111';
+      const documentId = `diagnostic-multihop-${mode}`;
+      const rejects = Object.fromEntries(['fiberMissing', 'ownerMissing', 'stableKeyMismatch', 'itemsOverLimit',
+        // These two counts are authored by askFiber after validating turn arrays,
+        // rather than accepted from the untrusted MAIN-world diagnostic.
+        ...CORE_SHELL_CALL_REJECTION_KEYS.filter(key => key !== 'callInventoryMissing' && key !== 'callInventoryIncomplete')]
+        .map(key => [key, key === 'identityReasonNativeScopeBranchConflict' ? 1 : 0]));
+      const readStart = contentSource.indexOf('  function readShellScan(raw) {');
+      const readEnd = contentSource.indexOf('\n  function unseenAppSightings', readStart);
+      const projectionStart = contentSource.indexOf('  function coreBrowserEvidenceProjection(input) {');
+      const projectionEnd = contentSource.indexOf('\n  /** Fiber turn descriptor', projectionStart);
+      expect(readStart).toBeGreaterThan(0); expect(readEnd).toBeGreaterThan(readStart);
+      expect(projectionStart).toBeGreaterThan(0); expect(projectionEnd).toBeGreaterThan(projectionStart);
+      const calls = mode === 'large' ? 85 : 1;
+      const parents = Array.from({ length: calls }, (_, index) => `native-parent-${index}-${'a'.repeat(mode === 'large' ? 70 : 0)}`);
+      const diagnostic = vm.runInNewContext(`${contentSource.slice(readStart, readEnd)}
+        ${contentSource.slice(projectionStart, projectionEnd)};
+        coreBrowserEvidenceProjection({ ...input, shellScan: readShellScan(raw) });`, {
+        FIBER_MAX_ROWS: 400, RECORDER_VERSION: currentRecorderVersion,
+        settledFinalProjectionBlocked: () => false, settledFinalProjectionReady: () => true,
+        raw: { selectorMatches: 1, mapped: 1, rejects,
+          reader: { fiberWire: 19, fiberKeys: Object.keys(rejects).length, privateText: 'PRIVATE_STAGE' } },
+        input: { shell: 'alternate', shellDiscovery: 'compatible', requestIds: [], turnId: 'native-turn',
+          ordinaryFinal: { reason: 'open-call', questions: 1, calls, openCalls: calls, codeCalls: 0,
+            openCodeCalls: 0, activeTurnMapped: false, sourceUserMessageId: 'native-user',
+            coreCallMessageIds: parents, codeCallMessageIds: [],
+            identityRefusals: parents.map(messageId => ({ messageId, reasons: ['nativeScopeBranchConflict'] })) } }
+      });
+      let method: string | undefined, published = false;
+      const worker = loadWorker({
+        local: new FakeStorageArea({ port: 8765, token: 'paired-token', instanceId: 'multihop-profile' }),
+        session: new FakeStorageArea(),
+        fetch: async (input: string, init?: RequestInit) => {
+          const url = new URL(input);
+          if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true, instanceId: 'multihop-profile' });
+          if (url.pathname !== '/activity') return response(404, {});
+          method = init?.method;
+          const body = init?.body ? JSON.parse(String(init.body)) : null;
+          const native = body?.coreDiagnostic ?? JSON.parse(url.searchParams.get('coreDiagnostic') || 'null');
+          published = noteCoreBrowserEvidence({ ...native, conversationId });
+          return response(200, mode === 'observation-only'
+            ? { observationOnly: true, observationAccepted: published, completionVerified: false }
+            : { sessionId: 'session', entries: [], stream: [], nextSince: 0 });
+        }, tabsGet: async id => ({ id, url: `https://chatgpt.com/c/${conversationId}`, status: 'complete' })
+      });
+      await worker.registerTab(73, documentId);
+      await worker.send({ type: 'bind', conversationId }, 73, documentId);
+      const result = await worker.send({ type: 'activity', conversationId, since: 0,
+        ...(mode === 'observation-only' ? { observationOnly: true } : {}), coreDiagnostic: diagnostic }, 73, documentId);
+      expect(result).toMatchObject({ ok: true }); expect(published).toBe(true);
+      expect(method).toBe(mode === 'small' ? undefined : 'POST');
+      const native = coreBrowserEvidence(conversationId)!;
+      expect(native.shellScan?.reader).toEqual({ fiberWire: 19, fiberKeys: Object.keys(rejects).length,
+        contentRecorder: currentRecorderVersion, contentKeys: Object.keys(rejects).length,
+        workerRecorder: currentRecorderVersion, workerKeys: Object.keys(rejects).length,
+        mainKeys: Object.keys(rejects).length });
+      expect(native.shellScan?.rejects).toEqual(rejects);
+      expect(native.ordinaryFinal?.identityRefusals).toHaveLength(calls);
+      expect(native.documentId).toBe(documentId);
+      expect(JSON.stringify(native)).not.toContain('PRIVATE_STAGE');
+    });
+
+  it.each(['ordinary', 'observation-only'] as const)(
+    'retains executing reader generations without an available census through actual activity transport (%s)', async mode => {
+      const { noteCoreBrowserEvidence, coreBrowserEvidence, resetCoreBrowserEvidenceForTests } =
+        await import('../src/main/core-browser-evidence.js');
+      resetCoreBrowserEvidenceForTests();
+      const conversationId = 'e4000000-1111-4111-8111-111111111111', documentId = 'missing-reader-document';
+      const projectionStart = contentSource.indexOf('  function coreBrowserEvidenceProjection(input) {');
+      const projectionEnd = contentSource.indexOf('\n  /** Fiber turn descriptor', projectionStart);
+      const diagnostic = vm.runInNewContext(`${contentSource.slice(projectionStart, projectionEnd)};
+        coreBrowserEvidenceProjection(input);`, {
+        RECORDER_VERSION: currentRecorderVersion,
+        settledFinalProjectionBlocked: () => false, settledFinalProjectionReady: () => true,
+        input: { shell: 'alternate', shellDiscovery: 'failed', shellScan: null, ordinaryFinal: null,
+          reader: { fiberWire: 999, contentRecorder: 999, workerRecorder: 999, privateText: 'PRIVATE_READER' },
+          requestIds: [], turnId: null }
+      });
+      let stamped: any = null;
+      const worker = loadWorker({
+        local: new FakeStorageArea({ port: 8765, token: 'paired-token', instanceId: 'missing-reader-profile' }),
+        session: new FakeStorageArea(),
+        fetch: async (input: string, init?: RequestInit) => {
+          const url = new URL(input);
+          if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true, instanceId: 'missing-reader-profile' });
+          if (url.pathname !== '/activity') return response(404, {});
+          stamped = init?.body ? JSON.parse(String(init.body)).coreDiagnostic
+            : JSON.parse(url.searchParams.get('coreDiagnostic') || 'null');
+          expect(noteCoreBrowserEvidence({ ...stamped, conversationId })).toBe(true);
+          return response(200, mode === 'observation-only'
+            ? { observationOnly: true, observationAccepted: true, completionVerified: false }
+            : { sessionId: 'session', entries: [], stream: [], nextSince: 0 });
+        }, tabsGet: async id => ({ id, url: `https://chatgpt.com/c/${conversationId}`, status: 'complete' })
+      });
+      await worker.registerTab(73, documentId);
+      await worker.send({ type: 'bind', conversationId }, 73, documentId);
+      const result = await worker.send({ type: 'activity', conversationId,
+        ...(mode === 'observation-only' ? { observationOnly: true } : {}), coreDiagnostic: diagnostic }, 73, documentId);
+      expect(result).toMatchObject({ ok: true });
+      expect(stamped.reader).toEqual({ contentRecorder: currentRecorderVersion, workerRecorder: currentRecorderVersion });
+      const native = coreBrowserEvidence(conversationId)! as any;
+      expect(native.reader).toEqual(stamped.reader);
+      expect(native.shellScan).toBeNull();
+      expect(native.ordinaryFinal).toBeNull();
+      expect(native.pendingCompletion ?? null).toBeNull();
+      expect(JSON.stringify(native)).not.toContain('PRIVATE_READER');
+      resetCoreBrowserEvidenceForTests();
+    });
+
+  it.each(['stale-document', 'stale-epoch', 'account-changed'] as const)(
+    'withholds reader provenance through existing source admission when %s', async mode => {
+      const conversationId = 'e5000000-1111-4111-8111-111111111111', documentId = 'reader-owned-document';
+      let activityPosts = 0, flipAccount = false;
+      const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token', instanceId: 'reader-owned-profile' }),
+        session: new FakeStorageArea(), fetch: async (input: string) => {
+          const url = new URL(input);
+          if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true, instanceId: 'reader-owned-profile' });
+          if (url.pathname === '/activity') { activityPosts++; return response(200, {}); }
+          return response(404, {});
+        }, tabsGet: async id => {
+          if (flipAccount) { flipAccount = false; await worker.send({ type: 'unpair' }); }
+          return { id, url: `https://chatgpt.com/c/${conversationId}`, status: 'complete' };
+        } });
+      await worker.registerTab(73, documentId);
+      await worker.send({ type: 'bind', conversationId }, 73, documentId);
+      if (mode === 'stale-document') await worker.registerTab(73, 'replacement-reader-document');
+      if (mode === 'stale-epoch') await worker.send({ type: 'bind', conversationId, navigationEpoch: 1 }, 73, documentId);
+      if (mode === 'account-changed') flipAccount = true;
+      const reply = await worker.send({ type: 'activity', conversationId, observationOnly: true, navigationEpoch: 0,
+        coreDiagnostic: { shell: 'alternate', shellDiscovery: 'failed', shellScan: null, ordinaryFinal: null,
+          reader: { contentRecorder: currentRecorderVersion }, requestIds: [], turnId: null } }, 73, documentId);
+      expect(reply.ok).toBe(false);
+      expect(activityPosts).toBe(0);
+    });
+
+  it.each(['missing', 'foreign-owner', 'malformed-version', 'accessor', 'reader-accessor'] as const)(
+    'stamps only its own worker without unavailable Fiber counts for %s reader input', async mode => {
+      const conversationId = 'e6000000-1111-4111-8111-111111111111', documentId = 'reader-shape-document';
+      let getterReads = 0, stamped: any = null;
+      const worker = loadWorker({ local: new FakeStorageArea({ port: 8765, token: 'paired-token', instanceId: 'reader-shape-profile' }),
+        session: new FakeStorageArea(), fetch: async (input: string, init?: RequestInit) => {
+          const url = new URL(input);
+          if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true, instanceId: 'reader-shape-profile' });
+          if (url.pathname !== '/activity') return response(404, {});
+          stamped = init?.body ? JSON.parse(String(init.body)).coreDiagnostic : JSON.parse(url.searchParams.get('coreDiagnostic') || 'null');
+          return response(200, { observationOnly: true, observationAccepted: true, completionVerified: false });
+        }, tabsGet: async id => ({ id, url: `https://chatgpt.com/c/${conversationId}`, status: 'complete' }) });
+      await worker.registerTab(73, documentId);
+      await worker.send({ type: 'bind', conversationId }, 73, documentId);
+      const diagnostic: any = { shell: 'alternate', shellDiscovery: 'failed', shellScan: null, ordinaryFinal: null,
+        reader: { contentRecorder: 152, fiberWire: 19, fiberKeys: 85, contentKeys: 85,
+          workerRecorder: 999, workerKeys: 399, mainKeys: 399, privateText: 'PRIVATE_READER' }, requestIds: [], turnId: null };
+      if (mode === 'missing') delete diagnostic.reader;
+      if (mode === 'foreign-owner') diagnostic.reader = { workerRecorder: 999, mainKeys: 399, privateText: 'PRIVATE_READER' };
+      if (mode === 'malformed-version') diagnostic.reader.contentRecorder = 1_000_001;
+      if (mode === 'accessor') Object.defineProperty(diagnostic.reader, 'contentRecorder', { get() { getterReads++; return 153; } });
+      if (mode === 'reader-accessor') Object.defineProperty(diagnostic, 'reader', { get() { getterReads++; return { contentRecorder: 153 }; } });
+      const result = await worker.send({ type: 'activity', conversationId, observationOnly: true, coreDiagnostic: diagnostic }, 73, documentId);
+      expect(result).toMatchObject({ ok: true });
+      expect(stamped.reader).toEqual({ workerRecorder: currentRecorderVersion });
+      expect(stamped.shellScan).toBeNull();
+      expect(stamped.ordinaryFinal).toBeNull();
+      expect(getterReads).toBe(0);
+      expect(JSON.stringify(stamped)).not.toContain('PRIVATE_READER');
+    });
 
   it('posts a complete 85-call native proof without overflowing activity URLs or losing document custody', async () => {
     const conversationId = '22222222-3333-4444-5555-666666666666';

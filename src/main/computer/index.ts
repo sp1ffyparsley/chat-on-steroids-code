@@ -804,9 +804,9 @@ async function sendHelperRequest(request: Record<string, unknown>, expected?: Ex
       if (runtime.pending !== pending) return;
       // Fixed native breadcrumbs locate a provider stall without exporting stderr/page text.
       // This is the last reported stage, never completion, liveness or input authority.
-      const stage = [...runtime.stderrTail.matchAll(/\[cos-uia\] (root-window|root-handle|root-class|root-children|walk-elements|element-actions|text-read|snapshot-identities|done)(?:\r?\n|$)|\[cos-desktop\] (compile-start|compiled|request-dispatch|windows-enumeration|windows-enumerated)(?:\r?\n|$)/g)].at(-1);
+      const stage = [...runtime.stderrTail.matchAll(/\[cos-uia\] (root-window|root-handle|root-class|root-children|walk-elements|element-actions|text-read|snapshot-identities|done)(?:\r?\n|$)|\[cos-desktop\] (compile-start|compiled|request-dispatch|windows-enumeration|windows-enumerated)(?:\r?\n|$)|\[cos-capture\] (compile-start|compiled|support-check|item-create|item-ready|device-create|pool-create|session-create|border-config|session-start|frame-wait|copy-start|copy-complete|encode-start|dispose-start|done)(?:\r?\n|$)/g)].at(-1);
       rejectAfterHelperRetirement(runtime, pending, new ComputerError('The desktop helper did not answer in time.' +
-        (stage ? ` Last reported ${stage[1] ? 'UIA' : 'desktop'} stage: ${stage[1] ?? stage[2]}.` : '')));
+        (stage ? ` Last reported ${stage[1] ? 'UIA' : stage[2] ? 'desktop' : 'capture'} stage: ${stage[1] ?? stage[2] ?? stage[3]}.` : '')));
     }, remaining);
     pending = { resolve, reject, timer, deadline };
     runtime.pending = pending;

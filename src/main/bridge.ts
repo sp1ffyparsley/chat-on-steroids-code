@@ -2310,6 +2310,8 @@ export type SessionControlsView = {
   queueAtFinish?: boolean;
   canInject?: boolean;
   canSendDirectly?: boolean;
+  /** Sampled transport diagnosis only; per-Input claim and Send gates still apply. */
+  inputPolicy?: { browserAllowed: boolean; manualBrowserProbe: boolean; stoppedIdle: boolean };
   finishWaiting?: boolean;
   stopPending?: boolean;
   /** Existing Goal owner identifies the actual source turn; a retained draft is not a new turn's helper. */
@@ -2495,6 +2497,33 @@ async function controlledConversation(sessionId: string): Promise<string> {
   if ((await getSession(sessionId))?.conversationId !== id) throw new Error('conversation_changed');
   return id;
 }
+/** Diagnostic identity only: native exchange keys and recorder generations are different namespaces. */
+async function diagnosticQuestionCurrent(session: SessionSummary, native: NonNullable<ReturnType<typeof coreBrowserEvidence>>,
+  turnId: string | null): Promise<boolean> {
+  const id = session.conversationId, source = native.ordinaryFinal?.sourceUserMessageId;
+  if (!id || !turnId || !source) return false;
+  const [anchor, question] = await Promise.all([
+    stopUserAnchor(session.id, turnId, { requireUnique: true }), readLatestUserMessage(session.id)
+  ]);
+  if (anchor !== source || question?.messageId !== source) return false;
+  const [latestAnchor, latestQuestion] = await Promise.all([
+    stopUserAnchor(session.id, turnId, { requireUnique: true }), readLatestUserMessage(session.id)
+  ]);
+  const latest = await getSession(session.id);
+  const latestTurn = latest?.activeTurnId ??
+    (latest?.finishTurn?.conversationId === id ? latest.finishTurn.turnId : null);
+  // Observation clocks and capability counters may refresh for this same source.
+  // Only its immutable native identity participates in this diagnostic match.
+  const observed = coreBrowserEvidence(id);
+  return latest?.conversationId === id && latestTurn === turnId && latest.events === session.events &&
+    latestAnchor === anchor && latestQuestion?.messageId === source &&
+    (latestQuestion.origin ?? latestQuestion.seq) === (question.origin ?? question.seq) &&
+    latestQuestion.semanticUpdatedAt === question.semanticUpdatedAt &&
+    observed?.conversationId === id && observed.documentId === native.documentId &&
+    observed.navigationEpoch === native.navigationEpoch && observed.turnId === native.turnId &&
+    observed.ordinaryFinal?.sourceUserMessageId === source;
+}
+
 export async function sessionControlsFor(sessionId: string): Promise<SessionControlsView> {
   const id = await controlledConversation(sessionId);
   // Work/status may be read after the native final and original Core result
@@ -2540,16 +2569,21 @@ export async function sessionControlsFor(sessionId: string): Promise<SessionCont
   const diagnosticIncidents = diagnosticSnapshot?.incidents
     .filter(row => row.sourceSessionId === sessionId || row.sourceSessionId === activeWork.primeSessionId)
     .slice(-20) ?? [];
+  const goalWait = !blocked && !draft && goalActiveFor(id) ? await goalWaitFor(id, sessionId) : null;
+  const completion = native ? await nativeCompletionControlsDiagnostic(native, sessionId) : null;
+  const currentQuestionMatched = native ? await diagnosticQuestionCurrent(session, native, currentNativeTurn) : false;
   return { sessionId, plan, conversationId: id, activeTurnId, finishHeld,
     recovery,
     queueAtFinish: !blocked && inputPolicy.queueAtFinish, canInject: !blocked && inputPolicy.canInject,
     canSendDirectly: !blocked && !!inputPolicy.directTurn,
+    inputPolicy: { browserAllowed: inputPolicy.browserAllowed,
+      manualBrowserProbe: inputPolicy.manualBrowserProbe === true, stoppedIdle: inputPolicy.stoppedIdle === true },
     finishGoalDraft: getSessionFinishDraft(sessionId, activeTurnId),
     finishWaiting,
     goalDraft: draft ? { turnId: draft.turnId, stage: draft.stage, stageStartedAt: draft.stageStartedAt, model: draft.model,
       text: draft.text.slice(-8000), error: draft.error,
       ...(draft.outboxContinuationOwned === true ? { outboxContinuationOwned: true } : {}) } : null,
-    goalWait: !blocked && !draft && goalActiveFor(id) ? await goalWaitFor(id, sessionId) : null,
+    goalWait,
     nativeEvidence: native ? {
       reason: nativeFinal?.reason ?? null,
       fresh: native.observedAt <= Date.now() && Date.now() - native.observedAt <= CORE_BROWSER_EVIDENCE_MAX_AGE_MS,
@@ -2559,8 +2593,7 @@ export async function sessionControlsFor(sessionId: string): Promise<SessionCont
       // a subsequent associated-looking frame must not hide an earlier truncated census.
       inventoryIncomplete: native.pendingCompletion?.reason === 'inventory-incomplete' ||
         nativeFinal?.callInventoryComplete === false,
-      inventoryCurrentTurnMatched: Boolean(native.turnId && currentNativeTurn &&
-        native.turnId === currentNativeTurn && nativeFinal?.callInventoryComplete === false),
+      inventoryCurrentTurnMatched: currentQuestionMatched && nativeFinal?.callInventoryComplete === false,
       // Newer page observations cannot erase an older unanswered native call.
       // The existing pendingCompletion fence owns those counts until receipt proof.
       openCalls: Math.max(nativeFinal?.openCalls ?? 0, native.pendingCompletion?.openCalls ?? 0),
@@ -2572,10 +2605,10 @@ export async function sessionControlsFor(sessionId: string): Promise<SessionCont
         settlingTools: Math.min(400, settlingToolCalls(null)),
         managedProcesses: Math.min(400, unifiedExecManager.listProcesses().length),
         mcpRequests: Math.min(400, inFlightMcpRequests()), recordingWrites: Math.min(400, observationWritesInFlight) },
-      completion: await nativeCompletionControlsDiagnostic(native, sessionId),
+      completion: completion!,
       providerUI: {
         observedAt: native.observedAt, shell: native.shell, discovery: native.shellDiscovery,
-        currentTurnMatched: Boolean(native.turnId && native.turnId === currentNativeTurn),
+        currentTurnMatched: currentQuestionMatched,
         selectorMatches: native.shellScan?.selectorMatches ?? null,
         mapped: native.shellScan?.mapped ?? null,
         // Already normalized by the exact document/epoch evidence owner.
@@ -2583,7 +2616,8 @@ export async function sessionControlsFor(sessionId: string): Promise<SessionCont
         // a selector/UI change must not become unexplainable at Work status.
         // These numbers grant no native result, Send or Loop authority.
         rejects: native.shellScan ? { ...native.shellScan.rejects } : null,
-        ...(native.shellScan?.reader ? { reader: { ...native.shellScan.reader } } : {}),
+        ...(native.reader ? { reader: { ...native.reader } }
+          : native.shellScan?.reader ? { reader: { ...native.shellScan.reader } } : {}),
         identityRefusalSummary: nativeIdentityRefusalSummary(native)
       }
     } : null,
@@ -2599,8 +2633,10 @@ export async function sessionControlsFor(sessionId: string): Promise<SessionCont
 }
 /** One absolute budget includes opening an absent tab and native hydration. */
 export const STOP_COMMAND_TIMEOUT_MS = 120_000;
-async function stopUserAnchor(sessionId: string, turnId: string): Promise<string | undefined> {
+async function stopUserAnchor(sessionId: string, turnId: string,
+  options: { requireUnique?: true } = {}): Promise<string | undefined> {
   const rows = await readRecentEvents(sessionId, 64, { kinds: ['user_message', 'turn_start', 'turn_end'] });
+  if (options.requireUnique && rows.filter(row => row.kind === 'turn_start' && row.turnId === turnId).length !== 1) return undefined;
   const order = (event: SessionEvent) => ('origin' in event ? event.origin : undefined) ?? event.seq;
   const chronological = [...rows].sort((a, b) => order(a) - order(b));
   let user: string | undefined;
@@ -2859,15 +2895,20 @@ async function pendingStopCommands(): Promise<Array<{ id: string; conversationId
   return pending;
 }
 /** Switch activation cannot spend a live generation or silence-recovery window. */
-async function activateConversationGoalReply(id: string, active: boolean, reconstruct = false, deliberateResume = false): Promise<boolean> {
+async function activateConversationGoalReply(id: string, active: boolean, reconstruct = false, deliberateResume = false,
+  staleFailureReply?: NonNullable<ReturnType<typeof goalPendingReplyFor>>): Promise<boolean> {
   const grant = activeUntil.get(id);
   const idle = (silenceSourceTurnId?: string) => {
     const live = liveConversations().find(row => row.conversationId === id);
     return activeUntil.get(id) === grant && runningToolCalls(id) === 0 &&
       (!chatIsWorking(id) || (!!silenceSourceTurnId && live?.activeTurnId === silenceSourceTurnId)) &&
-      observationWritesInFlight === 0 && (!grant || grant.until <= Date.now());
+      observationWritesInFlight === 0 && (!grant || grant.until <= Date.now()) &&
+      (!staleFailureReply || (getConfig().ui.automationPaused !== true && goalSwitchFor(id).own &&
+        goalModeFor(id) === 'loop' && loopAfterTurnFor(id) && !repairsInFlight.has(id) &&
+        !continuationForSession(staleFailureReply.sessionId) && !unattendedRecoveryAt.has(id) &&
+        !goalDraftBusy(id) && settlingToolCalls(id) === 0));
   };
-  let applied = await setGoalReplyActiveNow(id, active, idle, deliberateResume);
+  let applied = await setGoalReplyActiveNow(id, active, idle, deliberateResume, staleFailureReply);
   // Recorder commits are intentionally a short exclusion window. A settings click must not
   // report success while silently losing its matching retry ticket just because one of the
   // many observed chats happened to be committing at that instant. Wait for that exact race
@@ -2877,7 +2918,7 @@ async function activateConversationGoalReply(id: string, active: boolean, recons
     while (observationWritesInFlight > 0 && Date.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, 25));
     }
-    if (observationWritesInFlight === 0) applied = await setGoalReplyActiveNow(id, active, idle, deliberateResume);
+    if (observationWritesInFlight === 0) applied = await setGoalReplyActiveNow(id, active, idle, deliberateResume, staleFailureReply);
   }
   if (active && reconstruct && !applied && observationWritesInFlight === 0) {
     applied = await reconstructExplicitGoalReplyNow(id, () => idle());
@@ -4035,9 +4076,20 @@ async function restoreAutomaticLoopDebt(
   if (!control.own || !control.enabled || control.mode !== 'loop' || !loopAfterTurnFor(conversationId) ||
       !['completed', 'failed'].includes(session.lastTurnOutcome ?? '') ||
       !session.lastTurnEndAt || now < session.lastTurnEndAt + AUTOMATIC_LOOP_RECOVERY_GRACE_MS ||
-      !automaticLoopReplyRecoveryDue(conversationId, now) ||
       repairsInFlight.has(conversationId) || continuationForSession(session.id) ||
-      goalDraftBusy(conversationId) || goalPendingReplyFor(conversationId)) return false;
+      goalDraftBusy(conversationId)) return false;
+  const pending = goalPendingReplyFor(conversationId);
+  if (pending) {
+    if (session.lastTurnOutcome !== 'failed' || pending.sessionId !== session.id ||
+        pending.replyId !== `activation:${pending.turnId}`.slice(0, 200) ||
+        unattendedRecoveryAt.has(conversationId)) return false;
+    // Let the Goal owner prove the exact newer failure inside its Input lock.
+    // Never fall back to reconstructing an unrelated reply if that proof fails.
+    const reconciled = await activateConversationGoalReply(conversationId, true, false, false, pending);
+    if (reconciled) logInfo('bridge: reconciled a stale generated Loop checkpoint with the latest recorded failure; no Send receipt inferred');
+    return reconciled;
+  }
+  if (!automaticLoopReplyRecoveryDue(conversationId, now)) return false;
   return activateConversationGoalReply(conversationId, true, true);
 }
 
@@ -4242,7 +4294,9 @@ export async function automationSupervisorSnapshot(
     });
   }
   const presentationAttributionKey = presentationDeferredByUnattributedTool.sort().join(',');
-  if (presentationAttributionKey !== automationPresentationAttributionLogKey) {
+  // Per-chat readers pass partial catalogs. They must not replace the fleet's
+  // transition cursor and make ordinary alternating status polls log forever.
+  if (source === undefined && presentationAttributionKey !== automationPresentationAttributionLogKey) {
     automationPresentationAttributionLogKey = presentationAttributionKey;
     if (presentationDeferredByUnattributedTool.length > 0) {
       logInfo('bridge: automation presentation ignored unattributed local-tool safety evidence for ' +
@@ -4463,6 +4517,18 @@ export async function resumeAutomationChats(options: AutomationResumeOptions = {
   }
   const mode = options.mode ?? 'all';
   const background = options.maxQueued !== undefined || options.lifecycleEpoch !== undefined;
+  // Only a deliberate zero-eligible Resume needs this fixed admission explanation.
+  // Each predicate stays in its original short-circuit position; diagnostics neither
+  // inspect a later gate nor expose session, conversation, objective or secret values.
+  type AdmissionSkip = 'missing-conversation' | 'duplicate-conversation' | 'worker' | 'helper' |
+    'blocked' | 'goal-inactive' | 'mode' | 'inherited-background' | 'recording-disabled' |
+    'key-missing' | 'superseded' | 'handoff' | 'rotation';
+  const admissionSkips = new Map<AdmissionSkip, number>();
+  const admissionRefused = (reason: AdmissionSkip, refused: unknown): boolean => {
+    if (!refused) return false;
+    if (!background) admissionSkips.set(reason, (admissionSkips.get(reason) ?? 0) + 1);
+    return true;
+  };
   // Resume all is an explicit user/startup recovery boundary. Older browser-helper owners
   // that ended without a delivery receipt otherwise fence their source chat forever even
   // though the user has deliberately asked us to start it again. Retire one representative
@@ -4500,18 +4566,28 @@ export async function resumeAutomationChats(options: AutomationResumeOptions = {
   for (const session of candidates) {
     if (options.lifecycleEpoch !== undefined && options.lifecycleEpoch !== browserLoopResumeEpoch) break;
     const id = session.conversationId;
-    if (!id || seen.has(id)) { result.skipped++; continue; }
+    if (!id || seen.has(id)) {
+      admissionRefused(!id ? 'missing-conversation' : 'duplicate-conversation', true);
+      result.skipped++;
+      continue;
+    }
     seen.add(id);
     const automation = goalSwitchFor(id);
-    if (session.origin?.kind === 'worker' || session.origin?.kind === 'helper' || goalBlockReason(id) ||
-        !goalActiveFor(id) || (mode === 'loop' && goalModeFor(id) !== 'loop') ||
-        (options.maxQueued !== undefined && !automation.own) ||
-        !getConfig().sessions.record || !await goalKeyPresent(goalModeFor(id)) ||
-        await conversationWasSuperseded(id) || continuationForSession(session.id)) {
+    if (admissionRefused('worker', session.origin?.kind === 'worker') ||
+        admissionRefused('helper', session.origin?.kind === 'helper') ||
+        admissionRefused('blocked', goalBlockReason(id)) ||
+        admissionRefused('goal-inactive', !goalActiveFor(id)) ||
+        admissionRefused('mode', mode === 'loop' && goalModeFor(id) !== 'loop') ||
+        admissionRefused('inherited-background', options.maxQueued !== undefined && !automation.own) ||
+        admissionRefused('recording-disabled', !getConfig().sessions.record) ||
+        admissionRefused('key-missing', !await goalKeyPresent(goalModeFor(id))) ||
+        admissionRefused('superseded', await conversationWasSuperseded(id)) ||
+        admissionRefused('handoff', continuationForSession(session.id))) {
       result.skipped++;
       continue;
     }
     if (rotation.enabled && !automationRotationAdmits(id)) {
+      admissionRefused('rotation', true);
       result.skipped++;
       continue;
     }
@@ -4657,6 +4733,11 @@ export async function resumeAutomationChats(options: AutomationResumeOptions = {
       const repair = repairsInFlight.get(id);
       if (!firstOwed && repair) firstOwed = { conversationId: id, repair };
     }
+  }
+  if (!background && result.eligible === 0) {
+    logInfo('bridge: explicit Resume admission eligible=0 firstSkips=' +
+      ([...admissionSkips].sort(([left], [right]) => left.localeCompare(right))
+        .map(([reason, count]) => `${reason}:${count}`).join(',') || 'none'));
   }
   logInfo(`bridge: resume ${mode === 'loop' ? 'Loop' : 'all automation'}${options.trigger ? ` after ${options.trigger}` : ''} — ${result.queued} queued, ${result.alreadyActive} working, ${result.recovering} recovering, ${result.rearmed} durable repl${result.rearmed === 1 ? 'y' : 'ies'} re-armed, ${result.skipped} skipped`);
   wakeBrowserWork();
@@ -6407,7 +6488,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       if (woke?.revived) tidyCommands();
     }
     observationWritesInFlight += 1;
-    let committed: { sessionId: string | null; stored: number; wake: boolean } | undefined;
+    let committed: { sessionId: string | null; stored: number; wake: boolean; collectDecision: boolean } | undefined;
     try {
       const agent = agentForOwnedConversation(id);
       // The command acknowledgement normally supplies this origin before the worker's first
@@ -6482,7 +6563,6 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
           return json(res, 503, { error: 'conversation_limit_handoff_not_durable', retryable: true }, origin);
         }
       }
-      if (!superseded && result.sessionId) await collectRecordedBrowserDecision(id);
       // The stable assistant message, not the page-local turn id, is the exactly-once Goal
       // checkpoint. Freeze app config/key policy before 200 lets the browser retire this
       // terminal observation from its durable journal.
@@ -6566,10 +6646,16 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       // no input row changed: finish stages and after-turn sends can now be claimed.
       // Publish that boundary to the existing wake channel instead of waiting for
       // the extension's idle maintenance poll. Claims still recheck exact state.
-      committed = { sessionId: result.sessionId, stored: result.stored, wake: !superseded && result.activity.terminal };
+      committed = { sessionId: result.sessionId, stored: result.stored, wake: !superseded && result.activity.terminal,
+        collectDecision: !superseded && !!result.sessionId };
     } finally {
       observationWritesInFlight -= 1;
     }
+    // Collection rechecks source/physical readiness, including outstanding recorder
+    // writes. This observation must finish before its saved helper answer is tested;
+    // otherwise it vetoes itself and permanently fails a valid native-Sent result.
+    // Other concurrent writes remain counted and still withhold forward authority.
+    if (committed?.collectDecision) await collectRecordedBrowserDecision(id);
     // A replacement page may discover Thinking failed after this source's ordinary
     // silence ticket was already filed. Publish its receipt-anchored listening
     // deadline into that same outbox row before acknowledging the observation.
@@ -6766,6 +6852,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
             shell: parsed['shell'] as 'classic' | 'alternate' | 'unknown',
             shellDiscovery: parsed['shellDiscovery'] as 'compatible' | 'failed' | 'unknown',
             shellScan: parsed['shellScan'],
+            ...(Object.getOwnPropertyDescriptor(parsed, 'reader')
+              ? { reader: Object.getOwnPropertyDescriptor(parsed, 'reader')?.value } : {}),
             ordinaryFinal: parsed['ordinaryFinal'],
             requestIds: Array.isArray(parsed['requestIds']) ? parsed['requestIds'] as string[] : [],
             turnId: typeof parsed['turnId'] === 'string' ? parsed['turnId'] : null
@@ -13083,15 +13171,16 @@ export async function settledTurnContinuationProof(sessionId: string, conversati
   // An ordinary Sent input can have an exact native question/final pair without
   // a document-local generation. Keep its existing reply cursor; never invent a
   // turn or treat this forward permission as a missing tool-result receipt.
+  // The exact native pair also applies when its results are already strictly complete.
   const ordinarySourceCurrent = () => ordinaryInputTerminalReply(sessionId, conversationId, turnId, {
     inputRows: options.inputRows, ignoreInputIds: options.ignoreInputIds,
-    ...(native ? { settledNativeSource: { sourceUserMessageId: native.sourceUserMessageId,
-      finalMessageId: native.finalMessageId } } : {})
+    ...(nativeSource ? { settledNativeSource: { sourceUserMessageId: nativeSource.sourceUserMessageId,
+      finalMessageId: nativeSource.finalMessageId } } : {})
   });
   // A restored activation may retain its exact watchdog generation cursor even
   // when the later provider final has no local turn alias. Input must prove that
   // very watchdog owner; never substitute an arbitrary latest generation.
-  const ordinarySource = Boolean(native && await ordinarySourceCurrent());
+  const ordinarySource = Boolean(nativeSource && await ordinarySourceCurrent());
   if (ordinarySource) source = turnId;
   if (!source || !current()) return refuse('reply_source_changed');
   const events = await readRecentEvents(sessionId, 1024, {
@@ -13135,8 +13224,8 @@ export async function settledTurnContinuationProof(sessionId: string, conversati
         unresolvedCurrentProcess) return refuse(`stopped_source current=${Boolean(current())} userMatches=${user?.kind === 'user_message' && user.messageId === checkpoint.ordinaryFinal!.checkpointSourceUserMessageId} boundaryStopped=${boundary?.kind === 'turn_end' && boundary.outcome === 'stopped'} boundaryMatches=${boundary?.seq === pending.eventSeq && boundary?.seq === stoppedRequest!.eventSeq} newerWork=${events.some(event => positionOf(event) > (boundary?.seq ?? 0))} revisionMatches=${stoppedRequest!.sourceRevision === checkpointRevision}`);
   } else if (!current() || user?.kind !== 'user_message' || final?.kind !== 'assistant_message' ||
       user.message.truncated ||
-      (native && (user.messageId !== native.sourceUserMessageId || final.messageId !== native.finalMessageId ||
-        final.providerMessageId !== native.finalMessageId)) ||
+      (nativeSource && (user.messageId !== nativeSource.sourceUserMessageId || final.messageId !== nativeSource.finalMessageId ||
+        final.providerMessageId !== nativeSource.finalMessageId)) ||
       !final.final || final.state !== 'final' || !final.message.text.trim() || final.message.truncated ||
       (!ordinarySource && final.turnId !== source && turnId !== `reply:${final.messageId}`) ||
       (!ordinarySource && (final.origin ?? final.seq) <= (user.origin ?? user.seq)) ||

@@ -162,7 +162,7 @@ async function settleWheelFrame(w: { requestAnimationFrame: (callback: FrameRequ
   await settle();
 }
 
-async function boot(events: SessionEvent[], selectExisting = true, pausedHelpers: Array<{ id: string; sourceSessionId: string }> = [], projects: LocalProject[] = [], options: { origin?: SessionSummary["origin"]; developerMode?: boolean; followOutput?: boolean; automationPaused?: boolean; automationProfile?: 'day' | 'overnight' | 'rotation'; automation?: AutomationSupervisorSnapshot; alarmAutomation?: FleetAutomationAlarmView | null; alarmState?: Partial<MajorityAlarmState>; sessions?: SessionSummary[]; detailSessions?: Record<string, SessionSummary>; strictSessionPaging?: boolean; sessionEvents?: Record<string, SessionEvent[]>; inputs?: InputEntry[]; pro?: boolean; sidebarFolders?: SidebarFolder[]; blocked?: string[]; sessionTotal?: number; sessionPageCursor?: { updatedAt: number; id: string }; globalWorkerLimit?: number; workerProgress?: Array<{ id: string; total: number; active: number; queued: number; finished: number; failed: number; names: string[]; failures: string[] }>; controls?: Record<string, unknown> } = {}) {
+async function boot(events: SessionEvent[], selectExisting = true, pausedHelpers: Array<{ id: string; sourceSessionId: string; reviewRequired?: true }> = [], projects: LocalProject[] = [], options: { origin?: SessionSummary["origin"]; developerMode?: boolean; followOutput?: boolean; automationPaused?: boolean; automationProfile?: 'day' | 'overnight' | 'rotation'; automation?: AutomationSupervisorSnapshot; alarmAutomation?: FleetAutomationAlarmView | null; alarmState?: Partial<MajorityAlarmState>; sessions?: SessionSummary[]; detailSessions?: Record<string, SessionSummary>; strictSessionPaging?: boolean; sessionEvents?: Record<string, SessionEvent[]>; inputs?: InputEntry[]; pro?: boolean; sidebarFolders?: SidebarFolder[]; blocked?: string[]; sessionTotal?: number; sessionPageCursor?: { updatedAt: number; id: string }; globalWorkerLimit?: number; workerProgress?: Array<{ id: string; total: number; active: number; queued: number; finished: number; failed: number; names: string[]; failures: string[] }>; controls?: Record<string, unknown> } = {}) {
   const html = await fs.readFile(path.join(process.cwd(), 'src', 'renderer', 'index.html'), 'utf8');
   dom = new JSDOM(html, { url: 'https://local.test/', pretendToBeVisual: true });
   const w = dom.window;
@@ -398,7 +398,8 @@ async function boot(events: SessionEvent[], selectExisting = true, pausedHelpers
       },
       // IPC snapshots cannot share the backend's mutable array with the renderer.
       listInputs: () => ok(structuredClone(live.inputs)),
-      listPausedHelpers: () => ok(pausedHelpers),
+      listPausedHelpers: (reviewedSourceSessionId?: string) => ok(pausedHelpers.filter(helper =>
+        !helper.reviewRequired || helper.sourceSessionId === reviewedSourceSessionId)),
       retryHelper: (id: string, sourceSessionId: string) => {
         live.controlCalls.push({ id: sourceSessionId, action: `retry:${id}` });
         pausedHelpers = pausedHelpers.filter(row => row.sourceSessionId !== sourceSessionId);
@@ -10891,6 +10892,44 @@ it('offers deliberate helper retry only for the selected source session', async 
   await settle();
   expect(live.controlCalls).toEqual([{ id: sourceSessionId, action: 'retry:paused-selected-new' }]);
   expect(queue.querySelectorAll('button')).toHaveLength(0);
+});
+
+it.each([false, true])('offers reviewed archived-safety recovery only on the selected chat, outside bulk restart (bulk=%s)', async includeCancelled => {
+  const sourceSessionId = summary([]).id;
+  const { w, live } = await boot([], true, [
+    { id: 'reviewed-selected-native-helper', sourceSessionId, reviewRequired: true },
+    { id: 'reviewed-foreign-native-helper', sourceSessionId: 'another-session', reviewRequired: true },
+    ...(includeCancelled ? [{ id: 'cancelled-foreign-helper', sourceSessionId: 'cancelled-source' }] : [])
+  ]);
+  const queue = w.document.getElementById('inputQueue')!;
+  expect(queue.textContent).toContain('Saved helper answer needs review');
+  expect(queue.textContent).toContain('original receipt is retained');
+  expect(queue.textContent).not.toContain('unconfirmed helper owner');
+  const bulk = w.document.getElementById('retryPausedHelpers') as HTMLButtonElement;
+  expect(bulk.hidden).toBe(!includeCancelled);
+  if (includeCancelled) expect(w.document.getElementById('retryPausedHelpersLabel')!.textContent).toBe('Restart 1 helper chats');
+  const restart = [...queue.querySelectorAll('button')].find(button => button.textContent?.includes('Restart helper'))!;
+  expect(restart).toBeTruthy();
+  restart.click(); await settle();
+  expect(live.controlCalls).toEqual([{ id: sourceSessionId, action: 'retry:reviewed-selected-native-helper' }]);
+  expect(live.sent).toEqual([]);
+});
+
+it.each(['stale selection', 'account pause'] as const)('refuses an old reviewed-safety helper action after %s', async changed => {
+  const first = summary([]), second = { ...first, id: 'reviewed-second-source', conversationId: 'reviewed-second-conversation', title: 'Second source' };
+  const { w, live, state } = await boot([], true,
+    [{ id: 'reviewed-held-helper', sourceSessionId: first.id, reviewRequired: true }], [], { sessions: [first, second] });
+  const button = [...w.document.querySelectorAll<HTMLButtonElement>('#inputQueue button')]
+    .find(row => row.textContent?.includes('Restart helper'))!;
+  expect(button).toBeTruthy();
+  if (changed === 'stale selection') {
+    (w as any).api.listPausedHelpers = () => new Promise(() => {});
+    (w.document.querySelector('#sessionList [data-id="reviewed-second-source"]') as HTMLElement).click();
+  } else state.config.ui.automationPaused = true;
+  button.click(); await settle();
+  expect(live.controlCalls).toEqual([]);
+  expect(live.sent).toEqual([]);
+  if (changed === 'account pause') expect(w.document.querySelector('.toast')?.textContent).toContain('Automation is paused for this account');
 });
 
 it.each(['Restart helper', 'Resume this chat'])('refuses a lingering %s card after selecting another chat', async label => {

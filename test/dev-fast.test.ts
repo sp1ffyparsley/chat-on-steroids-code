@@ -212,7 +212,8 @@ describe('fast development launcher', () => {
       const command = spawnSync(process.execPath, [local, ...flags], {
         cwd: root, encoding: 'utf8', timeout: 15000, maxBuffer: 1024 * 1024
       });
-      expect(command.stdout.trim().startsWith('{'), command.stderr).toBe(true);
+      expect(command.stdout.trim().startsWith('{'), JSON.stringify({ status: command.status,
+        signal: command.signal, error: command.error?.message, stderr: command.stderr })).toBe(true);
       return { code: command.status, receipt: JSON.parse(command.stdout) };
     };
     let runningUpdate: ReturnType<typeof spawn> | null = null;
@@ -1769,8 +1770,12 @@ setTimeout(()=>process.exit(0),2000);
         .toBe('historical-generated-output-untouched');
       expect(existsSync(path.join(root, '.test_tmp', '.chat42-private-preview-owner'))).toBe(false);
     } finally {
-      if (await localUpdateFixtureCleanupReady(compilerAbsenceVerified, [compilerChild, previewChild]))
-        rmSync(root, { recursive: true, force: true });
+      if (await localUpdateFixtureCleanupReady(compilerAbsenceVerified, [compilerChild, previewChild])) {
+        // Exact compiler absence and child close already own this fixture. Windows
+        // can briefly retain a filesystem/indexer handle after those closes; retry
+        // only this proved-owned cleanup, never the failed ownership checks above.
+        rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      }
     }
   }, 165000);
 

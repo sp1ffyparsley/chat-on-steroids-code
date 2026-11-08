@@ -27,12 +27,15 @@ try {
 }
 Write-Output 'CAPTURE_RUNTIME_VERIFIED'
 `, 'utf8');
-      const { stdout } = await execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', script], {
+      const { stdout, stderr } = await execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', script], {
         windowsHide: true,
         timeout: 15_000,
         maxBuffer: 32_768
       });
       expect(stdout.trim()).toBe('CAPTURE_RUNTIME_VERIFIED');
+      expect(stderr.trim().split(/\r?\n/)).toEqual([
+        '[cos-capture] compile-start', '[cos-capture] compiled', '[cos-capture] support-check'
+      ]);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

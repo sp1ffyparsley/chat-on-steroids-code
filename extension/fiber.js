@@ -41,6 +41,8 @@
 
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
   const VERSION = 19;
+  /** Private implementation epoch, independent of the stable cross-world wire schema. */
+  const PRODUCER_VERSION = 154;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -1399,6 +1401,48 @@
     const content = data && own.call(data, 'value') ? data.value : null;
     const textField = content && typeof content === 'object' ? Object.getOwnPropertyDescriptor(content, 'text') : null;
     const raw = textField && own.call(textField, 'value') ? textField.value : null;
+    const validReceipt = receipt => receipt && typeof receipt === 'object' && !Array.isArray(receipt) &&
+      typeof receipt.id === 'string' && /^[a-f0-9]{48}$/.test(receipt.id) &&
+      (receipt.version === 1 && Object.keys(receipt).length === 2 ||
+        receipt.version === 2 && Object.keys(receipt).length === 3 &&
+        typeof receipt.invocationSha256 === 'string' && /^[a-f0-9]{64}$/.test(receipt.invocationSha256));
+    const remember = receipt => {
+      if (proof && receipt?.version === 2) proof.invocationSha256 = receipt.invocationSha256;
+      return receipt.id;
+    };
+    // ChatGPT flattens image CallToolResults into this exact provider carrier:
+    // one structured-output field followed by image pointers. Do not search or
+    // recursively parse arbitrary tool prose/parts. Accept only the v2 root
+    // receipt, with its original invocation digest, on a finished native result.
+    const type = content && Object.getOwnPropertyDescriptor(content, 'content_type');
+    if (type?.value === 'multimodal_text') {
+      const descriptor = Object.getOwnPropertyDescriptor(content, 'parts');
+      const parts = descriptor && own.call(descriptor, 'value') ? descriptor.value : null;
+      if (!status || status.value !== 'finished_successfully' || textField ||
+          Object.keys(content).length !== 2 || !Array.isArray(parts) || parts.length < 2 || parts.length > 17)
+        return decline('parts');
+      const first = Object.getOwnPropertyDescriptor(parts, '0');
+      const carrier = first && own.call(first, 'value') ? first.value : null;
+      const prefix = 'Structured tool output: ';
+      if (typeof carrier !== 'string' || !carrier.startsWith(prefix) || carrier.length > 512 * 1024)
+        return decline('parts');
+      for (let at = 1; at < parts.length; at++) {
+        const field = Object.getOwnPropertyDescriptor(parts, String(at));
+        const image = field && own.call(field, 'value') ? field.value : null;
+        const imageType = image && typeof image === 'object'
+          ? Object.getOwnPropertyDescriptor(image, 'content_type') : null;
+        if (!imageType || !own.call(imageType, 'value') || imageType.value !== 'image_asset_pointer')
+          return decline('parts');
+      }
+      try {
+        const payload = carrier.slice(prefix.length), value = JSON.parse(payload);
+        if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 1 ||
+            !own.call(value, 'cosResultReceipt') || JSON.stringify(value) !== payload ||
+            value.cosResultReceipt?.version !== 2 || !validReceipt(value.cosResultReceipt)) return decline('receipt');
+        if (shapes) shapes.valid++;
+        return remember(value.cosResultReceipt);
+      } catch { return decline('json'); }
+    }
     if (typeof raw !== 'string' || !content || content.content_type !== 'code' || content.language !== 'json') {
       const parts = content && typeof content === 'object' ? Object.getOwnPropertyDescriptor(content, 'parts') : null;
       return decline(parts && own.call(parts, 'value') && Array.isArray(parts.value) ? 'parts' : 'content');
@@ -1408,15 +1452,6 @@
       const value = JSON.parse(raw);
       if (!value || typeof value !== 'object' || Array.isArray(value) ||
           (value.isError !== undefined && typeof value.isError !== 'boolean')) return decline('envelope');
-      const validReceipt = receipt => receipt && typeof receipt === 'object' && !Array.isArray(receipt) &&
-        typeof receipt.id === 'string' && /^[a-f0-9]{48}$/.test(receipt.id) &&
-        (receipt.version === 1 && Object.keys(receipt).length === 2 ||
-          receipt.version === 2 && Object.keys(receipt).length === 3 &&
-          typeof receipt.invocationSha256 === 'string' && /^[a-f0-9]{64}$/.test(receipt.invocationSha256));
-      const remember = receipt => {
-        if (proof && receipt?.version === 2) proof.invocationSha256 = receipt.invocationSha256;
-        return receipt.id;
-      };
       // ChatGPT also serializes structuredContent directly into the native JSON
       // result. The reserved root field is server-authored after durable commit.
       // Require the positively finished provider message and reject competing
@@ -2040,6 +2075,74 @@
   }
 
   /**
+   * A just-completed turn can still owe exact result attribution after the provider accepts its
+   * successor. The current-terminal reader deliberately excludes that older turn. Recover only
+   * its result path here, from the same live canonical branch and its independently receipted
+   * final; never make an older final eligible for terminal publication or another Loop reply.
+   */
+  function shellRequestPath(snapshot, entry) {
+    const current = shellCurrentPath(snapshot, entry);
+    if (current.length || !snapshot || entry.turn.status !== 'complete') return current;
+    const value = (object, key) => object && typeof object === 'object'
+      ? Object.getOwnPropertyDescriptor(object, key)?.value : undefined;
+    const turns = snapshot.renderedTurns;
+    const matches = turns.filter(row => row?.id === entry.id && row.turn === entry.turn);
+    if (matches.length !== 1 || turns.at(-2) !== matches[0]) return [];
+    const latest = turns.at(-1);
+    const latestTurn = value(latest, 'turn'), latestItems = value(latestTurn, 'items');
+    const latestIds = value(latestTurn, 'messageIds');
+    if (!latestTurn || value(latest, 'conversationId') !== entry.conversationId ||
+        !Array.isArray(latestItems) || latestItems.length > MAX_ROWS ||
+        !Array.isArray(latestIds) || latestIds.length < 1 || latestIds.length > MAX_ROWS) return [];
+    const nextUsers = [], nextIds = [];
+    for (let at = 0; at < latestItems.length; at++) {
+      const item = value(latestItems, String(at));
+      if (!item) return [];
+      if (value(item, 'type') === 'user-message')
+        nextUsers.push(str(value(item, 'messageId')) || str(value(item, 'serverMessageId')));
+    }
+    for (let at = 0; at < latestIds.length; at++) {
+      const member = str(value(latestIds, String(at)));
+      if (!member) return [];
+      nextIds.push(member);
+    }
+    const mapping = snapshot.renderedConversation.mapping;
+    const user = shellSelectedUserId(entry, mapping), nextUser = nextUsers.length === 1 ? nextUsers[0] : null;
+    if (!user || !nextUser || user === nextUser || !nextIds.includes(nextUser)) return [];
+    const finals = entry.turn.items.filter(item => value(item, 'type') === 'assistant-message' && value(item, 'phase') === 'final_answer');
+    if (finals.length !== 1) return [];
+    const finalId = str(value(finals[0], 'messageId'));
+    if (!finalId || !shellProviderTerminalAt(mapping, finalId)) return [];
+    const seen = new Set(), olderIds = new Set(), older = [];
+    let id = snapshot.renderedConversation.current_node, successorSeen = false, finalSeen = false;
+    for (let at = 0; at < MAX_NATIVE_PATH_NODES && typeof id === 'string' && id.length <= MAX_TEXT && !seen.has(id); at++) {
+      const node = value(mapping, id), message = value(node, 'message');
+      if (value(node, 'id') !== id || value(message, 'id') !== id) return [];
+      seen.add(id);
+      const role = value(value(message, 'author'), 'role');
+      if (!finalSeen) {
+        if (id === nextUser) {
+          if (role !== 'user' || !nextIds.every(member => seen.has(member))) return [];
+          successorSeen = true;
+        } else if (role === 'user') return [];
+        if (id === finalId) {
+          if (!successorSeen) return [];
+          finalSeen = true;
+        }
+      }
+      if (finalSeen) {
+        older.push(id); olderIds.add(id);
+        if (role === 'user') {
+          return id === user && entry.turn.messageIds.every(member => olderIds.has(member))
+            ? older.reverse() : [];
+        }
+      }
+      id = value(node, 'parent');
+    }
+    return [];
+  }
+
+  /**
    * One exact provider-owned terminal assistant record from a conversation mapping.
    *
    * This reader is intentionally narrower than the ordinary authored-text projection. It is
@@ -2181,7 +2284,7 @@
     const mapping = live?.renderedConversation?.mapping || data?.mapping;
     if (!mapping || typeof mapping !== 'object') return noMetadata('callLiveMappingMissing');
     const selected = new Set(ids), invocationIds = new Set(), unprovedInvocations = new Set(), sourceCounts = new Map();
-    const currentPath = shellCurrentPath(live, entry), currentIds = new Set(currentPath), completed = new Set();
+    const currentPath = shellRequestPath(live, entry), currentIds = new Set(currentPath), completed = new Set();
     const resultReceipts = new Map(), resultInvocationDigests = new Map();
     for (const reference of shell.callSources.values()) if (reference.id)
       sourceCounts.set(reference.id, (sourceCounts.get(reference.id) || 0) + 1);
@@ -2341,7 +2444,10 @@
     let nativeAnchorBranch = 'none';
     let nativeAnchorRetainedParent = 'none', nativeAnchorRetainedMember = 'none';
     let nativeAnchorRetainedPosition = 'none', nativeAnchorRetainedLocation = 'none';
+    let nativeAnchorExecutionCalls = null, nativeAnchorExecutionResults = null;
+    let nativeAnchorExecutionBalance = 'none';
     let nativeAnchorFinalFacet = 'none', nativeAnchorCoreResultFacet = 'none', nativeAnchorHeaderFacet = 'none';
+    let nativeAnchorRetryScope = 'none';
     const finalFacet = facet => { if (nativeAnchorFinalFacet === 'none') nativeAnchorFinalFacet = facet; };
     let nativeAnchorMember = 'none', nativeAnchorMemberTerminal = false, nativeAnchorMemberTyped = false;
     const mountedNativeScope = (() => {
@@ -2393,10 +2499,66 @@
           const headerMeta = nativeField(header, 'metadata');
           const headerWorking = str(nativeField(headerMeta, 'working_turn_id'));
           const headerExchange = str(nativeField(headerMeta, 'turn_exchange_id'));
+          const retainedRetryScope = () => {
+            const held = reason => { nativeAnchorRetryScope = reason; return false; };
+            const userNode = nativeField(mapping, typedUserId), children = nativeField(userNode, 'children');
+            if (!Array.isArray(children) || children.length < 2 || children.length > MAX_ROWS)
+              return held('children-unavailable');
+            const childIds = new Set();
+            for (let at = 0; at < children.length; at++) {
+              const id = str(nativeField(children, String(at)));
+              if (!id || childIds.has(id)) return held('children-ambiguous');
+              childIds.add(id);
+            }
+            if (!childIds.has(currentPath[1])) return held('current-header-undeclared');
+            const cachedMapping = nativeField(data, 'mapping'), cachedUser = nativeField(cachedMapping, typedUserId);
+            if (cachedUser) {
+              const message = nativeField(cachedUser, 'message'), metadata = nativeField(message, 'metadata');
+              if (nativeField(cachedUser, 'id') !== typedUserId || nativeField(message, 'id') !== typedUserId ||
+                  nativeField(nativeField(message, 'author'), 'role') !== 'user' ||
+                  ['working_turn_id', 'turn_exchange_id', 'request_id'].some(key =>
+                    nativeField(metadata, key) !== nativeField(userMeta, key))) return held('user-cache-conflict');
+            }
+            let witnesses = 0;
+            for (const id of childIds) {
+              const node = nativeField(mapping, id), message = nativeField(node, 'message');
+              if (nativeField(node, 'id') !== id || nativeField(message, 'id') !== id ||
+                  nativeField(node, 'parent') !== typedUserId) return held('child-identity-conflict');
+              if (id === currentPath[1]) continue;
+              const metadata = nativeField(message, 'metadata');
+              if (nativeField(nativeField(message, 'author'), 'role') !== 'system' ||
+                  str(nativeField(metadata, 'working_turn_id')) !== working ||
+                  str(nativeField(metadata, 'turn_exchange_id')) !== exchange) continue;
+              if (currentIds.has(id) || nativeField(message, 'recipient') !== 'all' ||
+                  nativeField(message, 'status') !== 'finished_successfully' ||
+                  nativeField(metadata, 'is_visually_hidden_from_conversation') !== true ||
+                  nativeField(metadata, 'message_type') !== 'next' ||
+                  nativeField(metadata, 'rebase_developer_message') !== false ||
+                  (str(nativeField(userMeta, 'request_id')) &&
+                    nativeField(metadata, 'request_id') !== nativeField(userMeta, 'request_id')))
+                return held('prior-header-conflict');
+              const cached = nativeField(cachedMapping, id);
+              if (cached) {
+                const prior = nativeField(cached, 'message'), priorMeta = nativeField(prior, 'metadata');
+                if (nativeField(cached, 'id') !== id || nativeField(cached, 'parent') !== typedUserId ||
+                    nativeField(prior, 'id') !== id || nativeField(nativeField(prior, 'author'), 'role') !== 'system' ||
+                    ['recipient', 'status'].some(key => nativeField(prior, key) !== nativeField(message, key)) ||
+                    ['parent_id', 'working_turn_id', 'turn_exchange_id', 'request_id', 'is_visually_hidden_from_conversation',
+                      'message_type', 'rebase_developer_message'].some(key =>
+                        nativeField(priorMeta, key) !== nativeField(metadata, key))) return held('prior-cache-conflict');
+              }
+              if (++witnesses > 1) return held('prior-header-ambiguous');
+            }
+            if (witnesses !== 1) return held('prior-header-unavailable');
+            // The user retains its original namespace; the selected new header remains the
+            // execution authority only after every ordinary group/result/cache guard below.
+            nativeAnchorRetryScope = 'matched';
+            return true;
+          };
           // Preserve the guard's exact order and short-circuit reads. Report only
           // its first fixed refusal; provider values and identities stay local.
           const headerFacet = !headerWorking ? 'working-missing' : !headerExchange ? 'exchange-missing'
-            : hasUserScope && (working !== headerWorking || exchange !== headerExchange) ? 'user-scope'
+            : hasUserScope && (working !== headerWorking || exchange !== headerExchange) && !retainedRetryScope() ? 'user-scope'
             : nativeField(header, 'recipient') !== 'all' ? 'recipient'
             : nativeField(header, 'status') !== 'finished_successfully' ? 'status'
             : nativeField(headerMeta, 'is_visually_hidden_from_conversation') !== true ? 'visible'
@@ -2424,6 +2586,37 @@
           }
           const canonicalParents = new Map(), executionIds = new Set(), nativeCalls = new Set(), executionGroups = new Map(), receiptIds = new Set();
           let execution = null;
+          // The rendered graph can contract one finished commentary node while the
+          // invocation retains its original metadata parent. Prove that exact
+          // two-edge path, not merely a matching namespace or an off-path node.
+          // Narration grants no result credit: all native groups/receipts below
+          // must still agree. A retained tool, final, foreign edge or getter is
+          // never an interchangeable parent.
+          const contractedNarration = (id, parent, metadata) => {
+            if (currentIds.has(id) || selected.has(id) || !nativeNarration(id)) return false;
+            const node = nativeField(mapping, id), message = nativeField(node, 'message');
+            const meta = nativeField(message, 'metadata');
+            if (nativeField(node, 'parent') !== parent || nativeField(meta, 'parent_id') !== parent ||
+                nativeField(message, 'status') !== 'finished_successfully' || nativeField(message, 'end_turn') !== false ||
+                nativeField(message, 'recipient') !== 'all' ||
+                nativeField(nativeField(message, 'content'), 'content_type') !== 'text' ||
+                !['request_id', 'working_turn_id', 'turn_exchange_id'].every(key =>
+                  str(nativeField(meta, key)) && nativeField(meta, key) === nativeField(metadata, key))) return false;
+            const cached = nativeField(nativeField(data, 'mapping'), id);
+            if (cached && cached !== node) {
+              const cachedMessage = nativeField(cached, 'message'), cachedMeta = nativeField(cachedMessage, 'metadata');
+              if (nativeField(cached, 'id') !== id || nativeField(cachedMessage, 'id') !== id ||
+                  nativeField(cached, 'parent') !== parent ||
+                  ['parent_id', 'request_id', 'working_turn_id', 'turn_exchange_id'].some(key =>
+                    nativeField(cachedMeta, key) !== nativeField(meta, key)) ||
+                  nativeField(cachedMessage, 'status') !== nativeField(message, 'status') ||
+                  nativeField(cachedMessage, 'end_turn') !== false ||
+                  nativeField(cachedMessage, 'channel') !== nativeField(message, 'channel') ||
+                  nativeField(cachedMessage, 'recipient') !== 'all' ||
+                  nativeField(nativeField(cachedMessage, 'author'), 'role') !== 'assistant') return false;
+            }
+            return true;
+          };
           for (let at = 1; at < currentPath.length; at++) {
             const id = currentPath[at], node = nativeField(mapping, id), message = nativeField(node, 'message');
             const author = nativeField(message, 'author'), metadata = nativeField(message, 'metadata');
@@ -2432,7 +2625,11 @@
             if (nativeField(node, 'id') !== id || nativeField(message, 'id') !== id)
               return refuse('nativeScopeBranchConflict', 'group-node');
             if (parent !== currentPath[at - 1]) return refuse('nativeScopeBranchConflict', 'group-parent');
-            if (!retainedParent || retainedParent !== parent && own.call(mapping, retainedParent)) {
+            const contracted = at > 1 && role === 'assistant' &&
+              (recipient === 'functions.exec' || recipient === 'api_tool.call_tool') &&
+              retainedParent && retainedParent !== parent && own.call(mapping, retainedParent) &&
+              contractedNarration(retainedParent, parent, metadata);
+            if (!retainedParent || retainedParent !== parent && own.call(mapping, retainedParent) && !contracted) {
               // Fixed shape of the first refused edge only. Do not export either
               // parent, inspect its node or change the original ancestry guard.
               try {
@@ -2471,8 +2668,15 @@
               if (!execution) return refuse('nativeScopeBranchConflict', 'execution-result-no-owner');
               if (str(nativeField(metadata, 'request_id')) !== execution.request)
                 return refuse('nativeScopeBranchConflict', 'execution-result-request');
-              if (execution.calls.length !== execution.results.length)
+              if (execution.calls.length !== execution.results.length) {
+                // Diagnose only this first refused group, not whole-chat totals. Counts
+                // remain bounded and console-only; unequal groups still grant no scope.
+                nativeAnchorExecutionCalls = Math.min(MAX_ROWS, execution.calls.length);
+                nativeAnchorExecutionResults = Math.min(MAX_ROWS, execution.results.length);
+                nativeAnchorExecutionBalance = execution.calls.length > execution.results.length
+                  ? 'missing-results' : 'extra-results';
                 return refuse('nativeScopeBranchConflict', 'execution-result-child-count');
+              }
               execution.closed = true; execution = null;
             } else if (role === 'assistant' && recipient === 'api_tool.call_tool') {
               const call = shell.calls.find(call => call.messageId === id), path = nativeRequestPath(message);
@@ -2861,6 +3065,7 @@
             selectedRequestIdsPresent, selectedRequestIdsMissing, identityRefusalCalls,
             nativeAnchorReason, nativeAnchorBranch, nativeAnchorRetainedParent, nativeAnchorRetainedMember,
             nativeAnchorRetainedPosition, nativeAnchorRetainedLocation, nativeAnchorFinalFacet, nativeAnchorCoreResultFacet, nativeAnchorHeaderFacet, nativeAnchorMember, nativeAnchorMemberTerminal, nativeAnchorMemberTyped, ...Object.values(identityRefusalReasons), selectedToolResults, witnessedToolResults,
+            nativeAnchorExecutionCalls, nativeAnchorExecutionResults, nativeAnchorExecutionBalance, nativeAnchorRetryScope,
             missingWithChild, missingWithWitness, ...Object.values(resultShapes)].join(':');
           if (!nativeReferenceTraceKeys.has(key) && nativeReferenceTraceKeys.size < MAX_TURNS) {
             nativeReferenceTraceKeys.add(key);
@@ -2874,8 +3079,11 @@
               ` anchorReason=${nativeAnchorReason} anchorBranch=${nativeAnchorBranch} anchorFinalFacet=${nativeAnchorFinalFacet} anchorMember=${nativeAnchorMember}` +
               ` anchorCoreResultFacet=${nativeAnchorCoreResultFacet}` +
               ` anchorHeaderFacet=${nativeAnchorHeaderFacet}` +
+              ` anchorRetryScope=${nativeAnchorRetryScope}` +
               ` anchorRetainedParent=${nativeAnchorRetainedParent} anchorRetainedMember=${nativeAnchorRetainedMember}` +
               ` anchorRetainedPosition=${nativeAnchorRetainedPosition} anchorRetainedLocation=${nativeAnchorRetainedLocation}` +
+              ` anchorExecutionCalls=${nativeAnchorExecutionCalls} anchorExecutionResults=${nativeAnchorExecutionResults}` +
+              ` anchorExecutionBalance=${nativeAnchorExecutionBalance}` +
               ` anchorMemberTerminal=${nativeAnchorMemberTerminal} anchorMemberTyped=${nativeAnchorMemberTyped}` +
               ` identityReasons=${Object.entries(identityRefusalReasons).map(([kind, count]) => kind + ":" + count).join(',')}` +
               ` selectedResults=${selectedToolResults} witnessedResults=${witnessedToolResults}` +
@@ -4233,10 +4441,18 @@
   // while its listener did not, so keep the actual listener and always replace it. The prior
   // owned registry spans protocol upgrades; the new reply still carries only this VERSION.
   const prior = window[ACTIVE_HELPER];
-  // Same-version reinjection repairs a damaged listener. A valid newer owner must
-  // survive late code from an older worker; legacy code cannot access this slot.
-  if (prior && Number.isSafeInteger(prior.version) && prior.version > VERSION &&
-      typeof prior.listener === 'function') return;
+  // Same-producer reinjection repairs a damaged listener. Older workers can still
+  // inject wire-compatible code, so wire equality alone must not retire a newer
+  // implementation or let it rewrite that implementation's native DOM stamps.
+  // Legacy V2 registrations used version as the wire epoch. Publish our producer
+  // there so their unchanged `prior.version > VERSION` guard refuses a downgrade;
+  // current code uses wireVersion to keep newer wire owners protected as well.
+  const priorWire = prior && Number.isSafeInteger(prior.wireVersion)
+    ? prior.wireVersion : prior?.version;
+  const priorProducer = prior && Number.isSafeInteger(prior.wireVersion) ? prior.version : 0;
+  if (prior && typeof prior.listener === 'function' &&
+      ((Number.isSafeInteger(priorWire) && priorWire > VERSION) ||
+        (priorWire === VERSION && Number.isSafeInteger(priorProducer) && priorProducer > PRODUCER_VERSION))) return;
   for (const owner of [prior, window[LEGACY_HELPER]]) {
     if (owner && typeof owner.listener === 'function') {
       try { window.removeEventListener('message', owner.listener); }
@@ -4248,5 +4464,5 @@
   // retires that legacy owner as well; never suppress unrelated message handlers.
   try { delete window[LEGACY_HELPER]; } catch { /* Legacy availability is not authority. */ }
   window.addEventListener('message', listener);
-  window[ACTIVE_HELPER] = { version: VERSION, listener };
+  window[ACTIVE_HELPER] = { version: PRODUCER_VERSION, wireVersion: VERSION, listener };
 })();
