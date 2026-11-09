@@ -6,7 +6,7 @@ This mirror includes reviewed recorder 155 through 159 source changes. Native Co
 
 Receipt verification now checks all receipts for one turn in a single traversal of the account journals. Tests cover 40 receipts alongside an independent chat, wrong native parents, duplicate or foreign receipts, missing journals, source changes during disk reads and the final checkpoint. Fresh evidence holds display tool result verification until the observation expires.
 
-TypeScript and 137 selected mirror regression checks passed. The private Windows Recorder 159 build passed its clean release suite with 13,581 main tests and 62 existing conditional skips. Recorder 158 is installed on the operator's machine. Live execution of every browser component and sustained automatic turns across accounts still require acceptance. Public source is available for research. Private installer receipts and account data remain with their existing local owners.
+TypeScript and 137 selected mirror regression checks passed. The private Windows Recorder 159 build passed 113 preliminary, 314 serial process, 13,581 main and 33 final installer checks, with 62 existing conditional skips. Recorder 159 is installed and independently verified across all 291 program files. All 24 sampled settings, connector-store and local key-state checkpoint files matched. Live execution of every browser component and sustained automatic turns across accounts still require acceptance. Public source is available for research. Private installer receipts and account data remain with their existing local owners.
 
 ## Recorder 154 source and verification
 
