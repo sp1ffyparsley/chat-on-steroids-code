@@ -16,7 +16,7 @@ async function recordedConversationBelongsToSession(sessionId: string, conversat
     session.chatIds.includes(conversationId)));
 }
 
-/** The canonical writer snapshots a real owned native ACK before bounded
+/** The canonical writer snapshots owned native and tool delivery receipts before bounded
  * outbox pruning. This proves instruction origin, never work completion. */
 export function canonicalInputProvenanceMatches(
   event: Extract<SessionEvent, { kind: 'user_message' }>, sessionId: string, chatIds: readonly string[]
@@ -25,7 +25,10 @@ export function canonicalInputProvenanceMatches(
   return !!proof && proof.version === 1 && ['human', 'automation'].includes(proof.authorship) &&
     proof.sessionId === sessionId && chatIds.includes(proof.conversationId) &&
     !!event.inputId && proof.inputId === event.inputId && !!event.messageId &&
-    proof.nativeMessageId === event.messageId && !event.messageId.startsWith('input:') &&
+    (proof.toolMessageId !== undefined
+      ? proof.nativeMessageId === undefined && event.source === 'app' &&
+        proof.toolMessageId === event.messageId && event.messageId === `input:${event.inputId}`
+      : proof.nativeMessageId === event.messageId && !event.messageId.startsWith('input:')) &&
     event.inputDelivery === 'confirmed' && !event.unverifiedAuthorshipClaim &&
     ['app', 'extension'].includes(event.source) && Number.isFinite(proof.deliveredAt) && proof.deliveredAt >= 0 &&
     typeof event.authoredText === 'string' &&
@@ -45,14 +48,18 @@ export async function recordDeliveredInput(entry: Readonly<InputEntry>): Promise
   const images = [...entry.images ?? [], ...entry.toolImages ?? []];
   const text = entry.deliveryText ?? entry.text;
   const preparedSha256 = createHash('sha256').update(text).digest('hex');
+  const toolReceipt = entry.state === 'sent' && entry.sessionId === sessionId &&
+    entry.toolReceiptUncertain !== true && messageId === `input:${entry.id}` &&
+    Number.isFinite(entry.offeredAt) && Number.isFinite(entry.deliveredAt) && entry.deliveredAt! >= entry.offeredAt!;
   const inputProvenance = confirmed && entry.owner && entry.conversationId &&
-    !messageId.startsWith('input:') ? {
+    (toolReceipt || !messageId.startsWith('input:')) ? {
       version: 1 as const,
       authorship: !entry.sourceHelperId && !entry.finishOwner && !entry.recovery &&
         entry.purpose !== 'rotation' && entry.lifetime !== 'temporary-planner'
         ? 'human' as const : 'automation' as const,
       sessionId, conversationId: entry.conversationId, inputId: entry.id,
-      nativeMessageId: messageId, deliveredAt: time,
+      ...(toolReceipt ? { toolMessageId: messageId } : { nativeMessageId: messageId }),
+      deliveredAt: time,
       authoredSha256: createHash('sha256').update(entry.text).digest('hex'), preparedSha256
     } : undefined;
   await validateInputImages(images);
@@ -89,7 +96,7 @@ export async function recordDeliveredInput(entry: Readonly<InputEntry>): Promise
     ...(assets.length ? { assets } : {})
   });
   if (inputProvenance && projected.changed)
-    logInfo(`input ${entry.id}: ${inputProvenance.authorship} native provenance committed to canonical history; execution acceptance unchanged`);
+    logInfo(`input ${entry.id}: ${inputProvenance.authorship} ${toolReceipt ? 'tool delivery' : 'native'} provenance committed to canonical history; execution acceptance unchanged`);
   // The exact native message must first pass canonical authorship validation.
   // A rejected duplicate UUID (Goal versus human, or another Input) cannot
   // manufacture a fresh model-picker observation before the history write

@@ -17031,9 +17031,10 @@ describe('evidence from the page context', () => {
     const requestId = 'wfr_native_result_receipt_delayed_ack';
     const witness = 'cd'.repeat(24);
     live = await harness();
+    let resultConfirmed = false;
     live.reply.set('correlate', () => ({
       ok: true, data: { conversationId, confirmed: [requestId], complete: true,
-        confirmedResultReceipts: [] }
+        confirmedResultReceipts: resultConfirmed ? [witness] : [] }
     }));
     const frame = () => [{ turnId: 'delayed-result-receipt-turn', conversationId,
       calls: [{ messageId: 'delayed-receipt-exact-call', tool: 'read', order: 0,
@@ -17043,7 +17044,7 @@ describe('evidence from the page context', () => {
     await replyFiber([], frame());
     await settle();
     expect(live.sent.filter(message => message.type === 'correlate')).toHaveLength(1);
-    live.advance(5000);
+    live.advance(2001);
     await replyFiber([], frame());
     await settle();
     expect(live.sent.filter(message => message.type === 'correlate')).toHaveLength(2);
@@ -17051,6 +17052,21 @@ describe('evidence from the page context', () => {
       .toMatchObject({ conversationId, calls: [expect.objectContaining({
         requestId, resultReceiptId: witness
       })] });
+    // A workflow ACK is not a receipt ACK. The still-unconfirmed witness must
+    // retain the second backoff, then stop retrying once Main confirms it.
+    live.advance(2001);
+    await replyFiber([], frame());
+    await settle();
+    expect(live.sent.filter(message => message.type === 'correlate')).toHaveLength(2);
+    resultConfirmed = true;
+    live.advance(2001);
+    await replyFiber([], frame());
+    await settle();
+    expect(live.sent.filter(message => message.type === 'correlate')).toHaveLength(3);
+    live.advance(60000);
+    await replyFiber([], frame());
+    await settle();
+    expect(live.sent.filter(message => message.type === 'correlate')).toHaveLength(3);
   });
 
   it('sends one request id once when it arrives both as a labelled row and as a bare sighting', async () => {
@@ -20787,6 +20803,12 @@ describe('the field above the composer', () => {
       // Elapsed phase time is not a retry deadline and grants no Send authority.
       expect(result).toHaveProperty('startedAt', 12_345);
     }
+    const fresh = live.hook.goalStageView({ enabled: true, mode: 'loop', phase: 'settling',
+      wait: { reason: 'evidence', evidenceFreshUntil: live.window.Date.now() + 30_000, detail } });
+    expect(fresh).toMatchObject({ stage: 'Loop waiting for tool result verification', detail, steps: [], done: false });
+    const expired = live.hook.goalStageView({ enabled: true, mode: 'loop', phase: 'settling',
+      wait: { reason: 'evidence', evidenceFreshUntil: live.window.Date.now() - 1, detail } });
+    expect(expired?.stage).toContain('activity unknown');
     expect(live.sent.some(row => ['goal_draft', 'goal_prepare', 'goal_ack', 'settings_set'].includes(row.type))).toBe(false);
   });
 
@@ -29269,7 +29291,8 @@ describe('the goal loop', () => {
       return { ...reply, data: { ...reply.data, goal: { ...reply.data.goal, requiresCore: true, coreConnector: TEST_CORE } } };
     } });
     const sends = watchSend(live.document);
-    acceptProviderSend(live.document, 'core-loop-send');
+    const nativeId = '6ac024bb-486c-43e8-bf8e-4be1147847e3';
+    acceptProviderSend(live.document, nativeId);
     let delivered: { core: boolean; authored: string } | null = null;
     live.document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
       const adapter = (live!.window as any).CLF_DOM;
@@ -29282,7 +29305,7 @@ describe('the goal loop', () => {
     expect(sends()).toBe(1);
     // Assert outside the DOM listener: jsdom reports listener exceptions without failing this test.
     expect(delivered).toEqual({ core: true, authored: 'Continue the saved local task' });
-    expect(acks(live)).toHaveLength(1);
+    expect(acks(live).map(message => message.messageId)).toEqual([nativeId]);
   });
 
   it.each(['empty', 'authored', 'file', 'foreign'])('handles Core-chip composer residue without discarding user state: %s', async residue => {
@@ -29306,11 +29329,12 @@ describe('the goal loop', () => {
       box.parentElement!.append(file);
     }
     const sends = watchSend(live.document);
-    acceptProviderSend(live.document, 'core-chip-loop-send');
+    const nativeId = '6ac024bb-486c-43e8-bf8e-4be1147847e4';
+    acceptProviderSend(live.document, nativeId);
     source.set(readyDraft('Continue the saved local task'));
     await live.hook.pullActivity(); await settle();
     expect(sends()).toBe(residue === 'empty' ? 1 : 0);
-    expect(acks(live)).toHaveLength(residue === 'empty' ? 1 : 0);
+    expect(acks(live).map(message => message.messageId)).toEqual(residue === 'empty' ? [nativeId] : []);
     if (residue === 'authored') expect(box.textContent).toContain('Keep my handoff unchanged');
   });
 
@@ -30091,9 +30115,9 @@ describe('the goal loop', () => {
       assistantTurn(document, 'dead-answer-without-final', []);
       document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
         sends++;
-        userTurn(document, 'recovery-user', prepareOperatorPrompt('Continue the original task', upper => upper - 1));
+        userTurn(document, 'recovery-user', prepareOperatorPrompt('Continue the original task', upper => upper - 1), { sent: false });
         document.querySelector('#prompt-textarea')!.textContent = '';
-        startGenerating(document);
+        startGenerating(document, { send: false });
       });
     });
     pending.listenUntil = live.window.Date.now() + 60_000;
@@ -30104,7 +30128,7 @@ describe('the goal loop', () => {
     await live.hook.pullActivity(); await settle(1200);
     expect(drafts(live)).toEqual([expect.objectContaining({ turnId: pending.turnId, terminalRequired: true })]);
     expect(sends).toBe(1);
-    expect(acks(live)).toHaveLength(1);
+    expect(acks(live).map(message => message.messageId)).toEqual(['m-recovery-user']);
     expect(live.document.querySelector('.clf-stage')?.textContent ?? '').not.toContain('Checking the answer');
   });
 
@@ -30672,6 +30696,133 @@ describe('the goal loop', () => {
     expect(acks(live)).toHaveLength(0);
     expect(operatorPromptBody(composerText(live.document))).toBe('');
     expect(live.window.sessionStorage.getItem('clf-goal-prepared-v1')).toContain('send-attempted');
+    expect(live.document.querySelector('.clf-stage')?.textContent).toContain('Send outcome is unconfirmed');
+  });
+
+  it('keeps an older matching native row from acknowledging an attempted Goal Send', async () => {
+    const reply = 'Continue with the next verified useful change';
+    let sends = () => 0;
+    live = await harness(`https://chatgpt.com/c/${CHAT}`, liveFeed(readyDraft(reply)).replies, (document, dom) => {
+      dom.window.sessionStorage.setItem('clf-goal-prepared-v1', JSON.stringify([
+        { key: `${CHAT}\u0000g-token`, state: 'send-attempted' }
+      ]));
+      userTurn(document, 'old-manual-copy', prepareOperatorPrompt(reply, upper => upper - 1), { sent: false });
+      assistantTurn(document, 'answered-old-manual-copy', []);
+      userTurn(document, 'actual-newer-question', 'Work only on the current checkpoint.', { sent: false });
+      assistantTurn(document, 'answer-to-current-question', []);
+      sends = watchSend(document);
+    });
+
+    await live.hook.pullActivity();
+    await settle();
+
+    expect(sends()).toBe(0);
+    expect(acks(live)).toHaveLength(0);
+    expect(live.window.sessionStorage.getItem('clf-goal-prepared-v1')).toContain('send-attempted');
+  });
+
+  it('keeps a timed-out native Goal Send pending without an unreceipted acknowledgement', async () => {
+    const source = liveFeed();
+    live = await harness(`https://chatgpt.com/c/${CHAT}`, source.replies);
+    const sends = watchSend(live.document);
+    const timer = live.window.setTimeout;
+    let expire: (() => void) | undefined;
+    live.window.setTimeout = ((fn: () => void, ms?: number) => {
+      if (ms === 30000) { expire = fn; return 0; }
+      return timer(fn, ms);
+    }) as typeof timer;
+
+    source.set(readyDraft('Continue the existing work'));
+    const attempt = live.hook.pullActivity();
+    await settle(400);
+    expect(sends()).toBe(1);
+    expect(expire).toBeTypeOf('function');
+    expire!();
+    await attempt;
+    await settle(400);
+
+    expect(acks(live)).toHaveLength(0);
+    expect(live.window.sessionStorage.getItem('clf-goal-prepared-v1')).toContain('send-attempted');
+    await reinjectContentRecorder(live);
+    await live.hook.pullActivity();
+    await settle();
+    expect(sends()).toBe(1);
+    expect(acks(live)).toHaveLength(0);
+  });
+
+  it('persists the exact Goal receipt during native Send before a recorder remount', async () => {
+    const source = liveFeed();
+    const nativeId = '6ac024bb-486c-43e8-bf8e-4be1147847e1';
+    live = await harness(`https://chatgpt.com/c/${CHAT}`, source.replies);
+    const sends = watchSend(live.document);
+    acceptProviderSend(live.document, nativeId);
+    let witnessAtClick: string | null = null;
+    let remount: Promise<Hook> | undefined;
+    live.document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
+      witnessAtClick = live!.window.sessionStorage.getItem('clf-goal-spent-v1');
+      remount = reinjectContentRecorder(live!);
+    });
+
+    source.set(readyDraft('Continue the existing work'));
+    await live.hook.pullActivity();
+    await settle(400);
+    expect(witnessAtClick).toContain(nativeId);
+    await remount;
+    await live.hook.pullActivity();
+    await settle();
+    expect(sends()).toBe(1);
+    expect(acks(live)).toHaveLength(1);
+    expect(acks(live)[0]).toMatchObject({ token: 'g-token', messageId: nativeId });
+  });
+
+  it('ignores an older matching row that hydrates during the native Goal click', async () => {
+    const source = liveFeed();
+    const reply = 'Continue with the latest verified change';
+    const nativeId = '6ac024bb-486c-43e8-bf8e-4be1147847e2';
+    live = await harness(`https://chatgpt.com/c/${CHAT}`, source.replies);
+    const document = live.document;
+    const currentUser = userTurn(document, 'current-user', 'The current question.', { sent: false });
+    const sends = watchSend(document);
+    document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
+      const older = userTurn(document, 'hydrated-older-user', prepareOperatorPrompt(reply, upper => upper - 1), { sent: false });
+      currentUser.before(older);
+    });
+    acceptProviderSend(document, nativeId);
+
+    source.set(readyDraft(reply));
+    await live.hook.pullActivity();
+    await settle();
+    expect(sends()).toBe(1);
+    expect(acks(live).map(message => message.messageId)).toEqual([nativeId]);
+  });
+
+  it('keeps an attempted Goal Send pending when ChatGPT renders two identical user rows', async () => {
+    const reply = 'Continue the saved Loop reply with ambiguous rows in the conversation';
+    let sends = () => 0;
+    const bytes = prepareOperatorPrompt(reply, upper => upper - 1);
+    live = await harness(
+      `https://chatgpt.com/c/${CHAT}`,
+      liveFeed(readyDraft(reply)).replies,
+      (document, dom) => {
+        dom.window.sessionStorage.setItem('clf-goal-prepared-v1', JSON.stringify([
+          { key: `${CHAT}\u0000g-token`, state: 'send-attempted' }
+        ]));
+        userTurn(document, 'limbo-first', bytes, { sent: false });
+        userTurn(document, 'limbo-second', bytes, { sent: false });
+        sends = watchSend(document);
+      }
+    );
+
+    await live.hook.pullActivity();
+    await settle();
+    await live.hook.pullActivity();
+    await settle();
+
+    // Two rows carrying the same bytes cannot say which Send they belong to; the
+    // receipt stays unconfirmed and replay stays forbidden, exactly as before.
+    expect(sends()).toBe(0);
+    expect(acks(live)).toHaveLength(0);
+    expect(live.window.sessionStorage.getItem('clf-goal-prepared-v1') || '').toContain('send-attempted');
     expect(live.document.querySelector('.clf-stage')?.textContent).toContain('Send outcome is unconfirmed');
   });
 

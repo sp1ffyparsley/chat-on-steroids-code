@@ -1,5 +1,13 @@
 # Chat On Steroids - code research mirror
 
+## Recorder 159 source and verification
+
+This mirror includes reviewed recorder 155 through 159 source changes. Native Core results can recover through an exact direct invocation and folded result under a validated native header. Goal delivery retains the original native click and user receipt across remounts and timeouts. Confirmed tool-delivered instructions retain their original history provenance after bounded outbox pruning.
+
+Receipt verification now checks all receipts for one turn in a single traversal of the account journals. Tests cover 40 receipts alongside an independent chat, wrong native parents, duplicate or foreign receipts, missing journals, source changes during disk reads and the final checkpoint. Fresh evidence holds display tool result verification until the observation expires.
+
+TypeScript and 137 selected mirror regression checks passed. The private Windows Recorder 159 build passed its clean release suite with 13,581 main tests and 62 existing conditional skips. Recorder 158 is installed on the operator's machine. Live execution of every browser component and sustained automatic turns across accounts still require acceptance. Public source is available for research. Private installer receipts and account data remain with their existing local owners.
+
 ## Recorder 154 source and verification
 
 This source mirror includes the recorder 147–154 changes. It covers exact native request/result attribution, the immediately preceding completed turn, same-user Retry scope, retained helper and continuation custody, and strict Windows test isolation. Recorder 154 carries executing content and background versions through the existing activity envelope when the native census is unavailable. It also reports the first guarded reason an eligible queued input was withheld. Both changes preserve existing completion and Send gates.

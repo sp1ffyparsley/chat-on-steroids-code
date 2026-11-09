@@ -21,7 +21,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 import { EXTERNAL_TUNNEL_CHALLENGE_HEADER, EXTERNAL_TUNNEL_PROBE_HEADER, EXTERNAL_TUNNEL_PROOF_HEADER, EXTERNAL_TUNNEL_PROOF_PATTERN, EXTERNAL_TUNNEL_REQUEST_ID_DIGEST_HEADER, MCP_SURFACE_TOKEN_PATTERN, type ExternalRouteVerifier } from '../../shared/external-tunnel.js';
 import { INSTANCE_CONNECTOR_SURFACES } from '../../shared/instance-profile.js';
 import { invocationArgumentsDigest } from '../session/correlation.js';
-import { createInboundTiming, formatInboundTiming, inboundIdentityFromHeaders, withInboundRequestId, type IdentityHeaderShapes } from './inbound.js';
+import { createInboundTiming, formatInboundTiming, inboundClientSessionShape, inboundIdentityFromHeaders, withInboundRequestId, type ClientSessionShape, type IdentityHeaderShapes } from './inbound.js';
 import http from 'node:http';
 import type { Socket } from 'node:net';
 import { createMcpHandler } from '@modelcontextprotocol/server';
@@ -208,6 +208,8 @@ export interface McpIngressEvidence {
   rpcIdentity?: McpRpcIdentity;
   /** Fixed ingress shapes, never header values or an alternative attribution source. */
   identityHeaders?: IdentityHeaderShapes;
+  /** Presence only; an anonymized conversation hint never grants request ownership. */
+  clientSessionShape?: ClientSessionShape;
 }
 interface McpRpcIdentity {
   kind: 'string' | 'number' | 'absent' | 'null' | 'invalid' | 'batch';
@@ -250,7 +252,8 @@ function noteIngressEvidence(surface: SurfaceId, at: number, requestId: string |
   identityHeaders: IdentityHeaderShapes): McpRpcIdentity | null {
   const rpcIdentity = rpcEnvelopeIdentity(body);
   ingressEvidence.push({ surface, at, requestId, methods: rpcMethods(body),
-    ...(rpcIdentity ? { rpcIdentity, identityHeaders: { ...identityHeaders } } : {}) });
+    ...(rpcIdentity ? { rpcIdentity, identityHeaders: { ...identityHeaders },
+      clientSessionShape: inboundClientSessionShape(body) } : {}) });
   while (ingressEvidence.length > MAX_INGRESS_EVIDENCE) {
     const removed = ingressEvidence.shift();
     if (removed) ingressDroppedThrough = Math.max(ingressDroppedThrough, removed.at);
@@ -478,6 +481,7 @@ export async function startMcpServer(getContext: () => ToolContext, persistent?:
 
     const startedAt = Date.now();
     let rpcIdentity: McpRpcIdentity | null = null;
+    let clientSessionShape: ClientSessionShape | null = null;
     const publication = { completedAt: null as number | null, failed: false };
     res.once('close', () => { if (publication.completedAt === null) publication.failed = true; });
     res.on('finish', () => {
@@ -501,7 +505,8 @@ export async function startMcpServer(getContext: () => ToolContext, persistent?:
           // A full opaque 64-hex digest is correctly masked by the generic credential
           // redactor. Emit only a short hash prefix: useful for comparing identical typed
           // envelopes in app.log, too short to look like a secret, and NEVER caller identity.
-          (rpcIdentity.sha256 ? ` rpc_id_fingerprint=${rpcIdentity.sha256.slice(0, 16)}` : '') : '') : '';
+          (rpcIdentity.sha256 ? ` rpc_id_fingerprint=${rpcIdentity.sha256.slice(0, 16)}` : '') : '') +
+        (clientSessionShape ? ` client_session=${clientSessionShape}` : '') : '';
       const line = `${method} ${shape} → ${res.statusCode} in ${Date.now() - startedAt}ms${who}${formatInboundTiming(timing)}${identityNote}`;
       if (route && timing.calls > 0 && res.statusCode >= 200 && res.statusCode < 300 &&
           !selfTest && !tunnelProbe && missingHeaderIncident === 'none' &&
@@ -632,6 +637,7 @@ export async function startMcpServer(getContext: () => ToolContext, persistent?:
       res.once('finish', release);
       res.once('close', release);
       if (!selfTest && !tunnelProbe) rpcIdentity = noteIngressEvidence(route.id, Date.now(), requestId, body, identity.headers);
+      if (rpcIdentity) clientSessionShape = inboundClientSessionShape(body);
       // Freeze only a bounded digest of the ORIGINAL tools/call arguments.
       // SDK validation may add defaults or transform strings before dispatch;
       // those derived values cannot identify the browser's authored invocation.

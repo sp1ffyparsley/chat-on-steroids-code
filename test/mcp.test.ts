@@ -1803,6 +1803,39 @@ describe('endpoint hardening', () => {
     }
   });
 
+  it('observes documented conversation metadata without exposing it or granting request ownership', async () => {
+    const observed: string[] = [];
+    const unsubscribe = onLog(row => { if (row.message.includes('identity_header=')) observed.push(row.message); });
+    const privateSession = 'opaque-private-conversation-session';
+    try {
+      const since = Date.now();
+      const call = { name: 'read', arguments: { paths: ['/workspace/src/app.ts'] } };
+      for (const params of [call,
+        { ...call, _meta: { 'openai/session': privateSession } },
+        { ...call, _meta: { 'openai/session': { secret: privateSession } } },
+        { ...call, _meta: { 'openai/session': '' } }]) {
+        // modern() deliberately replaces _meta with its protocol-only envelope.
+        // Send the actual provider metadata through the real HTTP boundary here.
+        expect((await rawPost(endpoint.urls.core, JSON.stringify({ jsonrpc: '2.0', id: 1,
+          method: 'tools/call', params }))).status).toBe(200);
+      }
+      await vi.waitFor(() => expect(observed).toHaveLength(4), { timeout: 1000, interval: 10 });
+      const records = recentMcpIngress('core', since).records.filter(row => row.methods.includes('tools/call'));
+      expect(records.map(row => row.clientSessionShape)).toEqual(['missing', 'present', 'invalid', 'invalid']);
+      expect(records.every(row => row.requestId === null)).toBe(true);
+      expect(recentToolDispatches('core', since).records.every(row => row.requestId === null)).toBe(true);
+      expect(observed.map(line => /client_session=(\w+)/.exec(line)?.[1]))
+        .toEqual(['missing', 'present', 'invalid', 'invalid']);
+      expect(JSON.stringify(records) + observed.join('\n')).not.toContain(privateSession);
+      // A session hint must never override the incumbent exact request-header owner.
+      expect((await rawPost(endpoint.urls.core, JSON.stringify({ jsonrpc: '2.0', id: 7,
+        method: 'tools/call', params: { ...call, _meta: { 'openai/session': privateSession } } }),
+      { 'x-request-id': 'wfr_session_metadata_negative/hop' })).status).toBe(200);
+      const last = recentMcpIngress('core', since).records.at(-1);
+      expect(last).toMatchObject({ requestId: 'wfr_session_metadata_negative', clientSessionShape: 'present' });
+    } finally { unsubscribe(); }
+  });
+
   it('bounds malformed envelope identity diagnostics and returns defensive copies', async () => {
     const since = Date.now();
     const tool = { jsonrpc: '2.0', method: 'tools/call',

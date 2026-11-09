@@ -9727,6 +9727,39 @@ describe('activity feed', () => {
     });
   });
 
+  it('settles an exact later headerless result while an earlier batch receipt has no durable witness', async () => {
+    const { invocationArgumentsDigest } = await import('../src/main/session/correlation.js');
+    const conversationId = randomUUID(), requestId = 'wfr_partial_receipt_' + randomUUID();
+    const receipts = [randomBytes(24).toString('hex'), randomBytes(24).toString('hex')];
+    const args = [{ paths: ['/project/awaiting-witness.txt'] }, { paths: ['/project/returned.txt'] }];
+    await pair();
+    const opened = await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'user_message', messageId: randomUUID(), text: 'Read the two selected files.', time: Date.now() }
+    ] } });
+    const sessionId = opened.body.sessionId;
+    const calls = args.map((value, index) => ({ messageId: randomUUID(), requestId, tool: 'read', order: index,
+      answered: true, resultReceiptId: receipts[index], invocationSha256: invocationArgumentsDigest('read', value)! }));
+    const record = async (index: number) => {
+      const original = await recordToolCall({ tool: 'read', args: args[index],
+        content: [{ type: 'text', text: 'Original returned result' }], resultReceiptId: receipts[index],
+        invocationSha256: calls[index]!.invocationSha256, requestId: null, outcome: 'ok',
+        durationMs: 1, startedAt: Date.now() });
+      expect(original?.attributionMethod).toBe('unattributed');
+      await flushRecorder();
+    };
+    const correlate = () => request('POST', '/correlations', { body: { conversationId, calls } });
+    await record(1);
+    const partial = await correlate();
+    expect(partial.body.confirmedResultReceipts).toEqual([receipts[1]]);
+    expect(await readEvents(sessionId, { kinds: ['tool_call'], requireIntegrity: true })).toMatchObject([
+      { call: { nativeCallMessageId: calls[1]!.messageId, resultReceiptId: receipts[1], attributionMethod: 'result_receipt' } }
+    ]);
+    expect((await correlate()).body.confirmedResultReceipts).toEqual([receipts[1]]);
+    await record(0);
+    expect((await correlate()).body.confirmedResultReceipts).toEqual(receipts);
+    expect(await readEvents(sessionId, { kinds: ['tool_call'], requireIntegrity: true })).toHaveLength(2);
+  });
+
   it('ACKs a serialized headerless batch only after both invocation digests match their durable executions', async () => {
     const recorder = await import('../src/main/session/recorder.js');
     const store = await import('../src/main/session/store.js');
@@ -9863,9 +9896,9 @@ describe('activity feed', () => {
       }
     }
     if (variant === 'source changes during receipt check') {
-      const unique = recorder.receiptDurableOwnerUnique;
+      const unique = recorder.receiptDurableOwnersUnique;
       let changed = false;
-      const spy = vi.spyOn(recorder, 'receiptDurableOwnerUnique').mockImplementation(async (...values) => {
+      const spy = vi.spyOn(recorder, 'receiptDurableOwnersUnique').mockImplementation(async (...values) => {
         const accepted = await unique(...values);
         if (!changed) { changed = true; await editSource(); }
         return accepted;
@@ -32447,6 +32480,13 @@ describe('the goal loop over the bridge', () => {
       expect(calls).toBe(1);
       expect(operatorPromptBody(feed.body.goal.draft.reply)).toBe(humanReply('what about the tests'));
 
+      const uncertain = await request('POST', '/goal/ack', {
+        body: { conversationId: 'cafe0003-0000-4000-8000-000000000003', token: started.body.goal.token }
+      });
+      expect(uncertain.body.acknowledged).toBe(false);
+      expect((await request('GET', '/activity?conversationId=cafe0003-0000-4000-8000-000000000003')).body.goal.draft)
+        .toMatchObject({ token: started.body.goal.token, stage: 'ready' });
+
       const acked = await request('POST', '/goal/ack', {
         body: { conversationId: 'cafe0003-0000-4000-8000-000000000003', token: started.body.goal.token,
           messageId: 'native-confirmed-goal-3', sendModel: 'gpt-6-thinking', sendReasoningEffort: 'high' }
@@ -37142,6 +37182,50 @@ describe('diagnostic-only original scope reasons', () => {
     expect(JSON.stringify(controls.nativeEvidence?.providerUI)).not.toContain('PRIVATE_READER');
     expect(pendingCommands()).toEqual(beforeCommands);
     expect(await (await import('../src/main/session/input.js')).listInputs()).toEqual(beforeInputs);
+    resetCoreBrowserEvidenceForTests();
+  });
+
+  it('refuses an older observation that would replace newer executing reader generations', async () => {
+    await pair(); resetCoreBrowserEvidenceForTests();
+    const { noteCoreBrowserEvidence, coreBrowserEvidence } = await import('../src/main/core-browser-evidence.js');
+    const conversationId = '78787878-1111-4222-8333-444444444448';
+    const observedAt = Date.now();
+    expect(noteCoreBrowserEvidence({ conversationId, documentId: 'reader-race-newer', navigationEpoch: 0, observedAt,
+      shell: 'alternate', shellDiscovery: 'failed', shellScan: null, ordinaryFinal: null, requestIds: [], turnId: null,
+      reader: { contentRecorder: 154, workerRecorder: 154 } })).toBe(true);
+    const reply = await request('POST', `/activity?conversationId=${conversationId}`, { body: {
+      observationOnly: true, coreDiagnostic: { documentId: 'reader-race-older', navigationEpoch: 0,
+        observedAt: observedAt - 1, shell: 'alternate', shellDiscovery: 'failed', shellScan: null,
+        ordinaryFinal: null, requestIds: [], turnId: null,
+        reader: { contentRecorder: 153, workerRecorder: 153 } }
+    } });
+    expect(reply).toMatchObject({ status: 400, body: { error: 'invalid_core_diagnostic' } });
+    const actual = coreBrowserEvidence(conversationId)!;
+    expect(actual.documentId).toBe('reader-race-newer');
+    expect(actual.observedAt).toBe(observedAt);
+    expect(actual.reader).toEqual({ contentRecorder: 154, workerRecorder: 154 });
+    resetCoreBrowserEvidenceForTests();
+  });
+
+  it('drops same-envelope scan counts from a malformed census without inventing executing generations', async () => {
+    const { noteCoreBrowserEvidence, coreBrowserEvidence } = await import('../src/main/core-browser-evidence.js');
+    resetCoreBrowserEvidenceForTests();
+    const conversationId = '78787878-1111-4222-8333-444444444449';
+    const base = { conversationId, documentId: 'reader-malformed-census', navigationEpoch: 0,
+      observedAt: Date.now(), shell: 'alternate' as const, shellDiscovery: 'compatible' as const,
+      ordinaryFinal: null, requestIds: [], turnId: null };
+    const malformed = { selectorMatches: 1.5, mapped: 0,
+      rejects: { fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0 } };
+    expect(noteCoreBrowserEvidence({ ...base, shellScan: malformed, reader: { fiberWire: 19, fiberKeys: 85,
+      contentRecorder: 154, contentKeys: 85, workerRecorder: 154, workerKeys: 85, mainKeys: 85,
+      privateText: 'PRIVATE_READER' } })).toBe(true);
+    const stamped = coreBrowserEvidence(conversationId)!;
+    expect(stamped.shellScan).toBeNull();
+    expect(stamped.reader).toEqual({ contentRecorder: 154, workerRecorder: 154 });
+    expect(JSON.stringify(stamped)).not.toContain('PRIVATE_READER');
+    // A malformed census alone never mints a generation from the scan that failed validation.
+    expect(noteCoreBrowserEvidence({ ...base, observedAt: base.observedAt + 1, shellScan: malformed })).toBe(true);
+    expect(coreBrowserEvidence(conversationId)!.reader).toBeUndefined();
     resetCoreBrowserEvidenceForTests();
   });
 

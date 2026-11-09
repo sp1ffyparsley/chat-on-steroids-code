@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 154;
+  const RECORDER_VERSION = 159;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -5447,8 +5447,6 @@
               pendingStreamOrigins.delete(call.requestId);
             continue;
           }
-          requestOwnerRetryAt.delete(key);
-          requestOwnerAttempts.delete(key);
           requestOwnersConfirmed.set(call.requestId, ownerConversation);
           if (typed) {
             // /correlations commits every typed message in this batch before
@@ -5459,15 +5457,20 @@
             if (nativeCallPublications.size > 1024)
               nativeCallPublications.delete(nativeCallPublications.values().next().value);
           }
-          if (receipt && confirmedResultReceipts.has(receipt))
+          const resultPending = Boolean(receipt && !confirmedResultReceipts.has(receipt));
+          const turnPending = Boolean(requestedTurnId && !confirmedTurnIds.has(call.requestId));
+          if (receipt && !resultPending)
             resultReceiptsConfirmed.set(receipt, ownerConversation);
-          else if (receipt) backOffRequestOwner(key);
+          if (requestedTurnId && !turnPending) requestTurnsConfirmed.set(call.requestId, requestedTurnId);
+          // A request owner ACK is only part of this observation's receipt.
+          // Keep the same bounded backoff until every requested proof is confirmed.
+          if (resultPending || turnPending) backOffRequestOwner(key);
+          else {
+            requestOwnerRetryAt.delete(key);
+            requestOwnerAttempts.delete(key);
+          }
           pendingStreamOrigins.delete(call.requestId);
           traceStage(call.requestId, 'confirmed');
-          if (requestedTurnId) {
-            if (confirmedTurnIds.has(call.requestId)) requestTurnsConfirmed.set(call.requestId, requestedTurnId);
-            else backOffRequestOwner(key);
-          }
         }
       }
     } catch {
@@ -10847,6 +10850,7 @@
 
   function goalStageView(goal) {
     if (!goal) return null;
+    const freshEvidence = Number.isFinite(goal.wait?.evidenceFreshUntil) && goal.wait.evidenceFreshUntil >= Date.now();
     // Pausing admission cannot turn an unresolved native Send into known-unsent work.
     // Keep that exact existing no-replay warning ahead of the neutral saved-work view.
     if (goal.health?.state === 'paused' && goal.error !== 'ChatGPT would not send the message') {
@@ -10884,7 +10888,7 @@
       const holdStartedAt = Number.isFinite(goal.evidenceHoldSince) && goal.evidenceHoldSince > 0
         ? goal.evidenceHoldSince
         : Number.isFinite(goal.phaseStartedAt) && goal.phaseStartedAt > 0 ? goal.phaseStartedAt : 0;
-      return { stage: `${automation} waiting for verified completion · activity unknown`,
+      return { stage: freshEvidence ? `${automation} waiting for tool result verification` : `${automation} waiting for verified completion · activity unknown`,
         detail: [goal.wait?.detail || goal.draft?.message || goal.error || 'Exact tool-call completion has not been verified.',
           goal.wait?.nextAction || ''].filter(Boolean).join(' · '),
         body: '', kind: 'goal', ...(holdStartedAt > 0 ? { startedAt: holdStartedAt } : {}), steps: [], at: 0, done: false };
@@ -10960,7 +10964,7 @@
       const wait = goal.wait;
       if (wait?.reason === 'evidence') {
         const automation = goal.mode === 'loop' ? 'Loop' : 'Goal';
-        return { stage: `${automation} waiting for verified completion · activity unknown`,
+        return { stage: freshEvidence ? `${automation} waiting for tool result verification` : `${automation} waiting for verified completion · activity unknown`,
           detail: [wait.detail || '', wait.nextAction || ''].filter(Boolean).join(' · '),
           body: '', kind: 'goal', startedAt: phaseStartedAt, steps: [], at: 0, done: false };
       }
@@ -12852,31 +12856,37 @@
     };
   }
 
+  async function acknowledgeGoalReceipt(conversationId, token, receipt) {
+    if (!receipt?.messageId || receipt.acknowledged) return;
+    const result = await ask({ type: 'goal_ack', conversationId, token, messageId: receipt.messageId,
+      ...(goalSendSelection(receipt) ? { sendModel: receipt.model, sendReasoningEffort: receipt.reasoningEffort } : {})
+    }).catch(() => undefined);
+    if (result?.ok && result.data?.acknowledged === true) receipt.acknowledged = true;
+  }
+
   async function maybeSendGoalReply() {
     const draft = goalDraft;
     if (!draft || !conversationId || draft.conversationId !== conversationId) return;
     const target = conversationId, forEpoch = epoch;
     const workRevision = turnProgressRevision;
     const onDocument = () => alive && epoch === forEpoch && conversationId === target && CLF_DOM.conversationId() === target;
-    if (goalBusy) return;
-    if (goalWasSpent(conversationId, draft.token)) {
-      // The message already crossed the browser's irreversible boundary. A lost ACK may make
-      // the app re-offer it, including after a content-script reload; only retry the receipt.
-      goalDraft = null;
-      forgetGoalPrepared(conversationId, draft.token);
-      const receipt = goalSpentReceipt(conversationId, draft.token);
-      await ask({ type: 'goal_ack', conversationId, token: draft.token,
-        ...(receipt?.messageId ? { messageId: receipt.messageId } : {}),
-        ...(goalSendSelection(receipt) && receipt?.messageId
-          ? { sendModel: receipt.model, sendReasoningEffort: receipt.reasoningEffort } : {})
-      }).catch(() => undefined);
-      return;
+    if (!onDocument() || goalBusy) return;
+    if (goalWasSpent(target, draft.token)) {
+      const receipt = goalSpentReceipt(target, draft.token);
+      if (receipt?.messageId) {
+        // A re-offered token may only retry its original receipt.
+        goalBusy = true;
+        goalDraft = null;
+        try { await acknowledgeGoalReceipt(target, draft.token, receipt); }
+        finally {
+          if (alive && epoch === forEpoch && conversationId === target) goalBusy = false;
+        }
+        return;
+      }
     }
-    // The native Send may have been clicked before its user-row receipt was observed. If the
-    // composer cleared or the content script reloaded, the durable reply can reappear with no
-    // spent receipt. Keep the original attempt in custody; an empty composer is not proof that
-    // it was unsent and must never authorize a second click or an invented ACK.
-    if (goalPrepared.get(goalSpentKey(target, draft.token)) === 'send-attempted') {
+    // The prepared marker owns a click, not its result. A composer change or a
+    // historical native row with the same text cannot supply a receipt for it.
+    if (goalWasSpent(target, draft.token) || goalPrepared.get(goalSpentKey(target, draft.token)) === 'send-attempted') {
       setGoalPhase('sending', 'Send outcome is unconfirmed. The saved Loop reply remains pending.');
       return;
     }
@@ -13059,13 +13069,14 @@
       // must not restore text into a replacement editor or a user's intervening edit.
       preparedDraft = CLF_DOM.captureComposerDraft(CLF_DOM.composerText() || '', onDocument);
       await sleep(200);
-      const current = () => onDocument() && goalUsable() &&
-        (sendAttempted || (((goalConfig?.afterTurn !== true && !goalConfig?.pending?.silenceSourceTurnId) || turnProgressRevision === workRevision) &&
+      const current = () => onDocument() &&
+        (sendAttempted || (goalUsable() && !CLF_DOM.approvalWaiting() &&
+          ((goalConfig?.afterTurn !== true && !goalConfig?.pending?.silenceSourceTurnId) || turnProgressRevision === workRevision) &&
           goalDraft?.token === draft.token && preparedDraft.current()));
       if (!current()) return;
-      let nativeReceipt = null, sendSelection = null;
+      let nativeReceipt = null, sendSelection = null, previousUserId = null;
       const sentRequestForGoal = clickedAt => sentRequestSince(clickedAt, entry => entry.epoch === forEpoch);
-      const sent = await sendSubmittedText(current, true, async sendCurrent => {
+      await sendSubmittedText(current, true, async sendCurrent => {
         // Off or a replacement task retires this exact token in the app. Re-read it
         // when native Send is ready, including after a delayed React update.
         const authorization = await ask({ type: 'activity', conversationId: target, since });
@@ -13115,8 +13126,20 @@
         // appeared. Require ChatGPT's fresh user row or the exact provider request created by
         // this one click, pinned to the same conversation. The request path carries identity
         // only; the unchanged composer/draft check above remains the content authority.
-        if (nativeConversation !== target || !user?.id) return false;
+        if (!sendAttempted || !onDocument() || nativeConversation !== target ||
+            typeof user?.id !== 'string' || !user.id || user.id.length > 200) return false;
+        if (!user.sentRequest) {
+          // History can hydrate during the click. Only a new last user beyond
+          // the before-click anchor can be this DOM receipt.
+          const users = CLF_DOM.messages().filter(message => message.role === 'user');
+          if (users.at(-1)?.id !== user.id || (previousUserId &&
+              !users.slice(0, -1).some(message => message.id === previousUserId))) return false;
+        }
         nativeReceipt = { messageId: user.id, conversationId: target };
+        // Persist the actual same-click witness inside the DOM callback. A remount
+        // between this proof and the awaited Send result can then only retry its ACK.
+        rememberGoalSpent(target, draft.token, user.id, sendSelection);
+        forgetGoalPrepared(target, draft.token);
         return true;
       }, null, goalCore ? (message, expected) => matchesSubmittedConnectorUser(message, expected, goalCore) : undefined,
       goalCore ? draft.reply : null,
@@ -13126,32 +13149,25 @@
         // Commit attempted custody only at the native click, after the DOM owner's
         // final editor/draft/control checks. An authorized remount is still unsent.
         rememberUserSend();
+        previousUserId = userSendReceipt?.previousMessageId ?? null;
         rememberGoalPrepared(target, draft.token, 'send-attempted');
         sendAttempted = true;
       });
       if (!onDocument() || !sendAttempted) return;
       const witnessedSendReceipt = userSendReceipt;
       const ownsDraft = goalDraft?.token === draft.token;
-      if (ownsDraft) goalDraft = null;
-      if (!sent || !nativeReceipt) {
-        await ask({ type: 'goal_ack', conversationId: target, token: draft.token }).catch(() => undefined);
-        if (ownsDraft) setGoalPhase('sending', 'ChatGPT would not send the message');
+      if (!nativeReceipt) {
+        if (ownsDraft) setGoalPhase('sending', 'Send outcome is unconfirmed. The saved Loop reply remains pending.');
         return;
       }
-      // Native click listeners may refresh userSendReceipt after the explicit pre-click call.
-      // Pin the exact provider id onto whichever same-document receipt actually witnessed that
-      // Send so a missing React user bubble can still open the following turn exactly once.
+      if (ownsDraft) goalDraft = null;
+      // Keep the accepted provider id on the same-document Send observer as well,
+      // so the next generation can open even if React redraws the new user row away.
       if (witnessedSendReceipt && (!witnessedSendReceipt.conversationId || witnessedSendReceipt.conversationId === target)) {
         witnessedSendReceipt.accepted = { ...nativeReceipt, epoch: forEpoch };
       }
-      // Sending is the irreversible step. Record it before the fallible ACK hop so a lost
-      // receipt can never turn the same ready draft into a second user message.
-      rememberGoalSpent(target, draft.token, nativeReceipt.messageId, sendSelection);
-      forgetGoalPrepared(target, draft.token);
-      await ask({ type: 'goal_ack', conversationId: target, token: draft.token, messageId: nativeReceipt.messageId,
-        ...(sendSelection ? { sendModel: sendSelection.model, sendReasoningEffort: sendSelection.reasoningEffort } : {})
-      }).catch(() => undefined);
-      if (ownsDraft && !goalDraft) setGoalPhase('');
+      await acknowledgeGoalReceipt(target, draft.token, goalSpentReceipt(target, draft.token));
+      if (onDocument() && ownsDraft && !goalDraft) setGoalPhase('');
     } finally {
       // Undo only our unchanged, definitely pre-wire insertion. Never erase a user's
       // intervening edit or roll back an ambiguous native send.

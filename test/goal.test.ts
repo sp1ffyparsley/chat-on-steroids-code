@@ -201,6 +201,35 @@ it('counts a real confirmed native human Input correction as a NEW task version,
     .rejects.toThrow(/unverified|incomplete|custody/i);
 }));
 
+it('retains a confirmed tool-delivered instruction when the outbox ages out', async () => withIsolatedNativeInputOutbox(async () => {
+  const { recordDeliveredInput } = await import('../src/main/session/input-history.js');
+  const { nativeExecutionScopeForPreparedInput } = await import('../src/main/mcp/plan-tool.js');
+  const conversationId = 'pruned-tool-instruction';
+  const session = await createSession({ conversationId });
+  await goal.setGoalObjectiveNow(conversationId, 'Original acceptance IDs: preserve.\npreserve: Keep the current output.');
+  const original = await nativeExecutionScopeForPreparedInput(session.id, conversationId);
+  const id = randomUUID();
+  const text = 'Current human correction: retain the original acceptance IDs and preserve the source footage.';
+  const offered: InputEntry = {
+    id, sessionId: session.id, conversationId, text, mode: 'auto', state: 'tool',
+    owner: 'exact-returned-tool-request', offeredAt: 100, dueAt: 90, createdAt: 90,
+    model: null, reasoningEffort: null
+  };
+  await recordDeliveredInput(offered);
+  await expect(nativeExecutionScopeForPreparedInput(session.id, conversationId, [])).rejects.toThrow(/human authorship/);
+  const delivered: InputEntry = { ...offered, state: 'sent', messageId: `input:${id}`, deliveredAt: 103 };
+  await recordDeliveredInput(delivered);
+  const confirmed = await nativeExecutionScopeForPreparedInput(session.id, conversationId, [delivered]);
+  expect(confirmed).not.toBe(original);
+  await expect(nativeExecutionScopeForPreparedInput(session.id, conversationId, [])).resolves.toBe(confirmed);
+  const rows = (await readEvents(session.id)).filter(row => row.kind === 'user_message');
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({ inputDelivery: 'confirmed', inputProvenance: { toolMessageId: `input:${id}` } });
+  await expect(nativeExecutionScopeForPreparedInput(session.id, conversationId, [
+    { ...delivered, conversationId: 'foreign-conversation' }
+  ])).rejects.toThrow(/human authorship/);
+}));
+
 it('refuses native Send when a genuine later human correction supersedes a prepared Input, without replay or losing its original claim', async () => withIsolatedNativeInputOutbox(async () => {
   const { nativeExecutionScopeForPreparedInput } = await import('../src/main/mcp/plan-tool.js');
   const { stampNativeExecutionScope, executionScopeFromNativeDelivery } = await import('../src/shared/agent-plan.js');

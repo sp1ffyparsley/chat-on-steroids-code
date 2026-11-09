@@ -12,3 +12,5 @@ This repository is a sanitized code mirror. Read README.md for the exact source 
 - Keep this map and README current when the source or acceptance boundary changes. If retrieval fails, continue from supplied excerpts and label evidence; never invent symbols or return an access-only research report.
 
 - scripts/kill-stray-vitest.mjs preserves live/foreign/unknown runners. Windows cleanup requires exact explicit-root orphan identity under a native handle; POSIX is diagnostic-only. Never substitute global process-name kills.
+
+- Recorder 159 batches exact receipt verification per turn through session/store and recorder. Preserve full account catalog, original JSONL and canonical revisions, asset checks, source reproof and checkpoint clear. Fresh evidence captions expire using Main observation time. See README for current tests and live limitations.

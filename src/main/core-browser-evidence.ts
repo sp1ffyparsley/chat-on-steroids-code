@@ -1017,6 +1017,7 @@ export function nativeFinalEvidenceWait(
     : 'Browser evidence freshness is unknown; its observation clock is unverified.';
   return {
     reason: 'evidence',
+    ...(stale ? {} : { evidenceFreshUntil: evidence.observedAt + CORE_BROWSER_EVIDENCE_MAX_AGE_MS }),
     detail: [stale
       ? 'CoS last observed an unresolved native tool result, but that browser observation is stale and current activity is unknown. Elapsed time is not a completion receipt.'
       : pending.reason === 'inventory-incomplete'

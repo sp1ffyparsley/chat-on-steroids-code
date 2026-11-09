@@ -388,6 +388,7 @@ type SafeCloseLifecycleControls = {
   status(): ProfileLifecycleStatus;
   cancel(transitionId: string): Promise<CancelDrainResult>;
   companionStatus?(): unknown;
+  observeWork?(): Promise<{ recordedTurns: number; nativeBusyTurns: number; localProcesses: number; sessionCatalogComplete: boolean }>;
 };
 
 /**
@@ -415,6 +416,7 @@ export function createSafeCloseForUpdateGate(log: {
   let inFlightRequest: RequestIdentity | null = null;
   let pumping: Promise<void> | null = null;
   let controls: SafeCloseLifecycleControls | undefined;
+  let workObservationPending = false;
   const companionSnapshot = () => {
     let raw: unknown;
     try { raw = controls?.companionStatus?.(); } catch { /* A diagnostic failure must not suppress lifecycle status or expose its exception. */ }
@@ -442,6 +444,27 @@ export function createSafeCloseForUpdateGate(log: {
     if (request.expectedGeneration !== log.runningProcessGeneration)
       throw new Error(`expected process generation ${request.expectedGeneration} does not match running generation ${log.runningProcessGeneration}`);
   };
+  const observeWork = async (request: RequestIdentity, status: ProfileLifecycleStatus) => {
+    const owner = controls;
+    if (!owner?.observeWork || status.phase !== 'idle' || workObservationPending) return;
+    workObservationPending = true;
+    try {
+      const counts = await owner.observeWork();
+      const current = owner.status();
+      if (current.profileId !== status.profileId || current.phase !== status.phase ||
+          current.admission.generation !== status.admission.generation) return;
+      const { recordedTurns, nativeBusyTurns, localProcesses, sessionCatalogComplete } = counts;
+      if (typeof sessionCatalogComplete !== 'boolean' || ![recordedTurns, nativeBusyTurns, localProcesses].every(value => Number.isSafeInteger(value) && value >= 0))
+        throw new Error('Invalid work counts');
+      log.info(`safe close for update: work observation ${JSON.stringify({ profileId: request.profileId,
+        pid: log.runningProcessId, generation: log.runningProcessGeneration,
+        phase: status.phase, observedAt: Date.now(), recordedTurns, nativeBusyTurns, localProcesses, sessionCatalogComplete })}`);
+    } catch {
+      log.info(`safe close for update: work observation ${JSON.stringify({ profileId: request.profileId,
+        pid: log.runningProcessId, generation: log.runningProcessGeneration, state: 'unavailable' })}`);
+    } finally { workObservationPending = false; }
+  };
+
   const reportSnapshot = (request: RequestIdentity, status: ProfileLifecycleStatus) => {
     if (status.profileId !== request.profileId) throw new Error('lifecycle snapshot belongs to another profile');
     log.info(`safe close for update: lifecycle snapshot ${JSON.stringify({ profileId: request.profileId,
@@ -453,6 +476,7 @@ export function createSafeCloseForUpdateGate(log: {
       blockerCount: status.blockerCount, blockers: status.blockers.slice(0, 24).map(row => ({
         category: /^[a-z][a-z0-9-]{0,63}$/.test(row.category) ? row.category : 'unknown',
         count: Math.max(0, Math.min(1_000_000, Number.isSafeInteger(row.count) ? row.count : 0)) })) })}`);
+    if (request.action === 'status') void observeWork(request, status);
   };
 
   const pump = (): Promise<void> => {

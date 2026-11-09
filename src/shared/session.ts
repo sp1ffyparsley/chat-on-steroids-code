@@ -308,11 +308,11 @@ export type SessionEvent =
         sessionId: string;
         conversationId: string;
         inputId: string;
-        nativeMessageId: string;
         deliveredAt: number;
         authoredSha256: string;
         preparedSha256: string;
-      };
+      } & ({ nativeMessageId: string; toolMessageId?: never } |
+        { nativeMessageId?: never; toolMessageId: string });
       /** A provider echo supplied app-origin labels before a matching local
        * receipt. It is reference text, not a verified new human correction;
        * the real app-owned ACK may clear this uncertainty on the same UUID. */

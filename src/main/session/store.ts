@@ -657,7 +657,8 @@ function inputProvenanceEqual(
   return left === right || !!(left && right && left.version === right.version &&
     left.authorship === right.authorship && left.sessionId === right.sessionId &&
     left.conversationId === right.conversationId && left.inputId === right.inputId &&
-    left.nativeMessageId === right.nativeMessageId && left.deliveredAt === right.deliveredAt &&
+    left.nativeMessageId === right.nativeMessageId && left.toolMessageId === right.toolMessageId &&
+    left.deliveredAt === right.deliveredAt &&
     left.authoredSha256 === right.authoredSha256 && left.preparedSha256 === right.preparedSha256);
 }
 
@@ -1843,16 +1844,20 @@ export function upsertMessageEvent(
           event.preparedDeliverySha256 !== undefined || event.inputProvenance !== undefined);
       if (event.kind === 'user_message' && event.source === 'app' && event.inputProvenance !== undefined) {
         const proof = event.inputProvenance;
+        const receiptMatches = proof?.toolMessageId !== undefined
+          ? proof.nativeMessageId === undefined && proof.toolMessageId === event.messageId &&
+            event.messageId === `input:${event.inputId}`
+          : !!proof?.nativeMessageId && proof.nativeMessageId === event.messageId &&
+            !proof.nativeMessageId.startsWith('input:');
         if (!proof || proof.version !== 1 || !['human', 'automation'].includes(proof.authorship) ||
             proof.sessionId !== sessionId || !entry.summary.chatIds.includes(proof.conversationId) ||
-            !proof.inputId || proof.inputId !== event.inputId || !proof.nativeMessageId ||
-            proof.nativeMessageId !== event.messageId || proof.nativeMessageId.startsWith('input:') ||
+            !proof.inputId || proof.inputId !== event.inputId || !receiptMatches ||
             event.inputDelivery !== 'confirmed' || !Number.isFinite(proof.deliveredAt) || proof.deliveredAt < 0 ||
             typeof event.authoredText !== 'string' ||
             proof.authoredSha256 !== createHash('sha256').update(event.authoredText).digest('hex') ||
             !/^[a-f0-9]{64}$/.test(proof.preparedSha256) || proof.preparedSha256 !== event.preparedDeliverySha256 ||
             (proof.authorship === 'human' && event.automationOrigin !== undefined))
-          throw new Error('Canonical Input provenance conflicts with its exact owned native receipt');
+          throw new Error('Canonical Input provenance conflicts with its exact owned delivery receipt');
       }
       if (event.kind === 'user_message' && event.preparedDeliverySha256 !== undefined) {
         if (event.source !== 'app') {
@@ -3378,13 +3383,23 @@ async function readAllSummaries(): Promise<SessionSummary[]> {
  * folder after an arbitrary cap can resume the wrong work. Keep the expensive path explicit
  * and use it only where "every session" is part of the contract.
  */
-async function readEverySummary(): Promise<SessionSummary[]> {
-  const catalog = await ensureAttachmentCatalog();
-  const summaries = new Map<string, SessionSummary>();
-  for (const summary of catalog.summaries.values()) summaries.set(summary.id, summary);
+function usageSummaries(catalog: AttachmentCatalog | null): Map<string, SessionSummary> {
+  const summaries = new Map(catalog?.summaries);
   // Live projections are authoritative between debounced meta writes.
   for (const entry of open.values()) summaries.set(entry.summary.id, entry.summary);
-  return [...summaries.values()].map((summary) => ({ ...summary })).sort(compareSummariesNewestFirst);
+  return summaries;
+}
+
+async function readEverySummary(): Promise<SessionSummary[]> {
+  return [...usageSummaries(await ensureAttachmentCatalog()).values()]
+    .map((summary) => ({ ...summary })).sort(compareSummariesNewestFirst);
+}
+
+/** Observe the existing cache only. A cold or partial catalog cannot establish absence. */
+export function cachedUsageSessionIdentities() {
+  return { sessionCatalogComplete: attachmentCatalog?.complete === true,
+    sessions: [...usageSummaries(attachmentCatalog).values()].map(({ id, conversationId, activeTurnId }) =>
+      ({ id, conversationId, activeTurnId })) };
 }
 
 export interface SessionListCursor {
@@ -3504,8 +3519,17 @@ export async function readReceiptWitnessOccurrences(
   sessionId: string,
   resultReceiptId: string
 ): Promise<Array<Extract<SessionEvent, { kind: 'tool_call' }>>> {
+  return readReceiptWitnessBatch(sessionId, [resultReceiptId]);
+}
+
+/** Read each journal once for the original receipt set of one native turn. */
+export async function readReceiptWitnessBatch(
+  sessionId: string,
+  resultReceiptIds: readonly string[]
+): Promise<ToolEvent[]> {
   assertSessionId(sessionId);
-  if (!/^[a-f0-9]{48}$/.test(resultReceiptId)) throw new Error('Invalid receipt witness identity');
+  if (!resultReceiptIds.length || resultReceiptIds.some(id => !/^[a-f0-9]{48}$/.test(id)))
+    throw new Error('Invalid receipt witness identity');
   await flushSession(sessionId);
   let raw: string;
   try { raw = await fs.readFile(path.join(sessionDir(sessionId), 'events.jsonl'), 'utf8'); }
@@ -3522,27 +3546,32 @@ export async function readReceiptWitnessOccurrences(
       throw new Error('Recorded session receipt journal missing or empty; custody unverified');
     return [];
   }
-  if (!raw.includes(resultReceiptId)) return [];
-  const matches: Array<Extract<SessionEvent, { kind: 'tool_call' }>> = [];
+  const present = resultReceiptIds.filter(id => raw.includes(id));
+  if (!present.length) return [];
+  const requested = new Set(present);
+  const matches: ToolEvent[] = [];
+  const counts = new Map<string, number>();
   for (const line of raw.split('\n')) {
-    if (!line.includes(resultReceiptId)) continue;
+    if (!present.some(id => line.includes(id))) continue;
     let event: SessionEvent;
     try { event = JSON.parse(line) as SessionEvent; }
     catch { throw new Error('Receipt witness journal row integrity unverified'); }
     if (event?.kind !== 'tool_call') continue;
     const call = event.call;
     if (!call || typeof call !== 'object' ||
-        call.resultReceiptId === resultReceiptId &&
+        call.resultReceiptId !== undefined && requested.has(call.resultReceiptId) &&
         (!Number.isSafeInteger(event.seq) || !call.callId || !call.tool ||
           !call.args || !call.result || !['unattributed', 'request_id', 'result_receipt', 'superseded'].includes(call.attributionMethod)))
       throw new Error('Receipt witness tool result integrity unverified');
-    if (call.resultReceiptId === resultReceiptId)
-      matches.push(event as Extract<SessionEvent, { kind: 'tool_call' }>);
+    if (call.resultReceiptId && requested.has(call.resultReceiptId)) {
+      matches.push(event);
+      counts.set(call.resultReceiptId, (counts.get(call.resultReceiptId) ?? 0) + 1);
+    }
   }
   // Canonical native bindings/process exits annotate the one immutable original;
   // they are not additional executions or a way to mint a historical witness.
-  if (matches.length === 1) {
-    const original = matches[0]!;
+  for (const [index, original] of matches.entries()) {
+    if (counts.get(original.call.resultReceiptId!) !== 1) continue;
     try {
       const revision = JSON.parse(await fs.readFile(canonicalToolPath(sessionId, original.call.callId), 'utf8')) as ToolEvent;
       if (!sameReceiptExecution(original, revision) ||
@@ -3551,7 +3580,7 @@ export async function readReceiptWitnessOccurrences(
           (typeof revision.call.nativeCallMessageId !== 'string' ||
             !revision.call.nativeCallMessageId || revision.call.nativeCallMessageId.length > 200))
         throw new Error('Canonical tool receipt identity changed');
-      return [revision];
+      matches[index] = revision;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
   return matches;

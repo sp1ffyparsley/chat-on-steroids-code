@@ -27,6 +27,7 @@ import {
   recordProgress,
   recordToolCall,
   receiptDurableOwnerUnique,
+  receiptDurableOwnersUnique,
   repairDeterministicAttribution,
   rebindConversation,
   resetRecorderForTests,
@@ -1960,15 +1961,41 @@ describe('session store', () => {
       summary: { title: 'read', tone: 'neutral' as const, kind: 'read' as const }
     };
     await appendEvent(target.id, { time: Date.now(), source: 'mcp', kind: 'tool_call', call: basicCall });
+    const foreignWitness = { expectedCallId: 'other-execution', resultReceiptId: 'af'.repeat(24),
+      nativeCallMessageId: 'foreign-native-parent' };
     await appendEvent(foreign.id, { time: Date.now(), source: 'mcp', kind: 'tool_call',
-      call: { ...basicCall, callId: 'other-execution', resultReceiptId: 'af'.repeat(24),
-        conversationId: 'receipt-journal-loss-foreign', attribution: 'request_id',
-        attributionMethod: 'request_id', nativeCallMessageId: undefined }
+      call: { ...basicCall, callId: foreignWitness.expectedCallId, resultReceiptId: foreignWitness.resultReceiptId,
+        conversationId: 'receipt-journal-loss-foreign', nativeCallMessageId: foreignWitness.nativeCallMessageId }
     });
+    const witnesses = Array.from({ length: 40 }, (_, index) => ({
+      resultReceiptId: (index + 256).toString(16).padStart(48, '0'),
+      nativeCallMessageId: `native-batch-${index}`,
+      expectedCallId: `execution-batch-${index}`
+    }));
+    await Promise.all(witnesses.map(witness => appendEvent(target.id, { time: Date.now(),
+      source: 'mcp', kind: 'tool_call', call: { ...basicCall, resultReceiptId: witness.resultReceiptId,
+        nativeCallMessageId: witness.nativeCallMessageId, callId: witness.expectedCallId } })));
     await flushSessions();
+    const journal = path.join(sessionsRoot(), foreign.id, 'events.jsonl');
+    const targetJournal = path.join(sessionsRoot(), target.id, 'events.jsonl');
+    const reads = vi.spyOn(fs, 'readFile');
+    try {
+      expect(await Promise.all([
+        receiptDurableOwnersUnique(target.id, witnesses),
+        receiptDurableOwnersUnique(foreign.id, [foreignWitness])
+      ])).toEqual([true, true]);
+      // One read of each journal per verification, regardless of the 40 receipts.
+      expect(reads.mock.calls.filter(([file]) => file === journal)).toHaveLength(2);
+      expect(reads.mock.calls.filter(([file]) => file === targetJournal)).toHaveLength(2);
+    } finally {
+      reads.mockRestore();
+    }
+    expect(await receiptDurableOwnersUnique(target.id, [...witnesses, witnesses[0]!])).toBe(false);
+    expect(await receiptDurableOwnersUnique(foreign.id, witnesses)).toBe(false);
+    expect(await receiptDurableOwnersUnique(target.id, [...witnesses.slice(1),
+      { ...witnesses[0]!, nativeCallMessageId: 'wrong-native-parent' }])).toBe(false);
     expect((await getSession(foreign.id))?.toolCalls).toBe(1);
     expect(await receiptDurableOwnerUnique(receiptId, target.id, nativeMessage, basicCall.callId)).toBe(true);
-    const journal = path.join(sessionsRoot(), foreign.id, 'events.jsonl');
     const held = `${journal}.test-held`;
     await fs.rename(journal, held);
     try {
@@ -1977,12 +2004,22 @@ describe('session store', () => {
       await expect(readReceiptWitnessOccurrences(foreign.id, receiptId))
         .rejects.toThrow(/journal|integrity|unverified/i);
       expect(await receiptDurableOwnerUnique(receiptId, target.id, nativeMessage, basicCall.callId)).toBe(false);
-      expect((await readEvents(target.id, { kinds: ['tool_call'], requireIntegrity: true })).length).toBe(1);
+      expect(await receiptDurableOwnersUnique(target.id, witnesses)).toBe(false);
+      expect((await readEvents(target.id, { kinds: ['tool_call'], requireIntegrity: true })).length).toBe(41);
     } finally {
       await fs.rename(held, journal);
     }
     expect(await receiptDurableOwnerUnique(receiptId, target.id, nativeMessage, basicCall.callId)).toBe(true);
     const originalBytes = await fs.readFile(journal);
+    const duplicate = { kind: 'tool_call', seq: 2, source: 'mcp', time: Date.now(),
+      call: { ...basicCall, resultReceiptId: witnesses[0]!.resultReceiptId } };
+    await fs.appendFile(journal, JSON.stringify(duplicate) + '\n');
+    try {
+      expect(await receiptDurableOwnersUnique(target.id, witnesses)).toBe(false);
+      expect(await receiptDurableOwnersUnique(foreign.id, [foreignWitness])).toBe(true);
+    } finally {
+      await fs.writeFile(journal, originalBytes);
+    }
     await fs.writeFile(journal, '');
     try {
       // A zero-byte replacement is also no evidence that the metadata's

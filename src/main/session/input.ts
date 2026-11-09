@@ -223,8 +223,9 @@ const entrySchema = inputArgs.extend({
   historyRecorded: z.boolean().optional(),
   /** Canonical history already carries authoredText for this outbox projection. */
   historyProjectionVersion: z.literal(1).optional(),
-  /** Projection bookkeeping only; canonical native provenance remains the authority. */
+  /** Projection bookkeeping only; canonical delivery provenance remains the authority. */
   historyProvenanceRecorded: z.literal(true).optional(),
+  historyToolProvenanceRecorded: z.literal(true).optional(),
   historyProvenancePending: z.literal(true).optional(),
   /** Consume-once association of this exact Sent question with its settled native answer. */
   acceptedNativeFinal: z.object({ replyId: z.string().uuid(), acceptedAt: z.number().nonnegative() }).optional(),
@@ -861,6 +862,9 @@ function sourceHelperCustodyIds(rows: InputEntry[], now = Date.now()): Set<strin
 }
 const preparable = (row: InputEntry): boolean => row.state === 'queued' ||
   (row.state === 'browser' && row.requiresAuthorization === true && row.sendAuthorizedAt === undefined);
+const confirmedToolHistory = (row: InputEntry): boolean => row.state === 'sent' &&
+  !!row.sessionId && !!row.owner && !!row.conversationId && row.toolReceiptUncertain !== true &&
+  row.messageId === `input:${row.id}` && Number.isFinite(row.offeredAt) && Number.isFinite(row.deliveredAt) && row.deliveredAt! >= row.offeredAt!;
 const needsHistory = (row: InputEntry): boolean => row.purpose !== 'decision' &&
   (!row.historyRecorded || row.historyProvenancePending === true) &&
   ((row.state === 'tool' && Number.isFinite(row.offeredAt)) || ((row.state === 'sent' || row.state === 'cancelled') &&
@@ -1004,7 +1008,9 @@ async function load(): Promise<InputEntry[]> {
       row.historyRecorded = false;
     // Older projections can retain full authored text without the origin/ACK
     // snapshot needed after bounded outbox trimming. Upgrade only a positively
-    // owned native receipt; failed writes keep this row unprunable via needsHistory.
+    // owned delivery receipt; failed writes keep this row unprunable via needsHistory.
+    if (row.historyRecorded && confirmedToolHistory(row) && row.historyToolProvenanceRecorded !== true)
+      row.historyProvenancePending = true;
     if (row.historyRecorded && row.historyProvenanceRecorded !== true && row.purpose !== 'decision' &&
         ['sent', 'cancelled'].includes(row.state) && row.owner && row.conversationId &&
         (row.sessionId || row.deliveredSessionId) && row.messageId && !row.messageId.startsWith('input:') &&
@@ -1759,7 +1765,9 @@ async function publishHistory(): Promise<void> {
   if (recorded.size) {
     try { await commit(current.map(row => recorded.has(row.id)
       ? { ...row, historyRecorded: true, historyProjectionVersion: 1 as const,
-        historyProvenanceRecorded: true as const, historyProvenancePending: undefined } : row)); }
+        historyProvenanceRecorded: true as const,
+        ...(confirmedToolHistory(row) ? { historyToolProvenanceRecorded: true as const } : {}),
+        historyProvenancePending: undefined } : row)); }
     catch { /* the durable delivery receipt remains; canonical retry is idempotent */ }
   }
 }

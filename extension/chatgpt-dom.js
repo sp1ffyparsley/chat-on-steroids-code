@@ -651,6 +651,34 @@ var CLF_DOM = (() => {
   }
 
   /**
+   * A provider failure card whose only rendered anchor is its exact native Retry control.
+   *
+   * The current full-width delivery-timeout card renders no alert element: `errors()` admits
+   * it through that Retry control, but a stale shell running hint vetoed the whole recovery
+   * ladder while a visible, enabled Retry sat unspent. Anchor on the same admission the
+   * retry owner enforces — exact English Retry, enabled, displayed, outside authored and
+   * owned chrome, nearest complete provider notice in the exact transport vocabulary. A
+   * quota, cooldown, terminal, quoted, disabled or historical-turn occurrence never counts;
+   * those keep the cached hint authoritative for their own owners.
+   */
+  function retryAnchoredTransportFailure(control, currentSection) {
+    return safe(() => {
+      const quick = (control.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!/^(?:retry|try again)$/i.test(quick) || control.disabled ||
+          control.getAttribute('aria-disabled') === 'true') return false;
+      const failure = retryFailure(control);
+      if (!failure || failure.retry !== control || failure.reason ||
+          !transportFailure(failure.text, failure.node) || !retryControlReady(control)) return false;
+      const section = failure.node.closest(TURN);
+      // No turn container mirrors a provider live region above the thread; the retry owner
+      // admits exactly that shape, so the cached hint must not veto it either. A card inside
+      // the current exchange qualifies the same way the in-turn alert exemption does.
+      return !section || section === currentSection || section.contains(currentSection) ||
+        currentSection?.contains(section) === true;
+    }, false);
+  }
+
+  /**
    * The conversation a ChatGPT path names, or null when it names none.
    *
    * A conversation inside a Project is routed as `/g/<project>/c/<id>`, so anchoring at
@@ -1945,7 +1973,14 @@ var CLF_DOM = (() => {
         !node.closest(`${OWN_SURFACES},.markdown,[data-markdown-text-style],[data-message-author-role="user"],[contenteditable],[hidden],[inert],[aria-hidden="true"]`) &&
         node.closest(SHELL_TURN) === latest && displayed(node) &&
         transportFailure(node.innerText || node.textContent || '', node))) return false;
-      return latest?.getAttribute('data-clf-shell-running-v2') === location.pathname;
+      const staleHint = latest?.getAttribute('data-clf-shell-running-v2') === location.pathname;
+      // The provider additionally paints its delivery-timeout failure as a full-width card
+      // with no alert role; only its exact native Retry control anchors the same transport
+      // vocabulary. The same stale cached hint must not veto that failure either, with the
+      // exact admission the retry owner votes on. Real Stop stays authoritative above both.
+      if (staleHint && [...document.querySelectorAll('button')].some(control =>
+        retryAnchoredTransportFailure(control, latest))) return false;
+      return staleHint;
     }, false);
   }
 

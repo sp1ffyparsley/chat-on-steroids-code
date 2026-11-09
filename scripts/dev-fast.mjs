@@ -1331,7 +1331,10 @@ if (checkOnly) {
       appShellSourceSha256 === '8C8AAE632D67BBADC423F14BE5BAA655FEA9D5BAA0EBCA42060CC6F30236C4B1' ||
       // Paused lossless maintenance no longer depends on a ChatGPT sign-in observation.
       // Both complete navigation owners remain unchanged and BLOCKED.
-      appShellSourceSha256 === 'C48D4F7716B573569623EB08D97623DBEBB6263DF22CC0275DE33EA455542206';
+      appShellSourceSha256 === 'C48D4F7716B573569623EB08D97623DBEBB6263DF22CC0275DE33EA455542206' ||
+      // Read-only lifecycle work observation changes startup wiring only. Both
+      // complete navigation owners retain window6c0662d9/globald2ba9316; BLOCKED.
+      appShellSourceSha256 === '0B28780DDAED7857D145A7F448028B782F047C44990A09334E9B871EEEC1690B';
   const nativeDocumentGate = knownBlockedNavigationSource
     ? 'blocked-by-known-app-shell-navigation-guards'
     : 'source-unknown-requires-native-qualification';

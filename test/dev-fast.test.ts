@@ -5305,7 +5305,7 @@ require('node:module').syncBuiltinESMExports();
     expect(payload.bridge).toBe('127.0.0.1:8796');
     expect(payload.installedRuntimeChecked).toBe(false);
     expect(payload.developmentUpdateGates).toMatchObject({
-      appShellSourceSha256: 'C48D4F7716B573569623EB08D97623DBEBB6263DF22CC0275DE33EA455542206',
+      appShellSourceSha256: '0B28780DDAED7857D145A7F448028B782F047C44990A09334E9B871EEEC1690B',
       htmlDocument: 'blocked-by-known-app-shell-navigation-guards',
       preloadCurrentRenderer: 'blocked-by-known-app-shell-navigation-guards',
       nativeRuntimeVerified: false,
@@ -5316,7 +5316,7 @@ require('node:module').syncBuiltinESMExports();
 
   it('pins the reviewed recovery shell to blocked navigation without qualifying modified shell bytes', () => {
     const reviewedBytes = readFileSync(path.join(project, 'src', 'main', 'index.ts'));
-    const reviewedHash = 'C48D4F7716B573569623EB08D97623DBEBB6263DF22CC0275DE33EA455542206';
+    const reviewedHash = '0B28780DDAED7857D145A7F448028B782F047C44990A09334E9B871EEEC1690B';
     const source = reviewedBytes.toString('utf8');
     expect(createHash('sha256').update(reviewedBytes).digest('hex').toUpperCase()).toBe(reviewedHash);
     // The reviewed window body includes view-only recovery and exact-window close
@@ -5329,6 +5329,9 @@ require('node:module').syncBuiltinESMExports();
     // The historical exact source remains blocked too; neither reviewed hash grants runtime proof.
     const launcher = readFileSync(script, 'utf8');
     const classifier = launcher.slice(launcher.indexOf('  const knownBlockedNavigationSource ='), launcher.indexOf('  const developmentUpdateGates ='));
+    expect(vm.runInNewContext(`${classifier}\nnativeDocumentGate`, {
+      appShellSourceSha256: 'C48D4F7716B573569623EB08D97623DBEBB6263DF22CC0275DE33EA455542206'
+    })).toBe('blocked-by-known-app-shell-navigation-guards');
     expect(vm.runInNewContext(`${classifier}\nnativeDocumentGate`, {
       appShellSourceSha256: '8C8AAE632D67BBADC423F14BE5BAA655FEA9D5BAA0EBCA42060CC6F30236C4B1'
     })).toBe('blocked-by-known-app-shell-navigation-guards');

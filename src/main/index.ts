@@ -128,7 +128,7 @@ import { bridgeExtensionOriginSecretSlot, getSecret, validateIsolatedInstanceSec
 import { ProfileLifecycleCoordinator } from './profile-lifecycle.js';
 import { createManagedInstanceProfile, renameManagedInstanceProfile, setManagedInstanceBrowserProfile } from './instance-management.js';
 import { profileWorkAdmission } from './work-admission.js';
-import { activeProfileWorkCensus } from './profile-work-state.js';
+import { activeProfileWorkCensus, observeProfileWork } from './profile-work-state.js';
 import { assertCanonicalAccountRouting, developmentBridgePortOverride, developmentUserDataOverride, isolatedProcessSelection } from './instance-process.js';
 import { parseInstanceRegistry } from '../shared/instance-profile.js';
 import {
@@ -1451,7 +1451,7 @@ void app.whenReady().then(async () => {
     getActiveInstanceRuntime().profile.id,
     () => profileLifecycle.requestShutdown(),
     { status: () => profileLifecycle.getStatus(), cancel: transitionId => profileLifecycle.cancelDrain(transitionId),
-      companionStatus: () => companionActivationSnapshot(companionFingerprint) }
+      companionStatus: () => companionActivationSnapshot(companionFingerprint), observeWork: observeProfileWork }
   );
   if (quitting || windowActivation.isDisabled()) return;
 

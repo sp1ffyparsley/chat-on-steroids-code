@@ -59,6 +59,7 @@ import {
   readEvents,
   readRecentEvents,
   readReceiptWitnessOccurrences,
+  readReceiptWitnessBatch,
   readLatestUserMessage,
   indexedSessions,
   syncSessionJournal,
@@ -1456,16 +1457,34 @@ export async function receiptDurableOwnerUnique(
   resultReceiptId: string, targetSessionId: string, nativeCallMessageId: string,
   expectedCallId?: string, options: { historicalReadOnly?: true } = {}
 ): Promise<boolean> {
-  if (!/^[a-f0-9]{48}$/.test(resultReceiptId) || !targetSessionId ||
-      !nativeCallMessageId) return false;
+  return receiptDurableOwnersUnique(targetSessionId, [{ resultReceiptId, nativeCallMessageId, expectedCallId }], options);
+}
+
+interface NativeReceiptWitness {
+  resultReceiptId: string;
+  nativeCallMessageId: string;
+  expectedCallId?: string;
+}
+
+/** Verify a turn's receipt set using one complete scan of the current account. */
+export async function receiptDurableOwnersUnique(
+  targetSessionId: string, witnesses: readonly NativeReceiptWitness[],
+  options: { historicalReadOnly?: true } = {}
+): Promise<boolean> {
+  if (!targetSessionId || !witnesses.length || witnesses.some(witness =>
+    !/^[a-f0-9]{48}$/.test(witness.resultReceiptId) || !witness.nativeCallMessageId)) return false;
+  const expected = new Map(witnesses.map(witness => [witness.resultReceiptId, witness]));
+  if (expected.size !== witnesses.length) return false;
+  const ids = [...expected.keys()];
   try {
-    let count = 0;
-    let owned: Extract<SessionEvent, { kind: 'tool_call' }> | null = null;
+    const owned = new Map<string, Extract<SessionEvent, { kind: 'tool_call' }>>();
     for (const summary of await indexedSessions({ requireComplete: true })) {
-      const events = await readReceiptWitnessOccurrences(summary.id, resultReceiptId);
+      const events = await readReceiptWitnessBatch(summary.id, ids);
       for (const event of events) {
-        if (event.kind !== 'tool_call' || event.call.resultReceiptId !== resultReceiptId) continue;
-        count++;
+        const id = event.call.resultReceiptId!;
+        const witness = expected.get(id);
+        if (!witness) return false;
+        const { nativeCallMessageId, expectedCallId } = witness;
         // A successful Compact & Resume retains the exact older execution in
         // the same session's chatIds, but that old chat may not authorize a new
         // native Send/receipt. ONLY the read-only acceptance projection opts in
@@ -1474,7 +1493,7 @@ export async function receiptDurableOwnerUnique(
         const retainedHistorical = options.historicalReadOnly === true &&
           typeof event.call.conversationId === 'string' &&
           summary.chatIds.includes(event.call.conversationId);
-        if (count !== 1 || summary.id !== targetSessionId ||
+        if (owned.has(id) || summary.id !== targetSessionId ||
             event.call.nativeCallMessageId !== nativeCallMessageId ||
             (event.call.conversationId !== summary.conversationId && !retainedHistorical) ||
             !(event.call.attributionMethod === 'request_id'
@@ -1483,21 +1502,23 @@ export async function receiptDurableOwnerUnique(
               conversationId: retainedHistorical ? event.call.conversationId : summary.conversationId,
               sessionId: targetSessionId, nativeCallMessageId, invocationSha256: event.call.invocationSha256 })) ||
             (expectedCallId && event.call.callId !== expectedCallId)) return false;
-        owned = event;
+        owned.set(id, event);
       }
     }
-    if (count !== 1 || !owned) return false;
-    if (owned.call.attributionMethod === 'request_id') await syncCanonicalToolCall(targetSessionId, owned);
+    if (owned.size !== expected.size) return false;
     // Native final/Loop can re-evaluate a receipt after a cold restart, when
     // the recorder's original copy barrier is no longer in memory. The row is
     // not sufficient proof if its overflow result or referenced binary was
     // removed/corrupted since the transfer. Verify all content-addressed bytes
     // and flush the exact owned journal before returning an ACK candidate.
-    const call = owned.call;
     const assets = new Set<string>();
-    if (call.args.assetId) assets.add(call.args.assetId);
-    if (call.result.assetId) assets.add(call.result.assetId);
-    for (const asset of call.assets ?? []) assets.add(asset.id);
+    for (const row of owned.values()) {
+      const call = row.call;
+      if (call.attributionMethod === 'request_id') await syncCanonicalToolCall(targetSessionId, row);
+      if (call.args.assetId) assets.add(call.args.assetId);
+      if (call.result.assetId) assets.add(call.result.assetId);
+      for (const asset of call.assets ?? []) assets.add(asset.id);
+    }
     for (const id of assets) {
       const bytes = await readAsset(targetSessionId, id);
       if (!bytes) return false;

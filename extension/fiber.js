@@ -42,7 +42,7 @@
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
   const VERSION = 19;
   /** Private implementation epoch, independent of the stable cross-world wire schema. */
-  const PRODUCER_VERSION = 154;
+  const PRODUCER_VERSION = 159;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -2450,6 +2450,10 @@
     let nativeAnchorRetryScope = 'none';
     const finalFacet = facet => { if (nativeAnchorFinalFacet === 'none') nativeAnchorFinalFacet = facet; };
     let nativeAnchorMember = 'none', nativeAnchorMemberTerminal = false, nativeAnchorMemberTyped = false;
+    // A fully validated native branch can prove who issued a request before its
+    // opaque result witness hydrates. Keep that identity separate from the
+    // receipt-bearing scope used by result pairing and completion below.
+    let mountedNativeRequestScope = null;
     const mountedNativeScope = (() => {
       // No independent mounted anchor was attempted without these prerequisites.
       // A diagnostic failure never changes the namespace or any acceptance predicate.
@@ -2585,6 +2589,8 @@
               return refuse('nativeScopeBranchConflict', 'final-namespace');
           }
           const canonicalParents = new Map(), executionIds = new Set(), nativeCalls = new Set(), executionGroups = new Map(), receiptIds = new Set();
+          const pendingDirectCalls = new Set();
+          let missingCoreReceipt = false;
           let execution = null;
           // The rendered graph can contract one finished commentary node while the
           // invocation retains its original metadata parent. Prove that exact
@@ -2681,11 +2687,25 @@
             } else if (role === 'assistant' && recipient === 'api_tool.call_tool') {
               const call = shell.calls.find(call => call.messageId === id), path = nativeRequestPath(message);
               const server = ownServerName(shell.callSources.get(id)?.server);
-              if (!execution || !selected.has(id) || !call || !path || !server || !ourPath(path) ||
+              const request = str(nativeField(metadata, 'request_id'));
+              if (!selected.has(id) || !call || !path || !server || !ourPath(path) ||
                   !nativeRequestServerMatches(path, server) || toolName(path) !== call.tool ||
-                  str(nativeField(metadata, 'request_id')) !== execution.request) return refuse('nativeScopeBranchConflict', 'core-invocation');
-              nativeCalls.add(id); execution.calls.push(id); executionGroups.set(id, execution);
+                  !request || (execution ? request !== execution.request : pending))
+                return refuse('nativeScopeBranchConflict', 'core-invocation');
+              nativeCalls.add(id);
+              if (execution) {
+                execution.calls.push(id); executionGroups.set(id, execution);
+              } else pendingDirectCalls.add(id);
             } else if (role === 'tool' && nativeField(author, 'name') === 'api_tool.call_tool' && recipient === 'all') {
+              if (!execution && stagedResultMembers.has(id) && pendingDirectCalls.delete(parent)) {
+                // This folded result already passed the exact direct parent, resource,
+                // scope and receipt checks. It does not need a Code Mode wrapper.
+                const receiptId = coreResultReceipt(message);
+                if (!receiptId || receiptIds.has(receiptId))
+                  return refuse('nativeScopeBranchConflict', 'duplicate-receipt');
+                receiptIds.add(receiptId);
+                continue;
+              }
               const resource = nativeField(metadata, 'invoked_resource');
               // Keep the original short-circuit refusal order. The fixed first facet
               // survives legacy workers in the bounded console trace; it grants no
@@ -2697,16 +2717,28 @@
                       ? 'resource' : 'none';
               if (resultFacet !== 'none') {
                 nativeAnchorCoreResultFacet = resultFacet;
-                return refuse('nativeScopeBranchConflict', 'core-result');
+                // Receipt absence cannot erase an independently checked original
+                // request. It still forbids result/completion scope. Continue all
+                // remaining parent, resource, namespace, cache and group checks;
+                // any contradiction discards even the request-only scope.
+                if (resultFacet !== 'receipt' || !ownResult({
+                  app: str(nativeField(resource, 'app_name')), resource: str(nativeField(resource, 'resource_uri'))
+                })) return refuse('nativeScopeBranchConflict', 'core-result');
+                missingCoreReceipt = true;
               }
               const receiptId = coreResultReceipt(message);
-              if (receiptIds.has(receiptId)) return refuse('nativeScopeBranchConflict', 'duplicate-receipt');
-              receiptIds.add(receiptId); execution.results.push(id);
+              if (receiptId && receiptIds.has(receiptId)) return refuse('nativeScopeBranchConflict', 'duplicate-receipt');
+              if (receiptId) receiptIds.add(receiptId);
+              execution.results.push(id);
             } else if (!(role === 'assistant' && recipient === 'all')) return refuse('nativeScopeBranchConflict', 'group-role');
           }
-          if (execution && !pending || !executionIds.size || nativeCalls.size !== shell.calls.length ||
+          if (execution && !pending || pendingDirectCalls.size || nativeCalls.size !== shell.calls.length ||
               shell.calls.some(call => !nativeCalls.has(call.messageId)) || ids.some(id => !currentIds.has(id)))
             return refuse('nativeScopePathUnproved');
+          if (missingCoreReceipt) {
+            mountedNativeRequestScope = { working, exchange, canonicalParents, executionIds };
+            return refuse('nativeScopeBranchConflict', 'core-result');
+          }
           return { working, exchange, canonicalParents, executionIds, executionGroups };
         } catch { return refuse('nativeScopeUnsupported'); }
       }
@@ -2768,9 +2800,10 @@
         return { working, exchange };
       } catch { return refuse('nativeScopeUnsupported'); }
     })();
-    const expectedWorkingTurn = mountedNativeScope?.working || shell.turnId;
-    const expectedTurnExchange = mountedNativeScope?.exchange || typedUserId;
-    const typedExecIds = new Set([...shell.executionIds, ...(mountedNativeScope?.executionIds ?? [])]);
+    const mountedRequestScope = mountedNativeScope || mountedNativeRequestScope;
+    const expectedWorkingTurn = mountedRequestScope?.working || shell.turnId;
+    const expectedTurnExchange = mountedRequestScope?.exchange || typedUserId;
+    const typedExecIds = new Set([...shell.executionIds, ...(mountedRequestScope?.executionIds ?? [])]);
     // Per-scan, bounded reason counts for the existing result-reference diagnostic. These
     // values are fixed enum names/counts only; the native IDs stay local to this scan.
     const identityRefusalReasons = {
@@ -2850,7 +2883,7 @@
       if (!typedUserId || !selected.has(typedUserId)) return refuse('callIdentityUserUnproved', [
         typedUserId ? 'currentQuestionUnselected' : 'currentQuestionMissing'
       ]);
-      if (mountedNativeScope && (!selected.has(call.messageId) || !currentIds.has(call.messageId)))
+      if (mountedRequestScope && (!selected.has(call.messageId) || !currentIds.has(call.messageId)))
         return refuse('callIdentityParentUnproved', ['nativeAncestryUnproved']);
       // The provider's optional mapping can contain accessors or malformed branches.
       // Only inspect own data fields and refuse that identity without losing this turn.
@@ -2881,7 +2914,7 @@
         if (workingTurn !== expectedWorkingTurn) scopeReasons.push(workingTurn ? 'workingTurnMismatch' : 'workingTurnMissing');
         if (turnExchange !== expectedTurnExchange) scopeReasons.push(turnExchange ? 'turnExchangeMismatch' : 'turnExchangeMissing');
         if (scopeReasons.length) return refuse('callIdentityScopeUnproved', scopeReasons);
-        if (mountedNativeScope?.canonicalParents) {
+        if (mountedRequestScope?.canonicalParents) {
           // Every edge and typed Core member of this exact branch was checked
           // above. This publishes workflow identity only, never a result pair.
           shellDiagnostic(rejects, 'callIdentityRecovered');
@@ -3260,11 +3293,11 @@
     // Once the exact native branch is independently anchored, use its chronology
     // first. A folded execution must not change a shared workflow request's
     // original parent from functions.exec to its first rendered child.
-    const originalRequestOrder = mountedNativeScope?.canonicalParents ? currentPath.filter(id => {
+    const originalRequestOrder = mountedRequestScope?.canonicalParents ? currentPath.filter(id => {
       const message = messageAt(id);
       return message?.author?.role === 'assistant' && ['functions.exec', 'api_tool.call_tool'].includes(message.recipient);
     }) : currentPath;
-    for (const id of new Set([...(mountedNativeScope ? originalRequestOrder : []), ...ids, ...invocationIds, ...shellCurrentPath(live, entry)])) {
+    for (const id of new Set([...(mountedRequestScope ? originalRequestOrder : []), ...ids, ...invocationIds, ...shellCurrentPath(live, entry)])) {
       // A selected native ID can precede its widget. Selection proves which
       // native row exists, not that the row belongs to this typed user: keep
       // its request key private until the same ancestry proof that admits the

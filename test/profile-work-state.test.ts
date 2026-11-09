@@ -25,7 +25,7 @@ import {
   updateConfig
 } from '../src/main/config.js';
 import { initDurableStore, resetDurableForTests, writeDurableNow } from '../src/main/durable.js';
-import { activeProfileWorkCensus, persistedProfileWorkerCounts } from '../src/main/profile-work-state.js';
+import { activeProfileWorkCensus, observeProfileWork, persistedProfileWorkerCounts } from '../src/main/profile-work-state.js';
 import { buildInstanceProfilesSnapshot, copyManagedConnectorSetup, createManagedInstanceProfile, launchManagedInstanceRuntime, listManagedBrowserProfiles, openManagedInstanceBrowser, renameManagedInstanceProfile, repairManagedInstanceBridgePortIfOccupied, setManagedInstanceBrowserProfile, setManagedProfileCoreTunnel } from '../src/main/instance-management.js';
 import { accountSurfaceDescriptions, surfaceDefinition } from '../src/main/mcp/surfaces.js';
 import { processOperatorProfileCreation } from '../src/main/operator-input.js';
@@ -928,6 +928,20 @@ describe('profile lifecycle input census', () => {
     expect(shutdown).toHaveBeenCalledTimes(1);
   });
 
+  it('leaves a cold session catalog and its metadata untouched during preflight observation', async () => {
+    const session = await createSession({ conversationId: randomUUID() });
+    resetSessionStoreForTests();
+    const metaPath = path.join(dir, 'sessions', session.id, 'meta.json');
+    const metadata = JSON.parse(await fs.readFile(metaPath, 'utf8'));
+    delete metadata.historySeq;
+    const staleMetadata = JSON.stringify(metadata);
+    await fs.writeFile(metaPath, staleMetadata);
+    await expect(observeProfileWork()).resolves.toEqual({
+      recordedTurns: 0, nativeBusyTurns: 0, localProcesses: 0, sessionCatalogComplete: false
+    });
+    expect(await fs.readFile(metaPath, 'utf8')).toBe(staleMetadata);
+  });
+
   it('retains a fresh native busy page through shutdown when its current recorder turn is missing', async () => {
     resetCoreBrowserEvidenceForTests();
     const conversationId = randomUUID();
@@ -940,6 +954,7 @@ describe('profile lifecycle input census', () => {
         codeCalls: 0, openCodeCalls: 0, activeTurnMapped: false }
     });
     expect(observe('busy')).toBe(true);
+    await expect(observeProfileWork()).resolves.toMatchObject({ recordedTurns: 0, nativeBusyTurns: 1, localProcesses: 0 });
     const shutdown = vi.fn(async () => undefined);
     const lifecycle = new ProfileLifecycleCoordinator({
       profileId: getConfig().instances!.activeInstanceId,
@@ -953,6 +968,7 @@ describe('profile lifecycle input census', () => {
       expect(shutdown).not.toHaveBeenCalled();
       expect(await getSession(session.id)).toEqual(before);
       expect(observe('associated')).toBe(true);
+      await expect(observeProfileWork()).resolves.toMatchObject({ recordedTurns: 0, nativeBusyTurns: 0, localProcesses: 0 });
       await lifecycle.poll();
       expect(shutdown).toHaveBeenCalledTimes(1);
       expect(await getSession(session.id)).toEqual(before);

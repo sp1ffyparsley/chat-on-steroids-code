@@ -3,13 +3,14 @@ import path from 'node:path';
 import { getActiveInstanceRuntime, getConfig } from './config.js';
 import { getLocalInstanceOwnerPaths } from './config.js';
 import type { InstanceProfileRegistry } from '../shared/instance-profile.js';
+import type { SessionSummary } from '../shared/session.js';
 import { exactAutomaticMainWork, pendingCommands, swarmHealthState } from './bridge.js';
 import { unifiedExecManager } from './codex/manager.js';
 import { CORE_BROWSER_EVIDENCE_MAX_AGE_MS, coreBrowserEvidence } from './core-browser-evidence.js';
 import { inFlightMcpRequests } from './mcp/call-context.js';
 import { activeBrowserDecisionWork, listInputs, userRequestedInput, type InputEntry } from './session/input.js';
 import { pendingContinuations } from './session/continuation.js';
-import { listUsageSessions } from './session/store.js';
+import { cachedUsageSessionIdentities, listUsageSessions } from './session/store.js';
 import type { ActiveWorkBlocker, ActiveWorkCensus } from './profile-lifecycle.js';
 import { profileWorkAdmission } from './work-admission.js';
 
@@ -104,8 +105,36 @@ export async function persistedProfileWorkerCounts(profileId: string, registry?:
   return null;
 }
 
+function countActiveProfileTurns(sessions: readonly Pick<SessionSummary, 'id' | 'conversationId' | 'activeTurnId'>[]) {
+  const now = Date.now();
+  let recordedTurns = 0;
+  let nativeBusyTurns = 0;
+  for (const session of sessions) {
+    if (!session.conversationId) continue;
+    if (session.activeTurnId && exactAutomaticMainWork(session.conversationId, session.id, now)) {
+      recordedTurns++;
+      continue;
+    }
+    // The authenticated page can be busy before its question reaches the recorder.
+    // Old open-call history alone cannot establish active work.
+    const native = coreBrowserEvidence(session.conversationId);
+    if (native?.shellDiscovery === 'compatible' && native.ordinaryFinal?.reason === 'busy' &&
+        (native.ordinaryFinal.maintenanceIdle !== true || native.observedAt > now) &&
+        Number.isFinite(native.observedAt) &&
+        Math.abs(now - native.observedAt) <= CORE_BROWSER_EVIDENCE_MAX_AGE_MS) nativeBusyTurns++;
+  }
+  return { recordedTurns, nativeBusyTurns };
+}
+
+/** Partial preflight evidence, sampled without Drain polling or outbox reconciliation. */
+export async function observeProfileWork() {
+  const { sessions, sessionCatalogComplete } = cachedUsageSessionIdentities();
+  return { ...countActiveProfileTurns(sessions), localProcesses: unifiedExecManager.listProcesses().length,
+    sessionCatalogComplete };
+}
+
 /**
- * A read-only census of work that must settle before a process-bound profile switch or update.
+ * Census used by the transition owner. It reconciles existing queue and command custody.
  * Every source is already owned by the active profile's startup-bound stores/bridge.
  */
 export async function activeProfileWorkCensus(): Promise<ActiveWorkCensus> {
@@ -146,20 +175,8 @@ export async function activeProfileWorkCensus(): Promise<ActiveWorkCensus> {
   // Local work has its own non-expiring veto even if its caller has already returned.
   const processes = unifiedExecManager.listProcesses();
   if (processes.length > 0) blockers.push({ category: 'local-process', count: processes.length, detail: 'managed local process(es) are still running' });
-  const now = Date.now();
-  const activeTurns = sessions.filter(session => {
-    if (!session.conversationId) return false;
-    if (session.activeTurnId && exactAutomaticMainWork(session.conversationId, session.id, now)) return true;
-    // A native handoff can already be answering while its first question has
-    // not reached the recorder. The incumbent authenticated document cache
-    // may veto shutdown during that fresh busy view; it cannot mint a turn,
-    // grant Send or certify tool completion. Old/open-call history is not busy.
-    const native = coreBrowserEvidence(session.conversationId);
-    return native?.shellDiscovery === 'compatible' && native.ordinaryFinal?.reason === 'busy' &&
-      (native.ordinaryFinal.maintenanceIdle !== true || native.observedAt > now) &&
-      Number.isFinite(native.observedAt) &&
-      Math.abs(now - native.observedAt) <= CORE_BROWSER_EVIDENCE_MAX_AGE_MS;
-  }).length;
+  const { recordedTurns, nativeBusyTurns } = countActiveProfileTurns(sessions);
+  const activeTurns = recordedTurns + nativeBusyTurns;
   if (activeTurns > 0) blockers.push({ category: 'active-turn', count: activeTurns, detail: 'ChatGPT is reporting active work; preserving the current answer while it settles' });
 
   const continuations = pendingContinuations();

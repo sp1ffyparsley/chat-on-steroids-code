@@ -5,7 +5,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { makeTempDir, removeTempDir } from './helpers.js';
 import { initDurableStore, readDurable, resetDurableForTests, writeDurableNow } from '../src/main/durable.js';
-import { createSession, deleteSession, initSessionStore, pruneSessions, resetSessionStoreForTests, sessionDirectoryMissing } from '../src/main/session/store.js';
+import { createSession, deleteSession, initSessionStore, pruneSessions, readEvents, resetSessionStoreForTests, sessionDirectoryMissing, upsertMessageEvent } from '../src/main/session/store.js';
 import { configureInputDelivery, listInputs, resetInputForTests, type InputEntry } from '../src/main/session/input.js';
 import { recordDeliveredInput } from '../src/main/session/input-history.js';
 import { noteChatOrigin } from '../src/main/session/recorder.js';
@@ -161,6 +161,29 @@ it('retains verified prerequisite sessions while any dependent recipe input is u
   expect(await retentionHeldInputSessions(summaries)).toEqual(new Set([parent.id, child.id]));
   await writeDurableNow('session-input', [first, { ...next, state: 'cancelled' }]);
   expect((await retentionHeldInputSessions(summaries)).has(parent.id)).toBe(false);
+});
+
+it('repairs an already-projected tool receipt once when reopening an older outbox', async () => {
+  const session = await createSession({ conversationId: 'retained-chat' });
+  const id = randomUUID();
+  const row = receipt(session.id, { id, sessionId: session.id, deliveredSessionId: undefined,
+    owner: 'exact-tool-owner', offeredAt: 90, messageId: `input:${id}`,
+    historyProjectionVersion: 1, historyProvenanceRecorded: true });
+  const prepared = row.deliveryText!;
+  await upsertMessageEvent(session.id, { time: 90, source: 'app', kind: 'user_message', messageId: `input:${id}`,
+    inputId: id, inputDelivery: 'confirmed', authoredText: row.text,
+    message: { text: prepared, chars: prepared.length, truncated: false } });
+  await writeDurableNow('session-input', [row]);
+
+  expect(await listInputs()).toMatchObject([{ id, state: 'sent', historyToolProvenanceRecorded: true }]);
+  const users = (await readEvents(session.id)).filter(event => event.kind === 'user_message');
+  expect(users).toHaveLength(1);
+  expect(users[0]).toMatchObject({ inputId: id, inputDelivery: 'confirmed',
+    inputProvenance: { toolMessageId: `input:${id}` } });
+
+  resetInputForTests();
+  await listInputs();
+  expect(record).toHaveBeenCalledTimes(1);
 });
 
 function receipt(sessionId: string, extra: Partial<InputEntry> = {}): InputEntry {

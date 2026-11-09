@@ -2029,6 +2029,71 @@ describe('a workspace page kept mounted behind the current one', () => {
     expect(api.generating()).toBe(true);
   });
 
+  it.each(['in-turn', 'beside-thread'] as const)(
+    'does not let a stale running hint veto a Retry-anchored delivery-timeout card with no alert role (%s)', placement => {
+      const shell = document.createElement('main');
+      shell.setAttribute('data-app-shell-main-surface', 'true');
+      shell.innerHTML = `<div data-thread-find-target="conversation"><div data-turn-key="timed-out-turn" data-clf-shell-running-v2="${dom.window.location.pathname}"><div data-chatgpt-agent-turn-start="true"></div></div></div>`;
+      document.body.append(shell);
+      const turn = shell.querySelector('[data-turn-key]')!;
+      box.textContent = '';
+      // The provider's full-width failure card carries no alert element: its exact native
+      // Retry control is the only anchor. The in-turn alert exemption in generating() must
+      // not strand an unspent, visible, enabled Retry behind a cached running hint.
+      const wrapper = document.createElement('div');
+      const copy = document.createElement('p');
+      copy.textContent = 'Message delivery timed out. Please try again later.';
+      const retry = document.createElement('button');
+      retry.textContent = 'Retry';
+      wrapper.append(copy, retry);
+      if (placement === 'in-turn') turn.append(wrapper); else document.body.append(wrapper);
+      const clicked = vi.fn(); retry.addEventListener('click', clicked);
+      const authorize = vi.fn(() => true);
+      expect(api.errors()).toContainEqual(expect.objectContaining({ text: 'Message delivery timed out. Please try again later.', retry }));
+      expect(api.generating()).toBe(false);
+      expect(api.retryLatestTransportFailure(() => true, authorize)).toEqual({ status: 'retried' });
+      expect(authorize).toHaveBeenCalledOnce();
+      expect(clicked).toHaveBeenCalledOnce();
+      expect(api.retryLatestTransportFailure(() => true, authorize).status).toBe('stopped');
+      expect(clicked).toHaveBeenCalledOnce();
+    });
+
+  it('keeps a stale running hint authoritative for a historical Retry-anchored failure card', () => {
+    const shell = document.createElement('main');
+    shell.setAttribute('data-app-shell-main-surface', 'true');
+    shell.innerHTML = `<div data-thread-find-target="conversation"><div data-turn-key="older-turn"><div data-chatgpt-agent-turn-start="true"></div></div><div data-turn-key="current-turn" data-clf-shell-running-v2="${dom.window.location.pathname}"><div data-chatgpt-agent-turn-start="true"></div></div></div>`;
+    document.body.append(shell);
+    const older = shell.querySelector('[data-turn-key="older-turn"]')!;
+    const card = document.createElement('div');
+    card.innerHTML = '<p>Message delivery timed out. Please try again later.</p><button>Retry</button>';
+    older.append(card);
+    const retry = card.querySelector('button')!;
+    const clicked = vi.fn(); retry.addEventListener('click', clicked);
+    const authorize = vi.fn(() => true);
+    // A foreign/older turn's closed-off card never clears the busy signal and never
+    // borrows the current generation's Retry authority.
+    expect(api.generating()).toBe(true);
+    expect(api.retryLatestTransportFailure(() => true, authorize).status).toBe('stopped');
+    expect(authorize).not.toHaveBeenCalled();
+    expect(clicked).not.toHaveBeenCalled();
+  });
+
+  it('keeps a stale running hint and composer busy for a cooldown card with its own Retry', () => {
+    const shell = document.createElement('main');
+    shell.setAttribute('data-app-shell-main-surface', 'true');
+    shell.innerHTML = `<div data-thread-find-target="conversation"><div data-turn-key="cooldown-turn" data-clf-shell-running-v2="${dom.window.location.pathname}"><div data-chatgpt-agent-turn-start="true"></div><div><p>The model is temporarily unavailable. Try again later.</p><button>Retry</button></div></div></div>`;
+    document.body.append(shell);
+    const retry = shell.querySelector('button') as HTMLButtonElement;
+    const clicked = vi.fn(); retry.addEventListener('click', clicked);
+    const authorize = vi.fn(() => true);
+    // Cooldown is a deliberate model-ladder matter with its own owner, never a
+    // transport-retry grant; the stale-hint veto is preserved for it.
+    expect(api.generating()).toBe(true);
+    expect(api.retryLatestTransportFailure(() => true, authorize)).toEqual({ status: 'stopped', reason: 'page_not_idle' });
+    expect(authorize).not.toHaveBeenCalled();
+    expect(clicked).not.toHaveBeenCalled();
+  });
+
   it('records native input-stream failure without inventing a missing Retry or Stop action', () => {
     box.textContent = '';
     const shell = document.createElement('main');

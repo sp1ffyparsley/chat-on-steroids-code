@@ -102,6 +102,35 @@ export function inboundRequestId(): string | null {
 export type IdentityHeaderShape = 'missing' | 'valid' | 'invalid' | 'ambiguous';
 export type IdentityHeaderShapes = Record<'x-request-id' | 'x-openai-request-id' | 'openai-request-id', IdentityHeaderShape>;
 
+export type ClientSessionShape = 'missing' | 'present' | 'invalid' | 'batch';
+
+/** ChatGPT documents params._meta['openai/session'] as an anonymized conversation
+ * hint, not a native request/turn identity. Retain only its fixed presence shape
+ * so headerless ingress can be diagnosed without storing the value or guessing
+ * ownership. Do not inspect arguments, envelope metadata or inherited/getter fields.
+ * Reference: https://developers.openai.com/plugins/reference#_meta-fields-the-client-provides
+ */
+export function inboundClientSessionShape(body: unknown): ClientSessionShape {
+  if (Array.isArray(body)) return 'batch';
+  const field = (value: unknown, key: string): PropertyDescriptor | undefined => {
+    if (!value || typeof value !== 'object') return undefined;
+    return Object.getOwnPropertyDescriptor(value, key);
+  };
+  try {
+    const params = field(body, 'params');
+    if (!params) return 'missing';
+    if (!('value' in params)) return 'invalid';
+    const meta = field(params.value, '_meta');
+    if (!meta) return 'missing';
+    if (!('value' in meta) || !meta.value || typeof meta.value !== 'object' || Array.isArray(meta.value)) return 'invalid';
+    const session = field(meta.value, 'openai/session');
+    if (!session) return 'missing';
+    return 'value' in session && typeof session.value === 'string' &&
+      session.value.length > 0 && session.value.length <= 1024 &&
+      !/[\s\u0000-\u001f\u007f]/u.test(session.value) ? 'present' : 'invalid';
+  } catch { return 'invalid'; }
+}
+
 /** Snapshot fixed header shapes at ingress. Alternative headers are diagnostic only;
  * neither their values nor JSON-RPC envelope ids can grant workflow ownership. */
 export function inboundIdentityFromHeaders(

@@ -2405,9 +2405,10 @@ describe('alternate shell turn/message provenance', () => {
           frame = await shellRescan(page, `retry-sibling-${variant}`);
         }
         const accepted = variant === 'exact retained sibling' || variant === 'retained sibling without user request';
-        expect(frame.turns[0].calls[0]).toMatchObject({ requestId: accepted ? REQUEST : null, answered: accepted });
-        expect(frame.turns[0].requests.some((row: any) => row.requestId === REQUEST && row.messageId === EXEC)).toBe(accepted);
-        if (accepted) expect(frame.turns[0].requests.filter((row: any) => row.requestId === REQUEST))
+        const identityOnly = variant === 'missing result receipt';
+        expect(frame.turns[0].calls[0]).toMatchObject({ requestId: accepted || identityOnly ? REQUEST : null, answered: accepted });
+        expect(frame.turns[0].requests.some((row: any) => row.requestId === REQUEST && row.messageId === EXEC)).toBe(accepted || identityOnly);
+        if (accepted || identityOnly) expect(frame.turns[0].requests.filter((row: any) => row.requestId === REQUEST))
           .toEqual([expect.objectContaining({ messageId: EXEC })]);
         expect(frame.turns[0].endMessageId).toBe(accepted ? ASSISTANT : null);
         expect(accessorReads).toBe(0);
@@ -2417,7 +2418,7 @@ describe('alternate shell turn/message provenance', () => {
       } finally { page.dom.window.close(); }
     });
 
-  it.each(['exact canonical group', 'exact final reference', 'foreign final pointer', 'foreign final reference',
+  it.each(['direct Core', 'direct Core wrong parent', 'direct Core missing receipt', 'direct Core foreign resource', 'exact canonical group', 'exact final reference', 'foreign final pointer', 'foreign final reference',
     'multiple final references', 'getter final reference', 'unfinished native final reference',
     'duplicate final pointer source', 'missing final reference preview',
     'duplicate final anchor', 'off-path final anchor', 'nonterminal final anchor', 'different final body anchor',
@@ -2431,23 +2432,29 @@ describe('alternate shell turn/message provenance', () => {
     'retained commentary foreign exchange', 'retained commentary wrong parent', 'retained commentary wrong metadata parent',
     'retained commentary unfinished', 'retained commentary terminal', 'retained commentary tool',
     'retained commentary accessor', 'retained commentary cached conflict', 'retained commentary missing receipt',
-    'core receipt missing', 'core resource foreign', 'core request foreign', 'core request and receipt foreign',
+    'core receipt missing', 'core receipt missing referenced widget', 'core resource foreign', 'core request foreign', 'core request and receipt foreign',
+    'missing receipt late namespace', 'missing receipt late parent', 'missing receipt duplicate result',
+    'missing receipt foreign resource', 'missing receipt late cache',
     'missing retained header parent', 'missing retained execution parent', 'off-path retained parent', 'later retained parent', 'cached conflict',
     'unselected call', 'missing live branch', 'system accessor'] as const)(
     'recovers folded native execution ownership from an exact provider group: %s', async variant => {
       let getterReads = 0;
+      let observedMapping: any;
       const diagnosticLogs: string[] = [];
       const HEADER = 'native-group-header';
       const page = await shellHarness({ withCall: true, withExec: true, nativeCallReceipt: true,
         diagnosticLogs,
         status: variant.startsWith('pending ') ? 'in_progress' : 'complete',
         nativeCurrentNode: variant.startsWith('pending ') ? CALL : ASSISTANT,
-        nativeCallLive: variant !== 'missing live branch', nativeCallCacheConflict: variant === 'cached conflict' || variant === 'retained commentary cached conflict',
+        nativeCallLive: variant !== 'missing live branch', nativeCallCacheConflict: variant === 'cached conflict' ||
+          variant === 'retained commentary cached conflict' || variant === 'missing receipt late cache',
         callCompleted: false, assistantCompleted: false,
         nativeCallMutation(mapping, entry) {
+          observedMapping = mapping;
           completeExecBeforeCall(mapping, entry);
           entry.turn.items = entry.turn.items.filter((item: any) => item.callId !== EXEC);
-          delete entry.turn.items.find((item: any) => item.callId === CALL).widgetStateSource;
+          if (variant !== 'core receipt missing referenced widget')
+            delete entry.turn.items.find((item: any) => item.callId === CALL).widgetStateSource;
           const scope = { request_id: REQUEST, working_turn_id: 'native-group-working', turn_exchange_id: 'native-group-exchange' };
           mapping[HEADER] = { id: HEADER, parent: USER, message: { id: HEADER, author: { role: 'system' },
             recipient: 'all', status: 'finished_successfully', content: { content_type: 'text', parts: ['PRIVATE_SYSTEM_TEXT'] },
@@ -2467,10 +2474,24 @@ describe('alternate shell turn/message provenance', () => {
           mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: JSON.stringify({
             content: [{ type: 'text', text: 'PRIVATE_TOOL_RESULT' }],
             structuredContent: { cosResultReceipt: { version: 1, id: 'a'.repeat(48) } } }) };
-          if (variant === 'core receipt missing' || variant === 'core request and receipt foreign')
+          if (variant.startsWith('direct Core')) {
+            mapping[CALL].parent = HEADER;
+            mapping[CALL].message.metadata.parent_id = HEADER;
+            mapping[ASSISTANT].parent = RESULT;
+            mapping[ASSISTANT].message.metadata.parent_id = RESULT;
+            delete mapping[EXEC];
+            delete mapping[EXEC_RESULT];
+            if (variant === 'direct Core wrong parent') mapping[RESULT].message.metadata.parent_id = HEADER;
+            if (variant === 'direct Core missing receipt') mapping[RESULT].message.content.text = '{"content":[]}';
+            if (variant === 'direct Core foreign resource') mapping[RESULT].message.metadata.invoked_resource.resource_uri = `/${ASDK}/link_foreign/read`;
+          }
+          if (variant.startsWith('core receipt missing') || variant.startsWith('missing receipt ') || variant === 'core request and receipt foreign')
             mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: '{"content":[]}' };
-          if (variant === 'core resource foreign')
+          if (variant === 'core resource foreign' || variant === 'missing receipt foreign resource')
             mapping[RESULT].message.metadata.invoked_resource.app_name = 'PRIVATE_FOREIGN_RESULT_APP';
+          if (variant === 'missing receipt late namespace') mapping[EXEC_RESULT].message.metadata.working_turn_id = 'foreign';
+          if (variant === 'missing receipt late parent') mapping[EXEC_RESULT].message.metadata.parent_id = USER;
+          if (variant === 'core receipt missing referenced widget') entry.turn.messageIds.push(RESULT);
           if (variant === 'core request foreign' || variant === 'core request and receipt foreign')
             mapping[RESULT].message.metadata.request_id = 'PRIVATE_OTHER_CORE_REQUEST';
           if (variant.startsWith('pending ')) { entry.turn.messageIds = [USER, CALL]; mapping[CALL].message.status = 'in_progress'; }
@@ -2557,7 +2578,7 @@ describe('alternate shell turn/message provenance', () => {
             mapping[EXEC_RESULT].parent = CALL;
             mapping[EXEC_RESULT].message.metadata.parent_id = CALL;
           }
-          if (variant === 'execution child result extra') {
+          if (variant === 'execution child result extra' || variant === 'missing receipt duplicate result') {
             const extra = 'PRIVATE_EXTRA_CORE_RESULT';
             mapping[extra] = JSON.parse(JSON.stringify(mapping[RESULT]));
             mapping[extra].id = extra;
@@ -2583,13 +2604,22 @@ describe('alternate shell turn/message provenance', () => {
           }
         } });
       try {
-        const accepted = variant === 'exact canonical group' || variant === 'exact final reference' ||
+        const accepted = variant === 'direct Core' || variant === 'exact canonical group' || variant === 'exact final reference' ||
           variant === 'exact retained commentary parent' || variant === 'exact retained execution commentary parent' ||
           variant === 'exact retained commentary image result';
+        const identityOnly = variant.startsWith('core receipt missing') || variant === 'retained commentary missing receipt';
         expect(page.fiber.turns[0].calls[0]).toMatchObject({
-          requestId: accepted || variant === 'pending canonical group' ? REQUEST : null, answered: accepted });
-        if (accepted || variant === 'pending canonical group')
-          expect(page.fiber.turns[0].requests.filter((row: any) => row.requestId === REQUEST)).toEqual([expect.objectContaining({ messageId: EXEC })]);
+          requestId: accepted || identityOnly || variant === 'pending canonical group' ? REQUEST : null, answered: accepted });
+        if (accepted || identityOnly || variant === 'pending canonical group')
+          expect(page.fiber.turns[0].requests.filter((row: any) => row.requestId === REQUEST))
+            .toEqual([expect.objectContaining({ messageId: variant === 'direct Core' ? CALL : EXEC })]);
+        if (variant.startsWith('direct Core')) {
+          const turn = page.fiber.turns[0];
+          expect(turn.calls[0].resultReceiptId).toBe(accepted ? 'a'.repeat(48) : undefined);
+          expect(turn.endMessageId).toBe(accepted ? ASSISTANT : null);
+          const rescanned = await shellRescan(page, 'same-direct-call-after-hydration');
+          expect(rescanned.turns[0].calls).toEqual(turn.calls);
+        }
         const headerFacets: Record<string, string> = {
           'missing header working': 'working-missing', 'missing header exchange': 'exchange-missing',
           'user header scope mismatch': 'user-scope', 'header recipient': 'recipient', 'header unfinished': 'status',
@@ -2605,13 +2635,13 @@ describe('alternate shell turn/message provenance', () => {
           for (const value of [USER, HEADER, 'PRIVATE_OTHER_USER_SCOPE', 'PRIVATE_OTHER_USER_EXCHANGE',
             'PRIVATE_HEADER_RECIPIENT', 'PRIVATE_HEADER_TYPE', 'PRIVATE_HEADER_REBASE_GETTER']) expect(trace).not.toContain(value);
         }
-        if (variant.startsWith('core ')) {
-          const facet = variant.startsWith('core request') ? 'request' : variant === 'core receipt missing' ? 'receipt' : 'resource';
+        if (variant.startsWith('core ') && variant !== 'core receipt missing referenced widget') {
+          const facet = variant.startsWith('core request') ? 'request' : variant.startsWith('core receipt missing') ? 'receipt' : 'resource';
           const trace = diagnosticLogs.find(line => line.includes('native result-reference recovery diagnostic'))!;
           expect(trace).toContain('anchorBranch=core-result');
           expect(trace).toContain(`anchorCoreResultFacet=${facet}`);
           expect(page.fiber.turns[0].endMessageId).toBeNull();
-          expect(page.fiber.turns[0].calls[0]).toMatchObject({ requestId: null, answered: false });
+          expect(page.fiber.turns[0].calls[0]).toMatchObject({ requestId: identityOnly ? REQUEST : null, answered: false });
           for (const value of [USER, ASSISTANT, CALL, RESULT, REQUEST, EXEC, EXEC_RESULT, HEADER,
             'PRIVATE_TOOL_RESULT', 'PRIVATE_OTHER_CORE_REQUEST', 'PRIVATE_FOREIGN_RESULT_APP'])
             expect(trace).not.toContain(value);
@@ -2671,6 +2701,21 @@ describe('alternate shell turn/message provenance', () => {
         expect(getterReads).toBe(0);
         expect(JSON.stringify(page.fiber)).not.toContain('anchorRetained');
         expect(JSON.stringify(page.fiber)).not.toMatch(/PRIVATE_SYSTEM_TEXT|PRIVATE_SYSTEM_GETTER|retired-header-parent|retired-exec-parent|PRIVATE_RETAINED_COMMENTARY/);
+        if (identityOnly) {
+          // Request ownership survives result hydration. It is not completion:
+          // no result witness or terminal may be invented before the real receipt.
+          expect(page.fiber.turns[0].endMessageId).toBeNull();
+          expect(page.fiber.turns[0].calls[0].resultReceiptId).toBeUndefined();
+          observedMapping[RESULT].message.content = { content_type: 'code', language: 'json', text: JSON.stringify({
+            content: [],
+            structuredContent: { cosResultReceipt: { version: 1, id: 'a'.repeat(48) } } }) };
+          const hydrated = await shellRescan(page, 'exact-receipt-hydrated');
+          expect(hydrated.turns[0].calls).toHaveLength(1);
+          expect(hydrated.turns[0].calls[0]).toMatchObject({ messageId: CALL, requestId: REQUEST,
+            answered: true, resultReceiptId: 'a'.repeat(48) });
+          expect(hydrated.turns[0].requests.filter((row: any) => row.requestId === REQUEST))
+            .toEqual([expect.objectContaining({ messageId: EXEC })]);
+        }
       } finally { page.dom.window.close(); }
     });
 

@@ -108,6 +108,41 @@ describe('safe-close lifecycle operator controls', () => {
     })).toBe(true));
   });
 
+  it('reports current work separately from an idle lifecycle snapshot without advancing Drain', async () => {
+    const f = controlsFixture();
+    const observeWork = vi.fn(async () => ({ recordedTurns: 0, nativeBusyTurns: 1, localProcesses: 0, sessionCatalogComplete: false,
+      detail: 'PRIVATE_DRAFT' }));
+    await f.gate.enable('profile-foot', () => f.owner.requestShutdown(), { ...f.callbacks, observeWork });
+    f.gate.accept([...base.slice(0, 2), ...base.slice(3), '--safe-close-for-update-status=profile-foot']);
+    await vi.waitFor(() => expect(f.info).toHaveBeenCalledWith(expect.stringContaining('work observation ')));
+    const line = f.info.mock.calls.find(([line]) => line.includes('work observation '))![0];
+    expect(JSON.parse(line.split('work observation ')[1]!)).toMatchObject({
+      profileId: 'profile-foot', pid: 4242, generation: 1700000000424,
+      phase: 'idle', recordedTurns: 0, nativeBusyTurns: 1, localProcesses: 0, sessionCatalogComplete: false
+    });
+    expect(line).not.toContain('PRIVATE_DRAFT');
+    expect(f.census).not.toHaveBeenCalled();
+    expect(f.shutdown).not.toHaveBeenCalled();
+    expect(f.admission.snapshot()).toMatchObject({ mode: 'open' });
+  });
+
+  it('coalesces pending observations and discards their counts when Drain starts', async () => {
+    const f = controlsFixture();
+    let finish!: (value: { recordedTurns: number; nativeBusyTurns: number; localProcesses: number; sessionCatalogComplete: boolean }) => void;
+    const observeWork = vi.fn(() => new Promise<Parameters<typeof finish>[0]>(resolve => { finish = resolve; }));
+    await f.gate.enable('profile-foot', () => f.owner.requestShutdown(), { ...f.callbacks, observeWork });
+    const args = [...base.slice(0, 2), ...base.slice(3), '--safe-close-for-update-status=profile-foot'];
+    f.gate.accept(args);
+    f.gate.accept(args);
+    expect(observeWork).toHaveBeenCalledTimes(1);
+    await f.owner.requestShutdown();
+    finish({ recordedTurns: 1, nativeBusyTurns: 0, localProcesses: 0, sessionCatalogComplete: true });
+    await Promise.resolve();
+    expect(f.info.mock.calls.some(([line]) => line.includes('work observation '))).toBe(false);
+    expect(f.owner.getStatus().phase).toBe('draining-shutdown');
+    expect(f.shutdown).not.toHaveBeenCalled();
+  });
+
   it('bounds status logs and excludes blocker detail while retaining the aggregate count', async () => {
     const f = controlsFixture();
     f.census.mockResolvedValue({ profileId: 'profile-foot', blockers: Array.from({ length: 40 }, (_, i) => ({

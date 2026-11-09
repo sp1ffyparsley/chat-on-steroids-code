@@ -1,7 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import { inboundIdentityFromHeaders, inboundRequestId, requestIdFromHeader, withInboundRequestId } from '../src/main/mcp/inbound.js';
+import { inboundClientSessionShape, inboundIdentityFromHeaders, inboundRequestId, requestIdFromHeader, withInboundRequestId } from '../src/main/mcp/inbound.js';
 
 describe('MCP inbound request id boundary', () => {
+  it('bounds conversation metadata inspection without reading getters or promoting hints', () => {
+    const wrap = (value: unknown) => ({ params: { _meta: { 'openai/session': value } } });
+    for (const value of ['', ' ', 'private\nvalue', 'x'.repeat(1025), null, 7, {}, []])
+      expect(inboundClientSessionShape(wrap(value))).toBe('invalid');
+    expect(inboundClientSessionShape(wrap('opaque-session'))).toBe('present');
+    expect(inboundClientSessionShape({ _meta: { 'openai/session': 'envelope-only' } })).toBe('missing');
+    expect(inboundClientSessionShape({ params: { arguments: { _meta: { 'openai/session': 'ignored' } } } })).toBe('missing');
+    expect(inboundClientSessionShape({ params: { _meta: Object.create({ 'openai/session': 'inherited' }) } })).toBe('missing');
+    const getter = Object.defineProperty({}, 'openai/session', { get() { throw new Error('must not run'); } });
+    expect(inboundClientSessionShape({ params: { _meta: getter } })).toBe('invalid');
+    expect(inboundClientSessionShape({ params: { _meta: [] } })).toBe('invalid');
+    expect(inboundClientSessionShape([wrap('a'), wrap('b')])).toBe('batch');
+    expect(inboundClientSessionShape(null)).toBe('missing');
+    expect(inboundRequestId()).toBeNull();
+  });
+
   it('snapshots missing and alternative header shapes without inventing an owner', () => {
     expect(inboundIdentityFromHeaders({}, [])).toEqual({ requestId: null, headers: {
       'x-request-id': 'missing', 'x-openai-request-id': 'missing', 'openai-request-id': 'missing' } });

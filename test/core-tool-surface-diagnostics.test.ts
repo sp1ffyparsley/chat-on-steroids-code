@@ -392,6 +392,7 @@ describe('Core tool-surface incident diagnostics', () => {
     const refreshed = coreBrowserEvidence(TARGET)!;
     expect(refreshed.pendingCompletion?.observedAt).toBe(open.observedAt);
     expect(nativeFinalEvidenceWait(refreshed, NOW)).toMatchObject({ reason: 'evidence',
+      evidenceFreshUntil: NOW + CORE_BROWSER_EVIDENCE_MAX_AGE_MS,
       detail: expect.stringContaining('exact native tool completion remains unresolved') });
     expect(nativeFinalEvidenceWait(refreshed, NOW)).not.toHaveProperty('until');
     expect(nativeCompletionCandidate(TARGET)).toBeNull();

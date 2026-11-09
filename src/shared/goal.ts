@@ -11,6 +11,8 @@ export type GoalWait = {
   limit?: number;
   /** Evidence-backed explanation only. Never authorizes Send, Retry, reload or helper creation. */
   detail?: string;
+  /** Expiry of the existing fresh native observation, for presentation only. */
+  evidenceFreshUntil?: number;
   /** Existing owner/action expected to move this wait; presentation only. */
   nextAction?: string;
 };

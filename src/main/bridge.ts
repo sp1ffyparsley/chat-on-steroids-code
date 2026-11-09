@@ -552,6 +552,7 @@ import {
   recordRequestEvidence,
   attachNativeCoreResultReceipt,
   receiptDurableOwnerUnique,
+  receiptDurableOwnersUnique,
   ownedReceiptHeaderCompatible,
   recordProgress,
   restoreRecordedConversation,
@@ -6340,6 +6341,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         receiptCounts.set(call.resultReceiptId!, (receiptCounts.get(call.resultReceiptId!) ?? 0) + 1);
       for (const call of witnessed)
         nativeReceiptCounts.set(call.messageId, (nativeReceiptCounts.get(call.messageId) ?? 0) + 1);
+      let missingWitnesses = 0;
       for (const call of witnessed) {
         if (receiptCounts.get(call.resultReceiptId!) !== 1 || nativeReceiptCounts.get(call.messageId) !== 1) continue;
         const native = requestCorrelation(call.requestId!);
@@ -6349,9 +6351,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         // single snapshot for the WHOLE callback would either reject a valid
         // second move or accept retirement of an unrelated first bucket.
         const catalogBeforeTransfer = await receiptCatalogCustodySnapshot();
-        const source = catalogBeforeTransfer && await receiptTransferWitnessBefore(
-          call.resultReceiptId!, sessionId, call.messageId, call.tool, call.requestId!, call.invocationSha256);
-        if (!catalogBeforeTransfer || !source || !receiptCatalogCustodyMatches(
+        const source = catalogBeforeTransfer ? await receiptTransferWitnessBefore(
+          call.resultReceiptId!, sessionId, call.messageId, call.tool, call.requestId!, call.invocationSha256) : null;
+        if (!catalogBeforeTransfer || source === null || !receiptCatalogCustodyMatches(
           catalogBeforeTransfer, await receiptCatalogCustodySnapshot())) {
           logWarn('Core result custody held: source witness or catalog preflight unverified');
           void noteLocalIncident({ source: 'browser-debug', status: 'unresolved',
@@ -6359,6 +6361,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
             capture: 'not_requested', detail: 'Receipt source or catalog unverified before transfer' });
           break;
         }
+        // A complete scan found no execution for this receipt. Retain this result's
+        // debt and give each later receipt its own independent custody check.
+        if (source === undefined) { missingWitnesses++; continue; }
         if (!source.owned && !source.invocationBound && (native.tool !== call.tool || native.nativeCallAmbiguous === true ||
             (native.nativeCallMessageId ?? native.messageId) !== call.messageId)) continue;
         // Another session can be created or its metadata can become unreadable
@@ -6386,6 +6391,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
           call.messageId, source.callId))
           confirmedResultReceipts.push(call.resultReceiptId!);
       }
+      if (missingWitnesses && confirmedResultReceipts.length)
+        logInfo(`Core result custody: confirmed=${confirmedResultReceipts.length} missingWitnesses=${missingWitnesses}`);
     }
     // A conversation id alone is NOT a local-session receipt: its session epoch can
     // change while the native page still reports an older request ID. Return only
@@ -8372,6 +8379,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         return goalJson(res, 200, { acknowledged: false, deferred,
           ...(deferred ? { listenUntil: goalPendingReplyFor(id)?.listenUntil } : {}) }, origin);
       }
+      // An older companion may still send a bare ACK when its native click
+      // times out. Keep the ready draft until delivery or non-delivery is known.
+      if (!messageId && !confirmedUnsent && goalViewFor(id, clientId)?.stage === 'ready')
+        return goalJson(res, 200, { acknowledged: false }, origin);
       let deliveredReport = false;
       if (messageId) {
         const session = await findSessionByConversation(id, { requireUnique: true });
@@ -12340,10 +12351,12 @@ async function receiptCatalogCustodySnapshot(): Promise<string | null> {
  * either journal. An already migrated result may have ONLY the exact target
  * row; an interrupted move may have that row AND the matching original. A
  * copied receipt in a foreign session, different callId, wrong tool or second
- * Unattributed bucket is never authority to rewrite an execution. */
+ * Unattributed bucket is never authority to rewrite an execution. Undefined
+ * means the complete read found no occurrence. Null means conflicting or
+ * unreadable evidence and stops the batch. */
 async function receiptTransferWitnessBefore(
   receiptId: string, targetSessionId: string, nativeMessageId: string, tool: string, requestId: string, invocationSha256?: string
-): Promise<{ originalBucketId: string | null; callId: string; owned?: true; invocationBound?: true } | null> {
+): Promise<{ originalBucketId: string | null; callId: string; owned?: true; invocationBound?: true } | null | undefined> {
   try {
     let originalBucketId: string | null = null;
     let originalCallId: string | null = null;
@@ -12379,7 +12392,8 @@ async function receiptTransferWitnessBefore(
     }
     if (originalCallId && targetCallId && originalCallId !== targetCallId) return null;
     const callId = originalCallId ?? targetCallId;
-    return callId && !(owned && originalBucketId) ? { originalBucketId, callId,
+    if (callId === null) return undefined;
+    return !(owned && originalBucketId) ? { originalBucketId, callId,
       ...(owned ? { owned: true as const } : {}),
       ...(invocationSha256 && /^[a-f0-9]{64}$/.test(invocationSha256) ? { invocationBound: true as const } : {}) } : null;
   } catch { return null; }
@@ -12545,8 +12559,9 @@ async function reconcileOwnedNativeRequestIdentity(conversationId: string, sessi
     if (new Set(owned.map(row => row.call.resultReceiptId)).size !== original.calls) return false;
     const catalog = await receiptCatalogCustodySnapshot();
     if (!catalog) return false;
-    for (const row of owned) if (!await receiptDurableOwnerUnique(row.call.resultReceiptId!, sessionId,
-      row.call.nativeCallMessageId!, row.call.callId) || !current()) return false;
+    if (!await receiptDurableOwnersUnique(sessionId, owned.map(({ call }) => ({
+      resultReceiptId: call.resultReceiptId!, nativeCallMessageId: call.nativeCallMessageId!, expectedCallId: call.callId
+    }))) || !current()) return false;
     // The canonical binding owner compares immutable args/results against the original
     // JSONL execution. Re-read the full source after those asynchronous disk barriers.
     if (!receiptCatalogCustodyMatches(catalog, await receiptCatalogCustodySnapshot()) ||
@@ -12617,7 +12632,7 @@ async function settleObservedNativeCompletionNow(conversationId: string, session
     originalToolRows = recorded;
     const hasReceipt = recorded.some(event => event.kind === 'tool_call' && event.call.resultReceiptId);
     const receiptCatalog = hasReceipt ? await receiptCatalogCustodySnapshot() : null;
-    let confirmedReceipt = false;
+    const receiptWitnesses: Parameters<typeof receiptDurableOwnersUnique>[1][number][] = [];
     for (const [index, requestId] of completion.allCoreRequestIds.entries()) {
       const correlation = requestCorrelation(requestId);
       const nativeId = completion.coreCallMessageIds[index]!;
@@ -12629,9 +12644,9 @@ async function settleObservedNativeCompletionNow(conversationId: string, session
         if (correlation?.conversationId !== conversationId || correlation.sessionId !== sessionId ||
             owned.call.requestId !== requestId || !ownedReceiptHeaderCompatible(owned.call, sessionId) || !receiptCatalog ||
             owned.call.conversationId !== conversationId || !isReturnedToolOutcome(owned.call.outcome) ||
-            owned.call.process && !owned.call.process.completedAt ||
-            !await receiptDurableOwnerUnique(owned.call.resultReceiptId ?? '', sessionId, nativeId, owned.call.callId)) continue;
-        confirmedReceipt = true;
+            owned.call.process && !owned.call.process.completedAt || !owned.call.resultReceiptId) continue;
+        receiptWitnesses.push({ resultReceiptId: owned.call.resultReceiptId,
+          nativeCallMessageId: nativeId, expectedCallId: owned.call.callId });
         confirmedIds.push(requestId);
         confirmedNativeIds.push(nativeId);
         continue;
@@ -12686,9 +12701,8 @@ async function settleObservedNativeCompletionNow(conversationId: string, session
       // A partial two-journal transfer can leave the original Unattributed
       // execution on disk AFTER the destination commit. Refuse final/ACK and
       // any automatic Loop successor until source custody is verified clear.
-      if (!await receiptDurableOwnerUnique(call.resultReceiptId!, sessionId,
-        completion.coreCallMessageIds![index]!, call.callId)) continue;
-      confirmedReceipt = true;
+      receiptWitnesses.push({ resultReceiptId: call.resultReceiptId!,
+        nativeCallMessageId: nativeId, expectedCallId: call.callId });
       confirmedIds.push(requestId);
       confirmedNativeIds.push(nativeId);
     }
@@ -12697,8 +12711,9 @@ async function settleObservedNativeCompletionNow(conversationId: string, session
     // catalog admission from becoming a terminal ACK, helper handback, active
     // work credit or Loop successor. This also verifies any receipt that was
     // first found only after an earlier headered call in the same native turn.
-    if (confirmedReceipt && !receiptCatalogCustodyMatches(
-      receiptCatalog, await receiptCatalogCustodySnapshot())) return false;
+    if (confirmedIds.length !== completion.allCoreRequestIds.length) return false;
+    if (receiptWitnesses.length && (!await receiptDurableOwnersUnique(sessionId, receiptWitnesses) ||
+        !receiptCatalogCustodyMatches(receiptCatalog, await receiptCatalogCustodySnapshot()))) return false;
   }
   // A successor bind can commit while the recorder await is in progress.
   // Never apply an old result to the current chat after that epoch changes.
