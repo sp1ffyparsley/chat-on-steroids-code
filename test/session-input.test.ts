@@ -2842,6 +2842,40 @@ describe('durable user input ownership', () => {
     expect(await pendingBrowserInputs()).toEqual([{ id: queued.id, conversationId: null }]);
     expect((await listInputs()).find(row => row.id === queued.id)?.queuedBehindBrowser).toBeUndefined();
   });
+  it('advances and eventually parks the next manual input without a browser status poll', async () => {
+    const first = await enqueueInput(input({ sessionId: null, text: 'First chat' }));
+    const second = await enqueueInput(input({ sessionId: 'session-two', text: 'Second chat' }));
+    expect(second.queuedBehindBrowser).toBe(true);
+
+    now += UNCLAIMED_BROWSER_ATTENTION_MS + 1;
+    resetInputForTests();
+    const restored = await listInputs();
+    expect(restored.find(row => row.id === first.id)?.deliveryAttentionAt).toBe(now);
+    const promoted = restored.find(row => row.id === second.id);
+    expect(promoted).toMatchObject({
+      id: second.id, text: second.text, state: 'queued', owner: null,
+      queuedBehindBrowser: undefined, browserEligibleAt: now
+    });
+    expect(promoted?.deliveryAttentionAt).toBeUndefined();
+
+    now += UNCLAIMED_BROWSER_ATTENTION_MS + 1;
+    resetInputForTests();
+    const parked = (await listInputs()).find(row => row.id === second.id);
+    expect(parked).toMatchObject({
+      id: second.id, text: second.text, state: 'queued', owner: null, deliveryAttentionAt: now
+    });
+    expect(parked?.offeredAt).toBeUndefined();
+    expect(parked?.sendAuthorizedAt).toBeUndefined();
+    expect(parked?.messageId).toBeUndefined();
+  });
+  it('starts the unclaimed attention budget no earlier than the scheduled due time', async () => {
+    const dueAt = now + 2 * UNCLAIMED_BROWSER_ATTENTION_MS;
+    const row = await enqueueInput(input({ sessionId: null, dueAt }));
+    now = dueAt - 1;
+    expect((await listInputs()).find(entry => entry.id === row.id)?.deliveryAttentionAt).toBeUndefined();
+    now = dueAt + UNCLAIMED_BROWSER_ATTENTION_MS;
+    expect((await listInputs()).find(entry => entry.id === row.id)?.deliveryAttentionAt).toBe(now);
+  });
   it('parks only a 15-minute unclaimed browser head, advances the next chat, and preserves an exact revisit', async () => {
     const first = await enqueueInput(input({ sessionId: null, text: 'First chat' }));
     const second = await enqueueInput(input({ sessionId: 'session-two', text: 'Second chat' }));

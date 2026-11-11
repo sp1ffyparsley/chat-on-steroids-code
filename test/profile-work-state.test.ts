@@ -1102,8 +1102,8 @@ describe('profile lifecycle input census', () => {
     });
   });
 
-  it('drains around untouched automatic debt without changing pause or losing its durable identity', async () => {
-    const row = queued({ sourceHelperId: randomUUID() });
+  it.each(['automatic', 'manual'] as const)('drains around untouched %s debt without changing pause or losing its durable identity', async kind => {
+    const row = kind === 'manual' ? queued({ mode: 'auto' }) : queued({ sourceHelperId: randomUUID() });
     await seed(row);
     const ledger = path.join(dir, 'state', 'session-input.json');
     const before = await fs.readFile(ledger, 'utf8');
@@ -1130,7 +1130,11 @@ describe('profile lifecycle input census', () => {
   });
 
   it.each([
-    { name: 'manual work', row: () => queued({ mode: 'auto' }), category: 'pending-send' },
+    { name: 'manual prior offer', row: () => queued({ mode: 'auto', offeredAt: Date.now() }), category: 'pending-send' },
+    { name: 'manual uncertain result', row: () => queued({ mode: 'auto', toolReceiptUncertain: true }), category: 'pending-send' },
+    { name: 'manual ambiguous Send', row: () => queued({ mode: 'auto',
+      recoveryFailure: { phase: 'native_send_ambiguous', retrySafe: false,
+        detail: 'native Send outcome is unknown' } }), category: 'pending-send' },
     { name: 'prior offer', row: () => queued({ offeredAt: Date.now() }), category: 'pending-send' },
     { name: 'native receipt', row: () => queued({ messageId: randomUUID() }), category: 'pending-send' },
     { name: 'claimed work', row: () => queued({ state: 'browser', owner: 'native-owner' }), category: 'pending-send' },

@@ -1,5 +1,13 @@
 # Chat On Steroids - code research mirror
 
+## R84 queue and update recovery
+
+The browser queue now advances its saved manual head during ordinary outbox reads, including after restart. The next unoffered message gets its own attention window even if Chrome has stopped polling. That window starts no earlier than the message's scheduled time.
+
+Maintenance Drain can preserve an untouched manual message through an app update under its original UUID and payload. Prior offers, claimed deliveries, uncertain Sends, native approvals and running local work retain their blockers. Ordinary Pause keeps its existing manual-message behavior.
+
+These follow-ups passed 1,009 input/consumer tests and 103 lifecycle tests with TypeScript checks. The combined private release is rebuilding under strict qualification. Recorder 166 remains the installed version at this checkpoint. Successful automatic next turns across the live account fleet remain an open acceptance check.
+
 ## Recorder 167 research snapshot
 
 This source snapshot covers original tool-request/result verification, completed-turn pickup after long waits, and the same-command recovery of an automatic handoff that timed out before its destination could send. The final transport attempt waits one hour after two immediate attempts. The queued deadline and attempt count survive restart. A destination that may already have sent remains in its original custody.

@@ -16,3 +16,5 @@ This repository is a sanitized code mirror. Read README.md for the exact source 
 - scripts/kill-stray-vitest.mjs preserves live/foreign/unknown runners. Windows cleanup requires exact explicit-root orphan identity under a native handle; POSIX is diagnostic-only. Never substitute global process-name kills.
 
 - Recorder 159 batches exact receipt verification per turn through session/store and recorder. Preserve full account catalog, original JSONL and canonical revisions, asset checks, source reproof and checkpoint clear. Fresh evidence captions expire using Main observation time. See README for current tests and live limitations.
+
+- R84 queue ownership now promotes the unoffered head on outbox reads without a browser poll. Maintenance Drain preserves pristine manual rows under the same UUID. Pause, claimed/uncertain Sends, approvals and running work retain their existing behavior. Read README.md for the current build boundary.

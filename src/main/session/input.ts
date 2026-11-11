@@ -900,6 +900,19 @@ const directBrowserHead = (rows: InputEntry[]): InputEntry | undefined => {
     ['queued', 'browser'].includes(row.state));
   return eligible.find(row => row.state === 'browser') ?? eligible[0];
 };
+const unofferedBrowserHead = (row: InputEntry | undefined): row is InputEntry & { state: 'queued'; owner: null } =>
+  row?.state === 'queued' && row.owner === null && row.offeredAt === undefined &&
+  row.sendAuthorizedAt === undefined && row.deliveredAt === undefined && row.messageId === undefined;
+
+function promoteBrowserHead(rows: InputEntry[], now: number): { rows: InputEntry[]; promotedId?: string } {
+  if (!rows.some(row => row.queuedBehindBrowser === true)) return { rows };
+  const head = directBrowserHead(rows);
+  if (!unofferedBrowserHead(head) || head.queuedBehindBrowser !== true) return { rows };
+  return {
+    rows: rows.map(row => row === head ? { ...head, queuedBehindBrowser: undefined, browserEligibleAt: now } : row),
+    promotedId: head.id,
+  };
+}
 const companionOf = (rows: InputEntry[], row: InputEntry): InputEntry | undefined => rows.find(root => root.companionInputId === row.id);
 const sameDelivery = (root: InputEntry, row: InputEntry): boolean => row.id === root.id || row.id === root.companionInputId;
 
@@ -1136,6 +1149,7 @@ async function queuedLoopWakeWasSatisfied(row: InputEntry): Promise<boolean> {
 }
 async function expireQueued(current: InputEntry[]): Promise<InputEntry[]> {
   const browserHead = directBrowserHead(current);
+  const now = Date.now();
   let next = await Promise.all(current.map(async (row): Promise<InputEntry> => {
     // Dependency/parallel waits spend no native delivery timeout or browser attention budget.
     if (row.state === 'queued' && !workflowInputReady(row, current)) return row;
@@ -1165,11 +1179,9 @@ async function expireQueued(current: InputEntry[]): Promise<InputEntry[]> {
     // A never-claimed direct message is provably pre-Send. After 15 minutes, retain it for the
     // user under Needs attention but let the next chat become the one global composer head. The
     // wait starts when this row actually reaches the head, not while it sits behind another chat.
-    if (row.id === browserHead?.id && row.state === 'queued' && row.owner === null && manualInput(row) &&
-        !queuedFollowup(row) && row.transportIntent !== 'tool' && row.queuedBehindBrowser !== true &&
-        row.deliveryAttentionAt === undefined &&
-        Date.now() - (row.browserEligibleAt ?? row.createdAt) >= UNCLAIMED_BROWSER_ATTENTION_MS) {
-      return { ...row, deliveryAttentionAt: Date.now(),
+    if (row === browserHead && unofferedBrowserHead(row) && row.queuedBehindBrowser !== true &&
+        now - Math.max(row.dueAt, row.browserEligibleAt ?? row.createdAt) >= UNCLAIMED_BROWSER_ATTENTION_MS) {
+      return { ...row, deliveryAttentionAt: now,
         error: 'Needs attention: Chrome did not claim this message for 15 minutes. Other chats may continue; Retry browser revisits this exact saved message.' };
     }
     // An unclaimed browser message is positive pre-Send state. Chrome can take longer than a
@@ -1215,7 +1227,12 @@ async function expireQueued(current: InputEntry[]): Promise<InputEntry[]> {
     const root = companionOf(next, next[i]!);
     if (root && root.state !== next[i]!.state) next[i] = { ...next[i]!, state: root.state, error: root.error };
   }
-  if (next.some((row, index) => row !== current[index])) await commit(next);
+  // Advance the durable FIFO on ordinary outbox reads too. A disconnected companion may
+  // never ask for status, but the new head still needs its own attention clock after restart.
+  const promoted = promoteBrowserHead(next, now);
+  if (promoted.rows.some((row, index) => row !== current[index])) await commit(promoted.rows);
+  if (promoted.promotedId)
+    logInfo(`input ${promoted.promotedId}: now first in the browser queue; waiting for Chrome to claim the saved message`);
   for (const released of releasedFollowers)
     logInfo(`input ${released.id}: released same-chat explicit follower after ${released.priorId} timed out before native Send authorization`);
   return entries!;
@@ -2900,18 +2917,15 @@ export function pendingBrowserInputs(): Promise<Array<{ id: string; conversation
         error: 'Not sent: a newer question or existing continuation superseded automatic Continue.' } : entry);
       await commit(current);
     }
-    let browserHead = directBrowserHead(current);
-    // `queuedBehindBrowser` is explanatory custody, not a permanent transport mode. As soon as
-    // this row becomes the global head, clear the marker in the same serialized read that exposes
-    // it. The UI can now offer Retry for the true head and the ordinary status wake immediately
-    // publishes it without waiting for another user action.
-    if (browserHead?.queuedBehindBrowser === true) {
-      current = current.map(row => row.id === browserHead!.id
-        ? { ...row, queuedBehindBrowser: undefined, browserEligibleAt: Date.now() }
-        : row);
+    // This status pass can retire superseded rows after load(). Advance any new head
+    // from those retirements before publishing the queue.
+    const promoted = promoteBrowserHead(current, Date.now());
+    if (promoted.promotedId) {
+      current = promoted.rows;
       await commit(current);
-      browserHead = directBrowserHead(current);
+      logInfo(`input ${promoted.promotedId}: now first in the browser queue; waiting for Chrome to claim the saved message`);
     }
+    const browserHead = directBrowserHead(current);
     for (const entry of ordered(current)) {
       // Read-only first-refusal trace: one fixed log per input while the same stage
       // holds it. Never changes eligibility, ordering or the published shapes below.

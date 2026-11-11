@@ -41,12 +41,11 @@ const ACTIVE_WORKER_STATES = new Set(['active', 'detached', 'waking']);
 
 /**
  * An untouched durable queue row has not crossed into browser/tool custody. Attention-parked
- * rows and deferred automatic rows need not start a new delivery while lifecycle Drain is active; their
- * exact UUID and payload already survive restart in the outbox. Treat only that complete,
- * positively-unsent shape as deferred; an explicit user message, an ordinary unpaused queue, or
- * any prior offer/claim/Send evidence still blocks shutdown under its existing delivery owner.
+ * rows and pristine queued rows need not start a new delivery during lifecycle Drain. Their exact
+ * UUID and payload survive restart in the outbox. A normal Pause still preserves manual delivery
+ * admission. Any prior offer/claim/Send evidence keeps its existing shutdown blocker.
  */
-function deferredQueuedInput(entry: InputEntry, automaticDeferred: boolean): boolean {
+function deferredQueuedInput(entry: InputEntry, automaticDeferred: boolean, draining: boolean): boolean {
   if (entry.state !== 'queued' || entry.owner !== null || entry.offeredAt !== undefined ||
       entry.sendAuthorizedAt !== undefined || entry.deliveredAt !== undefined ||
       entry.messageId !== undefined) return false;
@@ -61,7 +60,7 @@ function deferredQueuedInput(entry: InputEntry, automaticDeferred: boolean): boo
   // pre-Send failure/withdrawal proof; every other delivered-session projection stays a blocker.
   if (entry.deliveredSessionId === null ||
       (entry.deliveredSessionId !== undefined && !provenPreSend)) return false;
-  return entry.deliveryAttentionAt !== undefined || (automaticDeferred && !userRequestedInput(entry));
+  return entry.deliveryAttentionAt !== undefined || draining || (automaticDeferred && !userRequestedInput(entry));
 }
 
 function countsFromPersistedAgents(rows: unknown): ProfileWorkerCounts | null {
@@ -151,15 +150,15 @@ export async function activeProfileWorkCensus(): Promise<ActiveWorkCensus> {
     detail: `delivered helper answer collection=${helperWork.collecting}, Goal acceptance=${helperWork.accepting}; existing request custody must settle`
   });
   const automationPaused = getConfig().ui.automationPaused === true;
-  // A normal maintenance Drain must not require flipping a user's persistent Pause merely
-  // to defer an untouched generated outbox row. Only positively unoffered/unclaimed/unsent
-  // automatic debt qualifies; manual, leased, authorized and ambiguous ownership still blocks.
-  const automaticDeferred = automationPaused || profileWorkAdmission.snapshot().mode === 'draining';
+  // Drain retains pristine manual and generated text for the same delivery owner after restart.
+  // Ordinary Pause alone defers automatic debt while keeping explicit manual inputs visible.
+  const draining = profileWorkAdmission.snapshot().mode === 'draining';
+  const automaticDeferred = automationPaused || draining;
   const ambiguousInputs = inputs.filter(entry =>
     (entry.state === 'browser' && entry.sendAuthorizedAt !== undefined) || entry.state === 'tool');
   const pendingInputs = inputs.filter(entry =>
     (entry.state === 'queued' || entry.state === 'browser' || entry.state === 'tool') &&
-    !ambiguousInputs.includes(entry) && !deferredQueuedInput(entry, automaticDeferred));
+    !ambiguousInputs.includes(entry) && !deferredQueuedInput(entry, automaticDeferred, draining));
   if (ambiguousInputs.length > 0) blockers.push({
     category: 'ambiguous-send',
     count: ambiguousInputs.length,
