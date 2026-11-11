@@ -92,6 +92,34 @@ describe('explicit browser attach to Chrome discarded/unloaded tabs',()=>{
     await control.execute(command('release'));
   });
 
+  it.each([true, false])('retires a restored lease when Chrome denies this debugger attachment, even if another target is attached=%s',async attached=>{
+    const {chrome,control,command,saved}=await fixture({status:'complete',owner:'session:mine'});
+    chrome.debugger.getTargets.mockResolvedValue([{tabId:17,attached}]);
+    chrome.debugger.sendCommand.mockRejectedValueOnce(new Error('Debugger is not attached to the tab with id: 17.'));
+    await expect(control.execute(command('attach'))).rejects.toThrow(/BROWSER_DETACHED/);
+    expect(saved().tabs).toEqual([]);
+    expect(control.controlsTab(17)).toBe(false);
+    expect(chrome.debugger.attach).not.toHaveBeenCalled();
+    expect(chrome.debugger.detach).not.toHaveBeenCalled();
+    expect(chrome.tabs.reload).not.toHaveBeenCalled();
+    // The failed command is never replayed. A separate explicit attach owns recovery.
+    expect(await control.execute(command('attach'))).toMatchObject({value:{attached:true}});
+    expect(chrome.debugger.attach).toHaveBeenCalledExactlyOnceWith({tabId:17},'1.3');
+    await control.execute(command('release'));
+  });
+
+  it.each(['ordinary protocol error','Debugger is not attached to the tab with id: 99.'])(
+    'does not retire an attached lease for an unrelated error: %s',async message=>{
+      const {chrome,control,command,saved}=await fixture({status:'complete',owner:'session:mine'});
+      chrome.debugger.sendCommand.mockRejectedValueOnce(new Error(message));
+      await expect(control.execute(command('attach'))).rejects.toThrow(message);
+      expect(saved().tabs).toHaveLength(1);
+      expect(control.controlsTab(17)).toBe(true);
+      expect(chrome.debugger.detach).not.toHaveBeenCalled();
+      expect(chrome.debugger.attach).not.toHaveBeenCalled();
+      await control.execute(command('release'));
+    });
+
   it('requires browser write permission before reloading',async()=>{
     const {chrome,control,command,saved}=await fixture({write:false});
     await expect(control.execute(command('attach'))).rejects.toThrow(/needs browser write permission/);

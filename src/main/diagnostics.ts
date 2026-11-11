@@ -887,7 +887,7 @@ export async function bindDiagnosticIncidentWakeInputNow(claimId: string, inputI
 
 export async function settleDiagnosticIncidentWakeNow(input: {
   claimId: string;
-  outcome: 'delivered' | 'confirmed-unsent' | 'ambiguous';
+  outcome: 'delivered' | 'confirmed-unsent' | 'operator-cancelled' | 'ambiguous';
   diagnosticSessionId?: string;
   diagnosticConversationId?: string;
   wakeInputId?: string;
@@ -898,6 +898,14 @@ export async function settleDiagnosticIncidentWakeNow(input: {
     const row = state.incidents.find(item => item.claimId === input.claimId && item.status === 'claimed');
     if (!row) return false;
     if (input.wakeInputId !== undefined && row.wakeInputId !== input.wakeInputId) return false;
+    if (input.outcome === 'operator-cancelled') {
+      if (!input.wakeInputId || row.wakeInputId !== input.wakeInputId) return false;
+      row.status = 'suppressed';
+      row.disposition = 'user-action';
+      row.settledAt = now;
+      await persistDiagnosticState(state);
+      return true;
+    }
     if (input.outcome === 'confirmed-unsent') {
       row.status = 'pending';
       row.claimId = null;

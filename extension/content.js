@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 159;
+  const RECORDER_VERSION = 167;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -3102,7 +3102,7 @@
    * is what makes `lastChangeAt` mean anything.
    */
   function turnStalled(candidate = null) {
-    if (generating && turnId && turnStartedAt > 0 && CLF_DOM.approvalWaiting()) {
+    if (generating && turnId && turnStartedAt > 0 && approvalHolding()) {
       // Waiting for a human approval is live provider state, not a dead turn. Count any later
       // silence from the instant that card disappears instead of from before it appeared.
       lastChangeAt = Math.max(lastChangeAt, Date.now());
@@ -3502,6 +3502,39 @@
     catch { console.warn('[Chat On Steroids] Native approval owner failed; the native card remains pending.'); }
   }
 
+  /**
+   * Reannounce one stable native Retry through Main's existing recovery owner.
+   * The recorder's first error can arrive before the control settles. A second
+   * exact occurrence after idle grace wakes the same durable repair budget.
+   * Only the background's authorized handout may click the provider control.
+   */
+  const observedRetryCards = new WeakMap();
+  const OBSERVED_RETRY_GRACE_MS = 2000;
+
+  function autoRetryFailedTurnObservation() {
+    if (!alive || !conversationId || CLF_DOM.conversationId() !== conversationId ||
+        nativeApprovalPolicy?.paused !== false || !goalUsable() || generating || CLF_DOM.generating() ||
+        goalBusy || !CLF_DOM.composer() || pendingTools !== 0 || nativeBusy || job?.busy ||
+        desktopInputBusy || modelCatalogBusy || pluginRefreshBusy || recoveryStopping) return;
+    const candidates = CLF_DOM.errors().filter(error => error.recoverable === true &&
+      error.blocking !== true && !error.reason && error.retry?.isConnected);
+    if (candidates.length !== 1) return;
+    const error = candidates[0];
+    const now = Date.now();
+    const prior = observedRetryCards.get(error.retry);
+    const recordedTurn = localErrorGeneration(error) || null;
+    if (!prior || prior.epoch !== epoch || prior.conversationId !== conversationId ||
+        prior.turnId !== recordedTurn) {
+      observedRetryCards.set(error.retry, { epoch, conversationId, turnId: recordedTurn, firstSeenAt: now, reported: false });
+      return;
+    }
+    if (prior.reported || now - prior.firstSeenAt < OBSERVED_RETRY_GRACE_MS) return;
+    prior.reported = true;
+    emit({ kind: 'chat_error', text: error.text, turnId: recordedTurn || undefined,
+      recoverable: true, retryAvailable: true, blocking: false });
+    void flush();
+  }
+
   function observe() {
     // This duplicate source document is only the native Project entry point. Its transcript
     // belongs to A's original recorder; do not adopt it while preparing the fresh composer.
@@ -3514,6 +3547,7 @@
     if (id && id === conversationId) {
       approvalHolding();
       autoApproveNativeTools();
+      autoRetryFailedTurnObservation();
     }
     // One DOM turn snapshot per observation, created lazily because a transient id-less route
     // returns before transcript work. Everything below this stack frame that needs `turns()`
@@ -3922,7 +3956,7 @@
       // generic stall, including when it appears after a long quiet run.
       const exactNativeFailure = NATIVE_FAILURE_REASONS.has(quietOutcome?.reason) || visibleErrors.some(
         error => NATIVE_FAILURE_REASONS.has(error.reason) && localErrorGeneration(error) === turnId && !isStale(error.node));
-      if (!exactNativeFailure && !stallReported && Date.now() - lastChangeAt > STALL_MS && !deliberateTurnLive()) {
+      if (!exactNativeFailure && !stallReported && turnStalled(turn) && !deliberateTurnLive()) {
         stallReported = true;
         emit({ kind: 'chat_error', reason: 'watchdog_stalled', text: 'No visible progress for five minutes. The app could not confirm that this turn finished.', turnId, recoverable: true });
       }
@@ -8620,7 +8654,7 @@
     if (current() && CLF_DOM.conversationId() === forId) await maybeResumePendingCompaction(forId, forEpoch);
     if (current() && CLF_DOM.conversationId() === forId) maybeRecoverResumeGoalTurn();
     if (current() && CLF_DOM.conversationId() === forId) maybeRecoverDurableGoalTurn();
-    if (current() && CLF_DOM.conversationId() === forId) maybeRecoverUnavailableGoalTurn(settledToolCensus);
+    if (current() && CLF_DOM.conversationId() === forId) maybeRecoverHeldGoalTurn(settledToolCensus);
     // Same reason, same place: this types into the composer and can wait on the page, and it
     // needs the draft this pull just delivered.
     if (current() && CLF_DOM.conversationId() === forId) await maybeSendGoalReply();
@@ -10070,7 +10104,15 @@
     // deliberately absent — the textarea already holds it, and Save is kept in step by the
     // input listener, so typing a goal repaints nothing.
     const nickname = control.nickname.hidden ? '' : control.nickname.textContent;
-    const painted = JSON.stringify([view, nickname, menuBusy, objectiveBusy, objectiveError, Boolean(readerRefreshRun), readerRefreshNote]);
+    // Main can still report a previous answer as active after the native page stops.
+    // On an idle page, the existing observation-only refresh can obtain fresh evidence.
+    const readerBlocked = evidenceReaderConflict();
+    const waitReason = goalConfig?.wait?.reason;
+    const showReaderRefresh = composerChat().state === 'chat' && status.connected && status.paired && status.instanceId &&
+      (waitReason === 'evidence' || (waitReason === 'answer' && !readerBlocked) ||
+        (goalErrorCode === 'native_completion_unverified' && !goalErrorCodePresentationOnly));
+    const painted = JSON.stringify([view, nickname, menuBusy, objectiveBusy, objectiveError, Boolean(readerRefreshRun),
+      readerRefreshNote, Boolean(showReaderRefresh), readerBlocked]);
     // Unchanged, so the sheet on screen is already the right sheet. Only its position is
     // still worth re-deciding: the composer it hangs off moves as ChatGPT grows it.
     if (painted === menuPainted && root.firstChild) {
@@ -10171,14 +10213,12 @@
       root.append(resume);
     }
 
-    if (composerChat().state === 'chat' && status.connected && status.paired && status.instanceId &&
-        (goalConfig?.wait?.reason === 'evidence' ||
-          (goalErrorCode === 'native_completion_unverified' && !goalErrorCodePresentationOnly))) {
+    if (showReaderRefresh) {
       const refresh = document.createElement('button');
       refresh.type = 'button'; refresh.className = 'clf-menu-action';
       refresh.dataset.clfAction = 'refresh-evidence-reader';
       refresh.textContent = readerRefreshRun ? 'Refreshing evidence reader…' : 'Refresh evidence reader';
-      refresh.disabled = evidenceReaderConflict();
+      refresh.disabled = readerBlocked;
       refresh.setAttribute('aria-disabled', readerRefreshRun ? 'true' : 'false');
       refresh.setAttribute('aria-busy', readerRefreshRun ? 'true' : 'false');
       refresh.setAttribute('data-clf-tip', 'Refresh only this page’s completion reader. Keeps saved work and pending receipts; does not reload the companion or retry a message.');
@@ -10816,11 +10856,11 @@
   }
 
   /** One presentation rule for both the stage and tab; never clears the old receipt fence. */
-  function goalAnswerReplacesPriorError(goal) {
+  function goalWorkReplacesPriorEvidenceError(goal) {
     const draft = goal?.draft;
     const failedTypedHold = draft?.stage === 'failed' && isNativeCompletionHold(draft.error) &&
       draft.outboxContinuationOwned !== true;
-    return Boolean(goal?.enabled === true && goal.wait?.reason === 'answer' &&
+    return Boolean(goal?.enabled === true && ['answer', 'tools'].includes(goal.wait?.reason) &&
       (isNativeCompletionHold(goal.errorCode) || (!goal.errorCode && failedTypedHold)) &&
       (!draft || failedTypedHold) && !goal.opening &&
       !['sending', 'model-wait'].includes(goal.phase) &&
@@ -10850,7 +10890,12 @@
 
   function goalStageView(goal) {
     if (!goal) return null;
-    const freshEvidence = Number.isFinite(goal.wait?.evidenceFreshUntil) && goal.wait.evidenceFreshUntil >= Date.now();
+    const now = Date.now();
+    const freshEvidence = Number.isFinite(goal.wait?.evidenceFreshUntil) && goal.wait.evidenceFreshUntil >= now;
+    const heldSince = goal.wait?.evidenceHeldSince;
+    const holdStartedAt = Number.isFinite(heldSince) && heldSince > 0 && heldSince <= now ? heldSince
+      : Number.isFinite(goal.evidenceHoldSince) && goal.evidenceHoldSince > 0 ? goal.evidenceHoldSince
+      : Number.isFinite(goal.phaseStartedAt) && goal.phaseStartedAt > 0 ? goal.phaseStartedAt : 0;
     // Pausing admission cannot turn an unresolved native Send into known-unsent work.
     // Keep that exact existing no-replay warning ahead of the neutral saved-work view.
     if (goal.health?.state === 'paused' && goal.error !== 'ChatGPT would not send the message') {
@@ -10867,17 +10912,17 @@
           goal.wait.nextAction || ''].filter(Boolean).join(' · '),
         body: '', kind: 'goal-error', steps: [], at: 0, done: false };
     }
-    // Main can positively identify an active *new* native answer while the previous
-    // turn's Core result remains unverified. The local error code describes that
-    // earlier result, not this current wait. Show the current typed answer wait,
-    // retaining the original error as historical detail instead of erasing it.
-    // Never derive liveness from the error text, a spinner, or a guessed Send:
-    // paused/approval/provider holds, saved drafts and delivery remain separate.
-    if (goalAnswerReplacesPriorError(goal)) {
+    // Main can positively identify an active native answer or running Core tool
+    // while prior result debt remains. Show the current work and retain the debt
+    // as detail. This presentation grants no execution or Send authority.
+    if (goalWorkReplacesPriorEvidenceError(goal)) {
       const automation = goal.mode === 'loop' ? 'Loop' : 'Goal';
-      return { stage: `${automation} is on · waiting for this answer`,
+      const tools = goal.wait.reason === 'tools';
+      const activity = tools ? 'tools running' : 'waiting for this answer';
+      const caveat = tools ? 'These running tools do not verify the earlier result.' : 'This active answer is not that result or a Send receipt.';
+      return { stage: `${automation} is on · ${activity}`,
         detail: [goal.wait.detail || '', goal.wait.nextAction || '',
-          `Earlier completion evidence still unverified: ${goal.error || 'Exact prior tool result not confirmed.'} This active answer is not that result or a Send receipt.`
+          `Earlier completion evidence still unverified: ${goal.error || 'Exact prior tool result not confirmed.'} ${caveat}`
         ].filter(Boolean).join(' · '),
         body: '', kind: 'goal', steps: GOAL_STEPS, at: 0, done: false };
     }
@@ -10885,9 +10930,6 @@
     // Its typed hold outranks the previous retry error; never infer this from prose.
     if (goalEvidenceHoldReplacesPriorError(goal)) {
       const automation = goal.mode === 'loop' ? 'Loop' : 'Goal';
-      const holdStartedAt = Number.isFinite(goal.evidenceHoldSince) && goal.evidenceHoldSince > 0
-        ? goal.evidenceHoldSince
-        : Number.isFinite(goal.phaseStartedAt) && goal.phaseStartedAt > 0 ? goal.phaseStartedAt : 0;
       return { stage: freshEvidence ? `${automation} waiting for tool result verification` : `${automation} waiting for verified completion · activity unknown`,
         detail: [goal.wait?.detail || goal.draft?.message || goal.error || 'Exact tool-call completion has not been verified.',
           goal.wait?.nextAction || ''].filter(Boolean).join(' · '),
@@ -10966,7 +11008,7 @@
         const automation = goal.mode === 'loop' ? 'Loop' : 'Goal';
         return { stage: freshEvidence ? `${automation} waiting for tool result verification` : `${automation} waiting for verified completion · activity unknown`,
           detail: [wait.detail || '', wait.nextAction || ''].filter(Boolean).join(' · '),
-          body: '', kind: 'goal', startedAt: phaseStartedAt, steps: [], at: 0, done: false };
+          body: '', kind: 'goal', ...(holdStartedAt > 0 ? { startedAt: holdStartedAt } : {}), steps: [], at: 0, done: false };
       }
       if (wait?.reason === 'attention') {
         const automation = goal.mode === 'loop' ? 'Loop' : 'Goal';
@@ -11210,10 +11252,10 @@
     const modelBlocked = !paused && goalPhase === 'model-wait';
     const projectedGoal = goalConfig ? { ...goalConfig,
       phase: goalPhase, error: goalError, errorCode: goalErrorCode, draft: goalDraft } : null;
-    const currentAnswer = goalAnswerReplacesPriorError(projectedGoal);
+    const currentWork = goalWorkReplacesPriorEvidenceError(projectedGoal);
     const evidenceHold = goalEvidenceHoldReplacesPriorError(projectedGoal);
     const currentDraftReplacesPriorError = goalCurrentDraftReplacesPriorError(projectedGoal);
-    const currentGoalError = Boolean(goalError && !currentAnswer && !evidenceHold && !currentDraftReplacesPriorError);
+    const currentGoalError = Boolean(goalError && !currentWork && !evidenceHold && !currentDraftReplacesPriorError);
     const failedDraftNeedsAttention = goalDraft?.stage === 'failed' && !evidenceHold;
     const needsAttention = modelBlocked || accountRestricted || signedOut || nativeErrorAttention || (!paused &&
       (currentGoalError || failedDraftNeedsAttention)) ||
@@ -11221,7 +11263,7 @@
     // Canonical pause is not a failed/stopped task. Cached helper/job phases cannot
     // paint it as Working; positive native generation and Main's exact live-work
     // verdict retain precedence without changing any execution or delivery owner.
-    const working = Boolean(currentAnswer || healthState === 'working' || CLF_DOM.generating() || (!paused && (generating || pendingTools > 0 || job?.busy || goalBusy ||
+    const working = Boolean(currentWork || healthState === 'working' || CLF_DOM.generating() || (!paused && (generating || pendingTools > 0 || job?.busy || goalBusy ||
       (goalDraft && !['ready', 'failed', 'no-reply'].includes(goalDraft.stage)))));
     const workerTab = goalConfig?.blocked === 'worker' || bootstrap === 'worker' || Boolean(agent);
     // Page transport and execution health are separate facts. Cached recorder generation,
@@ -12571,7 +12613,7 @@
    * itself, and the message this loop was about to write is about a turn that is no longer
    * the last one.
    */
-  function maybeRecoverUnavailableGoalTurn(pendingToolsReceipt) {
+  function maybeRecoverHeldGoalTurn(pendingToolsReceipt) {
     const held = goalSettlePending;
     if (!held) return;
     const latestUser = CLF_DOM.messages().filter(message => message?.role === 'user').at(-1)?.id;
@@ -12591,7 +12633,7 @@
     // Claim synchronously before another activity wake can enter. The entire original
     // settling barrier runs again; a recovered zero is not permission to skip it.
     goalSettlePending = null;
-    console.info('[Chat On Steroids] activity receipt restored; rechecking the same completed Goal turn. No continuation sent.');
+    console.info('[Chat On Steroids] Goal settle blocker cleared; rechecking the same completed turn. No continuation sent.');
     void watchGoalTurn(ended, held.turnId);
   }
 
@@ -12642,15 +12684,18 @@
         await requestGoalDraft(forTurn, current);
         return;
       }
-      // The same bounded barrier also waits for tools and native approval. Neither is an
-      // unstable model answer, and an approval card must never authorize a helper request.
-      // Keep the existing Main-owned pickup/recovery; do not invent a page retry or Send.
+      // A long approval/tool wait can outlive this bounded poll without invalidating the
+      // completed turn. Keep the same page-local pickup and let the existing activity feed
+      // restart the full barrier only after it sees no approval and an exact zero-tool receipt.
       console.warn(`[Chat On Steroids] Goal settle window ended: ${heldBy}; no draft requested.`);
-      if (heldBy === 'unavailable' && current() && userMessageId)
+      if ((heldBy === 'unavailable' || heldBy === 'approval' || heldBy === 'tools') && current() && userMessageId)
         goalSettlePending = { ended, turnId: forTurn, conversationId: forId, epoch: forEpoch, userMessageId };
-      setGoalPhase('settling', heldBy === 'unavailable'
+      const waitMessage = heldBy === 'unavailable'
         ? 'Could not verify running tools because the app did not return a valid activity receipt. No continuation was sent.'
-        : heldBy === 'changing-answer' ? 'the answer never stopped changing, so nothing was written' : '');
+        : heldBy === 'approval' ? 'Waiting for native approval before rechecking the completed turn.'
+        : heldBy === 'tools' ? 'Waiting for running tools to finish before rechecking the completed turn.'
+        : heldBy === 'changing-answer' ? 'the answer never stopped changing, so nothing was written' : '';
+      setGoalPhase('settling', waitMessage);
     } finally {
       if (epoch === forEpoch && conversationId === forId) goalBusy = false;
       renderControl();
@@ -15890,8 +15935,18 @@
     // Code-block language/copy controls are renderer chrome, not authored decision text.
     // Accept only one whole-answer block in this exact assistant node. Never search arbitrary
     // prose for a JSON example, and never borrow a code block from another message.
-    const node = assistant?.node;
+    let node = assistant?.node;
     if (!node?.isConnected || isStale(node)) return fallback;
+    // A turn section can contain earlier commentary and the terminal answer.
+    // Select the exact public message before reading its one whole-answer block.
+    const idSelector = '[data-dil-message-id], [data-message-id]';
+    const identified = [...node.querySelectorAll(idSelector)];
+    if (node.matches?.(idSelector)) identified.push(node);
+    const owned = identified.filter(element => ['data-dil-message-id', 'data-message-id'].every(name =>
+      !element.hasAttribute(name) || element.getAttribute(name) === assistant.id));
+    const owners = owned.filter(element => !owned.some(other => other !== element && other.contains(element)));
+    if (owners.length > 1) return fallback;
+    if (owners.length === 1) node = owners[0];
     const rootSelector = '.markdown, [data-markdown-text-style="assistant-message"]';
     const markdowns = [...(node.matches?.(rootSelector) ? [node] : []), ...node.querySelectorAll(rootSelector)];
     // The current renderer can nest a legacy .markdown inside its newer root.
@@ -15903,10 +15958,9 @@
     const roots = markdowns.filter(candidate => !markdowns.some(other => other !== candidate && other.contains(candidate)));
     if (roots.length !== 1) return fallback;
     const markdown = roots[0];
-    const idSelector = '[data-dil-message-id], [data-message-id]';
     const rendererIds = [...node.querySelectorAll(idSelector)];
     if (node.matches?.(idSelector)) rendererIds.push(node);
-    const ancestor = node.closest?.(idSelector);
+    const ancestor = node.parentElement?.closest?.(idSelector);
     if (ancestor && ancestor !== node) rendererIds.push(ancestor);
     // If both identity attributes exist, BOTH must agree; null-coalescing can hide
     // a conflicting older id behind a newer matching renderer id.

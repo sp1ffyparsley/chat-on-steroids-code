@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import vm from 'node:vm';
 import { createServer } from 'node:net';
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, onTestFinished } from 'vitest';
 
 const script = fileURLToPath(new URL('../scripts/dev-fast.mjs', import.meta.url));
 const project = path.resolve(path.dirname(script), '..');
@@ -201,6 +201,14 @@ describe('fast development launcher', () => {
 
   it('offers one bounded personal local-update command with exact private reuse, fresh drift repair and guarded main/companion handoffs', async () => {
     const root = mkdtempSync(path.join(project, '.test_tmp', 'chat42-local-update-spaces-'));
+    // This fixture owns its installation observation. A concurrently replaced
+    // real app must not change the expected private activation risk verdict.
+    const previousLocalAppData = process.env.LOCALAPPDATA;
+    process.env.LOCALAPPDATA = path.join(root, 'local-app-data');
+    onTestFinished(() => {
+      if (previousLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+      else process.env.LOCALAPPDATA = previousLocalAppData;
+    });
     const local = path.join(root, 'scripts', 'dev-fast.mjs');
     const compiler = path.join(root, 'node_modules', 'electron-vite', 'bin', 'electron-vite.js');
     const platformTypeScript = `typescript-${process.platform}-${process.arch}`;
@@ -1468,7 +1476,7 @@ for(const name of ['main/index.js','preload/index.js','renderer/index.html','ren
               { relative: 'main/index.js', sha256: expect.stringMatching(/^[A-F0-9]{64}$/) },
               { relative: 'preload/index.js', sha256: expect.stringMatching(/^[A-F0-9]{64}$/) }
             ] },
-          risk: { state: 'unverified', reason: 'installed-baseline-checkout-unverified' },
+          risk: { state: 'unverified', reason: 'installed-strict-baseline-unavailable' },
           requirements: { requestDrain: expect.stringContaining('drain-ready'),
             durableCheckpoint: expect.stringContaining('flushDurable'),
             priorGoodRollback: expect.stringContaining('restore'),
@@ -4658,15 +4666,12 @@ Module.syncBuiltinESMExports();
         NODE_OPTIONS: `--require="${preload.replaceAll('\\', '/')}"` }
     });
     const old = '2020-01-01T00:00:00.0000000Z';
-    const exitedProcessPid = () => new Promise<number>((resolve, reject) => {
-      const child = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
-      if (!child.pid) return reject(new Error('missing disposable pid'));
-      child.once('close', () => resolve(child.pid!));
-      child.once('error', reject);
-    });
+    // Just-exited Windows PIDs can already name unrelated process ancestry when the real
+    // census runs. Use absent sentinels for this empty-custody case; production still proves
+    // absence, and the competing/live-descendant cases below retain real process identities.
     const owner = { schema: 1, checkout, identity, token: '00000000-0000-4000-8000-000000000007',
-      pid: await exitedProcessPid(), startedAt: old, phase: 'spawning',
-      childPid: await exitedProcessPid(), childStartedAt: old, bridgePort: 8796,
+      pid: 2_147_483_643, startedAt: old, phase: 'spawning',
+      childPid: 2_147_483_639, childStartedAt: old, bridgePort: 8796,
       rendererPort: 5173, debugPort: null };
     try {
       mkdirSync(lock, { recursive: true });

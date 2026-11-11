@@ -482,6 +482,55 @@ describe('opt-in settled-turn Loop forward-readiness', () => {
     return { conversationId, sessionId, userId, partialId, turnId, diagnostic, publish, goal, input };
   }
 
+  it.each([true, false])('keeps native Retry through handout, claim and receipt with a pending Loop reply=%s', async hasPendingReply => {
+    const f = await stoppedResumeFixture(false, false, false, true);
+    const final = (await readEvents(f.sessionId, { kinds: ['assistant_message'] })).find(row =>
+      row.kind === 'assistant_message' && row.messageId === f.partialId)!;
+    if (hasPendingReply) await f.goal.acceptGoalReplyNow({ conversationId: f.conversationId, sessionId: f.sessionId,
+      turnId: f.turnId, replyId: f.partialId, eventSeq: final.seq, blocked: false });
+    f.diagnostic.ordinaryFinal = { reason: 'open-call', questions: 1, calls: 1, openCalls: 1,
+      codeCalls: 0, openCodeCalls: 0, activeTurnMapped: false, sourceUserMessageId: f.userId,
+      settledFinalMessageId: f.partialId, coreCallMessageIds: ['stopped-unverified-call'], codeCallMessageIds: [] };
+    await f.publish();
+    const pending = goalPendingReplyFor(f.conversationId);
+    if (hasPendingReply) {
+      expect(pending).toMatchObject({ sessionId: f.sessionId, turnId: f.turnId });
+      expect(await settledForwardBridge.settledTurnContinuationAllowed(f.sessionId, f.conversationId, f.turnId)).toBe(true);
+    } else expect(pending).toBeNull();
+    const held = coreBrowserEvidence(f.conversationId)?.pendingCompletion;
+    expect(nativeFinalEvidenceWait(coreBrowserEvidence(f.conversationId))).not.toBeNull();
+    const inputs = await f.input.listInputs();
+    await request('POST', '/events', { body: { conversationId: f.conversationId, events: [{
+      kind: 'chat_error', time: Date.now(), turnId: f.turnId,
+      text: 'Message delivery timed out. Please try again.', recoverable: true, retryAvailable: true
+    }] } });
+    expect((await settledForwardBridge.sessionControlsFor(f.sessionId)).goalWait).toMatchObject({
+      reason: 'pickup', detail: expect.stringContaining(hasPendingReply
+        ? 'continuation decision is pending' : 'does not block this Retry')
+    });
+    const status = await request('GET', '/status');
+    const retry = status.body.repairs?.find((row: any) => row.conversationId === f.conversationId);
+    expect(retry).toMatchObject({ reason: 'assistant-error', action: 'retry' });
+    expect((await request('POST', '/repairs/claim', { body: { token: retry.token } })).body.allowed).toBe(true);
+    expect((await request('POST', '/repairs/claim', { body: { token: retry.token, phase: 'recheck' } })).body.allowed).toBe(true);
+    const rejected = vi.fn();
+    const stopLog = onLog(line => {
+      if (line.message.includes('assistant_repair_receipt_native_hold')) rejected();
+    });
+    try {
+      await request('GET', '/status?repaired=' + retry.token + '&repairAction=retried');
+      expect(rejected).not.toHaveBeenCalled();
+      await vi.waitFor(async () => {
+        const saved = await readDurable<{ repairTurnBudgets?: Array<{ conversationId: string; retry: boolean }> }>('bridge-commands');
+        expect(saved?.repairTurnBudgets?.find(row => row.conversationId === f.conversationId)).toMatchObject({ retry: true });
+      });
+    } finally { stopLog(); }
+    expect(goalPendingReplyFor(f.conversationId)).toEqual(pending);
+    expect(coreBrowserEvidence(f.conversationId)?.pendingCompletion).toEqual(held);
+    expect(await f.input.listInputs()).toEqual(inputs);
+    expect((await request('GET', '/status')).body.repairs ?? []).toEqual([]);
+  });
+
   it.each(['before-resume', 'after-resume', 'edited-after-resume'] as const)(
     'binds stopped Resume to canonical message chronology and the exact %s revision', async phase => {
       const f = await stoppedResumeFixture(false);
@@ -682,11 +731,13 @@ describe('opt-in settled-turn Loop forward-readiness', () => {
         coreDiagnostic: { ...f.diagnostic, turnId: f.turnId, observedAt: Date.now(), ordinaryFinal } } });
     expect((await publish({ ...f.diagnostic.ordinaryFinal, reason: 'open-call', activeTurnMapped: true })).status).toBe(200);
     expect((await sessionControlsFor(f.sessionId)).nativeEvidence?.openCalls).toBe(1);
+    const heldSince = coreBrowserEvidence(f.conversationId)?.pendingCompletion?.observedAt;
+    expect(heldSince).toBeGreaterThan(0);
     expect((await publish({ ...f.diagnostic.ordinaryFinal, reason: 'associated', activeTurnMapped: true,
       openCalls: 0, openCodeCalls: 0 })).status).toBe(200);
     const after = await sessionControlsFor(f.sessionId);
     expect(after.nativeEvidence).toMatchObject({ reason: 'associated', openCalls: 1, settledCandidate: false });
-    expect(nativeFinalEvidenceWait(coreBrowserEvidence(f.conversationId))?.reason).toBe('evidence');
+    expect(nativeFinalEvidenceWait(coreBrowserEvidence(f.conversationId))).toMatchObject({ reason: 'evidence', evidenceHeldSince: heldSince });
     await recordChatObservations(f.conversationId, [
       { kind: 'turn_start', turnId: 'newer-native-result-owner', time: Date.now() }
     ]);
@@ -5047,6 +5098,139 @@ describe('provisioning', () => {
     ]);
     expect((await getSession(recorded.body.sessionId))?.activeTurnId).toBeNull();
     expect((await request('POST', '/repairs/claim', { body: { token: repair.token } })).body.allowed).toBe(false);
+  });
+
+  it.each(['unclaimed', 'claimed', 'confirmed'] as const)(
+    'preserves the exact %s repair budget across a long network outage', async phase => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      await pair();
+      const primeChat = randomUUID();
+      await request('POST', '/events', { body: { conversationId: primeChat, events: [
+        { kind: 'user_message', messageId: randomUUID(), text: 'Preserve this exact work.', time: Date.now() },
+        { kind: 'turn_start', turnId: 'network-held-turn', time: Date.now() }
+      ] } });
+      spawn({ workers: [{ task: 'retain the original Prime family' }], caller: { conversationId: primeChat } });
+      resetBridgeForTests();
+      await pair();
+      const first = (await request('POST', '/status', { body: {
+        openConversations: [], inventoryComplete: true
+      } })).body.repairs.find((row: any) => row.conversationId === primeChat);
+      expect(first).toMatchObject({ reason: 'no-tab' });
+      if (phase !== 'unclaimed') expect((await request('POST', '/repairs/claim', {
+        body: { token: first.token }
+      })).body.allowed).toBe(true);
+      if (phase === 'confirmed') await request('GET', `/status?repaired=${encodeURIComponent(first.token)}&repairAction=reopened`);
+      applyCoreConnectionDispatchState('connected');
+      coreConnection.state = 'offline';
+      applyCoreConnectionDispatchState('offline');
+      vi.setSystemTime(Date.now() + 60 * 60_000 + 1);
+      await request('POST', '/status', { body: { openConversations: [], inventoryComplete: true } });
+      await flushDurable();
+      const saved = await readDurable<{ recoveryFences: Array<{ conversationId: string }> }>('bridge-commands');
+      expect(saved?.recoveryFences.some(row => row.conversationId === primeChat)).toBe(false);
+      coreConnection.state = 'connected';
+      applyCoreConnectionDispatchState('connected');
+      const after = (await request('POST', '/status', { body: {
+        openConversations: [], inventoryComplete: true
+      } })).body;
+      expect(getLog().some(row => row.message.includes(`${primeChat} was claimed without a receipt`))).toBe(false);
+      const stillEligible = after.repairs.find((row: any) => row.conversationId === primeChat);
+      if (stillEligible) expect(stillEligible.token).toBe(first.token);
+      await flushDurable();
+      expect((await readDurable<{ recoveryFences: Array<{ conversationId: string }> }>('bridge-commands'))!
+        .recoveryFences.some(row => row.conversationId === primeChat)).toBe(false);
+      if (phase === 'claimed') expect((await request('POST', '/repairs/claim', {
+        body: { token: first.token }
+      })).body.allowed).toBe(false);
+    } finally {
+      coreConnection.state = 'connected';
+      applyCoreConnectionDispatchState('connected');
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['due', 'early', 'initial offline', 'auth-failed', 'tunnel-unavailable', 'disconnected', 'pause'] as const)(
+    'bounds one-hour network transport recovery without changing manual policy (%s)', async control => {
+    const before = getConfig();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      await pair();
+      const start = Date.now();
+      const notices = getLog().filter(row => row.message.includes('network restored after outage grace')).length;
+      if (control !== 'initial offline') applyCoreConnectionDispatchState('connected');
+      coreConnection.state = 'offline';
+      applyCoreConnectionDispatchState('offline');
+      await flushDurable();
+      const saved = await readDurable<{ networkOutage?: { startedAt: number; suspendedAt: number | null; resume: boolean } }>('bridge-commands');
+      if (control !== 'initial offline') expect(saved?.networkOutage).toEqual({ startedAt: start, suspendedAt: start, resume: true });
+      if (control === 'auth-failed' || control === 'tunnel-unavailable' || control === 'disconnected') {
+        applyCoreConnectionDispatchState(control);
+      }
+      if (control === 'pause') {
+        await saveConfig({ ...before, ui: { ...before.ui, automationPaused: true } });
+        applyAutomationPause(true);
+      }
+      vi.setSystemTime(start + (control === 'early' ? 59 : 61) * 60_000);
+      coreConnection.state = 'connected';
+      applyCoreConnectionDispatchState('connected');
+      await pair();
+      const inputs = await (await import('../src/main/session/input.js')).listInputs();
+      await maintainLoopLanes();
+      await maintainLoopLanes();
+      expect(getLog().filter(row => row.message.includes('network restored after outage grace'))).toHaveLength(notices + (control === 'due' ? 1 : 0));
+      expect(await (await import('../src/main/session/input.js')).listInputs()).toEqual(inputs);
+      await flushDurable();
+      const after = await readDurable<{ networkOutage?: unknown }>('bridge-commands');
+      if (control === 'due') expect(after?.networkOutage).toBeNull();
+      expect(opened).toEqual([]);
+    } finally {
+      await saveConfig(before);
+      coreConnection.state = 'connected';
+      applyCoreConnectionDispatchState('connected');
+      vi.useRealTimers();
+    }
+  });
+
+  it('retains an unspent network recovery across restart and consumes it once', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      await pair();
+      applyCoreConnectionDispatchState('connected');
+      const start = Date.now();
+      coreConnection.state = 'offline';
+      applyCoreConnectionDispatchState('offline');
+      await flushDurable();
+
+      resetBridgeForTests();
+      await restoreCommands();
+      vi.setSystemTime(start + 61 * 60_000);
+      applyCoreConnectionDispatchState('offline');
+      await maintainLoopLanes();
+      await flushDurable();
+      expect((await readDurable<{ networkOutage?: unknown }>('bridge-commands'))?.networkOutage)
+        .toEqual({ startedAt: start, suspendedAt: start, resume: true });
+
+      const before = getLog().filter(row => row.message.includes('network restored after outage grace')).length;
+      coreConnection.state = 'connected';
+      applyCoreConnectionDispatchState('connected');
+      await pair();
+      await maintainLoopLanes();
+      await flushDurable();
+      expect((await readDurable<{ networkOutage?: unknown }>('bridge-commands'))?.networkOutage).toBeNull();
+
+      resetBridgeForTests();
+      await restoreCommands();
+      applyCoreConnectionDispatchState('connected');
+      await pair();
+      await maintainLoopLanes();
+      expect(getLog().filter(row => row.message.includes('network restored after outage grace'))).toHaveLength(before + 1);
+      expect(opened).toEqual([]);
+    } finally {
+      coreConnection.state = 'connected';
+      applyCoreConnectionDispatchState('connected');
+      vi.useRealTimers();
+    }
   });
 
   it('does not replay a claimed no-tab reopen when its browser receipt is lost', async () => {
@@ -9800,7 +9984,13 @@ describe('activity feed', () => {
     'different request', 'known request half', 'missing digest', 'missing receipt', 'changed digest',
     'changed args', 'foreign receipt copy', 'pending Input', 'unknown Send', 'source changes during receipt check',
     'source changes during final Input check',
-    'wrong checkpoint profile', 'browser omitted requests', 'browser omitted requests and no bound parent'] as const)(
+    'wrong checkpoint profile', 'browser omitted requests', 'browser omitted requests and no bound parent',
+    'completed successor', 'live successor', 'successor source edited', 'successor missing receipt',
+    'successor unknown Send', 'successor changes during receipt check', 'successor parents change during receipt check',
+    'successor work starts during receipt check', 'successor source changes during receipt check',
+    'successor duplicate original final', 'successor missing original end', 'successor stopped original end',
+    'successor missing original start', 'multiple completed successors', 'successor heartbeat during receipt check',
+    'successor stopped original with earlier time', 'successor reopened original'] as const)(
     'recovers only the missing original request half from exact durable owned receipts after a new document (%s)', async variant => {
     const recorder = await import('../src/main/session/recorder.js');
     const store = await import('../src/main/session/store.js');
@@ -9844,11 +10034,61 @@ describe('activity feed', () => {
     await request('POST', '/events', { body: { conversationId, events: [
       { kind: 'assistant_message', messageId: finalId, providerMessageId: finalId, turnId,
         text: 'Both original results returned.', time: Date.now(), state: 'final', final: true },
-      { kind: 'turn_end', turnId, outcome: 'completed', time: Date.now() }
+      ...(variant === 'successor missing original end' ? [] : [
+        { kind: 'turn_end', turnId, outcome: 'completed', time: Date.now() }
+      ])
+    ] } });
+    if (variant === 'successor duplicate original final') await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'assistant_message', messageId: randomUUID(), providerMessageId: randomUUID(), turnId,
+        text: 'Another purported original final.', state: 'final', final: true, time: Date.now() }
+    ] } });
+    if (variant === 'successor stopped original end' || variant === 'successor stopped original with earlier time') await store.appendEvent(sessionId, {
+      kind: 'turn_end', source: 'extension', turnId, outcome: 'stopped',
+      time: Date.now() - (variant === 'successor stopped original with earlier time' ? 60_000 : 0) });
+    if (variant === 'successor reopened original') await store.appendEvent(sessionId, {
+      kind: 'turn_start', source: 'extension', turnId: 'g-reopened-original', time: Date.now() });
+    const successor = variant.includes('successor') ? { userId: randomUUID(), finalId: randomUUID(),
+      turnId: 'g-owned-successor-' + randomUUID(), callId: randomUUID(), requestId: 'wfr_successor_' + randomUUID() } : null;
+    if (variant === 'multiple completed successors') {
+      const userId = randomUUID(), finalId = randomUUID(), turnId = 'g-intermediate-' + randomUUID();
+      await request('POST', '/events', { body: { conversationId, events: [
+        { kind: 'user_message', messageId: userId, text: 'A completed intermediate question.', time: Date.now() },
+        { kind: 'turn_start', turnId, time: Date.now() },
+        { kind: 'assistant_message', messageId: finalId, providerMessageId: finalId, turnId,
+          text: 'The intermediate question is complete.', state: 'final', final: true, time: Date.now() },
+        { kind: 'turn_end', turnId, outcome: 'completed', time: Date.now() }
+      ] } });
+    }
+    if (successor) await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'user_message', messageId: successor.userId, text: 'Continue from the saved checkpoint.', time: Date.now() },
+      { kind: 'turn_start', turnId: successor.turnId, time: Date.now() },
+      ...(variant === 'live successor' ? [] : [
+        { kind: 'assistant_message', messageId: successor.finalId, providerMessageId: successor.finalId,
+          turnId: successor.turnId, text: 'A later completed source checkpoint.', state: 'final', final: true, time: Date.now() },
+        { kind: 'turn_end', turnId: successor.turnId, outcome: 'completed', time: Date.now() }
+      ])
     ] } });
     const journal = path.join(store.sessionsRoot(), sessionId, 'events.jsonl');
+    if (variant === 'successor missing original end' || variant === 'successor missing original start') {
+      // Final ingestion can repair an omitted end. Remove that durable witness
+      // too so this case really exercises absence, not a completed source.
+      await store.readEvents(sessionId);
+      const originalJournal = await fs.readFile(journal, 'utf8');
+      await fs.writeFile(journal, originalJournal.split('\n').filter(line => {
+        if (!line.trim()) return true;
+        const event = JSON.parse(line);
+        return event.kind !== (variant === 'successor missing original end' ? 'turn_end' : 'turn_start') || event.turnId !== turnId;
+      }).join('\n'));
+      onTestFinished(() => fs.writeFile(journal, originalJournal));
+      expect((await store.readEvents(sessionId, { kinds: ['turn_end', 'turn_start'] })).some(row =>
+        row.kind === (variant === 'successor missing original end' ? 'turn_end' : 'turn_start') &&
+        'turnId' in row && row.turnId === turnId)).toBe(false);
+    }
     const bytes = await fs.readFile(journal);
-    const final = { ...pending, openCalls: 1, openRequestIds: [requestId],
+    const final = successor ? { ...pending, questions: 2, calls: 1, openCalls: 1,
+      sourceUserMessageId: successor.userId, coreCallMessageIds: [successor.callId],
+      openRequestIds: [successor.requestId], allCoreRequestIds: [successor.requestId],
+      settledFinalMessageId: successor.finalId } : { ...pending, openCalls: 1, openRequestIds: [requestId],
       allCoreRequestIds: [requestId, requestId], settledFinalMessageId: finalId };
     const editSource = async () => {
       const user = (await store.readEvents(sessionId, { kinds: ['user_message'] }))[0]!;
@@ -9857,18 +10097,18 @@ describe('activity feed', () => {
         message: { text: 'A different original instruction', chars: 32, truncated: false } });
     };
     if (variant.startsWith('browser omitted requests')) delete (final as { allCoreRequestIds?: string[] }).allCoreRequestIds;
-    if (variant === 'source edited') await editSource();
+    if (variant === 'source edited' || variant === 'successor source edited') await editSource();
     if (variant === 'foreign current question') final.sourceUserMessageId = randomUUID();
     if (variant === 'reordered parents') final.coreCallMessageIds = [...messageIds].reverse();
     if (variant === 'different parent') final.coreCallMessageIds = [randomUUID(), messageIds[1]!];
     if (variant === 'different request') final.allCoreRequestIds = ['wfr_foreign_request', requestId];
-    if (['missing receipt', 'changed digest', 'changed args', 'browser omitted requests and no bound parent'].includes(variant)) {
+    if (['missing receipt', 'successor missing receipt', 'changed digest', 'changed args', 'browser omitted requests and no bound parent'].includes(variant)) {
       const files = await fs.readdir(path.join(store.sessionsRoot(), sessionId, 'messages'));
       for (const name of files) {
         const file = path.join(store.sessionsRoot(), sessionId, 'messages', name);
         const raw = await fs.readFile(file, 'utf8'), row = JSON.parse(raw);
         if (row.kind !== 'tool_call' || row.call.nativeCallMessageId !== messageIds[0]) continue;
-        if (variant === 'missing receipt') delete row.call.resultReceiptId;
+        if (variant === 'missing receipt' || variant === 'successor missing receipt') delete row.call.resultReceiptId;
         if (variant === 'browser omitted requests and no bound parent') delete row.call.nativeCallMessageId;
         if (variant === 'changed digest') row.call.invocationSha256 = 'f'.repeat(64);
         if (variant === 'changed args') row.call.args = { text: 'Changed original args', chars: 21, truncated: false };
@@ -9882,11 +10122,11 @@ describe('activity feed', () => {
       await store.appendEvent(foreign.id, { ...originalRow, time: Date.now() });
     }
     const input = await import('../src/main/session/input.js');
-    if (variant === 'unknown Send' || variant === 'pending Input') {
+    if (variant === 'unknown Send' || variant === 'pending Input' || variant === 'successor unknown Send') {
       const pending = await input.enqueueInput({ id: randomUUID(), sessionId, dueAt: Date.now(),
         model: 'gpt-6-thinking', reasoningEffort: 'high',
         text: 'Existing pending input must remain retained', automation: 'off', mode: 'auto' });
-      if (variant === 'unknown Send') {
+      if (variant === 'unknown Send' || variant === 'successor unknown Send') {
         const list = input.listInputs;
         const authorizedAt = Date.now() - 1000;
         const spy = vi.spyOn(input, 'listInputs').mockImplementation(async () => (await list()).map(row =>
@@ -9895,12 +10135,45 @@ describe('activity feed', () => {
         onTestFinished(() => spy.mockRestore());
       }
     }
-    if (variant === 'source changes during receipt check') {
+    if (variant === 'source changes during receipt check' || variant === 'successor source changes during receipt check') {
       const unique = recorder.receiptDurableOwnersUnique;
       let changed = false;
       const spy = vi.spyOn(recorder, 'receiptDurableOwnersUnique').mockImplementation(async (...values) => {
         const accepted = await unique(...values);
         if (!changed) { changed = true; await editSource(); }
+        return accepted;
+      });
+      onTestFinished(() => spy.mockRestore());
+    }
+    if (variant === 'successor work starts during receipt check') {
+      const { unifiedExecManager } = await import('../src/main/codex/manager.js');
+      const unique = recorder.receiptDurableOwnersUnique;
+      let working = false;
+      const processes = vi.spyOn(unifiedExecManager, 'listProcesses').mockImplementation(() => working
+        ? [{ processId: 42, pid: 4242, command: 'work admitted during receipt verification', cwd: dir, tty: true }] : []);
+      const spy = vi.spyOn(recorder, 'receiptDurableOwnersUnique').mockImplementation(async (...values) => {
+        const accepted = await unique(...values);
+        working = true;
+        return accepted;
+      });
+      onTestFinished(() => { spy.mockRestore(); processes.mockRestore(); });
+    }
+    if (variant === 'successor changes during receipt check' || variant === 'successor parents change during receipt check' ||
+        variant === 'successor heartbeat during receipt check') {
+      const unique = recorder.receiptDurableOwnersUnique;
+      let changed = false;
+      const spy = vi.spyOn(recorder, 'receiptDurableOwnersUnique').mockImplementation(async (...values) => {
+        const accepted = await unique(...values);
+        if (!changed) {
+          changed = true;
+          const evidence = await import('../src/main/core-browser-evidence.js');
+          expect(evidence.noteCoreBrowserEvidence({ ...native, conversationId, shell: 'alternate', shellDiscovery: 'compatible',
+            documentId: variant === 'successor changes during receipt check' ? 'owned-request-other-document' : 'owned-request-new-document',
+            navigationEpoch: variant === 'successor changes during receipt check' ? 6 : 5, observedAt: Date.now(), turnId: null,
+            ordinaryFinal: { ...final, ...(variant === 'successor changes during receipt check'
+              ? { sourceUserMessageId: randomUUID() } : variant === 'successor parents change during receipt check'
+                ? { coreCallMessageIds: [randomUUID()] } : {}) } })).toBe(true);
+        }
         return accepted;
       });
       onTestFinished(() => spy.mockRestore());
@@ -9939,7 +10212,8 @@ describe('activity feed', () => {
       expect(sameOwner).toBe(true);
       response = { status: 200 };
     } else response = await report(final, true);
-    if (variant !== 'exact' && variant !== 'concurrent controls' && variant !== 'browser omitted requests') {
+    const historicalSuccess = ['completed successor', 'multiple completed successors', 'successor heartbeat during receipt check'].includes(variant);
+    if (variant !== 'exact' && variant !== 'concurrent controls' && variant !== 'browser omitted requests' && !historicalSuccess) {
       expect(coreBrowserEvidence(conversationId)!.pendingCompletion).toEqual(original);
       expect(await input.listInputs()).toEqual(priorInputs);
       expect(await fs.readFile(journal)).toEqual(bytes);
@@ -9953,6 +10227,15 @@ describe('activity feed', () => {
     expect((await store.readSessionNativeCompletionFenceCheckpoint(sessionId, conversationId, profile))?.fence)
       .toEqual({ version: 1, profileId: profile, sessionId, conversationId, ...original,
         allCoreRequestIds: [requestId, requestId] });
+    if (historicalSuccess) {
+      // Only A's missing identity is enriched. B's different request remains B's;
+      // no historical terminal, continuation or Send is inferred from this repair.
+      expect(coreBrowserEvidence(conversationId)!.ordinaryFinal?.sourceUserMessageId).toBe(successor!.userId);
+      expect(coreBrowserEvidence(conversationId)!.ordinaryFinal?.allCoreRequestIds).toEqual([successor!.requestId]);
+      expect(await input.listInputs()).toEqual(priorInputs);
+      expect(await fs.readFile(journal)).toEqual(bytes);
+      return;
+    }
     if (variant === 'browser omitted requests') {
       // Identity repair alone cannot declare terminal completion from an omitted page half.
       await report({ ...final, reason: 'associated', openCalls: 0, openRequestIds: [] }, true);
@@ -15301,6 +15584,7 @@ describe('delivering a bootstrap', () => {
       expect(continuationByToken(token)?.destinationSend).toMatchObject({ state: 'dispatched-unresolved' });
 
       const opensBeforeTimeout = opened.length;
+      expect(await cancelResumeNow(sessionId, 'automatic opening exhausted', token, true)).toBe(false);
       await vi.advanceTimersByTimeAsync(REDEEMED_COMMAND_DELIVERY_MS + 1_000);
       await flushDurable();
       expect(pendingCommands().filter(row => row.what === `resume:${sessionId}`)).toEqual([
@@ -21907,7 +22191,7 @@ ${SAMPLE_BRIEF}`)).not.toBeNull();
     }
   });
 
-  it('retries an unredeemed automatic opening under the same id and ends after two safe attempts', async () => {
+  it('gives an unredeemed automatic handoff one delayed same-id retry and then stops', async () => {
     vi.useFakeTimers();
     try {
       await pair();
@@ -21934,9 +22218,34 @@ ${SAMPLE_BRIEF}`)).not.toBeNull();
       await vi.waitFor(() => expect(opened).toHaveLength(2));
       expect(opened).toEqual([commandUrl(command.id), commandUrl(command.id)]);
       await vi.advanceTimersByTimeAsync(COMMAND_DEADLINE_MS + 1);
-      // Two same-marker attempts cover a transient Chrome miss without creating duplicate
-      // handoffs. Exhaustion then keeps the original chat and ends Opening instead of silently
-      // starting an immortal series of fresh cycles.
+      await vi.waitFor(async () => {
+        const saved = await readDurable<any>('bridge-commands');
+        expect(saved?.commands).toEqual([
+          expect.objectContaining({ id: command.id, phase: 'queued', owner: null, openAttempts: 2 })
+        ]);
+      });
+      const saved = await readDurable<any>('bridge-commands');
+      const due = saved.commands[0].availableAt;
+      expect(due - saved.commands[0].admissionDeferredAt).toBe(60 * 60_000);
+      expect(queueResume(continuation.sessionId, continuation.token)?.id).toBe(command.id);
+      await flushDurable();
+      const snapshot = await readDurable<ContinuationSnapshot>(CONTINUATIONS_STATE);
+      resetContinuationsForTests();
+      resetBridgeForTests();
+      await restoreContinuations(snapshot!);
+      await restoreCommands();
+      setBrowserOpener(async (url) => { opened.push(url); });
+      expect(resumeJobFor(continuation.sessionId)).toMatchObject({
+        stage: 'queued',
+        waitReason: 'The same saved handoff is queued for a bounded browser retry.'
+      });
+      // The test seam restores only the ledger. Normal Bridge startup also runs delivery.
+      expect(queueResume(continuation.sessionId, continuation.token)?.id).toBe(command.id);
+      await vi.advanceTimersByTimeAsync(due - Date.now() - 1);
+      expect(opened).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.waitFor(() => expect(opened).toHaveLength(3));
+      await vi.advanceTimersByTimeAsync(COMMAND_DEADLINE_MS + 1);
       await vi.waitFor(() => expect(pendingCommands().some(entry => entry.id === command.id)).toBe(false));
       await flushDurable();
       expect((await readDurable<any>('bridge-commands')).commands).toEqual([]);
@@ -21945,16 +22254,16 @@ ${SAMPLE_BRIEF}`)).not.toBeNull();
         stage: 'failed',
         busy: false,
         destinationSend: { state: 'not-attempted', conversationId: null, messageId: null },
-        error: expect.stringContaining('replacement opening used its 2 safe attempts and the original chat was kept unchanged')
+        error: expect.stringContaining('replacement opening used its 3 safe attempts and the original chat was kept unchanged')
       });
       expect((await getSession(continuation.sessionId))?.conversationId).toBe('c0c0c0c0-1111-4222-8333-000000000c16');
-      expect(opened).toEqual([commandUrl(command.id), commandUrl(command.id)]);
+      expect(opened).toEqual(Array(3).fill(commandUrl(command.id)));
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('ends an automatic handoff after two browser-opener failures without resetting its attempt budget', async () => {
+  it('ends an automatic handoff after the delayed browser-opener failure without resetting its budget', async () => {
     vi.useFakeTimers();
     try {
       await pair();
@@ -21975,11 +22284,17 @@ ${SAMPLE_BRIEF}`)).not.toBeNull();
       ]));
       await vi.advanceTimersByTimeAsync(5_001);
       await vi.waitFor(() => expect(attempts).toEqual([commandUrl(command.id), commandUrl(command.id)]));
+      await vi.waitFor(async () => {
+        const saved = await readDurable<any>('bridge-commands');
+        expect(saved?.commands[0]).toMatchObject({ phase: 'queued', openAttempts: 2 });
+      });
+      const saved = await readDurable<any>('bridge-commands');
+      await vi.advanceTimersByTimeAsync(saved.commands[0].availableAt - Date.now());
       await vi.waitFor(() => expect(pendingCommands()).toEqual([]));
       expect(continuationByToken(continuation.token)?.state).toBe('aborted');
 
       await vi.advanceTimersByTimeAsync(60_000);
-      expect(attempts).toHaveLength(2);
+      expect(attempts).toEqual(Array(3).fill(commandUrl(command.id)));
       expect(opened).toEqual([]);
     } finally {
       vi.useRealTimers();
@@ -25073,6 +25388,112 @@ describe('unattributed activity recovery', () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it('auto-resumes a reliability restriction at the provider-stated minute and stays bounded across episodes', async () => {
+    vi.useFakeTimers();
+    const previous = getConfig();
+    const restriction = 'We’re doing a quick check to keep ChatGPT reliable. Try again in 1 minute.';
+    try {
+      await pair();
+      await events(PRIME, [openTurn('reliable-turn')]);
+      const restrict = () => events(PRIME, [{ kind: 'chat_error', time: Date.now(), blocking: true,
+        recoverable: false, text: restriction }]);
+      await restrict();
+      expect(getConfig().ui.automationPaused).toBe(true);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(getConfig().ui.automationPaused).toBe(true);
+      expect(vi.getTimerCount()).toBeGreaterThan(0); // the bounded resume timer is armed
+      // 60s window + the bounded schedule buffer.
+      await vi.advanceTimersByTimeAsync(31_000);
+      await vi.waitFor(() => expect(getConfig().ui.automationPaused).toBe(false));
+      await restrict();
+      expect(getConfig().ui.automationPaused).toBe(true);
+      await vi.advanceTimersByTimeAsync(91_000);
+      await vi.waitFor(() => expect(getConfig().ui.automationPaused).toBe(false));
+      await restrict();
+      expect(getConfig().ui.automationPaused).toBe(true);
+      await vi.advanceTimersByTimeAsync(91_000);
+      await vi.waitFor(() => expect(getConfig().ui.automationPaused).toBe(false));
+      // Fourth restriction in this episode: bounded attempts exhausted, manual Resume required.
+      await restrict();
+      expect(getConfig().ui.automationPaused).toBe(true);
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(getConfig().ui.automationPaused).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      await saveConfig(previous);
+      applyAutomationPause(previous.ui.automationPaused === true);
+    }
+  });
+
+  it('keeps a later manual pause when restriction resume waits for the settings writer', async () => {
+    vi.useFakeTimers();
+    const previous = getConfig();
+    const { updateConfig } = await import('../src/main/config.js');
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    let writer: Promise<Config> | undefined;
+    try {
+      await pair();
+      await events(PRIME, [openTurn('restriction-pause-race')]);
+      await events(PRIME, [{ kind: 'chat_error', time: Date.now(), blocking: true, recoverable: false,
+        text: 'We’re doing a quick check to keep ChatGPT reliable. Try again in 1 minute.' }]);
+      writer = updateConfig(async config => { await blocked; return config; });
+      await vi.advanceTimersByTimeAsync(91_000);
+      applyAutomationPause(true);
+      release();
+      await writer;
+      await updateConfig(config => config);
+      expect(getConfig().ui.automationPaused).toBe(true);
+    } finally {
+      release();
+      await writer;
+      vi.useRealTimers();
+      await saveConfig(previous);
+      applyAutomationPause(previous.ui.automationPaused === true);
+    }
+  });
+
+  it('keeps an hourly restriction paused for the full hour', async () => {
+    vi.useFakeTimers();
+    const previous = getConfig();
+    try {
+      await pair();
+      await events(PRIME, [openTurn('hourly-restriction-window')]);
+      await events(PRIME, [{ kind: 'chat_error', time: Date.now(), blocking: true, recoverable: false,
+        text: "You've reached our limit of messages per hour. Please try again later." }]);
+      await vi.advanceTimersByTimeAsync(31 * 60_000);
+      const { updateConfig } = await import('../src/main/config.js');
+      await updateConfig(config => config);
+      expect(getConfig().ui.automationPaused).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      await saveConfig(previous);
+      applyAutomationPause(previous.ui.automationPaused === true);
+    }
+  });
+
+  it('a manual Resume cancels a pending restriction auto-resume', async () => {
+    vi.useFakeTimers();
+    const previous = getConfig();
+    try {
+      await pair();
+      await events(PRIME, [openTurn('reliable-manual-turn')]);
+      await events(PRIME, [{ kind: 'chat_error', time: Date.now(), blocking: true, recoverable: false,
+        text: 'We’re doing a quick check to keep ChatGPT reliable. Try again in 27 minutes.' }]);
+      expect(getConfig().ui.automationPaused).toBe(true);
+      // Mirror the manual Resume owner: durable flag first, then the queue release.
+      await saveConfig({ ...getConfig(), ui: { ...getConfig().ui, automationPaused: false } });
+      applyAutomationPause(false);
+      expect(getConfig().ui.automationPaused).toBe(false);
+      await vi.advanceTimersByTimeAsync(30 * 60_000);
+      expect(getConfig().ui.automationPaused).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      await saveConfig(previous);
+      applyAutomationPause(previous.ui.automationPaused === true);
+    }
+  });
+
   it.each([
     'Our systems have detected unusual activity coming from your system. Please try again later.',
     "You've reached our limit of messages per hour. Please try again later.",
@@ -25395,6 +25816,26 @@ describe('unattributed activity recovery', () => {
     await attributed(PRIME, false, Date.now() + 1);
 
     expect(await maintenance()).toBeNull();
+  });
+
+  it('does not queue a watchdog reload when exact Core work already kept that turn live', async () => {
+    await pair();
+    await events(PRIME, [
+      { kind: 'user_message', time: Date.now(), messageId: 'watchdog-core-first-question', text: 'Keep working through the local checks.' },
+      openTurn('watchdog-core-first-turn')
+    ]);
+    await attributed(PRIME, false, Date.now());
+    await events(PRIME, [{
+      kind: 'chat_error', time: Date.now(), turnId: 'watchdog-core-first-turn',
+      reason: 'watchdog_stalled', text: 'No visible progress for five minutes.', recoverable: true
+    }]);
+    expect(await maintenance()).toBeNull();
+
+    await events(PRIME, [{
+      kind: 'chat_error', time: Date.now(), turnId: 'watchdog-core-first-turn',
+      text: 'A network error occurred.', recoverable: true
+    }]);
+    expect(await maintenance()).toMatchObject({ conversationId: PRIME, reason: 'assistant-error' });
   });
 
   it('keeps native transport recovery when it supersedes a watchdog stall on the same turn', async () => {
@@ -26669,6 +27110,50 @@ describe('unattributed activity recovery', () => {
       await events(PRIME, [{ kind: 'chat_error', time: Date.now(), turnId,
         text: 'Message delivery timed out. Please try again. Retry', recoverable: true, retryAvailable: true }]);
       expect(await maintenance()).toBeNull();
+    }
+  );
+
+  it.each(['interruption_not_visible', 'interrupted_stop_unconfirmed'] as const)(
+    'only preserves a late native Retry after a proved pre-Stop refusal (%s)', async failure => {
+      await pair();
+      await setGoalSwitchNow(PRIME, 'loop', true, true);
+      const questionId = 'stale-stop-card-question';
+      const turnId = 'stale-stop-card-answer';
+      const interrupt = { kind: 'chat_error', time: Date.now(), turnId,
+        text: 'Connection interrupted. Waiting for the complete answer', recoverable: true };
+      await events(PRIME, [
+        { kind: 'user_message', time: Date.now(), messageId: questionId, text: 'Continue the saved work.' },
+        openTurn(turnId),
+        interrupt
+      ]);
+      const stop = await maintenance();
+      expect(stop).toMatchObject({ conversationId: PRIME, action: 'continue' });
+      const claim = (token: string) => request('POST', '/repairs/claim', { body: { token } });
+      expect((await claim(stop!.token)).body.allowed).toBe(true);
+      await request('GET', `/status?repairFailed=${stop!.token}&repairAction=stopped&repairFailure=${failure}`);
+      await events(PRIME, [interrupt]);
+      expect((await maintenance())?.action).not.toBe('continue');
+
+      const timeout = { ...interrupt, time: Date.now() + 1, retryAvailable: true,
+        text: 'Message delivery timed out. Please try again. Retry' };
+      await events(PRIME, [timeout]);
+      const retry = await maintenance();
+      if (failure === 'interrupted_stop_unconfirmed') expect(retry).toBeNull();
+      else {
+        expect(retry).toMatchObject({ conversationId: PRIME, reason: 'assistant-error', action: 'retry' });
+        expect((await claim(retry!.token)).body.allowed).toBe(true);
+        await request('GET', '/status?repairFailed=' + retry!.token + '&repairAction=retried&repairFailure=retry_unavailable');
+        const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 5_001);
+        try {
+          const fallback = await maintenance();
+          expect(fallback).toMatchObject({ conversationId: PRIME, action: 'reload' });
+          expect((await claim(fallback!.token)).body.allowed).toBe(true);
+          await request('GET', '/status?repairFailed=' + fallback!.token + '&repairAction=reloaded&repairFailure=page_not_idle');
+          expect(await maintenance()).toBeNull();
+        } finally { clock.mockRestore(); }
+      }
+      const input = await import('../src/main/session/input.js');
+      expect((await input.listInputs()).filter(row => row.recovery?.questionId === questionId)).toHaveLength(0);
     }
   );
 
@@ -31692,6 +32177,50 @@ describe('the goal loop over the bridge', () => {
     input.resetInputForTests();
     await writeDurableNow('diagnostic-incidents', null);
     await writeDurableNow('session-input', []);
+  });
+
+  it('retains an operator-cancelled diagnostic wake without publishing a replacement', async () => {
+    await pair();
+    const input = await import('../src/main/session/input.js');
+    const diagnostics = await import('../src/main/diagnostics.js');
+    diagnostics.resetDiagnosticIncidentOwnerForTests();
+    input.resetInputForTests();
+    await writeDurableNow('diagnostic-incidents', null);
+    await writeDurableNow('session-input', []);
+    try {
+      const conversationId = 'face0013-0000-4000-8000-000000000013';
+      const session = await createSession({ title: 'diagnostic cancellation source', conversationId });
+      await diagnostics.noteExhaustedDiagnosticIncidentNow({
+        kind: 'loop', sourceSessionId: session.id, sourceConversationId: conversationId,
+        recoveryEpisodeId: 'operator-cancelled-wake', exhaustedAt: Date.now(),
+        appOwned: true, recoveryExhausted: true, inputCustody: 'none', origin: 'runtime', userStopped: false
+      });
+      await installDiagnosticProviderForTest();
+      let wakeId: string;
+      await vi.waitFor(async () => {
+        const row = (await input.listInputs()).find(entry => entry.nickname === 'CoS Diagnostics' && entry.state === 'queued');
+        expect(row).toBeTruthy();
+        wakeId = row!.id;
+      });
+      setDiagnosticIncidentProvider(null);
+      expect(await input.cancelQueuedInputByOperator(wakeId!)).toBe(true);
+      await installDiagnosticProviderForTest();
+      await vi.waitFor(async () => {
+        expect((await diagnostics.diagnosticIncidentSnapshot()).incidents).toEqual([
+          expect.objectContaining({ status: 'suppressed', disposition: 'user-action', wakeInputId: wakeId! })
+        ]);
+      });
+      expect(await diagnostics.claimDiagnosticIncidentWakeNow()).toBeNull();
+      expect(await input.listInputs()).toEqual([
+        expect.objectContaining({ id: wakeId!, state: 'cancelled', operatorCancelledAt: expect.any(Number) })
+      ]);
+    } finally {
+      setDiagnosticIncidentProvider(null);
+      diagnostics.resetDiagnosticIncidentOwnerForTests();
+      input.resetInputForTests();
+      await writeDurableNow('diagnostic-incidents', null);
+      await writeDurableNow('session-input', []);
+    }
   });
 
   it('retires a suppressed diagnostic wake before authorization and preserves ambiguity after authorization', async () => {

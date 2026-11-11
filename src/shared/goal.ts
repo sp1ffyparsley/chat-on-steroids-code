@@ -13,6 +13,8 @@ export type GoalWait = {
   detail?: string;
   /** Expiry of the existing fresh native observation, for presentation only. */
   evidenceFreshUntil?: number;
+  /** First observation of the retained completion debt. Independent of browser freshness. */
+  evidenceHeldSince?: number;
   /** Existing owner/action expected to move this wait; presentation only. */
   nextAction?: string;
 };

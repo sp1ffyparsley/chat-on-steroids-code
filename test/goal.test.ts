@@ -847,7 +847,7 @@ describe('finite Goal acceptance reference', () => {
       const newline = frozen.indexOf('\n');
       const serialized = frozen.slice(0, newline) + frozen.slice(newline)
         .replace(/([\\\u0060*_{}\[\]()#+\-.!<>&:|=~])/g, '\\$1').replace(/\n/g, '\\\n');
-      const provider = (withCore ? '[$luna-forge-x7-wise-lark-f968852d90b4-gamma-windows-core](app://asdk_app_6acdfd6eade881918f99e0fd00dbd3e6)' : '') + serialized;
+      const provider = (withCore ? '[$luna-forge-x7-wise-lark-0123456789ab-gamma-windows-core](app://asdk_app_eeeeeeee111122223333444444444444)' : '') + serialized;
       const nativeMessageId = 'serialized-provider-' + withCore;
       const entry: InputEntry = { id: randomUUID(), sessionId: source.sessionId, conversationId: source.conversationId,
         text: correction, deliveryText: frozen, state: 'sent', owner: 'exact-native-document',
@@ -3938,7 +3938,7 @@ it.each([
     const lateAmendment = changed === 'objective-await' ? vi.spyOn(store, 'readSessionPlan').mockImplementation(async id => {
       const plan = await readPlan(id);
       if (id === session.id) goal.setGoalObjective(conversationId,
-        saved + '\nCanonical workspace: C:/Users/Tavito/Documents/ChatGPT/Chat On Steroids Custom.');
+        saved + '\nCanonical workspace: C:/Users/Example/Documents/ChatGPT/Chat On Steroids Custom.');
       return plan;
     }) : null;
     try {
@@ -8760,11 +8760,17 @@ describe('the loop that never stops', () => {
     expect(claimed!.text).not.toContain('[… cut …]');
   });
 
-  it('appends one deterministic scope reminder from the saved objective and current plan', async () => {
+  it.each(['plain', 'wrapped', 'quoted', 'ambiguous'])('retains the exact project in a deterministic scope reminder (%s)', async kind => {
     await loopMode();
     const conversationId = 'c-loop-reminder';
     const sessionId = await seed(conversationId);
+    const generic = 'User instruction: implement the fixes, improve the existing code, and test the results.';
+    const project = 'PROJECT — Parser tools';
+    const prefix = kind === 'wrapped' ? [generic, '', project, '']
+      : kind === 'quoted' ? ['```text', 'PROJECT — Foreign audio project', '```', '', '> PROJECT — Another unrelated project', '']
+      : kind === 'ambiguous' ? [generic, '', project, '', 'PROJECT — Another workflow', ''] : [];
     const objective = [
+      ...prefix,
       'Ship the whole parser and preserve CLI compatibility.',
       '',
       'Done when: parser behavior, CLI compatibility, save/reopen workflow and focused regressions are verified.'
@@ -8785,7 +8791,11 @@ describe('the loop that never stops', () => {
 
     expect(view.stage).toBe('ready');
     expect(operatorPromptBody(view.reply).startsWith(goal.humanReply('finish the persistence proof and rerun the focused checks'))).toBe(true);
-    expect(view.reply).toContain('Reminder: Ship the whole parser and preserve CLI compatibility.');
+    const expected = kind === 'wrapped' ? 'Reminder: PROJECT — Parser tools Ship the whole parser'
+      : kind === 'ambiguous' ? `Reminder: ${generic}` : 'Reminder: Ship the whole parser and preserve CLI compatibility.';
+    expect(view.reply).toContain(expected);
+    expect(view.reply).not.toContain('Reminder: PROJECT — Foreign audio project');
+    expect(view.reply).not.toContain('Reminder: PROJECT — Another workflow');
     expect(view.reply).toContain('Current milestone: Prove save/reopen persistence');
     expect(view.reply).toContain('Done when: parser behavior, CLI compatibility, save/reopen workflow and focused regressions are verified.');
     expect(view.reply).toContain('Stay within scope; preserve completed work.');

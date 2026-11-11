@@ -2244,7 +2244,11 @@ describe('alternate shell turn/message provenance', () => {
       } finally { page.dom.window.close(); }
     });
 
-  it.each(['accepted successor', 'accepted streaming successor', 'foreign successor branch', 'unclosed historical turn',
+  it.each(['accepted successor', 'accepted streaming successor', 'accepted completed chain', 'accepted streaming chain', 'accepted streaming long chain',
+    'foreign intermediate conversation', 'unclosed intermediate turn', 'intermediate final mismatch',
+    'duplicate intermediate user', 'intermediate parent accessor', 'conflicting intermediate final', 'intermediate selected ids accessor',
+    'intermediate selected ids duplicate', 'skipped intermediate final',
+    'foreign successor branch', 'unclosed historical turn',
     'foreign successor conversation', 'missing successor user', 'duplicate successor user', 'unselected successor',
     'off-branch successor', 'cyclic successor', 'nonterminal historical final', 'duplicate historical final',
     'missing historical receipt', 'foreign historical request', 'nonadjacent historical turn',
@@ -2308,6 +2312,60 @@ describe('alternate shell turn/message provenance', () => {
           [RESULT]: { ...mapping[RESULT], message: { ...mapping[RESULT].message,
             metadata: { ...mapping[RESULT].message.metadata, request_id: 'conflicting-cached-request' } } }
         }, {});
+        if (['accepted completed chain', 'accepted streaming chain', 'accepted streaming long chain', 'foreign intermediate conversation',
+            'unclosed intermediate turn', 'intermediate final mismatch', 'duplicate intermediate user',
+            'intermediate parent accessor', 'conflicting intermediate final', 'intermediate selected ids accessor',
+    'intermediate selected ids duplicate', 'skipped intermediate final'].includes(variant)) {
+          const middleFinal = 'closed-intermediate-final', newestUser = 'newest-chain-user';
+          const finalMessage = structuredClone(mapping[ASSISTANT].message);
+          finalMessage.id = middleFinal;
+          finalMessage.content = { content_type: 'text', parts: ['completed intermediate answer'] };
+          finalMessage.metadata.parent_id = nextUser;
+          mapping[middleFinal] = { id: middleFinal, parent: nextUser, message: finalMessage };
+          latest.turn.status = 'complete';
+          latest.turn.messageIds.push(middleFinal);
+          latest.turn.items.push({ type: 'assistant-message', messageId: middleFinal,
+            phase: 'final_answer', content: 'completed intermediate answer', completed: true });
+          mapping[newestUser] = { id: newestUser, parent: middleFinal,
+            message: { id: newestUser, author: { role: 'user' }, content: { parts: ['next chain request'] } } };
+          snapshot.renderedTurns.push({ id: 'newest-chain-turn', conversationId: THREAD,
+            turn: { status: 'in_progress', messageIds: [newestUser],
+              items: [{ type: 'user-message', messageId: newestUser, serverMessageId: newestUser,
+                message: 'next chain request' }] } });
+          snapshot.renderedConversation.current_node = newestUser;
+          if (variant === 'accepted completed chain' || variant === 'accepted streaming long chain') {
+            const newestFinal = 'newest-chain-final', newest = snapshot.renderedTurns.at(-1);
+            const message = structuredClone(finalMessage); message.id = newestFinal;
+            message.metadata.parent_id = newestUser;
+            mapping[newestFinal] = { id: newestFinal, parent: newestUser, message };
+            newest.turn.status = 'complete'; newest.turn.messageIds.push(newestFinal);
+            newest.turn.items.push({ type: 'assistant-message', messageId: newestFinal,
+              phase: 'final_answer', content: 'completed intermediate answer', completed: true });
+            snapshot.renderedConversation.current_node = newestFinal;
+          }
+          if (variant === 'accepted streaming long chain') {
+            const user = 'third-chain-user';
+            mapping[user] = { id: user, parent: 'newest-chain-final',
+              message: { id: user, author: { role: 'user' }, content: { parts: ['third successor'] } } };
+            snapshot.renderedTurns.push({ id: 'third-chain-turn', conversationId: THREAD,
+              turn: { status: 'in_progress', messageIds: [user],
+                items: [{ type: 'user-message', messageId: user, serverMessageId: user, message: 'third successor' }] } });
+            snapshot.renderedConversation.current_node = user;
+          }
+          if (variant === 'foreign intermediate conversation') latest.conversationId = 'foreign-conversation';
+          if (variant === 'unclosed intermediate turn') latest.turn.status = 'in_progress';
+          if (variant === 'intermediate final mismatch') latest.turn.items.at(-1).content = 'different intermediate final';
+          if (variant === 'duplicate intermediate user') snapshot.renderedTurns.at(-1).turn.items[0].messageId = nextUser;
+          if (variant === 'conflicting intermediate final') mapping[middleFinal].message.end_turn = false;
+          if (variant === 'intermediate selected ids accessor') Object.defineProperty(snapshot.renderedTurns.at(-1).turn.messageIds, '0', {
+            get() { accessorReads++; throw new Error('PRIVATE_INTERMEDIATE_IDS'); }
+          });
+          if (variant === 'intermediate selected ids duplicate') snapshot.renderedTurns.at(-1).turn.messageIds.push(newestUser);
+          if (variant === 'skipped intermediate final') mapping[newestUser].parent = nextUser;
+          if (variant === 'intermediate parent accessor') Object.defineProperty(mapping[newestUser], 'parent', {
+            get() { accessorReads++; throw new Error('PRIVATE_INTERMEDIATE_PARENT'); }
+          });
+        }
         const frame = await shellRescan(page, `historical-result-${variant}`);
         if (variant === 'duplicate historical final') {
           // The incumbent typed-shell validator refuses this ambiguity before path recovery.
@@ -2418,12 +2476,12 @@ describe('alternate shell turn/message provenance', () => {
       } finally { page.dom.window.close(); }
     });
 
-  it.each(['direct Core', 'direct Core wrong parent', 'direct Core missing receipt', 'direct Core foreign resource', 'exact canonical group', 'exact final reference', 'foreign final pointer', 'foreign final reference',
+  it.each(['direct Core', 'direct Core wrong parent', 'direct Core missing receipt', 'direct Core missing receipt wrong parent', 'direct Core missing receipt foreign resource', 'direct Core foreign resource', 'exact canonical group', 'exact final reference', 'foreign final pointer', 'foreign final reference',
     'multiple final references', 'getter final reference', 'unfinished native final reference',
     'duplicate final pointer source', 'missing final reference preview',
     'duplicate final anchor', 'off-path final anchor', 'nonterminal final anchor', 'different final body anchor',
     'orphan execution result', 'execution result request mismatch', 'execution child result missing', 'execution child result extra',
-    'pending canonical group', 'pending header mismatch', 'missing system header', 'visible system header', 'foreign header scope',
+    'pending canonical group', 'pending direct Core', 'pending direct Core foreign header', 'pending header mismatch', 'missing system header', 'visible system header', 'foreign header scope',
     'missing header working', 'missing header exchange', 'user header scope mismatch', 'header recipient',
     'header unfinished', 'header message type', 'header rebase flag', 'header rebase accessor',
     'unfinished execution', 'unfinished execution result', 'foreign retained parent',
@@ -2433,6 +2491,7 @@ describe('alternate shell turn/message provenance', () => {
     'retained commentary unfinished', 'retained commentary terminal', 'retained commentary tool',
     'retained commentary accessor', 'retained commentary cached conflict', 'retained commentary missing receipt',
     'core receipt missing', 'core receipt missing referenced widget', 'core resource foreign', 'core request foreign', 'core request and receipt foreign',
+    'missing terminal exact user', 'missing terminal unscoped user', 'missing terminal foreign branch', 'missing terminal hidden final',
     'missing receipt late namespace', 'missing receipt late parent', 'missing receipt duplicate result',
     'missing receipt foreign resource', 'missing receipt late cache',
     'missing retained header parent', 'missing retained execution parent', 'off-path retained parent', 'later retained parent', 'cached conflict',
@@ -2445,7 +2504,8 @@ describe('alternate shell turn/message provenance', () => {
       const page = await shellHarness({ withCall: true, withExec: true, nativeCallReceipt: true,
         diagnosticLogs,
         status: variant.startsWith('pending ') ? 'in_progress' : 'complete',
-        nativeCurrentNode: variant.startsWith('pending ') ? CALL : ASSISTANT,
+        nativeCurrentNode: variant.startsWith('pending ') ? CALL :
+          variant.startsWith('missing terminal ') && variant !== 'missing terminal hidden final' ? EXEC_RESULT : ASSISTANT,
         nativeCallLive: variant !== 'missing live branch', nativeCallCacheConflict: variant === 'cached conflict' ||
           variant === 'retained commentary cached conflict' || variant === 'missing receipt late cache',
         callCompleted: false, assistantCompleted: false,
@@ -2471,19 +2531,29 @@ describe('alternate shell turn/message provenance', () => {
           entry.turn.messageIds = [USER, CALL, ASSISTANT];
           for (const [id, row] of Object.entries(mapping) as [string, any][]) if (id !== USER)
             Object.assign(row.message.metadata, scope);
+          if (variant.startsWith('missing terminal ')) {
+            entry.turn.items = entry.turn.items.filter((item: any) => item.messageId !== ASSISTANT);
+            entry.turn.messageIds = [USER, CALL];
+            if (variant !== 'missing terminal unscoped user') Object.assign(mapping[USER].message.metadata, scope);
+            if (variant === 'missing terminal foreign branch') mapping[EXEC_RESULT].message.metadata.turn_exchange_id = 'foreign';
+            if (variant === 'missing terminal hidden final') {
+              mapping[ASSISTANT].message.channel = 'final';
+              mapping[ASSISTANT].message.end_turn = true;
+            }
+          }
           mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: JSON.stringify({
             content: [{ type: 'text', text: 'PRIVATE_TOOL_RESULT' }],
             structuredContent: { cosResultReceipt: { version: 1, id: 'a'.repeat(48) } } }) };
-          if (variant.startsWith('direct Core')) {
+          if (variant.includes('direct Core')) {
             mapping[CALL].parent = HEADER;
             mapping[CALL].message.metadata.parent_id = HEADER;
             mapping[ASSISTANT].parent = RESULT;
             mapping[ASSISTANT].message.metadata.parent_id = RESULT;
             delete mapping[EXEC];
             delete mapping[EXEC_RESULT];
-            if (variant === 'direct Core wrong parent') mapping[RESULT].message.metadata.parent_id = HEADER;
-            if (variant === 'direct Core missing receipt') mapping[RESULT].message.content.text = '{"content":[]}';
-            if (variant === 'direct Core foreign resource') mapping[RESULT].message.metadata.invoked_resource.resource_uri = `/${ASDK}/link_foreign/read`;
+            if (variant === 'direct Core wrong parent' || variant === 'direct Core missing receipt wrong parent') mapping[RESULT].message.metadata.parent_id = HEADER;
+            if (variant.startsWith('direct Core missing receipt')) mapping[RESULT].message.content.text = '{"content":[]}';
+            if (variant === 'direct Core foreign resource' || variant === 'direct Core missing receipt foreign resource') mapping[RESULT].message.metadata.invoked_resource.resource_uri = `/${ASDK}/link_foreign/read`;
           }
           if (variant.startsWith('core receipt missing') || variant.startsWith('missing receipt ') || variant === 'core request and receipt foreign')
             mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: '{"content":[]}' };
@@ -2495,7 +2565,7 @@ describe('alternate shell turn/message provenance', () => {
           if (variant === 'core request foreign' || variant === 'core request and receipt foreign')
             mapping[RESULT].message.metadata.request_id = 'PRIVATE_OTHER_CORE_REQUEST';
           if (variant.startsWith('pending ')) { entry.turn.messageIds = [USER, CALL]; mapping[CALL].message.status = 'in_progress'; }
-          if (variant === 'pending header mismatch') mapping[HEADER].message.metadata.working_turn_id = 'foreign';
+          if (variant === 'pending header mismatch' || variant === 'pending direct Core foreign header') mapping[HEADER].message.metadata.working_turn_id = 'foreign';
           if (variant === 'missing system header') { mapping[EXEC].parent = USER; delete mapping[HEADER]; }
           if (variant === 'visible system header') mapping[HEADER].message.metadata.is_visually_hidden_from_conversation = false;
           if (variant === 'foreign header scope') mapping[HEADER].message.metadata.working_turn_id = 'foreign';
@@ -2607,13 +2677,18 @@ describe('alternate shell turn/message provenance', () => {
         const accepted = variant === 'direct Core' || variant === 'exact canonical group' || variant === 'exact final reference' ||
           variant === 'exact retained commentary parent' || variant === 'exact retained execution commentary parent' ||
           variant === 'exact retained commentary image result';
-        const identityOnly = variant.startsWith('core receipt missing') || variant === 'retained commentary missing receipt';
+        const identityOnly = variant === 'direct Core missing receipt' || variant.startsWith('core receipt missing') ||
+          variant === 'retained commentary missing receipt' || variant === 'missing terminal exact user';
         expect(page.fiber.turns[0].calls[0]).toMatchObject({
-          requestId: accepted || identityOnly || variant === 'pending canonical group' ? REQUEST : null, answered: accepted });
-        if (accepted || identityOnly || variant === 'pending canonical group')
+          requestId: accepted || identityOnly || ['pending canonical group', 'pending direct Core'].includes(variant) ? REQUEST : null, answered: accepted });
+        if (accepted || identityOnly || ['pending canonical group', 'pending direct Core'].includes(variant))
           expect(page.fiber.turns[0].requests.filter((row: any) => row.requestId === REQUEST))
-            .toEqual([expect.objectContaining({ messageId: variant === 'direct Core' ? CALL : EXEC })]);
-        if (variant.startsWith('direct Core')) {
+            .toEqual([expect.objectContaining({ messageId: variant.includes('direct Core') ? CALL : EXEC })]);
+        if (variant.startsWith('missing terminal ')) {
+          expect(page.fiber.turns[0].endMessageId).toBeNull();
+          expect(page.fiber.turns[0].calls[0].resultReceiptId).toBeUndefined();
+        }
+        if (variant.includes('direct Core')) {
           const turn = page.fiber.turns[0];
           expect(turn.calls[0].resultReceiptId).toBe(accepted ? 'a'.repeat(48) : undefined);
           expect(turn.endMessageId).toBe(accepted ? ASSISTANT : null);
@@ -2701,7 +2776,7 @@ describe('alternate shell turn/message provenance', () => {
         expect(getterReads).toBe(0);
         expect(JSON.stringify(page.fiber)).not.toContain('anchorRetained');
         expect(JSON.stringify(page.fiber)).not.toMatch(/PRIVATE_SYSTEM_TEXT|PRIVATE_SYSTEM_GETTER|retired-header-parent|retired-exec-parent|PRIVATE_RETAINED_COMMENTARY/);
-        if (identityOnly) {
+        if (identityOnly && variant !== 'missing terminal exact user') {
           // Request ownership survives result hydration. It is not completion:
           // no result witness or terminal may be invented before the real receipt.
           expect(page.fiber.turns[0].endMessageId).toBeNull();
@@ -2714,7 +2789,7 @@ describe('alternate shell turn/message provenance', () => {
           expect(hydrated.turns[0].calls[0]).toMatchObject({ messageId: CALL, requestId: REQUEST,
             answered: true, resultReceiptId: 'a'.repeat(48) });
           expect(hydrated.turns[0].requests.filter((row: any) => row.requestId === REQUEST))
-            .toEqual([expect.objectContaining({ messageId: EXEC })]);
+            .toEqual([expect.objectContaining({ messageId: variant.includes('direct Core') ? CALL : EXEC })]);
         }
       } finally { page.dom.window.close(); }
     });

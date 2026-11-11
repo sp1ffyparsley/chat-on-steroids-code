@@ -1209,7 +1209,9 @@ describe('custody-preserving companion reload', () => {
     let injected = false, armed = false, inventories = 0;
     let worker!: WorkerHarness;
     worker = loadWorker({ local, session, tabsQuery: async () => {
-      if (armed && ++inventories === 2) {
+      // Reload now reads an initial inventory, a post-drain inventory, then the
+      // final inventory after durable lease proof. Inject after that proof.
+      if (armed && ++inventories === 3) {
         injected = true;
         if (reason === 'new-journal') await worker.send({ type: 'events', conversationId,
           entries: [{ conversationId, event: { kind: 'progress', time: 2, text: 'late retained event' } }] });
@@ -1609,6 +1611,40 @@ describe('custody-preserving companion reload', () => {
       tabsQuery: async () => [{ id: 17, url: `https://chatgpt.com/c/${conversationId}` }] });
     expect(await request(unknown)).toMatchObject({ ok: false, error: 'reload_deferred' });
     expect(unknown.runtimeReload).not.toHaveBeenCalled();
+  });
+
+  it.each(['open-chat', 'pending-chat'] as const)(
+    'reconciles absent retired helpers before deferring companion reload on %s', async mode => {
+      const id = 'a1111111-2222-4333-8444-555555555555';
+      const local = new FakeStorageArea({ disconnected: true, inputOpenings: {
+        [id]: { tab: 41, stage: 'retired', retiredAt: Date.now() - 3600_000 }
+      } });
+      const worker = loadWorker({ local, session: new FakeStorageArea(), tabsQuery: async () => [{
+        id: 50, url: mode === 'open-chat' ? 'https://chatgpt.com/c/' + conversationId : 'about:blank',
+        ...(mode === 'pending-chat' ? { pendingUrl: 'https://chatgpt.com/c/' + conversationId } : {})
+      }] });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(await request(worker)).toMatchObject({ ok: false, error: 'reload_deferred', pendingWork: { openChatgptTabs: 1 } });
+      expect(local.data.inputOpenings).toEqual({});
+      expect(worker.runtimeReload).not.toHaveBeenCalled();
+      expect(worker.tabsRemove).not.toHaveBeenCalled();
+    }
+  );
+
+  it('refreshes retired helper absence after draining before companion reload', async () => {
+    const id = 'a1111111-2222-4333-8444-555555555555';
+    const local = new FakeStorageArea({ disconnected: true, inputOpenings: {
+      [id]: { tab: 41, stage: 'retired', retiredAt: Date.now() - 3600_000 }
+    } });
+    let inventories = 0;
+    const worker = loadWorker({ local, session: new FakeStorageArea(), tabsQuery: async () =>
+      ++inventories === 1 ? [{ id: 41, url: 'about:blank' }] : [] });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    inventories = 0;
+    expect(await request(worker)).toMatchObject({ ok: true, reloading: true });
+    expect(local.data.inputOpenings).toEqual({});
+    expect(worker.runtimeReload).toHaveBeenCalledTimes(1);
+    expect(worker.tabsRemove).not.toHaveBeenCalled();
   });
 
   it('reload retires forty old helper elections only after a complete inventory proves their tabs absent', async () => {
@@ -11945,7 +11981,7 @@ describe('extension connection', () => {
     expect(local.data.instanceId).toBe(instanceId);
   });
 
-  it('requires separate explicit companion choices for Gustavo, Jeremiah and Footlettuce', async () => {
+  it('requires separate explicit companion choices for Delta, Beta and Alpha', async () => {
     const pairPorts: number[] = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
@@ -11953,22 +11989,22 @@ describe('extension connection', () => {
       if (url.pathname === '/hello' && [8765, 8767, 8768].includes(candidate)) {
         return response(200, {
           app: 'chat-on-steroids',
-          instanceId: candidate === 8765 ? 'local-instance' : candidate === 8768 ? 'profile-jeremiah' : 'profile-footlettuce',
-          displayName: candidate === 8765 ? 'Gustavo' : candidate === 8768 ? 'Jeremiah' : 'Footlettuce',
+          instanceId: candidate === 8765 ? 'local-instance' : candidate === 8768 ? 'profile-beta' : 'profile-alpha',
+          displayName: candidate === 8765 ? 'Delta' : candidate === 8768 ? 'Beta' : 'Alpha',
           legacyInstance: candidate === 8765, paired: false
         });
       }
       if (url.pathname === '/pair') {
         pairPorts.push(candidate);
         expect([8767, 8768]).toContain(candidate);
-        const instanceId = candidate === 8768 ? 'profile-jeremiah' : 'profile-footlettuce';
+        const instanceId = candidate === 8768 ? 'profile-beta' : 'profile-alpha';
         expect(JSON.parse(String(init.body))).toEqual({ reconnect: true, instanceId });
         return response(200, { token: `${instanceId}-token`, instanceId });
       }
       return response(503, {});
     });
-    const jeremiahStorage = new FakeStorageArea();
-    const worker = loadWorker({ local: jeremiahStorage, session: new FakeStorageArea(), fetch });
+    const betaStorage = new FakeStorageArea();
+    const worker = loadWorker({ local: betaStorage, session: new FakeStorageArea(), fetch });
 
     expect(await worker.send({ type: 'status' })).toMatchObject({
       connected: false, paired: false, instanceId: null, instanceError: 'instance_selection_required'
@@ -11978,29 +12014,29 @@ describe('extension connection', () => {
     const choices = await worker.send({ type: 'accountChoices' }, 1, undefined, popupUrl);
     expect(choices).toMatchObject({ ok: true });
     expect(choices.accounts).toEqual(expect.arrayContaining([
-      { instanceId: 'local-instance', name: 'Gustavo', port: 8765, legacy: true, compatible: true },
-      { instanceId: 'profile-jeremiah', name: 'Jeremiah', port: 8768, legacy: false, compatible: true },
-      { instanceId: 'profile-footlettuce', name: 'Footlettuce', port: 8767, legacy: false, compatible: true }
+      { instanceId: 'local-instance', name: 'Delta', port: 8765, legacy: true, compatible: true },
+      { instanceId: 'profile-beta', name: 'Beta', port: 8768, legacy: false, compatible: true },
+      { instanceId: 'profile-alpha', name: 'Alpha', port: 8767, legacy: false, compatible: true }
     ]));
-    expect(await worker.send({ type: 'pairTo', instanceId: 'profile-jeremiah' }, 1, undefined, popupUrl)).toMatchObject({ ok: true });
+    expect(await worker.send({ type: 'pairTo', instanceId: 'profile-beta' }, 1, undefined, popupUrl)).toMatchObject({ ok: true });
     expect(pairPorts).toEqual([8768]);
-    expect(jeremiahStorage.data).toMatchObject({ port: 8768, instanceId: 'profile-jeremiah', token: 'profile-jeremiah-token' });
+    expect(betaStorage.data).toMatchObject({ port: 8768, instanceId: 'profile-beta', token: 'profile-beta-token' });
     expect(await worker.send({ type: 'status' })).toMatchObject({ connected: true, paired: true, port: 8768 });
 
-    // Each Chrome profile owns independent extension storage. Selecting Footlettuce in a
-    // different profile cannot silently retarget Jeremiah's saved companion or bridge.
-    const footlettuceStorage = new FakeStorageArea();
-    const footlettuceWorker = loadWorker({ local: footlettuceStorage, session: new FakeStorageArea(), fetch });
-    expect(await footlettuceWorker.send({ type: 'status' })).toMatchObject({
+    // Each Chrome profile owns independent extension storage. Selecting Alpha in a
+    // different profile cannot silently retarget Beta's saved companion or bridge.
+    const alphaStorage = new FakeStorageArea();
+    const alphaWorker = loadWorker({ local: alphaStorage, session: new FakeStorageArea(), fetch });
+    expect(await alphaWorker.send({ type: 'status' })).toMatchObject({
       connected: false, paired: false, instanceError: 'instance_selection_required'
     });
-    expect(await footlettuceWorker.send({ type: 'pairTo', instanceId: 'profile-footlettuce' }, 1, undefined, popupUrl))
+    expect(await alphaWorker.send({ type: 'pairTo', instanceId: 'profile-alpha' }, 1, undefined, popupUrl))
       .toMatchObject({ ok: true });
     expect(pairPorts).toEqual([8768, 8767]);
-    expect(footlettuceStorage.data).toMatchObject({
-      port: 8767, instanceId: 'profile-footlettuce', token: 'profile-footlettuce-token'
+    expect(alphaStorage.data).toMatchObject({
+      port: 8767, instanceId: 'profile-alpha', token: 'profile-alpha-token'
     });
-    expect(jeremiahStorage.data).toMatchObject({ port: 8768, instanceId: 'profile-jeremiah', token: 'profile-jeremiah-token' });
+    expect(betaStorage.data).toMatchObject({ port: 8768, instanceId: 'profile-beta', token: 'profile-beta-token' });
   });
 
   it('offers private development alongside installed legacy and pairs only the chosen dev port', async () => {
@@ -12093,10 +12129,10 @@ describe('extension connection', () => {
         return response(200, { app: 'chat-on-steroids', instanceId: devId, paired: false });
       }
       if (url.pathname === '/hello' && url.port === '8768')
-        return response(200, { app: 'chat-on-steroids', instanceId: 'profile-jeremiah', paired: false });
+        return response(200, { app: 'chat-on-steroids', instanceId: 'profile-beta', paired: false });
       if (url.pathname === '/pair') {
         pairPorts.push(Number(url.port));
-        return response(200, { instanceId: url.port === '8796' ? devId : 'profile-jeremiah', token: 'latest-jeremiah-token' });
+        return response(200, { instanceId: url.port === '8796' ? devId : 'profile-beta', token: 'latest-beta-token' });
       }
       return response(503, {});
     });
@@ -12105,15 +12141,15 @@ describe('extension connection', () => {
     const popup = 'chrome-extension://fcckeonnadegkheflpbppbddkpkdhjip/popup.html';
     const older = worker.send({ type: 'pairTo', instanceId: devId }, 1, undefined, popup);
     await started;
-    const newer = worker.send({ type: 'pairTo', instanceId: 'profile-jeremiah' }, 1, undefined, popup);
+    const newer = worker.send({ type: 'pairTo', instanceId: 'profile-beta' }, 1, undefined, popup);
     // Permit the second message to register its intent before the original /hello resolves.
     for (let i = 0; i < 5; i++) await Promise.resolve();
     releaseDevHello();
     expect(await older).toMatchObject({ ok: false });
     expect(await newer).toMatchObject({ ok: true });
     expect(pairPorts).toEqual([8768]);
-    expect(local.data).toMatchObject({ instanceId: 'profile-jeremiah', port: 8768,
-      token: 'latest-jeremiah-token', disconnected: false });
+    expect(local.data).toMatchObject({ instanceId: 'profile-beta', port: 8768,
+      token: 'latest-beta-token', disconnected: false });
   });
 
   it('persists a later Disconnect after a pending popup retarget storage write', async () => {
@@ -12167,25 +12203,25 @@ describe('extension connection', () => {
       const candidate = Number(url.port);
       if (url.pathname === '/hello' && (candidate === 8765 || candidate === 8768)) {
         return response(200, {
-          app: 'chat-on-steroids', instanceId: candidate === 8765 ? 'local-instance' : 'profile-jeremiah',
-          displayName: candidate === 8765 ? 'Gustavo' : 'Jeremiah', legacyInstance: candidate === 8765,
+          app: 'chat-on-steroids', instanceId: candidate === 8765 ? 'local-instance' : 'profile-beta',
+          displayName: candidate === 8765 ? 'Delta' : 'Beta', legacyInstance: candidate === 8765,
           paired: candidate === 8765, bridge: BRIDGE_PROTOCOL
         });
       }
       if (url.pathname === '/pair') {
         pairPorts.push(candidate);
-        return response(200, { token: 'jeremiah-token', instanceId: 'profile-jeremiah' });
+        return response(200, { token: 'beta-token', instanceId: 'profile-beta' });
       }
       return response(503, {});
     });
-    const local = new FakeStorageArea({ instanceId: 'local-instance', port: 8765, token: 'gustavo-token' });
+    const local = new FakeStorageArea({ instanceId: 'local-instance', port: 8765, token: 'delta-token' });
     const worker = loadWorker({ local, session: new FakeStorageArea(), fetch });
     expect(await worker.send({ type: 'status' })).toMatchObject({ connected: true, paired: true, port: 8765 });
     const popupUrl = 'chrome-extension://fcckeonnadegkheflpbppbddkpkdhjip/popup.html';
-    expect(await worker.send({ type: 'pairTo', instanceId: 'profile-jeremiah' }, 1, undefined, popupUrl))
+    expect(await worker.send({ type: 'pairTo', instanceId: 'profile-beta' }, 1, undefined, popupUrl))
       .toMatchObject({ ok: true });
     expect(pairPorts).toEqual([8768]);
-    expect(local.data).toMatchObject({ instanceId: 'profile-jeremiah', port: 8768, token: 'jeremiah-token' });
+    expect(local.data).toMatchObject({ instanceId: 'profile-beta', port: 8768, token: 'beta-token' });
   });
 
   const currentPairingPage = async () => ({ ok: true, epoch: 0, streaming: false, generating: false, pendingTools: 0 });
@@ -14481,11 +14517,11 @@ describe('extension connection', () => {
     const local = new FakeStorageArea();
     const fetch = vi.fn(async (_input: string) => response(503, {}));
     const worker = loadWorker({ local, session: new FakeStorageArea(), fetch, tabsSendMessage: currentPairingPage });
-    expect(await worker.send({ type: 'pairTo', instanceId: 'profile-jeremiah' }, 1, undefined, 'https://example.com/'))
+    expect(await worker.send({ type: 'pairTo', instanceId: 'profile-beta' }, 1, undefined, 'https://example.com/'))
       .toMatchObject({ ok: false, error: 'popup_required' });
     expect(await worker.send({ type: 'accountChoices' }, 1, '', 'https://chatgpt.com/'))
       .toMatchObject({ ok: false, error: 'document_identity_missing' });
-    expect(await worker.send({ type: 'pairTo', instanceId: 'profile-jeremiah' }, 1, undefined,
+    expect(await worker.send({ type: 'pairTo', instanceId: 'profile-beta' }, 1, undefined,
       'chrome-extension://fcckeonnadegkheflpbppbddkpkdhjip/popup.html-other'))
       .toMatchObject({ ok: false, error: 'popup_required' });
     expect(fetch.mock.calls.some(([input]) => new URL(input).pathname !== '/hello')).toBe(false);

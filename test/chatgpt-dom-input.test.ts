@@ -892,8 +892,8 @@ describe('one native HTML edit for prepared text', () => {
 });
 
 describe('native Core attachment', () => {
-  const connectorName = 'Luna Forge X7 — Gustavo Core';
-  const appId = 'asdk_app_gustavo';
+  const connectorName = 'Luna Forge X7 — Delta Core';
+  const appId = 'asdk_app_delta';
   const coreMenu = () => {
     const add = document.createElement('button');
     add.type = 'button';
@@ -4203,5 +4203,67 @@ describe('locale-independent provider composer evidence', () => {
     group.firstElementChild!.setAttribute('data-default-action', 'true');
     group.append(group.lastElementChild!.cloneNode(true));
     expect(api.hasComposerAttachments()).toBe(false);
+  });
+});
+
+describe('unrendered transport Retry reveal', () => {
+  function timeoutCard() {
+    box.textContent = '';
+    const node = document.createElement('div');
+    node.setAttribute('role', 'alert');
+    const copy = document.createElement('p');
+    copy.textContent = 'Message delivery timed out. Please try again.';
+    const retry = document.createElement('button');
+    retry.textContent = 'Retry';
+    node.append(copy, retry);
+    document.body.append(node);
+    const reveal = vi.fn();
+    Object.defineProperty(node, 'scrollIntoView', { value: reveal, configurable: true });
+    const clicked = vi.fn();
+    retry.addEventListener('click', clicked);
+    return { node, retry, reveal, clicked };
+  }
+
+  it('requests one bounded reveal for an unrendered delivery-timeout Retry and clicks it after render', () => {
+    const { retry, reveal, clicked } = timeoutCard();
+    Object.defineProperty(retry, 'getClientRects', { value: () => [], configurable: true });
+    const authorize = vi.fn(() => true);
+    expect(api.retryLatestTransportFailure(() => true, authorize))
+      .toEqual({ status: 'stopped', reason: 'retry_not_ready' });
+    expect(authorize).not.toHaveBeenCalled();
+    expect(clicked).not.toHaveBeenCalled();
+    expect(reveal).toHaveBeenCalledTimes(1);
+    // The same still-unrendered pass must not spam reveals.
+    expect(api.retryLatestTransportFailure(() => true, authorize).reason).toBe('retry_not_ready');
+    expect(reveal).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(1500);
+    // The page rendered the card after the requested reveal.
+    Object.defineProperty(retry, 'getClientRects', { value: () => [{ width: 60, height: 20 }], configurable: true });
+    expect(api.retryLatestTransportFailure(() => true, authorize)).toEqual({ status: 'retried' });
+    expect(clicked).toHaveBeenCalledTimes(1);
+    expect(reveal).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps hidden and already-spent Retry surfaces outside the reveal path', () => {
+    const { node, retry, reveal, clicked } = timeoutCard();
+    Object.defineProperty(retry, 'getClientRects', { value: () => [], configurable: true });
+    node.setAttribute('hidden', '');
+    // Pre-existing semantics: a hidden card reads as not-ready hydration evidence, and the
+    // new reveal path must not fire for it either.
+    expect(api.retryLatestTransportFailure(() => true, () => true).reason).toBe('retry_not_ready');
+    expect(reveal).not.toHaveBeenCalled();
+    node.removeAttribute('hidden');
+    Object.defineProperty(retry, 'getClientRects', { value: () => [{ width: 60, height: 20 }], configurable: true });
+    expect(api.retryLatestTransportFailure(() => true, () => true)).toEqual({ status: 'retried' });
+    expect(clicked).toHaveBeenCalledTimes(1);
+    expect(reveal).not.toHaveBeenCalled();
+    // A spent control is never revealed or clicked again.
+    node.remove();
+    const second = timeoutCard();
+    Object.defineProperty(second.retry, 'getClientRects', { value: () => [{ width: 60, height: 20 }], configurable: true });
+    expect(api.retryLatestTransportFailure(() => true, () => true)).toEqual({ status: 'retried' });
+    expect(api.retryLatestTransportFailure(() => true, () => true).reason).toBe('retry_unavailable');
+    expect(second.clicked).toHaveBeenCalledTimes(1);
+    expect(second.reveal).not.toHaveBeenCalled();
   });
 });

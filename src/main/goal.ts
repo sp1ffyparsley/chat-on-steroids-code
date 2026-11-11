@@ -3364,8 +3364,16 @@ function reminderSnippet(text: string, limit: number): string {
 }
 
 function originalScopeSnippet(scope: string): string {
-  const paragraphs = scope.split(/\r?\n\s*\r?\n/).map(part => part.replace(/^\s*#+\s*/, '').trim()).filter(Boolean);
-  const useful = paragraphs.find(part => part.length >= 24 && !/^[A-Z0-9 &/,:;()_.+—-]+$/.test(part)) ?? paragraphs[0] ?? scope;
+  const visible = visibleAcceptanceDeclarations(scope);
+  const paragraphs = visible.split(/\r?\n\s*\r?\n/).map(part => part.replace(/^\s*#+\s*/, '').trim()).filter(Boolean);
+  // Shared library introductions precede the actual project. Keep one explicit
+  // project heading in the short reminder so independent chats retain their lane.
+  const projects = paragraphs.filter(part => /^PROJECT\s+[—–:-]\s+\S/.test(part));
+  if (projects.length === 1) {
+    const index = paragraphs.indexOf(projects[0]!);
+    return reminderSnippet([projects[0], paragraphs[index + 1] ?? ''].join(' '), LOOP_REMINDER_SCOPE_CHARS);
+  }
+  const useful = paragraphs.find(part => part.length >= 24 && !/^[A-Z0-9 &/,:;()_.+—-]+$/.test(part)) ?? paragraphs[0] ?? visible;
   return reminderSnippet(useful, LOOP_REMINDER_SCOPE_CHARS);
 }
 

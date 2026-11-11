@@ -2031,7 +2031,15 @@ var CLF_DOM = (() => {
     } catch { /* Logging must not break recording or release a wait. */ }
   }
 
-  function approvalVisible(node) {
+  /**
+   * Style-and-ancestry evidence only, deliberately without rendered-geometry.
+   *
+   * The live renderer keeps off-screen conversation content connected but unrendered
+   * (virtualized/content-visibility containers), so a genuinely pending approval card can
+   * report zero rects until the user happens to scroll. Hidden/removed chrome must stay
+   * excluded exactly as before; only the zero-rect conclusion moved out of this predicate.
+   */
+  function approvalStructurallyVisible(node) {
     if (!node?.isConnected || node.closest(`${APPROVAL_EXCLUDED},[hidden],[inert],[aria-hidden="true"]`) ||
         onKeptPage(node) || !displayed(node)) return false;
     for (let parent = node; parent; parent = parent.parentElement) {
@@ -2039,7 +2047,45 @@ var CLF_DOM = (() => {
       if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' ||
           style.contentVisibility === 'hidden' || style.opacity === '0') return false;
     }
+    return true;
+  }
+
+  function approvalVisible(node) {
+    if (!approvalStructurallyVisible(node)) return false;
     return [...node.getClientRects()].some(rect => rect.width > 0 && rect.height > 0);
+  }
+
+  /**
+   * Whether the card's actions are connected but not yet rendered.
+   *
+   * Virtualized/off-screen transcripts keep every control style-visible with zero rects.
+   * Identity is deliberately loose: scrolling reveals the whole card, and the exact
+   * once-only selection still happens only among rendered controls.
+   */
+  function unrenderedApprovalAction(card) {
+    if (!approvalStructurallyVisible(card)) return false;
+    return [...card.querySelectorAll('button,[role="button"]')].some(button =>
+      button.closest(APPROVAL_CARD) === card && approvalStructurallyVisible(button) &&
+      !approvalVisible(button));
+  }
+
+  /** Bounded per-card reveal clock shared with revealApprovalButton. */
+  function revealAllowed(state, now = Date.now()) {
+    if (state.revealAt !== undefined && now >= state.revealAt && now - state.revealAt < 1500) return false;
+    state.revealAt = now;
+    return true;
+  }
+
+  /**
+   * Ask the page to render the card's own container; never jump the whole chat to bottom
+   * and never dispatch a click from here. Rendering stays the provider's job.
+   */
+  function revealApprovalCard(card, state) {
+    if (!revealAllowed(state)) return;
+    try {
+      card.scrollIntoView?.({ block: 'center', inline: 'nearest', behavior: 'instant' });
+      approvalDiagnostic('unrendered allow-once card reveal requested');
+    } catch { approvalDiagnostic('unrendered allow-once card reveal failed'); }
   }
 
   function pendingApprovalCard(card) {
@@ -2051,7 +2097,7 @@ var CLF_DOM = (() => {
       approvalAutomation.cards.delete(card);
       return false;
     }
-    return approvalVisible(card);
+    return approvalVisible(card) || unrenderedApprovalAction(card);
   }
 
   /** A broken card stays unknown without preventing inspection of its healthy siblings. */
@@ -2154,14 +2200,20 @@ var CLF_DOM = (() => {
       ? document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2) : null;
     const ownStageOverlap = !!hit?.closest?.('.clf-stage[data-clf-stage="1"][role="status"]') &&
       !hit.closest('[role="dialog"],[role="alertdialog"]');
-    if (!clipped && !ownStageOverlap) return;
+    // The native composer can cover an otherwise visible card. A generic
+    // overlay or an unowned lookalike cannot authorize moving the page.
+    const composerForm = composer()?.closest('form');
+    const coveredOverlap = !!hit && !!composerForm?.contains(hit) && !button.contains(hit) && !ownStageOverlap &&
+      !hit.closest?.('[role="dialog"],[role="alertdialog"]');
+    if (!clipped && !ownStageOverlap && !coveredOverlap) return;
     const now = Date.now();
     if (state.revealAt !== undefined && now >= state.revealAt && now - state.revealAt < 1500) return;
     state.revealAt = now;
     try {
       // Instant avoids a click racing a smooth scroll; normal hit testing below still applies.
-      button.scrollIntoView({ block: ownStageOverlap ? 'center' : 'nearest', inline: 'nearest', behavior: 'instant' });
+      button.scrollIntoView({ block: ownStageOverlap || coveredOverlap ? 'center' : 'nearest', inline: 'nearest', behavior: 'instant' });
       approvalDiagnostic(ownStageOverlap ? 'owned status panel overlaps allow-once action; reveal requested'
+        : coveredOverlap ? 'covered allow-once action reveal requested'
         : 'offscreen allow-once action reveal requested');
     } catch { approvalDiagnostic('offscreen allow-once action reveal failed'); }
   }
@@ -2195,7 +2247,14 @@ var CLF_DOM = (() => {
           if (!stillCurrent() || location.pathname !== path) break;
           if (!pendingApprovalCard(card)) continue;
           const button = approvalButton(card);
-          if (!button) { approvalDiagnostic('one-time action missing or ambiguous'); continue; }
+          if (!button) {
+            // A connected card whose action is not rendered yet still holds the turn.
+            // Reveal it at a bounded rate; the ordinary visible-card path approves it once
+            // the page renders, and no click budget is spent on an invisible control.
+            if (unrenderedApprovalAction(card)) revealApprovalCard(card, approvalAttemptState(card));
+            else approvalDiagnostic('one-time action missing or ambiguous');
+            continue;
+          }
           const now = Date.now();
           const previous = approvalAttemptState(card);
           if (previous.path !== path) continue;
@@ -3016,7 +3075,7 @@ var CLF_DOM = (() => {
         if (node.closest && node.closest(OWN_SURFACES)) continue;
         if (!displayed(node)) continue;
         if (value.length <= 2 || value.length >= 500) continue;
-        // Observed 2026-10-08: native Footlettuce helper alert. This is an account
+        // Observed 2026-10-08: native Alpha helper alert. This is an account
         // restriction, not transport failure; never grant its adjacent Retry authority.
         const hourlyLimit = /^you['’]ve reached our limit of messages per hour\. please try again later\.?(?:\s*retry)?$/i.test(value);
         // Current native 5.5 quota alert (October11) omits both the model and
@@ -4851,6 +4910,29 @@ var CLF_DOM = (() => {
       return [...controls.values()];
     };
     const currentErrors = readCurrentErrors();
+    // A connected, enabled, exact-label Retry whose card the provider has not rendered yet
+    // (virtualized/off-screen transcript content) used to read as permanently unavailable
+    // until a human scrolled. Ask the page to render that exact card once at a bounded rate;
+    // rendering stays the provider's job and no click or budget is spent from here.
+    const revealClocks = retryLatestTransportFailure.revealClocks ||= new WeakMap();
+    let revealed = false;
+    for (const error of currentErrors) {
+      if (retriedTransportControls.has(error.node)) continue;
+      for (const retry of error.retryControls || (error.retry ? [error.retry] : [])) {
+        if (retriedTransportControls.has(retry) || retryControlReady(retry)) continue;
+        if (!retry?.isConnected || retry.disabled || retry.getAttribute('aria-disabled') === 'true') continue;
+        if (!displayed(error.node) || error.node.closest('[hidden],[inert],[aria-hidden="true"]')) continue;
+        const now = Date.now();
+        const last = revealClocks.get(retry);
+        if (last !== undefined && now >= last && now - last < 1500) continue;
+        revealClocks.set(retry, now);
+        try {
+          (error.node.closest(TURN) || error.node).scrollIntoView?.({ block: 'center', inline: 'nearest', behavior: 'instant' });
+          console.info('[Chat On Steroids] unrendered native Retry card reveal requested; no click dispatched');
+          revealed = true;
+        } catch { /* A failed reveal must never spend or block the existing recovery ladder. */ }
+      }
+    }
     const eligible = eligibleControls(currentErrors);
     if (eligible.length !== 1) {
       // A positively identified failed card can precede its Retry control. This invocation has
@@ -4860,7 +4942,12 @@ var CLF_DOM = (() => {
         currentErrors[0].node?.isConnected && displayed(currentErrors[0].node) &&
         !retriedTransportControls.has(currentErrors[0].node) &&
         !(currentErrors[0].retry && retriedTransportControls.has(currentErrors[0].retry));
-      return { status: 'stopped', reason: eligible.length ? 'ambiguous_retry' : notReady ? 'retry_not_ready' : 'retry_unavailable' };
+      // A just-requested reveal is a hydration state, not a missing surface: the existing
+      // caller-side ready-grace may re-arm while the page renders, and the same eligibility
+      // scan clicks the control on a later pass. Missing/foreign surfaces keep their reason.
+      const reason = eligible.length ? 'ambiguous_retry'
+        : notReady || revealed && currentErrors.length === 1 ? 'retry_not_ready' : 'retry_unavailable';
+      return { status: 'stopped', reason };
     }
     const error = eligible[0];
     const pageChanged = wholePageLoadFailure

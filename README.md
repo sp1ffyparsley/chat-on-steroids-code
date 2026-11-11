@@ -1,5 +1,13 @@
 # Chat On Steroids - code research mirror
 
+## Recorder 167 research snapshot
+
+This source snapshot covers original tool-request/result verification, completed-turn pickup after long waits, and the same-command recovery of an automatic handoff that timed out before its destination could send. The final transport attempt waits one hour after two immediate attempts. The queued deadline and attempt count survive restart. A destination that may already have sent remains in its original custody.
+
+The existing one-hour Loop notice now includes the projected blocker. A native-result verification hold uses its original age and can coexist with current verified tool work. Research priorities are exact historical joins after a handoff, safe recovery of unknown Send outcomes, helper and replacement tab retirement, and recovery after one to two hours of real inactivity.
+
+Recorder 166 is the verified private installation. Recorder 167 is source under test. The public source is not an installer or a claim of live automatic recovery.
+
 ## Recorder 159 source and verification
 
 This mirror includes reviewed recorder 155 through 159 source changes. Native Core results can recover through an exact direct invocation and folded result under a validated native header. Goal delivery retains the original native click and user receipt across remounts and timeouts. Confirmed tool-delivered instructions retain their original history provenance after bounded outbox pruning.

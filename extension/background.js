@@ -79,6 +79,8 @@ function readerProvenanceDiagnostic(raw, scan) {
   }
   // Missing scan means no observed Fiber/counter capability, even if a sender retains
   // older values. The worker always supplies its own executing generation, never raw's.
+  // contentRecorder is retained without a census: it reflects what the content script
+  // self-reported, not a Fiber capability requiring scan verification.
   if (!scan) for (const key of ['fiberWire', 'fiberKeys', 'contentKeys']) delete upstream[key];
   return { ...upstream, workerRecorder: PAGE_RECORDER_VERSION,
     ...(scan ? { workerKeys: Object.keys(scan.rejects).length } : {}) };
@@ -1780,7 +1782,7 @@ async function discover(force = false, allowBinding = false) {
   if (instanceBindingError === 'invalid_instance_binding') return null;
   instanceBindingError = null;
   // A fresh Chrome profile must never silently attach to the first (legacy) bridge when
-  // Gustavo and an isolated account are both running. The popup offers an explicit choice.
+  // Delta and an isolated account are both running. The popup offers an explicit choice.
   if (!instanceId && port === null && !token) {
     const choices = await localAccountChoices();
     if (choices.length > 1) {
@@ -10259,6 +10261,11 @@ async function reloadCompanionSafely() {
       return defer(reloadPendingWork());
     const tabs = await conversationInventory();
     if (!Array.isArray(tabs)) return defer({ inventoryUnverified: 1 });
+    // Retire only already-absent, grace-expired helper elections even when an
+    // open ChatGPT document still vetoes the extension reload itself.
+    if (absentInputProof) await cleanupRetiredInputTabs(inputOpenings, null,
+      { ...absentInputProof, current });
+    if (!current()) return defer({ connectionChanged: 1 });
     if (tabs.length) return defer({ openChatgptTabs: Math.min(4000, tabs.length) });
     await drainCommandAcks();
     await drain();
@@ -10268,8 +10275,14 @@ async function reloadCompanionSafely() {
     await drainCloses();
     await Promise.all([liveWriteQueue, journalWriteQueue, connectionPersistTail]);
     if (!current()) return defer({ connectionChanged: 1 });
+    // Drain can change election generations or finish closing helper tabs.
+    // Re-sample their exact absence instead of spending the pre-drain proof.
+    const postDrainTabs = await conversationInventory();
+    if (!Array.isArray(postDrainTabs)) return defer({ inventoryUnverified: 1 });
     if (absentInputProof) await cleanupRetiredInputTabs(inputOpenings, null,
       { ...absentInputProof, current });
+    if (!current()) return defer({ connectionChanged: 1 });
+    if (postDrainTabs.length) return defer({ openChatgptTabs: Math.min(4000, postDrainTabs.length) });
     const durableLeases = await durableReloadLeases();
     if (!durableLeases) return defer({ leaseDurabilityUnverified: 1 });
     const pending = await accountPairingBusy(false, null, null, null, null, durableLeases);
@@ -10692,7 +10705,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 159;
+const PAGE_RECORDER_VERSION = 167;
 
 let deferredRecoveryWork = null;
 

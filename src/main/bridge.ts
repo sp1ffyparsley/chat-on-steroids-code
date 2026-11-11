@@ -96,7 +96,7 @@ type DiagnosticIncidentProvider = {
   bindInput(claimId: string, inputId: string): Promise<boolean>;
   settle(input: {
     claimId: string;
-    outcome: 'delivered' | 'confirmed-unsent' | 'ambiguous';
+    outcome: 'delivered' | 'confirmed-unsent' | 'operator-cancelled' | 'ambiguous';
     diagnosticSessionId?: string;
     diagnosticConversationId?: string;
     wakeInputId?: string;
@@ -152,9 +152,13 @@ async function reconcileDiagnosticWakeInput(inputId: string): Promise<boolean> {
   if (row.state === 'failed' || row.state === 'cancelled') {
     const confirmedUnsent = row.sendAuthorizedAt === undefined &&
       row.deliveredAt === undefined && row.messageId === undefined;
+    // A deliberate cancellation spends this exact incident's wake. An ordinary
+    // pre-Send failure can retry, but cancellation must never recreate the input.
+    const operatorCancelled = row.state === 'cancelled' && row.operatorCancelledAt !== undefined &&
+      confirmedUnsent && row.owner === null && row.offeredAt === undefined;
     return provider.settle({
       claimId: incident.claimId!,
-      outcome: confirmedUnsent ? 'confirmed-unsent' : 'ambiguous',
+      outcome: operatorCancelled ? 'operator-cancelled' : confirmedUnsent ? 'confirmed-unsent' : 'ambiguous',
       wakeInputId: inputId,
       ...(row.messageId ? { wakeMessageId: row.messageId } : {})
     });
@@ -541,7 +545,7 @@ import {
   tagGoalDraftProgressReport
 } from './goal.js';
 import { logInfo, logWarn } from './logger.js';
-import { noticeChatStopped, observeBrowserAuthenticationIncident, retireDisabledSignOutEmergencyIncident } from './user-notice.js';
+import { noticeChatStopped, noticeStalledAutomationChats, observeBrowserAuthenticationIncident, retireDisabledSignOutEmergencyIncident } from './user-notice.js';
 import { approvalCardWaiting, noteApprovalCard, resetApprovalWaits, type ApprovalWaitDeps } from './approval-wait.js';
 import {
   closeConversation,
@@ -800,9 +804,11 @@ export const WORKER_BOOTSTRAP_LIMIT_MS = 180_000;
 /** One retry is enough to cover a slow/missed tab without turning a broken browser into a tab storm. */
 const MAX_WORKER_OPEN_ATTEMPTS = 2;
 const WORKER_OPEN_RETRY_MS = 15_000;
-/** Automatic handoffs use the same safe, same-marker retry budget as worker openings. */
-const MAX_AUTOMATIC_RESUME_OPEN_ATTEMPTS = 2;
+/** Two prompt transport attempts, then one delayed recovery of the same unsent handoff. */
+const QUICK_AUTOMATIC_RESUME_OPEN_ATTEMPTS = 2;
+const MAX_AUTOMATIC_RESUME_OPEN_ATTEMPTS = QUICK_AUTOMATIC_RESUME_OPEN_ATTEMPTS + 1;
 const AUTOMATIC_RESUME_OPEN_RETRY_MS = 5_000;
+const STALE_RESUME_OPEN_RETRY_MS = 60 * 60_000;
 /** A worker may occupy the broker's `waking` state for one short, absolute attempt. */
 /**
  * How long the browser has to prove it typed a wake into a sleeping worker's chat.
@@ -1135,7 +1141,10 @@ interface DurableRepairTurnBudget {
   reload: boolean;
   retry: boolean;
   compact: boolean;
+  /** A Retry crossed its click boundary but did not preserve the exact model and effort. */
   modelBlocked: boolean;
+  /** The current interruption card disappeared before Stop. Retry may still hydrate. */
+  stopRefused?: true;
 }
 
 interface DurableCommandSnapshot {
@@ -1153,7 +1162,15 @@ interface DurableCommandSnapshot {
   repairTurnBudgets?: DurableRepairTurnBudget[];
   /** Human tab departures: browser maintenance may not reinterpret these as missing-tab work. */
   manualCloseFences?: Array<{ conversationId: string; closedAt: number }>;
+  /** One exact transport outage; never a replacement prompt or a cleared repair budget. */
+  networkOutage?: NetworkOutageEpisode | null;
 }
+
+interface NetworkOutageEpisode { startedAt: number; suspendedAt: number | null; resume: boolean }
+const NETWORK_OUTAGE_RECOVERY_MS = 60 * 60_000;
+let networkOutage: NetworkOutageEpisode | null = null;
+let networkConnectionState: ConnectionState | null = null;
+let networkRecoveryEpoch = 0;
 
 interface DurableAdmissionState {
   cooldownUntil: number;
@@ -1254,6 +1271,7 @@ const workerFamilyOpeningAt = new Map<string, number>();
 let nextWorkerFamilyOpeningAt = 0;
 let admission: DurableAdmissionState = { cooldownUntil: 0, lastRateLimitAt: 0, streak: 0 };
 let admissionTimer: NodeJS.Timeout | null = null;
+let admissionWakeAt = Infinity;
 /** Last reported admission reason per durable command, so alternating queued rows do not spam each pass. */
 const admissionLogKeys = new Map<string, string>();
 /**
@@ -4281,6 +4299,20 @@ export async function automationSupervisorSnapshot(
         recoveryStage: null
       };
     }
+    if (!pause && !config.ui.automationPaused && !exactMainWork && !recentPresentationActivity && activeWorkers === 0 &&
+        (health.state === 'waiting-main' || health.state === 'stalled') &&
+        !actionableAutomationDebt(id, session.id)) {
+      const evidence = coreBrowserEvidence(id)?.pendingCompletion ? nativeCompletionDiagnostic(id, now) : null;
+      if (evidence) health = {
+        ...health,
+        state: 'waiting-main',
+        reason: `Tool-result verification is waiting on ${evidence.reason}.`,
+        nextAction: 'Inspect the original request and tool-result evidence in this chat. A new browser observation alone cannot verify earlier work.',
+        nextRetryAt: null,
+        recoverable: false,
+        recoveryStage: null
+      };
+    }
     chats.push({
       sessionId: session.id,
       conversationId: id,
@@ -4455,6 +4487,8 @@ export type AutomationResumeOptions = {
   maxQueued?: number;
   /** Explicit single-session recovery boundary; never broadens to sibling chats. */
   sessionId?: string;
+  /** Cancels only the outage supervisor's bounded transport pass. */
+  networkEpoch?: number;
 };
 
 /** A named human Resume may reacquire its closed canonical main for observation.
@@ -4565,6 +4599,7 @@ export async function resumeAutomationChats(options: AutomationResumeOptions = {
   if (options.maxQueued !== undefined) candidates.sort((left, right) =>
     left.updatedAt - right.updatedAt || left.startedAt - right.startedAt || left.id.localeCompare(right.id));
   for (const session of candidates) {
+    if (options.networkEpoch !== undefined && !networkRecoveryCurrent(options.networkEpoch)) break;
     if (options.lifecycleEpoch !== undefined && options.lifecycleEpoch !== browserLoopResumeEpoch) break;
     const id = session.conversationId;
     if (!id || seen.has(id)) {
@@ -4728,6 +4763,7 @@ export async function resumeAutomationChats(options: AutomationResumeOptions = {
       result.skipped++;
       continue;
     }
+    if (options.networkEpoch !== undefined && !networkRecoveryCurrent(options.networkEpoch)) break;
     if (queueBrowserRecovery(id, session.id, `automation-resume:${run}:${id}`, 'automation')) {
       result.queued++;
       if (!background) resumedAutomationConversations.add(id);
@@ -4776,6 +4812,7 @@ let loopLaneStatusLogKey = '';
 export async function maintainLoopLanes(now = Date.now()): Promise<boolean> {
   const config = getConfig();
   if (config.ui.automationPaused === true || !config.sessions.record) return false;
+  const recoveredNetwork = await maintainNetworkOutageRecovery(now);
   await recycleStaleAutomationRepairs(now);
   // Core recovery can legitimately take seconds. Start the one existing aggregate recovery
   // flight now, but do not let it hold unrelated durable Loop lanes behind a connection check.
@@ -4859,7 +4896,7 @@ export async function maintainLoopLanes(now = Date.now()): Promise<boolean> {
       `${admissionLabel}, ${eligible} eligible)`);
   }
   const recoveredMissingMcp = await missingMcpRecovery;
-  return recoveredMissingMcp || queued > 0;
+  return recoveredNetwork || recoveredMissingMcp || queued > 0;
 }
 
 let browserLoopResumeFlight: Promise<void> | null = null;
@@ -6173,8 +6210,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         nativeCompletionCandidate(conversationId))
       await settleObservedNativeCompletion(conversationId, repair.sessionId);
     const nativeGoalBlocked = NATIVE_FINAL_SENSITIVE_REPAIRS.has(repair.reason) &&
-      await goalBrowserRecoveryHeld(conversationId, Date.now(),
-        repair.reason === 'goal' || repair.reason === 'automation' ? repair.sessionId : undefined);
+      await repairBrowserRecoveryHeld(conversationId, repair);
     // Tool execution may begin after handout or during the awaited ownership reads above.
     // Recheck at the claim boundary without consuming the offered repair when work is live.
     const approvalBlocked = repair.reason === 'unattributed' && approvalCardWaiting(conversationId);
@@ -6220,8 +6256,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         await attributionRepairAllowed(repair, latestSession) &&
         await assistantRepairCurrent(conversationId, repair);
       const nativeHeld = NATIVE_FINAL_SENSITIVE_REPAIRS.has(repair.reason) &&
-        await goalBrowserRecoveryHeld(conversationId, Date.now(),
-          repair.reason === 'goal' || repair.reason === 'automation' ? repair.sessionId : undefined);
+        await repairBrowserRecoveryHeld(conversationId, repair);
       if (!stillCurrent || nativeHeld || coreBrowserDispatchStopped() ||
           getConfig().ui.automationPaused === true || browserSignedOut() ||
           isChatBlocked(conversationId) || stopRequestedFor(conversationId) ||
@@ -9853,12 +9888,46 @@ async function sweepSleepingWorkerRuntimes(now = Date.now()): Promise<number> {
   return released;
 }
 
+function networkRecoveryCurrent(epoch: number): boolean {
+  return epoch === networkRecoveryEpoch && networkConnectionState === 'connected' &&
+    !bridgeRecovering && !bridgeShutdownRequested && !coreBrowserDispatchStopped() &&
+    getConfig().ui.automationPaused !== true && !browserSignedOut();
+}
+
+/** The existing supervisor spends one durable outage ticket; it never resets a failed action. */
+async function maintainNetworkOutageRecovery(now: number): Promise<boolean> {
+  const episode = networkOutage;
+  let epoch = networkRecoveryEpoch;
+  if (!episode?.resume || episode.suspendedAt !== null || now < episode.startedAt + NETWORK_OUTAGE_RECOVERY_MS ||
+      !networkRecoveryCurrent(epoch) || !browserPresent()) return false;
+  networkOutage = null;
+  epoch = ++networkRecoveryEpoch;
+  // Persist consumption before starting any asynchronous browser reconciliation.
+  try { await persistRecoveryFencesNow(); }
+  catch (error) {
+    if (networkRecoveryCurrent(epoch) && networkOutage === null) networkOutage = episode;
+    logWarn('bridge: network recovery ticket could not be committed; exact work retained');
+    return false;
+  }
+  if (!networkRecoveryCurrent(epoch)) return false;
+  logInfo('bridge: network restored after outage grace; checking at most 16 existing automation transport obligations');
+  const result = await resumeAutomationChats({ mode: 'all', startBrowser: false, maxQueued: 16,
+    lifecycleEpoch: browserLoopResumeEpoch, networkEpoch: epoch, trigger: 'one-hour network recovery' });
+  return result.queued > 0;
+}
+
 function runStaleSwarmSweep(): Promise<boolean> {
   if (staleSweepInFlight) return staleSweepInFlight;
   staleSweepInFlight = (async () => {
     const observedAt = Date.now();
     const fleetPublication = automationSupervisorSnapshot(undefined, observedAt)
-      .then(snapshot => publishFleetAutomationSnapshot(snapshot, observedAt))
+      .then(snapshot => {
+        noticeStalledAutomationChats(snapshot.chats.filter(chat =>
+          !exactAutomaticMainWork(chat.conversationId, chat.sessionId, observedAt) &&
+          runningToolCalls(chat.conversationId) === 0 && settlingToolCalls(chat.conversationId) === 0
+        ), observedAt, getConfig().ui.automationPaused === true);
+        return publishFleetAutomationSnapshot(snapshot, observedAt);
+      })
       .catch((error: unknown) => logWarn(
         `fleet automation alarm publication failed: ${error instanceof Error ? error.message : String(error)}`
       ));
@@ -10143,6 +10212,7 @@ async function startBridgeOnce(epoch: number): Promise<number | null> {
 }
 
 export async function stopBridge(): Promise<void> {
+  cancelRestrictionResume();
   // Fence every observational publisher before any asynchronous close/drain work. A stale sweep
   // resolving after this point will therefore serialize another inactive marker, never revive an
   // intentionally stopped account with old rows.
@@ -10331,7 +10401,8 @@ function commandSnapshot(options: {
     recoveryClaims: pendingRepairClaims(),
     repairTurnBudgets: [...turnRepairSpent].map(([conversationId, spent]) => ({ conversationId, ...spent })),
     manualCloseFences: [...manuallyClosedTabAt]
-      .map(([conversationId, closedAt]) => ({ conversationId, closedAt }))
+      .map(([conversationId, closedAt]) => ({ conversationId, closedAt })),
+    networkOutage: networkOutage ? { ...networkOutage } : null
   };
 }
 
@@ -10812,14 +10883,19 @@ async function retryUnredeemedWorkerCommand(command: Command, why: string): Prom
  * repairs a stalled hydrated page without creating a second handoff or synthetic user message.
  */
 async function retryPreSendResumeCommand(command: Command, why: string): Promise<boolean> {
+  if (command.spec.type !== 'resume' || !commands.includes(command) || command.claimedAt === null) return false;
+  const spec = command.spec;
+  const continuation = continuationForSession(spec.sessionId);
+  if (continuation?.token !== spec.token || !sendUnattempted(continuation.destinationSend)) return false;
   if (command.openAttempts >= MAX_AUTOMATIC_RESUME_OPEN_ATTEMPTS) {
-    const ended = await cancelResumeNow(command.spec.type === 'resume' ? command.spec.sessionId : '',
-      `${why}; the replacement opening used its ${MAX_AUTOMATIC_RESUME_OPEN_ATTEMPTS} safe attempts and the original chat was kept unchanged`);
+    const ended = await cancelResumeNow(spec.sessionId,
+      `${why}; the replacement opening used its ${MAX_AUTOMATIC_RESUME_OPEN_ATTEMPTS} safe attempts and the original chat was kept unchanged`,
+      spec.token, true);
     if (ended) logWarn(`bridge: ended exhausted untouched ${specKey(command.spec)} instead of starting another opening cycle`);
     return ended;
   }
   const retried = await writeCommandTransition(command, async () => {
-    if (!commands.includes(command) || command.spec.type !== 'resume' || command.claimedAt === null) {
+    if (!commands.includes(command) || command.spec !== spec || command.claimedAt === null) {
       return false;
     }
     const entry = continuationByToken(command.spec.token);
@@ -10828,7 +10904,9 @@ async function retryPreSendResumeCommand(command: Command, why: string): Promise
     if (continuationClaimedBy(command.spec.token, command.id) &&
         !(await releaseContinuationDestinationSendNow(command.spec.token, command.id))) return false;
     const deferredAt = Date.now();
-    const availableAt = deferredAt + AUTOMATIC_RESUME_OPEN_RETRY_MS;
+    const delay = entry.automatic && command.openAttempts >= QUICK_AUTOMATIC_RESUME_OPEN_ATTEMPTS
+      ? STALE_RESUME_OPEN_RETRY_MS : AUTOMATIC_RESUME_OPEN_RETRY_MS;
+    const availableAt = deferredAt + delay;
     const record: DurableCommandRecord = {
       ...durableCommand(command),
       availableAt,
@@ -10859,7 +10937,7 @@ async function retryPreSendResumeCommand(command: Command, why: string): Promise
     command.attention = false;
     logWarn(
       `bridge: ${specKey(command.spec)} opened no redeeming ChatGPT page; retrying the same untouched handoff ` +
-      `in ${Math.ceil(AUTOMATIC_RESUME_OPEN_RETRY_MS / 1_000)} second(s) ` +
+      `in ${Math.ceil(delay / 1_000)} second(s) ` +
       `(attempt ${command.openAttempts + 1}/${MAX_AUTOMATIC_RESUME_OPEN_ATTEMPTS})`
     );
     changed();
@@ -10896,6 +10974,7 @@ function queue(spec: CommandSpec, availableAt = Date.now(), preserveAvailableAt 
       existing.owner = null;
       existing.ownerTabLease = null;
       existing.attention = false;
+      existing.openAttempts = 0;
       if (existing.timer) clearTimeout(existing.timer);
       existing.timer = null;
       // A newer handoff for the same chat replaces the older one in place. The queued job
@@ -11189,7 +11268,9 @@ export function cancelResume(sessionId: string): boolean {
  * only then is its browser transport retired. That ordering makes a crash between the two
  * safe: restoreCommands refuses a resume whose authoritative continuation is already aborted.
  */
-export async function cancelResumeNow(sessionId: string, reason = 'cancelled', expectedToken?: string): Promise<boolean> {
+export async function cancelResumeNow(
+  sessionId: string, reason = 'cancelled', expectedToken?: string, destinationPreSendOnly = false
+): Promise<boolean> {
   const cancelOwned = async (): Promise<boolean> => {
     // Public controls name the job they displayed, not whatever became current while an
     // IPC/session lookup or another command publication awaited. Internal lifecycle callers
@@ -11210,7 +11291,7 @@ export async function cancelResumeNow(sessionId: string, reason = 'cancelled', e
       queued.spec.sessionId === sessionId && queued.spec.token === queuedToken;
     let aborted = false;
     if (entry && entry.state !== 'aborted') {
-      aborted = await abortContinuationNow(entry.token, reason);
+      aborted = await abortContinuationNow(entry.token, reason, destinationPreSendOnly);
       const afterAbort = continuationByToken(entry.token);
       if (aborted || afterAbort?.state === 'aborted' || afterAbort?.state === 'committing' || afterAbort?.state === 'committed')
         attributedFallbackCompactions.delete(entry.token);
@@ -11218,6 +11299,7 @@ export async function cancelResumeNow(sessionId: string, reason = 'cancelled', e
     } else if (entry?.state === 'aborted') {
       attributedFallbackCompactions.delete(entry.token);
     }
+    if (destinationPreSendOnly && !aborted) return false;
     if (!entry && !queued) return false;
 
     if (queued && sameCommand()) {
@@ -12501,32 +12583,38 @@ async function persistNativeCompletionCheckpoint(sessionId: string, conversation
 async function reconcileOwnedNativeRequestIdentity(conversationId: string, sessionId: string): Promise<boolean> {
   const original = nativeCompletionCheckpoint(sessionId, conversationId);
   const native = settledNativeTurnCandidate(conversationId), snapshot = coreBrowserEvidence(conversationId);
+  const historical = Boolean(native && original && native.sourceUserMessageId !== original.sourceUserMessageId);
+  const historyIdle = () => !historical || (inFlightMcpRequests() === 0 && runningToolCalls(null) === 0 &&
+    settlingToolCalls(null) === 0 && unifiedExecManager.listProcesses().length === 0 &&
+    observationWritesInFlight === 0 && !settledNativeObserverBusy(conversationId));
   if (!original || original.reason === 'inventory-incomplete' || original.allCoreRequestIds !== null ||
       original.calls < 1 || original.codeCalls !== 0 || !original.sourceUserMessageId ||
       !original.coreCallMessageIds || original.coreCallMessageIds.length !== original.calls ||
-      !native || native.sourceUserMessageId !== original.sourceUserMessageId ||
-      native.coreCallMessageIds.length !== original.calls || native.codeCallMessageIds.length !== 0 ||
-      original.coreCallMessageIds.some((id, at) => native.coreCallMessageIds[at] !== id) ||
-      !snapshot?.ordinaryFinal ||
-      snapshot.ordinaryFinal.allCoreRequestIds != null && snapshot.ordinaryFinal.allCoreRequestIds.length !== original.calls) return false;
+      !native || !snapshot?.ordinaryFinal || !historyIdle() ||
+      (!historical && (native.coreCallMessageIds.length !== original.calls || native.codeCallMessageIds.length !== 0 ||
+        original.coreCallMessageIds.some((id, at) => native.coreCallMessageIds[at] !== id) ||
+        snapshot.ordinaryFinal.allCoreRequestIds != null && snapshot.ordinaryFinal.allCoreRequestIds.length !== original.calls))) return false;
   const profile = getActiveInstanceRuntime().profile.id;
   const current = () => {
     const next = settledNativeTurnCandidate(conversationId), observed = coreBrowserEvidence(conversationId);
-    return getActiveInstanceRuntime().profile.id === profile &&
+    return getActiveInstanceRuntime().profile.id === profile && historyIdle() &&
       JSON.stringify(nativeCompletionCheckpoint(sessionId, conversationId)) === JSON.stringify(original) &&
       next?.documentId === native.documentId && next.navigationEpoch === native.navigationEpoch &&
       next.sourceUserMessageId === native.sourceUserMessageId && next.finalMessageId === native.finalMessageId &&
       JSON.stringify(next.coreCallMessageIds) === JSON.stringify(native.coreCallMessageIds) &&
+      JSON.stringify(next.codeCallMessageIds) === JSON.stringify(native.codeCallMessageIds) &&
       JSON.stringify(observed?.ordinaryFinal?.allCoreRequestIds) === JSON.stringify(snapshot.ordinaryFinal!.allCoreRequestIds);
   };
   try {
-    if ((await findSessionByConversation(conversationId, { requireUnique: true }))?.id !== sessionId ||
+    const session = await findSessionByConversation(conversationId, { requireUnique: true });
+    if (session?.id !== sessionId || (historical && session.activeTurnId) ||
         await conversationWasSuperseded(conversationId)) return false;
     const checkpoint = await readSessionNativeCompletionFenceCheckpoint(sessionId, conversationId, profile);
     if (JSON.stringify(checkpoint?.fence) !== JSON.stringify(original)) return false;
     const rows = await readEvents(sessionId, { requireIntegrity: true });
-    const source = rows.findLast(row => row.kind === 'user_message');
-    if (source?.kind !== 'user_message' || source.messageId !== original.sourceUserMessageId ||
+    const sources = rows.filter(row => row.kind === 'user_message' && row.messageId === original.sourceUserMessageId);
+    const source = sources[0];
+    if (sources.length !== 1 || source?.kind !== 'user_message' ||
         source.message.truncated || !source.message.text.trim() || source.unverifiedAuthorshipClaim ||
         !Number.isFinite(source.semanticUpdatedAt) || source.semanticUpdatedAt! > original.observedAt ||
         source.time > original.observedAt) return false;
@@ -12534,6 +12622,33 @@ async function reconcileOwnedNativeRequestIdentity(conversationId: string, sessi
     if (final?.kind !== 'assistant_message' || final.messageId !== native.finalMessageId ||
         final.providerMessageId !== native.finalMessageId || final.message.truncated ||
         (final.origin ?? final.seq) <= (source.origin ?? source.seq)) return false;
+    const latestUser = rows.findLast(row => row.kind === 'user_message');
+    if (latestUser?.kind !== 'user_message' || latestUser.messageId !== native.sourceUserMessageId) return false;
+    if (historical) {
+      // A later answer cannot supply A's identity. Require A's own unique
+      // completed provider final inside its original canonical question span.
+      const nextUser = rows.filter(row => row.kind === 'user_message' && positionOf(row) > positionOf(source))
+        .reduce<SessionEvent | null>((first, row) => !first || positionOf(row) < positionOf(first) ? row : first, null);
+      if (!nextUser || latestUser.message.truncated || latestUser.unverifiedAuthorshipClaim ||
+          !latestUser.message.text.trim() || !final.message.text.trim() ||
+          positionOf(latestUser) <= positionOf(source) || positionOf(final) <= positionOf(latestUser)) return false;
+      const finals = rows.filter(row => row.kind === 'assistant_message' && row.final && row.state === 'final' &&
+        positionOf(row) > positionOf(source) && positionOf(row) < positionOf(nextUser));
+      const ended = finals[0];
+      const starts = ended?.kind === 'assistant_message' ? rows.filter(row => row.kind === 'turn_start' &&
+        row.turnId === ended.turnId && positionOf(row) > positionOf(source) && positionOf(row) < positionOf(ended)) : [];
+      // Presentation can sort same-turn ends by provider time. Durable position
+      // owns this boundary: a later Stop or reopened generation cannot borrow an
+      // older completed end, even when its clock moved backwards.
+      const boundary = rows.filter(row => (row.kind === 'turn_start' || row.kind === 'turn_end') &&
+        positionOf(row) > positionOf(source) && positionOf(row) < positionOf(nextUser))
+        .reduce<SessionEvent | null>((last, row) => !last || positionOf(row) > positionOf(last) ||
+          positionOf(row) === positionOf(last) && row.seq > last.seq ? row : last, null);
+      if (finals.length !== 1 || ended?.kind !== 'assistant_message' || !ended.messageId ||
+          ended.providerMessageId !== ended.messageId || !ended.turnId || ended.message.truncated ||
+          !ended.message.text.trim() || starts.length !== 1 || boundary?.kind !== 'turn_end' ||
+          boundary.turnId !== ended.turnId || boundary.outcome !== 'completed' || positionOf(boundary) <= positionOf(ended)) return false;
+    }
     const inputCurrent = async () => !(await listInputs()).some(row =>
       (row.sessionId === sessionId || row.deliveredSessionId === sessionId ||
        row.decisionSourceSessionId === sessionId || row.conversationId === conversationId) &&
@@ -12550,7 +12665,7 @@ async function reconcileOwnedNativeRequestIdentity(conversationId: string, sessi
       const row = matches[0], call = row?.call;
       if (matches.length !== 1 || !row || !call || row.source !== 'mcp' ||
           call.conversationId !== conversationId ||
-          snapshot.ordinaryFinal.allCoreRequestIds != null && call.requestId !== snapshot.ordinaryFinal.allCoreRequestIds[at] ||
+          (!historical && snapshot.ordinaryFinal.allCoreRequestIds != null && call.requestId !== snapshot.ordinaryFinal.allCoreRequestIds[at]) ||
           !call.requestId || !/^[a-f0-9]{64}$/.test(call.invocationSha256 ?? '') ||
           !/^[a-f0-9]{48}$/.test(call.resultReceiptId ?? '') || !isReturnedToolOutcome(call.outcome) ||
           call.process && !call.process.completedAt || !ownedReceiptHeaderCompatible(call, sessionId)) return false;
@@ -12571,9 +12686,9 @@ async function reconcileOwnedNativeRequestIdentity(conversationId: string, sessi
     // immediately before the synchronous identity-only publication.
     if (JSON.stringify(await readEvents(sessionId, { requireIntegrity: true })) !== JSON.stringify(rows) || !current()) return false;
     const pending = snapshot.pendingCompletion!;
-    if (!retainNativeRequestIdsFromDurableReceipts(conversationId, pending, requestIds)) return false;
+    if (!retainNativeRequestIdsFromDurableReceipts(conversationId, pending, requestIds, historical ? native : undefined)) return false;
     if (!await persistNativeCompletionCheckpoint(sessionId, conversationId)) return false;
-    logInfo(`native Core original request identity recovered from exact owned execution receipts; pageRequestProjection=${snapshot.ordinaryFinal.allCoreRequestIds == null ? 'omitted' : 'matched'}; original result debt retained`);
+    logInfo(`native Core original request identity recovered from exact owned execution receipts; pageRequestProjection=${historical ? 'completed-successor-veto-only' : snapshot.ordinaryFinal.allCoreRequestIds == null ? 'omitted' : 'matched'}; original result debt retained`);
     return true;
   } catch { return false; }
 }
@@ -12633,12 +12748,20 @@ async function settleObservedNativeCompletionNow(conversationId: string, session
     const hasReceipt = recorded.some(event => event.kind === 'tool_call' && event.call.resultReceiptId);
     const receiptCatalog = hasReceipt ? await receiptCatalogCustodySnapshot() : null;
     const receiptWitnesses: Parameters<typeof receiptDurableOwnersUnique>[1][number][] = [];
+    // This is one immutable journal snapshot for one completion attempt. Index
+    // exact native owners once; retain every duplicate so ambiguity still vetoes
+    // admission. Never cache these rows across the awaited custody checks below.
+    const requestOwnedByNativeId = new Map<string, Extract<SessionEvent, { kind: 'tool_call' }>[]>();
+    for (const row of recorded) {
+      if (row.kind !== 'tool_call' || row.call.attributionMethod !== 'request_id' || !row.call.nativeCallMessageId) continue;
+      const bucket = requestOwnedByNativeId.get(row.call.nativeCallMessageId) ?? [];
+      bucket.push(row);
+      requestOwnedByNativeId.set(row.call.nativeCallMessageId, bucket);
+    }
     for (const [index, requestId] of completion.allCoreRequestIds.entries()) {
       const correlation = requestCorrelation(requestId);
       const nativeId = completion.coreCallMessageIds[index]!;
-      const ownedRows = recorded.filter((row): row is Extract<SessionEvent, { kind: 'tool_call' }> =>
-        row.kind === 'tool_call' && row.call.nativeCallMessageId === nativeId &&
-        row.call.attributionMethod === 'request_id');
+      const ownedRows = requestOwnedByNativeId.get(nativeId) ?? [];
       const owned = ownedRows.length === 1 ? ownedRows[0] : null;
       if (owned) {
         if (correlation?.conversationId !== conversationId || correlation.sessionId !== sessionId ||
@@ -13354,13 +13477,24 @@ function noteBrowserRecoveryHold(conversationId: string, repair: Repair, cause: 
 }
 
 /** The existing Goal/automation transport may reuse its exact forward permission.
- * Assistant-error Retry and compaction never receive that optional source authority.
+ * A current native Retry has its own bounded error/control authority, not tool completion.
  * Only the due repair owner requests diagnosis; passive status readers remain silent. */
 async function goalBrowserRecoveryHeld(conversationId: string, now = Date.now(), forwardSessionId?: string,
-  onHold?: (cause: BrowserRecoveryHold) => void): Promise<boolean> {
+  onHold?: (cause: BrowserRecoveryHold) => void,
+  options?: { skipEvidenceWait?: boolean }): Promise<boolean> {
   const refuse = (cause: BrowserRecoveryHold): true => { onHold?.(cause); return true; };
   if (runningToolCalls(conversationId) > 0) return refuse('tools');
   if (settlingToolCalls(conversationId) > 0) return refuse('settling');
+  if (options?.skipEvidenceWait === true) {
+    // Headerless work may belong to this failed chat. Never turn missing attribution into
+    // physical idleness or retry while an anonymous call/process can still be executing.
+    if (inFlightMcpRequests() > 0 || runningToolCalls(null) > 0 ||
+        unifiedExecManager.listProcesses().length > 0) return refuse('tools');
+    if (settlingToolCalls(null) > 0) return refuse('settling');
+    // Known requests under the current native question keep the existing completion/opt-in
+    // proof. Only older/unidentified receipt debt is independent of this exact Retry.
+    if (!nativeRetryCurrentRequestUnresolved(conversationId)) return false;
+  }
   if (nativeFinalEvidenceWait(coreBrowserEvidence(conversationId), now) === null) return false;
   const pending = forwardSessionId ? goalPendingReplyFor(conversationId) : null;
   if (!pending || pending.sessionId !== forwardSessionId) return refuse('native_completion');
@@ -13369,6 +13503,23 @@ async function goalBrowserRecoveryHeld(conversationId: string, now = Date.now(),
       ? { draftToken: goalViewFor(conversationId)!.token } : {})
   });
   return allowed ? false : refuse('source_permission');
+}
+
+/** The exact native Retry owner does not need a drafted Loop reply. Its current error,
+ * claim, native control and Send receipt are checked independently at every boundary.
+ * Preserve old result debt; it cannot authorize Retry, Stop, reload or another prompt. */
+function repairBrowserRecoveryHeld(conversationId: string, repair: Repair, now = Date.now(),
+  onHold?: (cause: BrowserRecoveryHold) => void): Promise<boolean> {
+  return goalBrowserRecoveryHeld(conversationId, now, repair.sessionId, onHold,
+    repair.reason === 'assistant-error' && repair.action === 'retry'
+      ? { skipEvidenceWait: true } : undefined);
+}
+
+function nativeRetryCurrentRequestUnresolved(conversationId: string): boolean {
+  const evidence = coreBrowserEvidence(conversationId);
+  const current = evidence?.ordinaryFinal, pending = evidence?.pendingCompletion;
+  return Boolean(pending?.sourceUserMessageId &&
+    pending.sourceUserMessageId === current?.sourceUserMessageId && pending.openRequestIds?.length);
 }
 
 /** Both UIs describe the same existing reply and work deadlines, without another clock owner. */
@@ -13400,6 +13551,13 @@ async function goalWaitFor(conversationId: string, sessionId: string, now = Date
     const repair = repairsInFlight.get(conversationId);
     if (!wait || repair?.sessionId !== sessionId || repair.reason !== 'assistant-error' ||
         repair.action !== 'retry' || repair.state !== 'queued' || repair.attempts !== 0) return wait;
+    if (!nativeRetryCurrentRequestUnresolved(conversationId) && inFlightMcpRequests() === 0 &&
+        runningToolCalls(null) === 0 && settlingToolCalls(null) === 0 &&
+        unifiedExecManager.listProcesses().length === 0) return {
+      reason: 'pickup' as const,
+      detail: 'ChatGPT\u2019s native Retry is queued for this exact failed message. Earlier result-verification debt remains retained; it does not block this Retry.',
+      nextAction: 'Let the existing native Retry owner act. Do not resend the task or create a second recovery request.'
+    };
     return { ...wait, detail: [wait.detail,
       'CoS queued ChatGPT’s native Retry, but the unresolved tool results block it. Retry was not clicked.'
     ].filter(Boolean).join(' ') };
@@ -14401,15 +14559,7 @@ async function retireBoundedRepairForExactWork(
  * Written only once the browser confirms the action, so a handout nobody carried out spends
  * nothing.
  */
-const turnRepairSpent = new Map<string, {
-  sessionId: string;
-  turnKey: string;
-  reload: boolean;
-  retry: boolean;
-  compact: boolean;
-  /** A Retry crossed its irreversible click boundary but violated the exact model/effort contract. */
-  modelBlocked: boolean;
-}>();
+const turnRepairSpent = new Map<string, Omit<DurableRepairTurnBudget, 'conversationId'>>();
 
 async function assistantRepairSource(sessionId: string): Promise<NonNullable<Repair['assistantSource']>> {
   const question = await readLatestUserMessage(sessionId);
@@ -14438,7 +14588,7 @@ async function assistantRepairCurrent(conversationId: string, repair: Repair): P
   if (!spent || spent.sessionId !== repair.sessionId || spent.turnKey !== source.key)
     return repair.action === 'reload' || repair.action === 'retry' || repair.action === 'compact' || repair.action === 'continue';
   return repair.action === 'retry' ? !spent.retry :
-    repair.action === 'continue' ? !(spent.retry && spent.reload) :
+    repair.action === 'continue' ? !spent.stopRefused && !(spent.retry && spent.reload) :
     repair.action === 'compact' ? !(spent.reload || spent.compact) : !spent.reload;
 }
 
@@ -14502,7 +14652,7 @@ function queueBrowserRecovery(
     if (sameSpentTurn) {
       if (spent.modelBlocked) return false;
       if (requestedAction === 'retry' ? spent.retry :
-        requestedAction === 'continue' ? (spent.retry && spent.reload) :
+        requestedAction === 'continue' ? spent.stopRefused || (spent.retry && spent.reload) :
         requestedAction === 'compact' ? (spent.reload || spent.compact) : spent.reload)
         return false;
     } else if (requestedAction !== 'reload' && requestedAction !== 'retry' && requestedAction !== 'compact' && requestedAction !== 'continue') return false;
@@ -14629,11 +14779,17 @@ function queueBrowserRecovery(
  * episode, while background polling cannot spin the same dead tab forever.
  */
 async function recycleStaleAutomationRepairs(now = Date.now()): Promise<void> {
+  // Network elapsed time cannot spend a handed token or its bounded attempt budget.
+  if (networkOutage && networkOutage.suspendedAt !== null) return;
   let moved = false;
   for (const [conversationId, repair] of [...repairsInFlight]) {
     if (!BOUNDED_AUTOMATION_REPAIRS.has(repair.reason) || repair.state === 'queued' || repairAttentionBlocked(repair)) continue;
-    const anchor = repair.state === 'handed' ? repair.handedAt : repair.confirmedAt;
-    const lifetime = repair.state === 'handed' ? AUTOMATION_REPAIR_RECEIPT_MS : AUTOMATION_REPAIR_ACTIVITY_MS;
+    const phase = repair.state;
+    const clock = phase === 'handed' ? 'handedAt' : 'confirmedAt';
+    const anchor = repair[clock];
+    const lifetime = phase === 'handed' ? AUTOMATION_REPAIR_RECEIPT_MS : AUTOMATION_REPAIR_ACTIVITY_MS;
+    const sameClock = () => networkOutage?.suspendedAt == null &&
+      repairsInFlight.get(conversationId) === repair && repair.state === phase && repair[clock] === anchor;
     if (anchor === undefined) {
       if (repair.state === 'handed') repair.handedAt = now;
       else repair.confirmedAt = now;
@@ -14675,6 +14831,7 @@ async function recycleStaleAutomationRepairs(now = Date.now()): Promise<void> {
       // attempt one was queued made the UI claim a 30-minute cooldown while work had not even
       // crossed the browser handout boundary; omitting it here let lane refill mint a new
       // two-attempt episode every maintenance sweep.
+      if (!sameClock()) continue;
       unattendedRecoveryAt.set(conversationId, now);
       try {
         await persistRecoveryFencesNow();
@@ -14712,6 +14869,7 @@ async function recycleStaleAutomationRepairs(now = Date.now()): Promise<void> {
       moved = true;
       continue;
     }
+    if (!sameClock()) continue;
     repair.state = 'queued';
     // The prior browser action was either unclaimed or positively receipted before this quiet
     // retry. Its one-time claim cannot carry into the fresh handout/token.
@@ -14904,7 +15062,8 @@ function noteRecoveryActivity(conversationId: string, verifiedClaimProgress = tr
       reload: restored.action !== 'retry' || same && prior.reload,
       retry: restored.action === 'retry' || restored.action === 'continue' || same && prior.retry,
       compact: restored.action === 'compact' || same && prior.compact,
-      modelBlocked: same && prior.modelBlocked
+      modelBlocked: same && prior.modelBlocked,
+      ...(same && prior.stopRefused ? { stopRefused: true } : {})
     });
   }
   // Real work opens a new unattended-recovery episode. Empty status polling never reaches here.
@@ -14923,18 +15082,102 @@ function noteRecoveryActivity(conversationId: string, verifiedClaimProgress = tr
   }
 }
 
+/**
+ * Bounded automatic resume authority for a restriction pause this process itself applied.
+ *
+ * The owner asked Loop work to keep running without a human Resume wave. The provider still
+ * owns the restriction, so this never sends early, never widens the queue, and never repeats
+ * forever: the reliability notice carries the provider's own retry minute, every other exact
+ * restriction waits one conservative interval, and each conversation gets at most three
+ * automatic resumes per six-hour episode before the ordinary manual Resume is required again.
+ * A manual Resume, manual pause, or a restriction reappearance always cancels/retires this
+ * schedule first; reappearance simply renews it with the next bounded attempt.
+ */
+const RESTRICTION_RESUME_EPISODE_MS = 6 * 60 * 60_000;
+const RESTRICTION_RESUME_MAX_ATTEMPTS = 3;
+const RESTRICTION_RESUME_DEFAULT_MS = 60 * 60_000;
+type RestrictionResume = { reason: 'unusual' | 'hourly' | 'usage' | 'reliability'; resumeAt: number; timer: ReturnType<typeof setTimeout> | null; armed: boolean };
+const restrictionResumes = new Map<string, RestrictionResume>();
+const restrictionResumeEpisodes = new Map<string, { count: number; at: number }>();
+
+function cancelRestrictionResume(conversationId?: string): void {
+  const retire = (id: string) => {
+    const resume = restrictionResumes.get(id);
+    if (!resume) return;
+    resume.armed = false;
+    if (resume.timer) clearTimeout(resume.timer);
+    restrictionResumes.delete(id);
+  };
+  if (conversationId) retire(conversationId);
+  else restrictionResumes.forEach((_, id) => retire(id));
+}
+
+function scheduleRestrictionResume(conversationId: string, reason: RestrictionResume['reason'], delayMs: number): void {
+  cancelRestrictionResume(conversationId);
+  const episode = restrictionResumeEpisodes.get(conversationId);
+  const now = Date.now();
+  for (const [id, prior] of restrictionResumeEpisodes)
+    if (now - prior.at >= RESTRICTION_RESUME_EPISODE_MS) restrictionResumeEpisodes.delete(id);
+  if (!restrictionResumeEpisodes.has(conversationId) && restrictionResumeEpisodes.size >= MAX_RECOVERY_FENCES) {
+    logWarn('bridge: restriction resume capacity reached; account remains paused');
+    return;
+  }
+  const attempts = episode && now - episode.at < RESTRICTION_RESUME_EPISODE_MS ? episode.count : 0;
+  if (attempts >= RESTRICTION_RESUME_MAX_ATTEMPTS) {
+    logWarn(`bridge: ${reason} restriction auto-resume exhausted its ${RESTRICTION_RESUME_MAX_ATTEMPTS} bounded attempts for this conversation episode; manual Resume required`);
+    return;
+  }
+  restrictionResumeEpisodes.set(conversationId, { count: attempts + 1, at: attempts ? episode!.at : now });
+  const resume: RestrictionResume = { reason, resumeAt: now + delayMs, timer: null, armed: true };
+  const lifecycle = bridgeLifecycleEpoch;
+  const profileId = getActiveInstanceRuntime().profile.id;
+  const current = () => restrictionResumes.get(conversationId) === resume && resume.armed &&
+    lifecycle === bridgeLifecycleEpoch && !bridgeShutdownRequested &&
+    getActiveInstanceRuntime().profile.id === profileId;
+  resume.timer = setTimeout(() => {
+    resume.timer = null;
+    if (!current()) return;
+    // Settings writes yield. A later manual pause, shutdown or account change
+    // revokes this owner both inside the serialized write and before dispatch.
+    void updateConfig(config => current() && config.ui.automationPaused === true
+      ? { ...config, ui: { ...config.ui, automationPaused: false } } : config)
+      .then(() => {
+        if (!current() || getConfig().ui.automationPaused === true) return;
+        logInfo(`bridge: native ${reason} restriction window ended; releasing the account's saved work`);
+        applyAutomationPause(false);
+      })
+      .catch(error => logWarn(`bridge: automatic restriction resume failed; the durable pause is preserved — ${error instanceof Error ? error.message : String(error)}`));
+  }, Math.max(1, delayMs));
+  resume.timer.unref?.();
+  restrictionResumes.set(conversationId, resume);
+  logWarn(`bridge: native ${reason} restriction; automation paused, saved work preserved, automatic resume scheduled in ${Math.round(delayMs / 60_000)} minute(s) (bounded attempt ${attempts + 1}/${RESTRICTION_RESUME_MAX_ATTEMPTS})`);
+}
+
 /** Reuse the durable instance pause for exact native account restrictions, not transport errors. */
-async function pauseForNativeAccountRestriction(text: string): Promise<boolean> {
+async function pauseForNativeAccountRestriction(text: string, conversationId?: string): Promise<boolean> {
   const notice = text.replace(/\s+/g, ' ').trim();
   const unusual = /^our systems have detected unusual activity coming from your system\. please try again later\.?$/i.test(notice);
   const hourly = /^you['’]ve reached our limit of messages per hour\. please try again later\.?$/i.test(notice);
   const usage = /^you['’]ve hit your limit\. please try again later\.?$/i.test(notice);
-  const reliability = /^we['’]re doing a quick check to keep chatgpt reliable\. try again in \d{1,3} minutes?\.?$/i.test(notice);
+  const reliability = /^we['’]re doing a quick check to keep chatgpt reliable\. try again in (\d{1,3}) minutes?\.?$/i.exec(notice);
   if (!unusual && !hourly && !usage && !reliability) return false;
+  const reason: RestrictionResume['reason'] = hourly ? 'hourly' : usage ? 'usage' : reliability ? 'reliability' : 'unusual';
   if (getConfig().ui.automationPaused !== true) {
-    await updateConfig(config => ({ ...config, ui: { ...config.ui, automationPaused: true } }));
+    const generation = deliveryGeneration;
+    let applied = false;
+    await updateConfig(config => {
+      if (config.ui.automationPaused === true) return config;
+      applied = true;
+      return { ...config, ui: { ...config.ui, automationPaused: true } };
+    });
+    const stillOwned = applied && generation === deliveryGeneration && !bridgeShutdownRequested;
     applyAutomationPause(true);
-    logWarn(`bridge: native ${hourly ? 'hourly message limit' : usage ? 'usage limit' : reliability ? 'temporary reliability check' : 'unusual-activity restriction'}; this account automation paused, saved work preserved; verify provider access before Resume`);
+    // The provider stated its own retry minute for the reliability check; every other exact
+    // restriction gets one conservative bounded interval. Without an owning conversation the
+    // existing manual-only pause behavior is preserved exactly as before.
+    if (conversationId && stillOwned && !unusual) scheduleRestrictionResume(conversationId, reason,
+      reliability ? Number(reliability[1]) * 60_000 + 30_000 : RESTRICTION_RESUME_DEFAULT_MS);
+    else logWarn(`bridge: native ${reason} restriction; this account automation paused, saved work preserved; verify provider access before Resume`);
   }
   return true;
 }
@@ -14955,7 +15198,7 @@ async function noteRecoveryObservations(
   // Elapsed time alone never authorizes lifting a provider restriction.
   for (const item of observations) {
     if (item.kind === 'chat_error' && item.blocking === true && item.recoverable !== true &&
-        await pauseForNativeAccountRestriction(item.text ?? '')) return;
+        await pauseForNativeAccountRestriction(item.text ?? '', conversationId)) return;
   }
   if (observations.some(item => (item.kind === 'chat_error' && item.recoverable === false && item.text === CONVERSATION_DELETED) ||
       (item.kind === 'turn_end' && item.outcome === 'failed' && item.detail === CONVERSATION_DELETED))) {
@@ -15251,6 +15494,15 @@ async function noteRecoveryObservations(
       if (current?.conversationId !== conversationId ||
           (latestStart?.turnId && latestStart.turnId !== item.turnId) ||
           (current.activeTurnId && current.activeTurnId !== item.turnId)) continue;
+      if (item.reason === 'watchdog_stalled' && current.activeTurnId === item.turnId) {
+        // A page watchdog only measures visible silence. Exact Core work can
+        // have reached Main before the watchdog, even if Chrome missed the update.
+        // Keep the incumbent silence deadline and process real transport errors below.
+        const grant = activeUntil.get(conversationId);
+        if (approvalCardWaiting(conversationId) ||
+            (grant?.sessionId === sessionId && grant.turnId === item.turnId &&
+              grant.mcpBacked && !grant.thinkingFailed && grant.until > Date.now())) continue;
+      }
     }
     // Resume can legitimately return 404 on an idle page. Only the recorder's exact current
     // generation may own this recovery fact; a stale tab or completed final cannot claim it.
@@ -15325,7 +15577,7 @@ async function noteRecoveryObservations(
     const action: Repair['action'] = nativeRetryAvailable && (!sameSpentTurn || !spent.retry)
       ? 'retry'
       : interruptedStream && !goalWorkerChat(conversationId) && goalActiveFor(conversationId) &&
-          (!sameSpentTurn || !(spent.retry && spent.reload)) ? 'continue'
+          (!sameSpentTurn || (!spent.stopRefused && !(spent.retry && spent.reload))) ? 'continue'
       : interrupted && !goalWorkerChat(conversationId) && (!sameSpentTurn || !(spent.reload || spent.compact))
         ? 'compact'
         : 'reload';
@@ -17327,8 +17579,7 @@ async function takePendingRepairs(
     if (NATIVE_FINAL_SENSITIVE_REPAIRS.has(repair.reason)) {
       if (nativeCompletionCandidate(conversationId))
         await settleObservedNativeCompletion(conversationId, repair.sessionId);
-      if (await goalBrowserRecoveryHeld(conversationId, now,
-        repair.reason === 'goal' || repair.reason === 'automation' ? repair.sessionId : undefined,
+      if (await repairBrowserRecoveryHeld(conversationId, repair, now,
         cause => noteBrowserRecoveryHold(conversationId, repair, cause))) continue;
     }
     // A compaction pickup owns a durable ticket and the page intentionally stops native
@@ -17391,8 +17642,7 @@ async function takePendingRepairs(
     // Only an offer first reserved by THIS pass may return to queued: a previously handed
     // token remains under its original claim/receipt owner, not a second issuance.
     if (NATIVE_FINAL_SENSITIVE_REPAIRS.has(repair.reason) &&
-        await goalBrowserRecoveryHeld(conversationId, Date.now(),
-          repair.reason === 'goal' || repair.reason === 'automation' ? repair.sessionId : undefined)) {
+        await repairBrowserRecoveryHeld(conversationId, repair)) {
       if (!unclaimedError && repairsInFlight.get(conversationId) === repair &&
           repair.state === 'handed' && !repair.claimed) {
         repair.state = 'queued';
@@ -17419,8 +17669,7 @@ async function takePendingRepairs(
       continue;
     }
     if (NATIVE_FINAL_SENSITIVE_REPAIRS.has(repair.reason) &&
-        await goalBrowserRecoveryHeld(conversationId, Date.now(),
-          repair.reason === 'goal' || repair.reason === 'automation' ? repair.sessionId : undefined)) {
+        await repairBrowserRecoveryHeld(conversationId, repair)) {
       // Native evidence or an exact live tool may have arrived WHILE the
       // progress/session writes above yielded. This handout was never shown
       // to Chrome, so refund its attempt and invalidate its unpublished token
@@ -17557,7 +17806,7 @@ async function confirmRepair(token: string, action: 'reloaded' | 'reopened' | 'r
           (repair.reason === 'assistant-error'
             ? await assistantRepairCurrent(conversationId, repair)
             : compactionRepairCurrent(conversationId, repair, session));
-        const nativeHeld = await goalBrowserRecoveryHeld(conversationId);
+        const nativeHeld = await repairBrowserRecoveryHeld(conversationId, repair);
         if (!claimed || !current || nativeHeld || coreBrowserDispatchStopped() ||
             getConfig().ui.automationPaused === true || browserSignedOut() ||
             isChatBlocked(conversationId) || stopRequestedFor(conversationId) ||
@@ -17754,7 +18003,8 @@ async function confirmRepair(token: string, action: 'reloaded' | 'reopened' | 'r
             reload: repair.action === 'reload' || repair.action === 'compact' || (same && current?.reload === true),
             retry: repair.action === 'retry' || (same && current?.retry === true),
             compact: repair.action === 'compact' || (same && current?.compact === true),
-            modelBlocked: same && current?.modelBlocked === true
+            modelBlocked: same && current?.modelBlocked === true,
+            ...(same && current?.stopRefused ? { stopRefused: true } : {})
           });
         }
       }
@@ -17796,15 +18046,21 @@ async function failRepairAttempt(
     if (repair.reason === 'assistant-error' && repair.assistantSource) {
       const current = turnRepairSpent.get(conversationId);
       const same = current?.sessionId === repair.sessionId && current.turnKey === repair.assistantSource.key;
-      const spent = {
+      // This exact content reply is emitted before Stop or Send when its card
+      // is already gone. Retire Stop for this turn without charging native Retry.
+      const preStopRefused = repair.action === 'continue' && action === 'stopped' && repair.claimed === true &&
+        !repair.receiptUnverified && failureCode === 'interruption_not_visible';
+      const spent: Omit<DurableRepairTurnBudget, 'conversationId'> = {
         sessionId: repair.sessionId,
         turnKey: repair.assistantSource.key,
         // Compact & Resume spends the reload-class fallback even when its native action fails.
         // Match the confirmed-action receipt path; failure must not authorize a third action.
-        reload: repair.action === 'reload' || repair.action === 'compact' || repair.action === 'continue' || (same && current?.reload === true),
-        retry: repair.action === 'retry' || repair.action === 'continue' || (same && current?.retry === true),
+        reload: repair.action === 'reload' || repair.action === 'compact' ||
+          (repair.action === 'continue' && !preStopRefused) || (same && current?.reload === true),
+        retry: repair.action === 'retry' || (repair.action === 'continue' && !preStopRefused) || (same && current?.retry === true),
         compact: repair.action === 'compact' || (same && current?.compact === true),
-        modelBlocked: same && current?.modelBlocked === true
+        modelBlocked: same && current?.modelBlocked === true,
+        ...(preStopRefused || same && current?.stopRefused ? { stopRefused: true } : {})
       };
       turnRepairSpent.set(conversationId, spent);
       if (repair.action === 'retry' && !spent.reload && !spent.compact && !unattendedRecoveryAt.has(conversationId)) {
@@ -17946,7 +18202,8 @@ async function deferRepairAttempt(
           reload: same && current?.reload === true,
           retry: true,
           compact: same && current?.compact === true,
-          modelBlocked: true
+          modelBlocked: true,
+          ...(same && current?.stopRefused ? { stopRefused: true } : {})
         });
       } else if (!modelBlock.retrySpent) {
         repair.attempts = Math.max(0, repair.attempts - 1);
@@ -18367,14 +18624,25 @@ function admissionBlock(command: Command, now = Date.now()): { key: string; dela
   if (command.availableAt > now) {
     const delay = command.availableAt - now;
     const retryingWorker = command.spec.type === 'worker' && command.openAttempts > 0 && command.lastError;
+    const retryingResume = command.spec.type === 'resume' && command.openAttempts > 0;
     return {
       key: `stagger:${command.id}:${command.availableAt}`,
       delay,
       message: retryingWorker
         ? `the previous worker tab did not connect; retrying its untouched command in ${Math.ceil(delay / 1000)} second(s)`
-        : command.spec.type === 'worker'
+        : retryingResume
+          ? 'The same saved handoff is queued for a bounded browser retry.'
+          : command.spec.type === 'worker'
           ? `another Prime's worker family is opening first; this family's tabs start in ${Math.ceil(delay / 1000)} second(s)`
           : `bulk fresh-copy is spacing new chats; next opening in ${Math.ceil(delay / 1000)} second(s)`
+    };
+  }
+  if (command.spec.type === 'resume' && command.openAttempts === QUICK_AUTOMATIC_RESUME_OPEN_ATTEMPTS &&
+      (networkConnectionState === 'offline' || browserSignedOut())) {
+    return {
+      key: 'handoff-transport-unavailable',
+      delay: ADMISSION_RECHECK_MS,
+      message: 'The last handoff opening is waiting for an available, signed-in browser.'
     };
   }
   const modelRetryAt = commandModelRetryUntil.get(command.id) ?? 0;
@@ -18457,6 +18725,7 @@ function admissionBlock(command: Command, now = Date.now()): { key: string; dela
 function clearAdmissionTimer(): void {
   if (admissionTimer) clearTimeout(admissionTimer);
   admissionTimer = null;
+  admissionWakeAt = Infinity;
 }
 
 function markAdmissionDeferral(command: Command, key: string, message: string): boolean {
@@ -18479,12 +18748,17 @@ function deferAdmission(command: Command, block: { key: string; delay: number; m
   // A global pause is released explicitly by applyAutomationPause(). A repeating timer would
   // wake the scheduler for no purpose and turn a deliberate pause into background churn.
   if (block.key === 'automation-paused') return;
-  if (admissionTimer) return;
+  const delay = Math.max(1, block.delay);
+  const wakeAt = Date.now() + delay;
+  if (wakeAt >= admissionWakeAt) return;
+  clearAdmissionTimer();
+  admissionWakeAt = wakeAt;
   admissionTimer = setTimeout(() => {
     admissionTimer = null;
+    admissionWakeAt = Infinity;
     scheduleDeliver();
     wakeBrowserWork();
-  }, Math.max(1, block.delay));
+  }, delay);
   admissionTimer.unref?.();
 }
 
@@ -18535,7 +18809,12 @@ function clearAdmissionBlockLog(command?: Command): void {
  * shifted forward on resume so spending ten minutes paused cannot make a worker or handoff expire.
  */
 export function applyAutomationPause(paused: boolean): void {
+  networkRecoveryEpoch++;
+  if (networkOutage) { networkOutage.resume = false; persistCommands(); }
   deliveryGeneration++;
+  // A deliberate Resume or a new pause from any other owner supersedes an automatic
+  // restriction resume; the scheduler's own wake removed itself from the map first.
+  cancelRestrictionResume();
   // The same durable pause must also reach positively unsent decision waiters.
   // Otherwise their preparation deadline charges a helper failure while dispatch is held.
   // Authorized/delivered/ambiguous helpers stay with their incumbent receipt owner.
@@ -18595,7 +18874,40 @@ export function applyAutomationPause(paused: boolean): void {
  * Disconnect is therefore immediate and quiet; reconnect resumes the same commands rather than
  * manufacturing replacements or leaving already-offered placements able to open more tabs.
  */
+function releaseNetworkOutageClocks(episode: NetworkOutageEpisode, now: number): void {
+  const suspendedAt = episode.suspendedAt;
+  if (suspendedAt === null) return;
+  for (const repair of repairsInFlight.values()) {
+    for (const key of ['handedAt', 'confirmedAt'] as const) {
+      const anchor = repair[key];
+      if (anchor !== undefined) repair[key] = anchor + Math.max(0, now - Math.max(anchor, suspendedAt));
+    }
+  }
+  episode.suspendedAt = null;
+}
+
 export function applyCoreConnectionDispatchState(state: ConnectionState): void {
+  const previous = networkConnectionState;
+  networkConnectionState = state;
+  if (state !== previous) networkRecoveryEpoch++;
+  const now = Date.now();
+  if (state === 'offline' && previous === 'connected') {
+    networkOutage = { startedAt: now, suspendedAt: now, resume: getConfig().ui.automationPaused !== true };
+    logInfo('bridge: network outage detected; exact repair clocks suspended, existing tabs and delivery custody retained');
+    persistCommands();
+  } else if (state !== 'offline' && networkOutage?.suspendedAt != null) {
+    releaseNetworkOutageClocks(networkOutage, now);
+    logInfo('bridge: network outage clock released; original repair tokens and attempts preserved');
+    persistCommands();
+  }
+  if (state !== 'connected' && state !== 'offline' && networkOutage) {
+    networkOutage = null;
+    persistCommands();
+  }
+  if (state === 'connected' && networkOutage && !networkOutage.resume) {
+    networkOutage = null;
+    persistCommands();
+  }
   const enabled = state === 'connected';
   if (enabled === coreDispatchEnabled) return;
   coreDispatchEnabled = enabled;
@@ -18603,7 +18915,6 @@ export function applyCoreConnectionDispatchState(state: ConnectionState): void {
   deliverScheduled = false;
   clearAdmissionTimer();
   placementCollector = null;
-  const now = Date.now();
   for (const command of commands) {
     if (command.spec.type === 'stop') continue;
     delete command.placement;
@@ -19618,6 +19929,7 @@ interface CommandRestorePlan {
   manualCloseFences: Array<{ conversationId: string; closedAt: number }>;
   /** Exact explicit-Resume debt restored with the command ledger. */
   resumeBoundary: { commandIds: string[]; conversationIds: string[] };
+  networkOutage: NetworkOutageEpisode | null;
 }
 
 /** One durable receipt that is still useful, rebuilt field-by-field. */
@@ -19740,7 +20052,8 @@ function restoredCommandSnapshot(
   },
   manualCloseFences: readonly { conversationId: string; closedAt: number }[] = [],
   recoveryClaims: readonly DurableRepairClaim[] = [],
-  repairTurnBudgets: readonly DurableRepairTurnBudget[] = []
+  repairTurnBudgets: readonly DurableRepairTurnBudget[] = [],
+  restoredNetworkOutage: NetworkOutageEpisode | null = null
 ): DurableCommandSnapshot {
   const commandIds = new Set(plannedCommands.map(command => command.id));
   return {
@@ -19757,8 +20070,20 @@ function restoredCommandSnapshot(
     recoveryFences: [...recoveryFences],
     manualCloseFences: [...manualCloseFences],
     recoveryClaims: [...recoveryClaims],
-    repairTurnBudgets: [...repairTurnBudgets]
+    repairTurnBudgets: [...repairTurnBudgets],
+    networkOutage: restoredNetworkOutage
   };
+}
+
+function restoredNetworkOutage(raw: unknown, now: number): NetworkOutageEpisode | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid saved network outage; preserve bridge-commands.');
+  const row = raw as Partial<NetworkOutageEpisode>;
+  if (Object.keys(raw).length !== 3 || !Number.isSafeInteger(row.startedAt) || row.startedAt! <= 0 ||
+      row.startedAt! > now || typeof row.resume !== 'boolean' ||
+      (row.suspendedAt !== null && (!Number.isSafeInteger(row.suspendedAt) || row.suspendedAt! < row.startedAt! || row.suspendedAt! > now)))
+    throw new Error('Invalid saved network outage; preserve bridge-commands.');
+  return { startedAt: row.startedAt!, suspendedAt: row.suspendedAt!, resume: row.resume };
 }
 
 function restoredAdmissionState(raw: unknown, now: number): DurableAdmissionState {
@@ -19793,6 +20118,7 @@ function planCommandRestore(
     recoveryClaims?: unknown;
     repairTurnBudgets?: unknown;
     manualCloseFences?: unknown;
+    networkOutage?: unknown;
     resumeBoundary?: unknown;
   },
   now: number
@@ -19866,11 +20192,13 @@ function planCommandRestore(
           typeof spent.sessionId !== 'string' || !spent.sessionId || spent.sessionId.length > 128 ||
           typeof spent.turnKey !== 'string' || !/^(user|turn):[^\r\n]{1,512}$/.test(spent.turnKey) ||
           typeof spent.reload !== 'boolean' || typeof spent.retry !== 'boolean' ||
-          typeof spent.compact !== 'boolean' || typeof spent.modelBlocked !== 'boolean')
+          typeof spent.compact !== 'boolean' || typeof spent.modelBlocked !== 'boolean' ||
+          spent.stopRefused !== undefined && spent.stopRefused !== true)
         throw new Error('Invalid saved browser action budget; possible action custody must be retained.');
       if (!repairTurnBudgets.has(spent.conversationId)) repairTurnBudgets.set(spent.conversationId, {
         conversationId: spent.conversationId, sessionId: spent.sessionId, turnKey: spent.turnKey,
-        reload: spent.reload, retry: spent.retry, compact: spent.compact, modelBlocked: spent.modelBlocked
+        reload: spent.reload, retry: spent.retry, compact: spent.compact, modelBlocked: spent.modelBlocked,
+        ...(spent.stopRefused ? { stopRefused: true } : {})
       });
     }
   }
@@ -19951,6 +20279,7 @@ function planCommandRestore(
     const persistedLeased = version !== 1 && raw.phase === 'leased';
     const persistedAttention = version !== 1 && raw.phase === 'attention';
     const continuation = spec.type === 'resume' ? continuationByToken(spec.token) : null;
+    const resumeRetryBudget = continuation?.automatic === true && sendUnattempted(continuation.destinationSend);
     // Older builds classified any redeemed page timeout as ambiguous delivery. The durable
     // continuation checkpoint is the actual Send boundary: both pre-Send states prove that no
     // native click was armed, even when a document owner was already persisted. Restore that
@@ -19995,7 +20324,8 @@ function planCommandRestore(
       createdAt,
       availableAt: typeof raw.availableAt === 'number' && Number.isFinite(raw.availableAt)
         ? Math.max(now, Math.min(
-            now + MAX_COMMANDS * Math.max(FRESH_COPY_STAGGER_MS, WORKER_FAMILY_OPEN_STAGGER_MS),
+            now + (resumeRetryBudget ? STALE_RESUME_OPEN_RETRY_MS :
+              MAX_COMMANDS * Math.max(FRESH_COPY_STAGGER_MS, WORKER_FAMILY_OPEN_STAGGER_MS)),
             raw.availableAt
           ))
         : now,
@@ -20009,7 +20339,8 @@ function planCommandRestore(
         : {}),
       attention: effectiveAttention,
       openAttempts: typeof raw.openAttempts === 'number' && Number.isFinite(raw.openAttempts)
-        ? Math.max(0, Math.min(MAX_WORKER_OPEN_ATTEMPTS, Math.floor(raw.openAttempts)))
+        ? Math.max(0, Math.min(resumeRetryBudget ? MAX_AUTOMATIC_RESUME_OPEN_ATTEMPTS : MAX_WORKER_OPEN_ATTEMPTS,
+          Math.floor(raw.openAttempts)))
         : 0,
       owner: leased && typeof raw.owner === 'string' ? raw.owner.slice(0, 64) : null,
       ownerTabLease: leased && typeof raw.ownerTabLease === 'string' && /^[a-zA-Z0-9_-]{16,80}$/.test(raw.ownerTabLease)
@@ -20061,7 +20392,8 @@ function planCommandRestore(
     repairTurnBudgets: [...repairTurnBudgets.values()],
     manualCloseFences: [...manualCloseFences]
       .map(([conversationId, closedAt]) => ({ conversationId, closedAt })),
-    resumeBoundary
+    resumeBoundary,
+    networkOutage: networkOutage ? { ...networkOutage } : restoredNetworkOutage(saved.networkOutage, now)
   };
 }
 
@@ -20075,6 +20407,7 @@ function planCommandRestore(
  * 1 is migrated conservatively, including resume commands whose continuation WAL survived.
  */
 export async function restoreCommands(): Promise<void> {
+  const networkEpoch = networkRecoveryEpoch;
   await reconcileLoopRotation(await listAllSessions(), Date.now());
   const saved = await readDurableStrict<{
     version?: number;
@@ -20085,6 +20418,7 @@ export async function restoreCommands(): Promise<void> {
     recoveryClaims?: unknown;
     repairTurnBudgets?: unknown;
     manualCloseFences?: unknown;
+    networkOutage?: unknown;
     resumeBoundary?: unknown;
   }>(COMMANDS_STATE);
   if (!saved) return;
@@ -20167,6 +20501,7 @@ export async function restoreCommands(): Promise<void> {
   // durable.ts retains this exact newer generation for retry; publishing the already-reconciled
   // plan in memory is safe because admission is still fenced by bridgeRecovering.
   let rewriteDurable = true;
+  if (networkRecoveryEpoch !== networkEpoch) plan.networkOutage = networkOutage ? { ...networkOutage } : null;
   try {
     await writeDurableNow(COMMANDS_STATE, restoredCommandSnapshot(
       plan.commands,
@@ -20176,7 +20511,8 @@ export async function restoreCommands(): Promise<void> {
       plan.resumeBoundary,
       plan.manualCloseFences,
       plan.recoveryClaims,
-      plan.repairTurnBudgets
+      plan.repairTurnBudgets,
+      plan.networkOutage
     ));
     rewriteDurable = false;
   } catch (err) {
@@ -20187,6 +20523,18 @@ export async function restoreCommands(): Promise<void> {
   // everything below may again use ordinary live command helpers and timers.
   commands = plan.commands;
   commandReceipts = plan.receipts;
+  if (networkRecoveryEpoch === networkEpoch) {
+    networkOutage = plan.networkOutage;
+    networkRecoveryEpoch++;
+  } else rewriteDurable = true;
+  // A restart retains claim ambiguity through recoveryClaims. Only transport health
+  // can release the outage stamp; it does not reconstruct a lost action or its token.
+  if (networkOutage && networkConnectionState === 'connected') {
+    releaseNetworkOutageClocks(networkOutage, Date.now());
+    rewriteDurable = true;
+  }
+  if (networkOutage && (getConfig().ui.automationPaused === true ||
+      networkConnectionState !== null && !['offline', 'connected'].includes(networkConnectionState))) networkOutage.resume = false;
   unattendedRecoveryAt.clear();
   for (const fence of plan.recoveryFences) unattendedRecoveryAt.set(fence.conversationId, fence.exhaustedAt);
   restoredRepairClaims.clear();
@@ -20222,6 +20570,8 @@ export async function restoreCommands(): Promise<void> {
 
 /** Test seam. */
 export function resetBridgeForTests(): void {
+  cancelRestrictionResume();
+  restrictionResumeEpisodes.clear();
   deliveryGeneration++;
   repairProgressBarrierForTests = null;
   deletionAuthorityBarrierForTests = null;
@@ -20235,6 +20585,9 @@ export function resetBridgeForTests(): void {
   resumedAutomationConversations.clear();
   resetAutomationRotationForTests();
   coreDispatchEnabled = true;
+  networkConnectionState = null;
+  networkOutage = null;
+  networkRecoveryEpoch++;
   coreIncidentDiagnosticProvider = null;
   diagnosticIncidentProvider = null;
   diagnosticDispatchFlight = null;

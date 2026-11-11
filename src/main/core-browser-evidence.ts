@@ -583,10 +583,23 @@ export function noteCoreBrowserEvidence(input: CoreBrowserEvidenceInput): boolea
   const turnId = bounded(input.turnId, 200);
   const shellScan = shellScanDiagnostic(input.shellScan);
   const readerDescriptor = Object.getOwnPropertyDescriptor(input, 'reader');
-  const reader = coreReaderDiagnostic(readerDescriptor ? readerDescriptor.value : shellScan?.reader);
+  // An own property `reader: undefined` produces a truthy property descriptor whose value is
+  // undefined; it must never shadow a valid shellScan.reader carrying the real provenance.
+  const explicitReader =
+    readerDescriptor && 'value' in readerDescriptor &&
+    readerDescriptor.value !== undefined && readerDescriptor.value !== null
+      ? readerDescriptor.value
+      : undefined;
+  const reader = coreReaderDiagnostic(
+    shellScan?.reader !== undefined && shellScan?.reader !== null ? shellScan.reader : explicitReader,
+  );
   if (!shellScan) for (const key of ['fiberWire', 'fiberKeys', 'contentKeys', 'workerKeys'] as const) delete reader[key];
   // Count only the fields actually normalized from this census. Null is unavailable, not zero.
   if (shellScan) reader.mainKeys = Object.keys(shellScan.rejects).length;
+  // A worker/content generation mismatch (e.g. workerRecorder 153 with contentRecorder 162 after
+  // a companion update) is a diagnostic fact carried on the row, never a veto or receipt proof.
+  // Downstream Bridge readers compare reader.workerRecorder against reader.contentRecorder to
+  // distinguish un-reloaded MV3 service workers from downstream coalescing without new logging.
   const row: CoreBrowserEvidenceSnapshot = {
     conversationId: input.conversationId,
     documentId,
@@ -726,20 +739,30 @@ export function settledNativeTurnCandidate(conversation: string, now = Date.now(
  * independently proved every original parent. A browser observation alone never calls
  * this owner. Keep the original document, time, census and unresolved-result debt. */
 export function retainNativeRequestIdsFromDurableReceipts(conversation: string,
-  expected: Readonly<PendingNativeCompletion>, requestIds: readonly string[]): boolean {
+  expected: Readonly<PendingNativeCompletion>, requestIds: readonly string[],
+  expectedSuccessor?: Readonly<NonNullable<ReturnType<typeof settledNativeTurnCandidate>>>): boolean {
   const row = snapshots.get(conversation), pending = row?.pendingCompletion, final = row?.ordinaryFinal;
   const native = settledNativeTurnCandidate(conversation);
+  // Main may independently prove A's immutable receipt owners after a completed
+  // successor B. B is only a fresh race fence, never A's request/result authority.
+  // Retained diagnostic observations still cannot enter this path.
+  const historical = Boolean(expectedSuccessor && native && pending &&
+    native.sourceUserMessageId !== pending.sourceUserMessageId &&
+    native.documentId === expectedSuccessor.documentId && native.navigationEpoch === expectedSuccessor.navigationEpoch &&
+    native.sourceUserMessageId === expectedSuccessor.sourceUserMessageId && native.finalMessageId === expectedSuccessor.finalMessageId &&
+    JSON.stringify(native.coreCallMessageIds) === JSON.stringify(expectedSuccessor.coreCallMessageIds) &&
+    JSON.stringify(native.codeCallMessageIds) === JSON.stringify(expectedSuccessor.codeCallMessageIds));
   if (!row || !pending || !final || !native || pending.reason === 'inventory-incomplete' ||
       pending.allCoreRequestIds !== null || JSON.stringify(pending) !== JSON.stringify(expected) ||
       pending.calls < 1 || pending.codeCalls !== 0 || !pending.coreCallMessageIds ||
       pending.coreCallMessageIds.length !== pending.calls || !pending.codeCallMessageIds || pending.codeCallMessageIds.length !== 0 ||
-      final.callInventoryComplete === false || final.calls !== pending.calls || final.codeCalls !== 0 ||
-      native.sourceUserMessageId !== pending.sourceUserMessageId ||
-      requestIds.length !== pending.calls ||
-      final.allCoreRequestIds != null && final.allCoreRequestIds.length !== pending.calls ||
-      pending.coreCallMessageIds.some((id, at) => native.coreCallMessageIds[at] !== id) ||
-      requestIds.some((id, at) => typeof id !== 'string' || !id || id.length > 100 ||
-        final.allCoreRequestIds != null && final.allCoreRequestIds[at] !== id)) return false;
+      final.callInventoryComplete === false || requestIds.length !== pending.calls ||
+      requestIds.some(id => typeof id !== 'string' || !id || id.length > 100) ||
+      (expectedSuccessor ? !historical : native.sourceUserMessageId !== pending.sourceUserMessageId) ||
+      (!historical && (final.calls !== pending.calls || final.codeCalls !== 0 ||
+        final.allCoreRequestIds != null && final.allCoreRequestIds.length !== pending.calls ||
+        pending.coreCallMessageIds.some((id, at) => native.coreCallMessageIds[at] !== id) ||
+        requestIds.some((id, at) => final.allCoreRequestIds != null && final.allCoreRequestIds[at] !== id)))) return false;
   pending.allCoreRequestIds = [...requestIds];
   return true;
 }
@@ -1017,6 +1040,7 @@ export function nativeFinalEvidenceWait(
     : 'Browser evidence freshness is unknown; its observation clock is unverified.';
   return {
     reason: 'evidence',
+    ...(pending.observedAt <= now ? { evidenceHeldSince: pending.observedAt } : {}),
     ...(stale ? {} : { evidenceFreshUntil: evidence.observedAt + CORE_BROWSER_EVIDENCE_MAX_AGE_MS }),
     detail: [stale
       ? 'CoS last observed an unresolved native tool result, but that browser observation is stale and current activity is unknown. Elapsed time is not a completion receipt.'

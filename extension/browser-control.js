@@ -131,6 +131,15 @@ export function createBrowserControl(chrome, transport, protectedTab = () => fal
       ]);
     } catch (cause) {
       clearTimeout(timer);
+      // A restored MV3 lease is not proof that THIS extension still owns CDP.
+      // getTargets().attached can describe DevTools or another extension, so its
+      // global bit must not preserve our stale lease after Chrome's exact denial.
+      // Retire local custody only: no detach, automatic attach or input replay.
+      if (tabs.get(state.tabId) === state &&
+          cause?.message === `Debugger is not attached to the tab with id: ${state.tabId}.`) {
+        await detached({tabId:state.tabId});
+        error('BROWSER_DETACHED: Chrome no longer recognizes this attachment. Earlier input may have completed; attach this same tab deliberately and inspect before repeating.');
+      }
       // A debugger loss can race its MV3 notification. Confirm Chrome's current target
       // state before retiring custody; an ordinary protocol/JavaScript error is not detach.
       if (tabs.get(state.tabId) === state) {

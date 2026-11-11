@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import type { AutomationChatProjection } from './bridge.js';
 import type { Config, SignOutEmergencyIncident, SignOutEmergencyNotice } from '../shared/types.js';
 import { getConfig, updateConfig } from './config.js';
 import { logInfo, logWarn } from './logger.js';
@@ -83,6 +84,41 @@ export function noticeChatStopped(title: string, body: string, sessionId: string
     notify?.(title, body, sessionId);
   } catch {
     // A refused native notification cannot change the already-durable recovery verdict.
+  }
+}
+
+const AUTOMATION_STALL_NOTICE_MS = 60 * 60_000;
+const stalledLoopNotices = new Map<string, { conversationId: string; lastWorkedAt: number }>();
+
+/** The existing supervisor calls this once per pass. A notice never changes chat custody. */
+export function noticeStalledAutomationChats(
+  chats: readonly AutomationChatProjection[], now = Date.now(), paused = false
+): void {
+  const eligible = paused ? [] : chats.slice(0, 64).filter(chat => chat.mode === 'loop' &&
+    ['waiting-main', 'recovering', 'stalled', 'blocked'].includes(chat.state) &&
+    !chat.pause && chat.rotation?.state !== 'queued' && chat.activeWorkers === 0 &&
+    (chat.nextRetryAt === null || chat.nextRetryAt <= now) && Number.isFinite(chat.lastWorkedAt) && chat.lastWorkedAt > 0 &&
+    now - chat.lastWorkedAt >= AUTOMATION_STALL_NOTICE_MS);
+  const sessions = new Set(eligible.map(chat => chat.sessionId));
+  for (const id of stalledLoopNotices.keys()) if (!sessions.has(id)) stalledLoopNotices.delete(id);
+  if (!notify) return;
+  for (const chat of eligible) {
+    const previous = stalledLoopNotices.get(chat.sessionId);
+    if (previous?.conversationId === chat.conversationId && previous.lastWorkedAt === chat.lastWorkedAt) continue;
+    stalledLoopNotices.set(chat.sessionId, { conversationId: chat.conversationId, lastWorkedAt: chat.lastWorkedAt });
+    try {
+      const shown = notify('Loop needs attention',
+        (chat.title || 'Untitled chat').slice(0, 160) +
+        ' has no new recorded work for at least one hour. ' + chat.reason.slice(0, 180) +
+        ' Open this chat to see the next action.',
+        chat.sessionId);
+      // Focus or unavailable native notifications may suppress a toast. Let the next
+      // existing supervisor pass try again without scheduling a second timer.
+      if (shown === false) stalledLoopNotices.delete(chat.sessionId);
+      else logInfo('automation stall notice: one-hour Loop inactivity reported; state=' + chat.state);
+    } catch {
+      logWarn('automation stall notice: local notification failed; chat work and recovery owners retained');
+    }
   }
 }
 

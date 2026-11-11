@@ -42,7 +42,7 @@
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
   const VERSION = 19;
   /** Private implementation epoch, independent of the stable cross-world wire schema. */
-  const PRODUCER_VERSION = 159;
+  const PRODUCER_VERSION = 167;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -2085,9 +2085,80 @@
     if (current.length || !snapshot || entry.turn.status !== 'complete') return current;
     const value = (object, key) => object && typeof object === 'object'
       ? Object.getOwnPropertyDescriptor(object, key)?.value : undefined;
-    const turns = snapshot.renderedTurns;
+    let turns = snapshot.renderedTurns;
     const matches = turns.filter(row => row?.id === entry.id && row.turn === entry.turn);
-    if (matches.length !== 1 || turns.at(-2) !== matches[0]) return [];
+    const entryIndex = matches.length === 1 ? turns.indexOf(matches[0]) : -1;
+    if (entryIndex < 0 || entryIndex >= turns.length - 1) return [];
+    // A late result can outlive more than one automatic turn. Peel only complete,
+    // unique, contiguous native successors from this same selected branch. Each
+    // peeled user must directly descend from its predecessor's independently
+    // receipted final. This is request/result ancestry, never a terminal pickup:
+    // shellCurrentPath still sees the real latest turn and cannot replay history.
+    const rowIds = new Set(), rowTurns = new Set();
+    for (const row of turns) {
+      const rowId = str(value(row, 'id')), rowTurn = value(row, 'turn');
+      if (!rowId || !rowTurn || rowIds.has(rowId) || rowTurns.has(rowTurn)) return [];
+      rowIds.add(rowId); rowTurns.add(rowTurn);
+    }
+    let remaining = MAX_NATIVE_PATH_NODES, length = turns.length;
+    const nativeMapping = snapshot.renderedConversation.mapping;
+    let cursor = value(snapshot.renderedConversation, 'current_node');
+    while (entryIndex < length - 2) {
+      const latest = turns[length - 1], prior = turns[length - 2];
+      const latestTurn = value(latest, 'turn'), items = value(latestTurn, 'items');
+      const ids = value(latestTurn, 'messageIds'), priorTurn = value(prior, 'turn');
+      const priorItems = value(priorTurn, 'items'), priorIds = value(priorTurn, 'messageIds');
+      if (value(latest, 'conversationId') !== entry.conversationId ||
+          value(prior, 'conversationId') !== entry.conversationId ||
+          !['complete', 'in_progress'].includes(value(latestTurn, 'status')) ||
+          value(priorTurn, 'status') !== 'complete' ||
+          !Array.isArray(items) || items.length > MAX_ROWS || !Array.isArray(ids) ||
+          !ids.length || ids.length > MAX_ROWS || !Array.isArray(priorItems) || priorItems.length > MAX_ROWS ||
+          !Array.isArray(priorIds) || !priorIds.length || priorIds.length > MAX_ROWS) return [];
+      const members = [], priorMembers = [];
+      for (const [source, target] of [[ids, members], [priorIds, priorMembers]]) {
+        for (let at = 0; at < source.length; at++) {
+          const id = str(value(source, String(at)));
+          if (!id) return [];
+          target.push(id);
+        }
+        if (new Set(target).size !== target.length) return [];
+      }
+      const users = [], finals = [];
+      for (let at = 0; at < items.length; at++) {
+        const item = value(items, String(at)); if (!item) return [];
+        if (value(item, 'type') === 'user-message')
+          users.push(str(value(item, 'messageId')) || str(value(item, 'serverMessageId')));
+      }
+      for (let at = 0; at < priorItems.length; at++) {
+        const item = value(priorItems, String(at)); if (!item) return [];
+        if (value(item, 'type') === 'assistant-message' && value(item, 'phase') === 'final_answer') finals.push(item);
+      }
+      const user = users.length === 1 ? users[0] : null;
+      const final = finals.length === 1 ? str(value(finals[0], 'messageId')) : null;
+      if (!user || !final || !members.includes(user) || !priorMembers.includes(final)) return [];
+      const terminal = shellProviderTerminalAt(nativeMapping, final);
+      if (!terminal || !shellScopeFinalReceiptMatches(finals[0], terminal)) return [];
+      let id = cursor, reached = false;
+      const seen = new Set();
+      while (remaining-- > 0 && typeof id === 'string' && id.length <= MAX_TEXT && !seen.has(id)) {
+        const node = value(nativeMapping, id), message = value(node, 'message');
+        if (value(node, 'id') !== id || value(message, 'id') !== id) return [];
+        seen.add(id);
+        if (value(value(message, 'author'), 'role') === 'user') {
+          if (id !== user || value(node, 'parent') !== final ||
+              !members.every(member => seen.has(member))) return [];
+          reached = true; break;
+        }
+        id = value(node, 'parent');
+      }
+      if (!reached || remaining <= 0) return [];
+      length--; cursor = final;
+    }
+    if (length !== turns.length) {
+      turns = turns.slice(0, length);
+      snapshot = { renderedTurns: turns, renderedConversation: { mapping: nativeMapping, current_node: cursor } };
+    }
     const latest = turns.at(-1);
     const latestTurn = value(latest, 'turn'), latestItems = value(latestTurn, 'items');
     const latestIds = value(latestTurn, 'messageIds');
@@ -2380,6 +2451,7 @@
     // check below must still succeed, then ordinary identity/result recovery owns all
     // publication. Never derive the namespace from this candidate or a fallback turn ID.
     const stagedResultMembers = new Set();
+    const stagedRequestResultMembers = new Set();
     if (live && typedUserId && selected.has(typedUserId)) for (const call of missingReferenceCalls) {
       const children = resultChildrenByParent.get(call.messageId);
       if (!selected.has(call.messageId) || children?.length !== 1 || selected.has(children[0]) || sourceCounts.has(children[0])) continue;
@@ -2405,8 +2477,9 @@
             (appIdOf(path) && appIdOf(path) !== appIdOf(resource.resource)) ||
             !['request_id', 'working_turn_id', 'turn_exchange_id'].every(key =>
               str(nativeField(askedMeta, key)) && nativeField(askedMeta, key) === nativeField(returnedMeta, key)) ||
-            nativeField(content, 'content_type') !== 'code' || nativeField(content, 'language') !== 'json' || !coreResultReceipt(returned)) continue;
-        stagedResultMembers.add(children[0]);
+            nativeField(content, 'content_type') !== 'code' || nativeField(content, 'language') !== 'json') continue;
+        stagedRequestResultMembers.add(children[0]);
+        if (coreResultReceipt(returned)) stagedResultMembers.add(children[0]);
       } catch { /* An unsupported native shape cannot add selected-path membership. */ }
     }
     // Code Mode invocations/results can be folded out of turn.messageIds too.
@@ -2572,21 +2645,27 @@
             nativeAnchorHeaderFacet = headerFacet;
             return refuse('nativeScopeBranchConflict', 'header-shape');
           }
+          const userAnchorsHeader = hasUserScope && working === headerWorking && exchange === headerExchange &&
+            nativeField(nativeField(mapping, typedUserId), 'id') === typedUserId && nativeField(nativeUser, 'id') === typedUserId;
           working = headerWorking; exchange = headerExchange;
           const pending = entry.turn.status === 'in_progress';
+          let missingTerminal = false;
           if (!pending) {
             if (entry.turn.status !== 'complete') return refuse('nativeScopeTurnIncomplete');
             const finals = entry.turn.items.filter(item => item?.type === 'assistant-message' && item.phase === 'final_answer');
-            if (finals.length !== 1) { finalFacet('final-count'); return refuse('nativeScopeFinalReceiptUnproved'); }
-            const finalId = str(finals[0].messageId);
-            if (!finalId) { finalFacet('final-id'); return refuse('nativeScopeFinalReceiptUnproved'); }
-            if (currentPath.at(-1) !== finalId) { finalFacet('path-tail'); return refuse('nativeScopeFinalReceiptUnproved'); }
-            const terminal = shellProviderTerminalAt(mapping, finalId, finalFacet);
-            if (!shellScopeFinalReceiptMatches(finals[0], terminal, finalFacet))
-              return refuse('nativeScopeFinalReceiptUnproved');
-            const finalMeta = nativeField(messageAt(finalId), 'metadata');
-            if (str(nativeField(finalMeta, 'working_turn_id')) !== working || str(nativeField(finalMeta, 'turn_exchange_id')) !== exchange)
-              return refuse('nativeScopeBranchConflict', 'final-namespace');
+            missingTerminal = finals.length === 0 && userAnchorsHeader;
+            if (!missingTerminal) {
+              if (finals.length !== 1) { finalFacet('final-count'); return refuse('nativeScopeFinalReceiptUnproved'); }
+              const finalId = str(finals[0].messageId);
+              if (!finalId) { finalFacet('final-id'); return refuse('nativeScopeFinalReceiptUnproved'); }
+              if (currentPath.at(-1) !== finalId) { finalFacet('path-tail'); return refuse('nativeScopeFinalReceiptUnproved'); }
+              const terminal = shellProviderTerminalAt(mapping, finalId, finalFacet);
+              if (!shellScopeFinalReceiptMatches(finals[0], terminal, finalFacet))
+                return refuse('nativeScopeFinalReceiptUnproved');
+              const finalMeta = nativeField(messageAt(finalId), 'metadata');
+              if (str(nativeField(finalMeta, 'working_turn_id')) !== working || str(nativeField(finalMeta, 'turn_exchange_id')) !== exchange)
+                return refuse('nativeScopeBranchConflict', 'final-namespace');
+            }
           }
           const canonicalParents = new Map(), executionIds = new Set(), nativeCalls = new Set(), executionGroups = new Map(), receiptIds = new Set();
           const pendingDirectCalls = new Set();
@@ -2655,6 +2734,10 @@
               return refuse('nativeScopeBranchConflict', 'group-working-turn');
             if (str(nativeField(metadata, 'turn_exchange_id')) !== exchange)
               return refuse('nativeScopeBranchConflict', 'group-exchange');
+            if (missingTerminal && role === 'assistant' && recipient === 'all' &&
+                (nativeField(message, 'end_turn') !== false || nativeField(message, 'channel') === 'final')) {
+              finalFacet('unselected-final'); return refuse('nativeScopeFinalReceiptUnproved');
+            }
             if (!(nativeField(message, 'status') === 'finished_successfully' || pending && role === 'assistant' &&
                 nativeField(message, 'status') === 'in_progress')) return refuse('nativeScopeBranchConflict', 'group-status');
             const cachedNode = nativeField(nativeField(data, 'mapping'), id);
@@ -2690,20 +2773,21 @@
               const request = str(nativeField(metadata, 'request_id'));
               if (!selected.has(id) || !call || !path || !server || !ourPath(path) ||
                   !nativeRequestServerMatches(path, server) || toolName(path) !== call.tool ||
-                  !request || (execution ? request !== execution.request : pending))
+                  !request || (execution && request !== execution.request))
                 return refuse('nativeScopeBranchConflict', 'core-invocation');
               nativeCalls.add(id);
               if (execution) {
                 execution.calls.push(id); executionGroups.set(id, execution);
               } else pendingDirectCalls.add(id);
             } else if (role === 'tool' && nativeField(author, 'name') === 'api_tool.call_tool' && recipient === 'all') {
-              if (!execution && stagedResultMembers.has(id) && pendingDirectCalls.delete(parent)) {
-                // This folded result already passed the exact direct parent, resource,
-                // scope and receipt checks. It does not need a Code Mode wrapper.
+              if (!execution && stagedRequestResultMembers.has(id) && pendingDirectCalls.delete(parent)) {
+                // The exact direct parent/resource/scope proves request membership while
+                // its receipt loads. Missing receipt still withholds all completion proof.
                 const receiptId = coreResultReceipt(message);
-                if (!receiptId || receiptIds.has(receiptId))
+                if (receiptId && receiptIds.has(receiptId))
                   return refuse('nativeScopeBranchConflict', 'duplicate-receipt');
-                receiptIds.add(receiptId);
+                if (receiptId) receiptIds.add(receiptId);
+                else missingCoreReceipt = true;
                 continue;
               }
               const resource = nativeField(metadata, 'invoked_resource');
@@ -2732,10 +2816,20 @@
               execution.results.push(id);
             } else if (!(role === 'assistant' && recipient === 'all')) return refuse('nativeScopeBranchConflict', 'group-role');
           }
-          if (execution && !pending || pendingDirectCalls.size || nativeCalls.size !== shell.calls.length ||
+          if (((execution || pendingDirectCalls.size) && !pending) || nativeCalls.size !== shell.calls.length ||
               shell.calls.some(call => !nativeCalls.has(call.messageId)) || ids.some(id => !currentIds.has(id)))
             return refuse('nativeScopePathUnproved');
-          if (missingCoreReceipt) {
+          if (missingTerminal) {
+            // An interrupted answer may omit the final while its exact scoped
+            // user, execution groups and parents are still mounted. Preserve
+            // request ownership only. A later final still needs its own receipt.
+            mountedNativeRequestScope = { working, exchange, canonicalParents, executionIds };
+            finalFacet('final-count');
+            return refuse('nativeScopeFinalReceiptUnproved');
+          }
+          if (missingCoreReceipt || pendingDirectCalls.size) {
+            // An exact pending direct invocation can establish its request owner.
+            // Only its later real result may satisfy completion.
             mountedNativeRequestScope = { working, exchange, canonicalParents, executionIds };
             return refuse('nativeScopeBranchConflict', 'core-result');
           }

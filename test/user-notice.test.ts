@@ -1,7 +1,10 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { AutomationChatProjection } from '../src/main/bridge.js';
 import { defaultConfig } from '../src/main/config.js';
 import type { Config, SignOutEmergencyNotice } from '../src/shared/types.js';
 import {
+  noticeStalledAutomationChats,
+  setUserNoticeNotifier,
   configureSignOutEmergencyForTests,
   flushSignOutEmergencyForTests,
   observeBrowserAuthenticationIncident,
@@ -15,7 +18,7 @@ import {
   type PushoverOwnerRequest
 } from '../src/main/user-notice.js';
 
-const PROFILE = { profileId: 'account-Alpha', profileName: 'Alpha' };
+const PROFILE = { profileId: 'account-alpha', profileName: 'Alpha' };
 const RECEIPT = 'A'.repeat(30);
 
 describe('fixed Pushover owner boundary', () => {
@@ -401,5 +404,73 @@ describe('durable ChatGPT sign-out emergency', () => {
     expect(config.noticeState?.signOutEmergency?.cancelRequested).toBeUndefined();
     expect(requests.filter(request => request.action === 'send')).toHaveLength(2);
     expect(requests.filter(request => request.action === 'cancel')).toHaveLength(1);
+  });
+});
+
+
+describe('one-hour stalled Loop desktop notices', () => {
+  const now = 1_800_000_000_000;
+  const hour = 60 * 60_000;
+  const chat = (overrides: Partial<AutomationChatProjection> = {}): AutomationChatProjection => ({
+    sessionId: 'existing-session', conversationId: 'existing-conversation', title: 'Voice Archive',
+    mode: 'loop', state: 'waiting-main', reason: 'Waiting for verified completion.',
+    nextAction: 'Inspect the retained result.', nextRetryAt: null, lastWorkedAt: now - hour,
+    activeWorkers: 0, recoverable: false, spinning: false, recoveryStage: 'pending-reply', ...overrides
+  });
+  const notice = vi.fn();
+  beforeEach(() => { noticeStalledAutomationChats([], now); notice.mockReset(); setUserNoticeNotifier(notice); });
+  afterEach(() => setUserNoticeNotifier(null));
+
+  it('alerts once at one hour of missing work and preserves the exact session target', () => {
+    const held = chat();
+    noticeStalledAutomationChats([held], now - 1);
+    expect(notice).not.toHaveBeenCalled();
+    noticeStalledAutomationChats([held], now);
+    noticeStalledAutomationChats([held], now + 60_000);
+    expect(notice).toHaveBeenCalledTimes(1);
+    expect(notice).toHaveBeenCalledWith('Loop needs attention', expect.stringContaining('Voice Archive'), held.sessionId);
+    expect(notice).toHaveBeenCalledWith('Loop needs attention', expect.stringContaining(held.reason), held.sessionId);
+  });
+
+  it.each(['working', 'waiting-workers', 'paused'] as const)('does not call an active or paused %s chat stalled', state => {
+    noticeStalledAutomationChats([chat({ state })], now);
+    expect(notice).not.toHaveBeenCalled();
+  });
+
+  it('excludes intentional rotation waits, finite Goals and global Pause', () => {
+    noticeStalledAutomationChats([chat({ rotation: { state: 'queued', position: 2 } })], now);
+    noticeStalledAutomationChats([chat({ mode: 'goal' })], now);
+    noticeStalledAutomationChats([chat()], now, true);
+    expect(notice).not.toHaveBeenCalled();
+  });
+
+  it('honors a future retry deadline but alerts when its schedule is overdue', () => {
+    noticeStalledAutomationChats([chat({ nextRetryAt: now + 1 })], now);
+    expect(notice).not.toHaveBeenCalled();
+    noticeStalledAutomationChats([chat({ nextRetryAt: now - 1 })], now);
+    expect(notice).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts a new alert episode only after real progress or a different conversation', () => {
+    const first = chat();
+    noticeStalledAutomationChats([first], now);
+    noticeStalledAutomationChats([chat({ lastWorkedAt: now })], now);
+    expect(notice).toHaveBeenCalledTimes(1);
+    noticeStalledAutomationChats([chat({ lastWorkedAt: now })], now + hour);
+    expect(notice).toHaveBeenCalledTimes(2);
+    noticeStalledAutomationChats([chat({ conversationId: 'new-handoff-conversation' })], now + hour);
+    expect(notice).toHaveBeenCalledTimes(3);
+  });
+
+  it('retries a suppressed local toast and contains a failing notifier without changing work', () => {
+    notice.mockReturnValueOnce(false).mockReturnValueOnce(undefined);
+    const held = chat();
+    noticeStalledAutomationChats([held], now);
+    noticeStalledAutomationChats([held], now + 30_000);
+    noticeStalledAutomationChats([held], now + 60_000);
+    expect(notice).toHaveBeenCalledTimes(2);
+    expect(held).toEqual(chat());
+    notice.mockImplementation(() => { throw new Error('notification unavailable'); });
+    expect(() => noticeStalledAutomationChats([chat({ sessionId: 'another-session' })], now)).not.toThrow();
   });
 });

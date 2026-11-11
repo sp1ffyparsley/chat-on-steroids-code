@@ -199,8 +199,11 @@ describe('same-document evidence reader refresh', () => {
     expect(emitted(live.sent.slice(before), 'turn_start')).toHaveLength(0);
   });
 
-  it('connects the existing chat menu action and retains keyboard focus through its result', async () => {
-    live = await harness(`https://chatgpt.com/c/${CHAT}`, { ...replies(), repair_fiber: () => ({ ok: true, refreshed: true }) });
+  it.each(['evidence', 'answer'])('refreshes an idle chat even when Main reports %s and retains menu focus', async reason => {
+    const base = replies();
+    live = await harness(`https://chatgpt.com/c/${CHAT}`, { ...base, repair_fiber: () => ({ ok: true, refreshed: true }),
+      activity: message => message.observationOnly ? base.activity(message) : { ok: true, data: { entries: [], job: null,
+        goal: { enabled: true, mode: 'loop', wait: { reason } } } } });
     await live.hook.checkStatus(); await live.hook.pullActivity();
     answerReader([]);
     live.hook.injectControl(); live.hook.toggleMenu();
@@ -210,7 +213,7 @@ describe('same-document evidence reader refresh', () => {
     await vi.waitFor(() => expect(live!.document.querySelector('[data-clf-reader-status]')?.textContent).toContain('Reader refreshed on this page'));
     expect(live.document.activeElement?.getAttribute('data-clf-action')).toBe('refresh-evidence-reader');
     expect(live.document.querySelector('[data-clf-reader-status]')?.textContent).toContain('Completion remains unverified');
-    expect(live.document.querySelector('.clf-stage')?.textContent).toContain('waiting for verified completion');
+    if (reason === 'evidence') expect(live.document.querySelector('.clf-stage')?.textContent).toContain('waiting for verified completion');
   });
 
   it('defers a native streaming turn without asking for injection or touching its draft', async () => {
@@ -5870,7 +5873,7 @@ describe('desktop input delivery and helper ownership', () => {
     ]);
   });
 
-  it.each(['plain', 'code-controls', 'code-with-prose', 'two-blocks', 'new-renderer', 'new-renderer-prose', 'new-renderer-two-blocks', 'new-renderer-foreign-id', 'new-renderer-nested', 'new-renderer-nested-prose', 'new-renderer-sibling-roots', 'new-renderer-foreign-data-id'])('waits through a reference-only helper terminal and publishes its exact visible JSON once rendered (%s)', async shape => {
+  it.each(['plain', 'code-controls', 'code-with-prose', 'two-blocks', 'new-renderer', 'new-renderer-prose', 'new-renderer-two-blocks', 'new-renderer-foreign-id', 'new-renderer-nested', 'new-renderer-nested-prose', 'new-renderer-sibling-roots', 'new-renderer-foreign-data-id', 'new-renderer-prior-message', 'new-renderer-prior-message-prose', 'new-renderer-duplicate-final'])('waits through a reference-only helper terminal and publishes its exact visible JSON once rendered (%s)', async shape => {
     const canonical = '{"action":"continue","reply":"Continue the exact task."}';
     const reference = '::chatgpt-content-reference{index="0" source_message_id="helper-source"}';
     live = await harness(`https://chatgpt.com/c/${chatA}`, {
@@ -5924,10 +5927,19 @@ describe('desktop input delivery and helper ownership', () => {
         if (shape === 'new-renderer-foreign-data-id') rendered.setAttribute('data-message-id', 'foreign-message');
         if (shape === 'new-renderer-prose') markdown.append('This is only an example.');
         if (shape === 'new-renderer-two-blocks') rendered.append(surface.cloneNode(true));
+        if (shape.startsWith('new-renderer-prior-message')) {
+          prose(live.document, section, 'earlier-independent-commentary', 'Earlier analysis belongs to another public message.');
+          section.prepend(section.lastElementChild!);
+          if (shape === 'new-renderer-prior-message-prose') markdown.append('This decision is only an example.');
+        }
+        if (shape === 'new-renderer-duplicate-final') {
+          const final = section.querySelector('[data-message-id="reference-helper-answer"]')!;
+          section.append(final.cloneNode(true));
+        }
       }
     }
     await bindFiberTurns([{ section, turn: proof }]);
-    if (shape === 'new-renderer-sibling-roots' || shape === 'new-renderer-foreign-data-id' || shape === 'new-renderer-nested-prose' || shape === 'code-with-prose' || shape === 'two-blocks' || shape === 'new-renderer-prose' || shape === 'new-renderer-two-blocks' || shape === 'new-renderer-foreign-id') {
+    if (shape === 'new-renderer-prior-message-prose' || shape === 'new-renderer-duplicate-final' || shape === 'new-renderer-sibling-roots' || shape === 'new-renderer-foreign-data-id' || shape === 'new-renderer-nested-prose' || shape === 'code-with-prose' || shape === 'two-blocks' || shape === 'new-renderer-prose' || shape === 'new-renderer-two-blocks' || shape === 'new-renderer-foreign-id') {
       expect(live.sent.filter(message => message.response)).toEqual([]);
       return;
     }
@@ -11579,6 +11591,29 @@ describe('a stop button that goes missing while the turn is still running', () =
     expect(emitted(live.sent, 'turn_end').map(row => row.event.outcome)).toEqual(['stopped']);
   });
 
+  it('does not report watchdog silence while the current turn waits for approval', async () => {
+    live = await harness();
+    userTurn(live.document, 'approval-watchdog-question', 'perform the task');
+    startGenerating(live.document);
+    assistantTurn(live.document, 'approval-watchdog-answer', []);
+    live.hook.observe(); await settle();
+    let waiting = true;
+    (live.window as any).CLF_DOM.approvalWaiting = () => waiting;
+    live.hook.observe(); await settle();
+    live.advance(live.hook.STALL_MS + 1);
+    live.hook.observe(); await settle(); await live.hook.flush();
+    const stalls = () => emitted(live!.sent, 'chat_error').filter(row => row.event.reason === 'watchdog_stalled');
+    expect(stalls()).toHaveLength(0);
+    expect(emitted(live.sent, 'turn_end')).toHaveLength(0);
+
+    waiting = false;
+    live.hook.observe(); await settle();
+    expect(stalls()).toHaveLength(0);
+    live.advance(live.hook.STALL_MS + 1);
+    live.hook.observe(); await settle(); await live.hook.flush();
+    expect(stalls()).toHaveLength(1);
+  });
+
   it('does not carry an approval grace window into the next local generation', async () => {
     live = await harness();
     userTurn(live.document, 'approval-old-question', 'first task');
@@ -14591,6 +14626,53 @@ describe('how a turn is recorded as having ended', () => {
     expect(clicks).toBe(1);
     expect((live.document.querySelector('#prompt-textarea')?.textContent || '').trim()).toBe('');
   });
+
+  it.each(['armed', 'paused', 'policy-unknown', 'off', 'provider-busy'] as const)(
+    'keeps observed Retry behind Main authorization (%s)', async mode => {
+      const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+      let clicks = 0;
+      live = await harness(`https://chatgpt.com/c/${conversationId}`, {
+        activity: () => ({ ok: true, data: {
+          ...(mode === 'policy-unknown' ? {} : { automationPaused: mode === 'paused' }),
+          pendingTools: 0, entries: [], stream: [], nextSince: 0,
+          goal: { enabled: mode !== 'off', own: true, mode: 'loop', hasKey: true, objective: 'Finish this task' }
+        } })
+      }, document => {
+        retryModelProof(document, conversationId);
+        const card = document.createElement('div');
+        card.setAttribute('role', 'alert');
+        const copy = document.createElement('p');
+        copy.textContent = 'Message delivery timed out. Please try again. ';
+        const retry = document.createElement('button');
+        retry.textContent = 'Retry';
+        retry.setAttribute('data-clf-test-rendered', '1');
+        retry.addEventListener('click', () => { clicks++; });
+        card.append(copy, retry);
+        document.body.append(card);
+      });
+      await live.hook.pullActivity();
+      if (mode === 'provider-busy') startGenerating(live.document);
+      live.hook.observe();
+      await settle();
+      const initial = emitted(live.sent, 'chat_error').filter(row => row.event.retryAvailable === true).length;
+      live.advance(2000);
+      live.hook.observe();
+      await settle();
+      expect(clicks).toBe(0);
+      const after = emitted(live.sent, 'chat_error').filter(row => row.event.retryAvailable === true).length;
+      expect(after).toBe(initial + (mode === 'armed' ? 1 : 0));
+      live.hook.observe();
+      await settle();
+      expect(emitted(live.sent, 'chat_error').filter(row => row.event.retryAvailable === true)).toHaveLength(after);
+      if (mode !== 'armed') return;
+      expect(await live.runtimeMessage({ type: 'clf-retry-failed-turn', conversationId })).toEqual({ ok: true });
+      expect(clicks).toBe(1);
+      live.advance(2000);
+      live.hook.observe();
+      await settle();
+      expect(clicks).toBe(1);
+    }
+  );
 
   it.each(['attachment', 'draft-during-authorization'])('defers native Retry for a protected composer without spending its control: %s', async kind => {
     const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
@@ -20810,6 +20892,27 @@ describe('the field above the composer', () => {
       wait: { reason: 'evidence', evidenceFreshUntil: live.window.Date.now() - 1, detail } });
     expect(expired?.stage).toContain('activity unknown');
     expect(live.sent.some(row => ['goal_draft', 'goal_prepare', 'goal_ack', 'settings_set'].includes(row.type))).toBe(false);
+  });
+
+  it('shows current exact tool work ahead of an earlier completion hold', async () => {
+    live = await harness();
+    const error = 'Original tool result still unverified.';
+    const result = live.hook.goalStageView({ enabled: true, mode: 'loop', phase: 'settling',
+      errorCode: 'native_completion_unverified', error, health: { state: 'working' },
+      wait: { reason: 'tools', detail: 'One exact Core tool call is still running.' } });
+    expect(result).toMatchObject({ stage: 'Loop is on · tools running',
+      detail: expect.stringContaining(error), done: false });
+    expect(live.sent.some(row => ['goal_draft', 'goal_prepare', 'goal_ack'].includes(row.type))).toBe(false);
+  });
+
+  it('keeps the original verification wait age when a fresh browser observation arrives', async () => {
+    live = await harness();
+    const now = live.window.Date.now();
+    const since = now - 9 * 60 * 60_000;
+    expect(live.hook.goalStageView({ enabled: true, mode: 'loop', phase: 'settling',
+      phaseStartedAt: now, evidenceHoldSince: now - 1000,
+      wait: { reason: 'evidence', evidenceHeldSince: since, evidenceFreshUntil: now + 1000 }
+    })).toMatchObject({ stage: 'Loop waiting for tool result verification', startedAt: since });
   });
 
   it('projects the exact typed native-completion failed draft as an evidence hold without a top-level code or wait', async () => {
@@ -27900,6 +28003,38 @@ describe('the goal loop', () => {
       expect(live.document.querySelector('#prompt-textarea')!.textContent).toBe('');
     });
 
+  it.each(['approval', 'tools'] as const)(
+    'picks up the same completed Goal turn after a long %s wait clears', async blocker => {
+      let held = true;
+      const response = feed()();
+      live = await harness(`https://chatgpt.com/c/${CHAT}`, {
+        ...goalReplies(),
+        activity: () => ({ ...response, data: {
+          ...response.data, pendingTools: held && blocker === 'tools' ? 1 : 0
+        } })
+      }, document => {
+        userTurn(document, 'long-settle-user', 'finish the same task', { sent: false });
+        const section = assistantTurn(document, 'long-settle-answer', []);
+        prose(document, section, 'long-settle-final', 'One useful unit finished.');
+      });
+      (live.window as any).CLF_DOM.approvalWaiting = () => held && blocker === 'approval';
+      await live.hook.pullActivity();
+      const ended = (live.window as any).CLF_DOM.turns().find((turn: any) => turn.id === 'long-settle-answer');
+      live.hook.noteGoalTurn(ended, 'completed', 'long-settle-owner');
+      await settle(8000);
+      expect(drafts(live)).toHaveLength(0);
+      await live.hook.pullActivity();
+      expect(drafts(live)).toHaveLength(0);
+      held = false;
+      await live.hook.pullActivity();
+      await settle(800);
+      expect(drafts(live)).toHaveLength(1);
+      await live.hook.pullActivity();
+      await settle(200);
+      expect(drafts(live)).toHaveLength(1);
+      expect(live.document.querySelector('#prompt-textarea')!.textContent).toBe('');
+    });
+
   it('collects an exact durable Loop reply immediately when the companion wakes the live page', async () => {
     let offered = false;
     let draftAttempts = 0;
@@ -32833,5 +32968,72 @@ describe('stable final eligibility during compaction custody', () => {
     expect(final?.turnId).toBeTruthy();
     expect(final?.goalEligible === true).toBe(!handoff);
     if (busy) expect(live.sent.filter(message => message.type === 'goal_draft')).toEqual([]);
+  });
+});
+
+describe('native approval unrendered and covered reveal', () => {
+  const unpaused = { activity: () => ({ ok: true, data: { automationPaused: false } }) };
+  async function ready(): Promise<Harness> {
+    const active = await harness('https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', unpaused);
+    active.hook.observe();
+    await active.hook.pullActivity();
+    return active;
+  }
+  function addUnrenderedApproval(active: Harness) {
+    const card = active.document.createElement('div');
+    card.setAttribute('data-codex-approval-surface', 'true');
+    card.setAttribute('data-clf-test-rendered', '1');
+    card.innerHTML = '<button>Deny</button><button>Allow once</button>';
+    const deny = card.querySelectorAll('button')[0]!;
+    const allow = card.querySelectorAll('button')[1]!;
+    let clicks = 0;
+    allow.addEventListener('click', () => { clicks++; card.remove(); });
+    const reveals: unknown[][] = [];
+    Object.defineProperty(card, 'scrollIntoView', { value: (...args: unknown[]) => reveals.push(args), configurable: true });
+    active.document.body.append(card);
+    return { card, allow, deny, reveals, clicked: () => clicks };
+  }
+
+  it.each(['buttons', 'whole-card'] as const)('reveals an unrendered approval card before approving it (%s)', async mode => {
+    live = await ready();
+    const approval = addUnrenderedApproval(live);
+    if (mode === 'whole-card') approval.card.removeAttribute('data-clf-test-rendered');
+    await settle(100);
+    expect(approval.clicked()).toBe(0);
+    expect(approval.reveals.length).toBeGreaterThanOrEqual(1);
+    // The page rendered the card after the requested reveal; no human scroll required.
+    approval.card.setAttribute('data-clf-test-rendered', '1');
+    approval.deny.setAttribute('data-clf-test-rendered', '1');
+    approval.allow.setAttribute('data-clf-test-rendered', '1');
+    live.hook.observe();
+    await settle(100);
+    expect(approval.clicked()).toBe(1);
+    expect(approval.card.isConnected).toBe(false);
+  });
+
+  it('re-centers a covered allow-once action and approves it once the cover clears', async () => {
+    live = await ready();
+    const active = live;
+    const card = active.document.createElement('div');
+    card.setAttribute('data-codex-approval-surface', 'true');
+    card.setAttribute('data-clf-test-rendered', '1');
+    card.innerHTML = '<button data-clf-test-rendered="1">Deny</button><button data-clf-test-rendered="1">Allow once</button>';
+    const allow = card.querySelectorAll('button')[1]!;
+    let clicks = 0;
+    allow.addEventListener('click', () => { clicks++; card.remove(); });
+    const reveals: unknown[][] = [];
+    Object.defineProperty(allow, 'scrollIntoView', { value: (...args: unknown[]) => reveals.push(args), configurable: true });
+    active.document.body.append(card);
+    const cover = active.document.querySelector('#composer-form')!;
+    (active.document as any).elementFromPoint = () => cover;
+    await settle(100);
+    expect(clicks).toBe(0);
+    expect(reveals.length).toBeGreaterThanOrEqual(1);
+    expect((reveals[0]![0] as { block?: string }).block).toBe('center');
+    (active.document as any).elementFromPoint = () => allow;
+    live.hook.observe();
+    await settle(100);
+    expect(clicks).toBe(1);
+    expect(card.isConnected).toBe(false);
   });
 });

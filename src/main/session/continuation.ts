@@ -1924,15 +1924,19 @@ function noteAbandoned(entry: Continuation, reason: string): void {
 }
 
 /** Durable abort for user-visible cancellation paths. */
-export async function abortContinuationNow(token: string, reason: string): Promise<boolean> {
-  const entry = byToken.get(token);
-  if (!entry || entry.state === 'committing') return false;
-  if (entry.state === 'committed' || entry.state === 'aborted') return false;
-  await transitionNow(entry, (current) => ({ ...current, state: 'aborted', error: reason }));
-  cancelPrimeTransfer(entry.from);
-  logWarn(`continuation ${entry.token.slice(0, 8)} durably abandoned — ${reason}`);
-  noteAbandoned(entry, reason);
-  return true;
+export async function abortContinuationNow(token: string, reason: string, destinationPreSendOnly = false): Promise<boolean> {
+  const abort = async (): Promise<boolean> => {
+    const entry = byToken.get(token);
+    if (!entry || entry.state === 'committing' || entry.state === 'committed' || entry.state === 'aborted') return false;
+    if (destinationPreSendOnly && (!isOpen(entry) || !sendUnattempted(entry.destinationSend))) return false;
+    await transitionNow(entry, (current) => ({ ...current, state: 'aborted', error: reason }));
+    cancelPrimeTransfer(entry.from);
+    logWarn(`continuation ${entry.token.slice(0, 8)} durably abandoned — ${reason}`);
+    noteAbandoned(entry, reason);
+    return true;
+  };
+  // Exhaustion and native dispatch must agree on which side of the Send fence won.
+  return destinationPreSendOnly ? withCheckpointLock(token, abort) : abort();
 }
 
 const SEND_STATES = new Set<ContinuationSendState>([

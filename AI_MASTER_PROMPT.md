@@ -8,6 +8,7 @@ This repository is a sanitized code mirror. Read README.md for the exact source 
 - The same activity envelope can report the executing content and worker generation even when shellScan is null. Fiber and census counters require that frame. The fixed reader fields are diagnostic and confer no completion, Retry or Send authority.
 - Preserve immutable source/delivery hashes, unknown Send effects, drafts, approvals, pauses, exact requested models and per-profile isolation. Archive custody is not replay authority.
 - Do not copy personal prompts, stores, credentials, browser state, private logs, backups or deployment paths into this mirror. Keep fixture identities synthetic.
+- For long stalls, start with the existing Bridge supervisor, Resume command queue and user notice. The delayed handoff retry is bounded by its persisted attempt count and the original destination Send checkpoint. A notification or fresh browser frame never grants replay authority.
 - Run typecheck and the relevant existing regressions. A mirror check or package build does not prove installation or sustained useful next turns.
 - Keep this map and README current when the source or acceptance boundary changes. If retrieval fails, continue from supplied excerpts and label evidence; never invent symbols or return an access-only research report.
 
