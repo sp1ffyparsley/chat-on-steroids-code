@@ -88,34 +88,42 @@ export function noticeChatStopped(title: string, body: string, sessionId: string
 }
 
 const AUTOMATION_STALL_NOTICE_MS = 60 * 60_000;
-const stalledLoopNotices = new Map<string, { conversationId: string; lastWorkedAt: number }>();
+const stalledLoopNotices = new Map<string, { conversationId: string; progressAt: number; stage: 1 | 2 }>();
 
 /** The existing supervisor calls this once per pass. A notice never changes chat custody. */
 export function noticeStalledAutomationChats(
   chats: readonly AutomationChatProjection[], now = Date.now(), paused = false
 ): void {
-  const eligible = paused ? [] : chats.slice(0, 64).filter(chat => chat.mode === 'loop' &&
-    ['waiting-main', 'recovering', 'stalled', 'blocked'].includes(chat.state) &&
-    !chat.pause && chat.rotation?.state !== 'queued' && chat.activeWorkers === 0 &&
-    (chat.nextRetryAt === null || chat.nextRetryAt <= now) && Number.isFinite(chat.lastWorkedAt) && chat.lastWorkedAt > 0 &&
-    now - chat.lastWorkedAt >= AUTOMATION_STALL_NOTICE_MS);
-  const sessions = new Set(eligible.map(chat => chat.sessionId));
+  const loops = chats.slice(0, 64).filter(chat => chat.mode === 'loop');
+  const sessions = new Set(loops.map(chat => chat.sessionId));
   for (const id of stalledLoopNotices.keys()) if (!sessions.has(id)) stalledLoopNotices.delete(id);
-  if (!notify) return;
-  for (const chat of eligible) {
+  for (const chat of loops) {
+    const progressAt = chat.stallProgressAt ?? chat.lastWorkedAt;
+    if (!Number.isFinite(progressAt) || progressAt <= 0) continue;
+    const age = now - progressAt;
     const previous = stalledLoopNotices.get(chat.sessionId);
-    if (previous?.conversationId === chat.conversationId && previous.lastWorkedAt === chat.lastWorkedAt) continue;
-    stalledLoopNotices.set(chat.sessionId, { conversationId: chat.conversationId, lastWorkedAt: chat.lastWorkedAt });
+    const sameEpisode = previous?.conversationId === chat.conversationId &&
+      (progressAt <= previous.progressAt || age >= AUTOMATION_STALL_NOTICE_MS);
+    if (!sameEpisode) stalledLoopNotices.delete(chat.sessionId);
+    if (!notify || paused || chat.pause || chat.stallNoticeSuppressed || chat.rotation?.state === 'queued' ||
+        chat.activeWorkers > 0 || (chat.nextRetryAt !== null && chat.nextRetryAt > now) ||
+        !['waiting-main', 'recovering', 'stalled', 'blocked'].includes(chat.state) ||
+        age < AUTOMATION_STALL_NOTICE_MS) continue;
+    const stage = chat.receiptStalled && age >= 2 * AUTOMATION_STALL_NOTICE_MS ? 2 : 1;
+    if (sameEpisode && previous.stage >= stage) continue;
     try {
-      const shown = notify('Loop needs attention',
+      const shown = notify(stage === 2 ? 'Loop still blocked' : 'Loop needs attention',
         (chat.title || 'Untitled chat').slice(0, 160) +
-        ' has no new recorded work for at least one hour. ' + chat.reason.slice(0, 180) +
-        ' Open this chat to see the next action.',
+        (stage === 2 ? ' has no new recorded work for at least two hours. ' :
+          ' has no new recorded work for at least one hour. ') + chat.reason.slice(0, 180) +
+        (stage === 2 ? ' The original result or delivery still needs verification.' : ' Open this chat to see the next action.'),
         chat.sessionId);
       // Focus or unavailable native notifications may suppress a toast. Let the next
       // existing supervisor pass try again without scheduling a second timer.
-      if (shown === false) stalledLoopNotices.delete(chat.sessionId);
-      else logInfo('automation stall notice: one-hour Loop inactivity reported; state=' + chat.state);
+      if (shown !== false) {
+        stalledLoopNotices.set(chat.sessionId, { conversationId: chat.conversationId, progressAt, stage });
+        logInfo(`automation stall notice: ${stage}-hour Loop inactivity reported; state=${chat.state}`);
+      }
     } catch {
       logWarn('automation stall notice: local notification failed; chat work and recovery owners retained');
     }

@@ -4,6 +4,7 @@ This repository is a sanitized code mirror. Read README.md for the exact source 
 
 - Browser production owners: extension/fiber.js, content.js, background.js and chatgpt-dom.js. Keep original question/document/epoch/ordered-parent/result proofs, current policy and native Send ownership intact.
 - Main owners: src/main/core-browser-evidence.ts, session/correlation.ts, session/recorder.ts, session/input.ts, session/continuation.ts, goal.ts and bridge.ts. Reuse their existing serialized custody; no duplicate queues, generic Continue watchdog or fabricated terminal receipts.
+- Recorder 167 research: the page watcher can recover a held turn after an exact same-document remount. Trace the unique native question/final pair through the ordinary settle barrier and Main authorization. Cross-document result custody, irreversible Send receipts and safe-shutdown admission remain separate.
 - Nearest test owners: test/shell-compat.test.ts, fiber.test.ts, content-script.test.ts, extension.test.ts, bridge.test.ts, continuation.test.ts and goal.test.ts.
 - The same activity envelope can report the executing content and worker generation even when shellScan is null. Fiber and census counters require that frame. The fixed reader fields are diagnostic and confer no completion, Retry or Send authority.
 - Preserve immutable source/delivery hashes, unknown Send effects, drafts, approvals, pauses, exact requested models and per-profile isolation. Archive custody is not replay authority.

@@ -1728,6 +1728,35 @@ describe('custody-preserving companion reload', () => {
     expect(worker.tabsRemove).not.toHaveBeenCalled();
   });
 
+  it.each(['present', 'absent', 'unavailable', 'account changed'] as const)(
+    'requires complete current inventory after a helper tab lookup fails: %s', async result => {
+      const row = { tab: 41, stage: 'retired', retiredAt: Date.now() - 3600_000 };
+      const elections = { helper: row };
+      const persistLive = vi.fn(async () => undefined);
+      const remove = vi.fn();
+      const context = {
+        console: { info: vi.fn() }, connectionEpoch: 1, commandLeaseGeneration: 1,
+        RETIRED_INPUT_TAB_GRACE_MS: 60_000, RETIRED_INPUT_SWEEP_MS: 10_000, lastRetiredInputSweepAt: 0,
+        stopOpenings: {}, modelCatalogTarget: null, storedBackgroundWindow: async () => null, persistLive,
+        chrome: {
+          storage: { session: { get: async () => ({}) } },
+          tabs: { get: async () => { throw Error('transient lookup'); }, remove }
+        },
+        boundedTabInventory: async () => {
+          if (result === 'account changed') context.connectionEpoch++;
+          return result === 'present' ? [{ id: row.tab, url: 'https://example.com/' }] :
+            result === 'unavailable' ? null : [];
+        }
+      };
+      const start = backgroundSource.indexOf('async function cleanupRetiredInputTabs(');
+      const end = backgroundSource.indexOf('\nconst desktopInputReceiverRepairs', start);
+      const run = vm.runInNewContext(`${backgroundSource.slice(start, end)};cleanupRetiredInputTabs`, context);
+      await run(elections, []);
+      expect(elections).toEqual(result === 'absent' ? {} : { helper: row });
+      expect(persistLive).toHaveBeenCalledTimes(result === 'absent' ? 1 : 0);
+      expect(remove).not.toHaveBeenCalled();
+    });
+
   it('refuses requests from native pages or foreign extension pages without draining or reloading', async () => {
     const worker = loadWorker({ local: new FakeStorageArea(), session: new FakeStorageArea() });
     for (const url of [`https://chatgpt.com/c/${conversationId}`, 'chrome-extension://foreign/popup.html']) {

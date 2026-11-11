@@ -3958,10 +3958,9 @@ function loopProgressReportFooter(thresholdMs: number): string {
   const label = Number.isInteger(hours) ? String(hours) : hours.toFixed(1);
   return [
     `Progress checkpoint: ${label}h of proven accumulated active work has crossed a durable reporting threshold.`,
-    'In your next response, give one concise evidence-backed status against the original acceptance checklist: current task, verified deliverables, remaining requirements/tests, evidence paths, uncertainty, and done=true/false.',
-    'Separate implemented, tested, installed, and live-verified results. A completed plan step, tool call, or worker claim alone is not acceptance evidence.',
-    'If you report a percentage, show verified acceptance items / total original acceptance items and list unverified items; disclose any user-approved scope change instead of shrinking the denominator. Use the existing plan and progress record, not a new tracking system.',
-    'Use unknown rather than inventing elapsed work or a completion percentage when evidence is incomplete; do not expand scope merely to keep Loop busy.'
+    'Keep the status to three short lines: Done — what changed; Verified — the actual test, artifact or measurement; Still needed — the highest-priority pending check or blocker.',
+    'Name the evidence and distinguish source tests, installation, and live verification. If you give a percentage, use verified items divided by the original checklist total.',
+    'Use the existing acceptance checklist and evidence. Leave unverified items pending, then keep independent authorized work moving.'
   ].join('\n');
 }
 
@@ -3969,12 +3968,14 @@ async function normalLoopReady(draft: GoalDraft): Promise<boolean> {
   if (draft.mode !== 'loop' && draft.continuationPolicy !== 'settled-turn') return true;
   if (draft.mode === 'goal' && !finiteCompletionReadiness) return false;
   if ((getConfig().goal.continuationPolicy ?? 'strict') !== draft.continuationPolicy) return false;
-  return draft.continuationPolicy === 'settled-turn'
-    ? Boolean(await loopForwardReadiness?.(draft.sessionId, draft.conversationId, draft.turnId, {
-      draftToken: draft.token,
-      onRefusal: reason => logInfo(`goal: Loop forward readiness refused for ${draft.conversationId}: ${reason}; no helper or Send authorized`)
-    }))
-    : loopReplyHasAuthority(draft.sessionId, draft.conversationId, draft.turnId);
+  if (draft.continuationPolicy !== 'settled-turn')
+    return loopReplyHasAuthority(draft.sessionId, draft.conversationId, draft.turnId);
+  // The existing browser recovery owners can recheck evidence. A long wait cannot
+  // authorize a helper while this exact source fails its current readiness check.
+  return (await loopForwardReadiness?.(draft.sessionId, draft.conversationId, draft.turnId, {
+    draftToken: draft.token,
+    onRefusal: reason => logInfo(`goal: Loop forward readiness refused for ${draft.conversationId}: ${reason}; no helper or Send authorized`)
+  })) === true;
 }
 
 async function run(draft: GoalDraft): Promise<void> {

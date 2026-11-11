@@ -462,6 +462,28 @@ describe('one-hour stalled Loop desktop notices', () => {
     expect(notice).toHaveBeenCalledTimes(3);
   });
 
+  it('escalates retained receipt debt at two hours and ignores fresh status churn for ten hours', () => {
+    const progressAt = now - hour;
+    for (let minute = 0; minute <= 9 * 60; minute++) {
+      const at = now + minute * 60_000;
+      noticeStalledAutomationChats([
+        chat({ receiptStalled: true, stallProgressAt: progressAt, lastWorkedAt: at }),
+        chat({ sessionId: 'other-chat', state: 'working', receiptStalled: true, stallProgressAt: progressAt })
+      ], at);
+    }
+    expect(notice.mock.calls.map(([title]) => title)).toEqual(['Loop needs attention', 'Loop still blocked']);
+    expect(notice).toHaveBeenLastCalledWith('Loop still blocked', expect.stringContaining('still needs verification'), 'existing-session');
+  });
+
+  it('does not escalate while approval, Stop, rotation or a scheduled retry still owns the wait', () => {
+    const held = chat({ receiptStalled: true, stallProgressAt: now - 3 * hour });
+    for (const gate of [
+      { stallNoticeSuppressed: true as const }, { nextRetryAt: now + 1 },
+      { rotation: { state: 'queued' as const, position: 1 } }
+    ]) noticeStalledAutomationChats([{ ...held, ...gate }], now);
+    expect(notice).not.toHaveBeenCalled();
+  });
+
   it('retries a suppressed local toast and contains a failing notifier without changing work', () => {
     notice.mockReturnValueOnce(false).mockReturnValueOnce(undefined);
     const held = chat();

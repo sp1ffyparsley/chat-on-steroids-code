@@ -4362,6 +4362,9 @@ async function cleanupRetiredInputTabs(elections, activeIds, absentProof = null)
   const now = Date.now();
   if (now - lastRetiredInputSweepAt < RETIRED_INPUT_SWEEP_MS) return;
   lastRetiredInputSweepAt = now;
+  const epoch = connectionEpoch, generation = commandLeaseGeneration;
+  const currentSweep = () => epoch === connectionEpoch && generation === commandLeaseGeneration;
+  const missing = [];
   const active = new Set(Array.isArray(activeIds) ? activeIds : []);
   const activeTabs = new Set(Object.entries(elections)
     .filter(([id, row]) => active.has(id) && Number.isInteger(row?.tab))
@@ -4371,11 +4374,21 @@ async function cleanupRetiredInputTabs(elections, activeIds, absentProof = null)
   const backgroundWindow = await storedBackgroundWindow();
   let changed = false;
   for (const [id, row] of Object.entries(elections)) {
+    if (!currentSweep()) break;
     if (row?.stage !== 'retired' || !Number.isInteger(row.tab) || !Number.isFinite(row.retiredAt) ||
         now - row.retiredAt < RETIRED_INPUT_TAB_GRACE_MS) continue;
     if (activeTabs.has(row.tab) || stoppedTabs.has(row.tab) || modelCatalogTarget?.tab === row.tab || pluginOwner?.tab === row.tab) continue;
-    const tab = await chrome.tabs.get(row.tab).catch(() => null);
-    if (!tab) { delete elections[id]; changed = true; continue; }
+    const candidate = { id, row, tab: row.tab, stage: row.stage, retiredAt: row.retiredAt };
+    const tab = await chrome.tabs.get(candidate.tab).catch(() => null);
+    const currentElection = () => currentSweep() && elections[id] === row && row.stage === candidate.stage &&
+      row.tab === candidate.tab && row.retiredAt === candidate.retiredAt;
+    if (!currentElection()) continue;
+    if (!tab) {
+      // A failed point lookup can be transient. Use the same complete inventory
+      // proof as reload before dropping the election that still owns cleanup.
+      missing.push(candidate);
+      continue;
+    }
     if (tab.pinned || tab.pendingUrl || (tab.active && tab.windowId !== backgroundWindow?.id)) continue;
     let url;
     try { url = new URL(tab.url || ''); } catch { continue; }
@@ -4398,15 +4411,20 @@ async function cleanupRetiredInputTabs(elections, activeIds, absentProof = null)
       const targetStillExact = routedTemporary
         ? temporaryPlannerCloseProofMatches(current?.url, id, proof)
         : proof?.conversationId === null && current?.url === tab.url;
-      if (proof?.safe !== true || !targetStillExact || proof.navigationEpoch !== source.navigationEpoch ||
+      if (!currentElection() || proof?.safe !== true || !targetStillExact || proof.navigationEpoch !== source.navigationEpoch ||
           !ownsDocument(source) || !current || current.pinned || current.pendingUrl || current.url !== tab.url ||
           (current.active && current.windowId !== backgroundWindow?.id)) continue;
-      if (!await retireAutomaticTab(tab.id)) continue;
-      delete elections[id]; changed = true;
+      const stillOwned = () => currentElection() && ownsDocument(source);
+      if (!await retireAutomaticTab(tab.id, stillOwned, null, stillOwned)) continue;
+      if (currentElection()) { delete elections[id]; changed = true; }
       console.info('[Chat On Steroids] closed abandoned temporary helper tab', tab.id);
     } catch { /* a missing proof leaves the tab and its cleanup custody intact */ }
   }
   if (changed) await persistLive();
+  if (missing.length && currentSweep()) {
+    const tabs = await boundedTabInventory({});
+    await cleanupRetiredInputTabs(elections, null, { tabs, candidates: missing, generation, current: currentSweep });
+  }
 }
 
 const desktopInputReceiverRepairs = new Map();

@@ -12613,36 +12613,69 @@
    * itself, and the message this loop was about to write is about a turn that is no longer
    * the last one.
    */
+  const goalNativeMessageId = id => typeof id === 'string' &&
+    /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(id);
+
+  function goalSettleFinalId(turn) {
+    const last = CLF_DOM.messagesIn(turn).filter(message => message.role === 'assistant' && message.text?.trim()).at(-1);
+    return last && !last.interrupted && goalNativeMessageId(last.id) ? last.id : null;
+  }
+
   function maybeRecoverHeldGoalTurn(pendingToolsReceipt) {
     const held = goalSettlePending;
     if (!held) return;
     const latestUser = CLF_DOM.messages().filter(message => message?.role === 'user').at(-1)?.id;
     if (!alive || conversationId !== held.conversationId || epoch !== held.epoch ||
         CLF_DOM.conversationId() !== held.conversationId || goalTurnId !== held.turnId ||
-        !goalUsable() || userStopped || latestUser !== held.userMessageId) {
+        !goalUsable() || userStopped || (latestUser && latestUser !== held.userMessageId)) {
       goalSettlePending = null;
       return;
     }
-    if (pendingToolsReceipt !== 0 || goalBusy || goalDraft || goalConfig?.pending || goalConfig?.queuePending ||
+    if (!latestUser || pendingToolsReceipt !== 0 || goalBusy || goalDraft || goalConfig?.pending || goalConfig?.queuePending ||
         generating || CLF_DOM.generating() || CLF_DOM.approvalWaiting() || nativeBusy || job?.busy) return;
-    const ended = currentAssistantTurn();
-    if (!ended?.node?.isConnected || ended.node !== held.ended.node) {
-      goalSettlePending = null;
+    const turns = CLF_DOM.turns();
+    const ended = currentAssistantTurn(turns);
+    if (!ended?.node?.isConnected) return; // a temporary unmount is not a different turn
+    const finalId = held.finalMessageId ? goalSettleFinalId(ended) : null;
+    if (held.finalMessageId && finalId !== held.finalMessageId) {
+      if (finalId) goalSettlePending = null;
       return;
+    }
+    let remountedSourceCurrent = null;
+    if (ended.node !== held.ended.node) {
+      if (!finalId || !goalNativeMessageId(held.userMessageId)) {
+        goalSettlePending = null;
+        return;
+      }
+      // A remount may keep the provider IDs while replacing every section node.
+      // Check per-turn rows so global message deduplication cannot hide two owners.
+      remountedSourceCurrent = (latestTurns = CLF_DOM.turns()) => {
+        const messages = latestTurns.flatMap(turn => CLF_DOM.messagesIn(turn));
+        const users = messages.filter(message => message.role === 'user');
+        return users.at(-1)?.id === held.userMessageId &&
+          users.filter(message => message.id === held.userMessageId).length === 1 &&
+          messages.filter(message => message.role === 'assistant' && message.id === finalId).length === 1 &&
+          goalSettleFinalId(currentAssistantTurn(latestTurns)) === finalId;
+      };
+      if (!remountedSourceCurrent(turns)) {
+        goalSettlePending = null;
+        return;
+      }
     }
     // Claim synchronously before another activity wake can enter. The entire original
     // settling barrier runs again; a recovered zero is not permission to skip it.
     goalSettlePending = null;
     console.info('[Chat On Steroids] Goal settle blocker cleared; rechecking the same completed turn. No continuation sent.');
-    void watchGoalTurn(ended, held.turnId);
+    void watchGoalTurn(ended, held.turnId, remountedSourceCurrent);
   }
 
-  async function watchGoalTurn(ended, forTurn) {
+  async function watchGoalTurn(ended, forTurn, remountedSourceCurrent = null) {
     goalBusy = true;
     setGoalPhase('settling');
     const forId = conversationId;
     const forEpoch = epoch;
     const userMessageId = CLF_DOM.messages().filter(message => message?.role === 'user').at(-1)?.id;
+    const finalMessageId = goalSettleFinalId(ended);
     const current = () => alive && conversationId === forId && epoch === forEpoch && goalTurnId === forTurn;
     try {
       const deadline = Date.now() + GOAL_WATCH_MS;
@@ -12681,6 +12714,7 @@
           void pullActivity();
           return;
         }
+        if (remountedSourceCurrent && !remountedSourceCurrent()) return void setGoalPhase('');
         await requestGoalDraft(forTurn, current);
         return;
       }
@@ -12689,7 +12723,7 @@
       // restart the full barrier only after it sees no approval and an exact zero-tool receipt.
       console.warn(`[Chat On Steroids] Goal settle window ended: ${heldBy}; no draft requested.`);
       if ((heldBy === 'unavailable' || heldBy === 'approval' || heldBy === 'tools') && current() && userMessageId)
-        goalSettlePending = { ended, turnId: forTurn, conversationId: forId, epoch: forEpoch, userMessageId };
+        goalSettlePending = { ended, turnId: forTurn, conversationId: forId, epoch: forEpoch, userMessageId, finalMessageId };
       const waitMessage = heldBy === 'unavailable'
         ? 'Could not verify running tools because the app did not return a valid activity receipt. No continuation was sent.'
         : heldBy === 'approval' ? 'Waiting for native approval before rechecking the completed turn.'

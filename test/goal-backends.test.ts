@@ -379,6 +379,30 @@ describe('Goal decision backends', () => {
     expect(await goal.draftFastFollowup(session.id)).toBeNull();
     expect(check).not.toHaveBeenCalled();
   });
+  it('keeps a refused Loop source unsent after ten hours and uses fresh readiness when it returns', async () => {
+    await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true, mode: 'loop',
+      loopBackend: 'chatgpt', continuationPolicy: 'settled-turn' } });
+    const id = 'loop-long-readiness-refusal';
+    const sessionId = await recording(id, 'The local test cannot start without a native approval.');
+    const start = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(start);
+    let ready = false;
+    goal.configureLoopForwardReadiness(async () => ready);
+    browser.request.mockResolvedValue('{"action":"continue","reply":"Validate an independent export path."}');
+    for (const elapsed of [0, 60 * 60_000, 10 * 60 * 60_000]) {
+      clock.mockReturnValue(start + elapsed);
+      const draft = goal.startGoalDraft({ sessionId, conversationId: id, turnId: 'source' });
+      expect(await settled(id)).toMatchObject({ stage: 'failed', error: 'goal_readiness_changed' });
+      expect(goal.ackGoalDraft(id, draft.token)).toBe(true);
+    }
+    expect(browser.request).not.toHaveBeenCalled();
+    ready = true;
+    goal.startGoalDraft({ sessionId, conversationId: id, turnId: 'source' });
+    expect(await settled(id)).toMatchObject({ stage: 'ready' });
+    expect(browser.request).toHaveBeenCalledTimes(1);
+    expect(browser.request.mock.calls[0]?.[0]).toContain('switch to independent authorized work');
+    expect(browser.request.mock.calls[0]?.[0]).toContain('keep unchecked claims pending without halting other work');
+  });
   it.each(['goal', 'loop'] as const)('fits the %s helper envelope after proving a provider-wrapped Resume is automatic, preserving the whole human correction', async mode => {
     await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true,
       mode, backend: 'chatgpt', loopBackend: 'chatgpt' } });
@@ -1386,7 +1410,8 @@ describe('Goal decision backends', () => {
     const reply = await goal.draftFastFollowup(sessionId);
     expect(prompt).toContain('Settled-turn continuation');
     expect(prompt).toContain('Unverified');
-    expect(reply).toContain('Before further writes, reconcile');
+    expect(reply).toContain('before writing to anything the uncertain action may have affected');
+    expect(reply).toContain('continue independent authorized work');
     expect(reply).toContain('Do not replay uncertain actions');
     expect(reply).toContain('Finish the remaining tests');
     // Finite Goal is not silently promoted to the weaker Loop readiness policy.

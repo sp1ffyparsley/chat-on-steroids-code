@@ -28035,6 +28035,51 @@ describe('the goal loop', () => {
       expect(live.document.querySelector('#prompt-textarea')!.textContent).toBe('');
     });
 
+  it.each(['same answer', 'temporarily unmounted', 'different answer', 'duplicate answer', 'unknown answer', 'later user'] as const)(
+    'rechecks a held Loop turn after a renderer remount only with exact native identity: %s', async variant => {
+      const question = '11111111-2222-4333-8444-555555555555';
+      const final = '22222222-3333-4444-8555-666666666666';
+      const different = '33333333-4444-4555-8666-777777777777';
+      let held = true;
+      const response = feed()();
+      live = await harness(`https://chatgpt.com/c/${CHAT}`, {
+        ...goalReplies(),
+        activity: () => ({ ...response, data: { ...response.data, pendingTools: held ? 1 : 0 } })
+      }, document => {
+        const user = userTurn(document, question, 'finish the same task', { sent: false });
+        user.querySelector('[data-message-id]')!.setAttribute('data-message-id', question);
+        const section = assistantTurn(document, 'before-remount', []);
+        prose(document, section, variant === 'unknown answer' ? 'no-native-id' : final, 'The first unit is finished.');
+      });
+      await live.hook.pullActivity();
+      const ended = (live.window as any).CLF_DOM.turns().find((turn: any) => turn.id === 'before-remount');
+      live.hook.noteGoalTurn(ended, 'completed', 'remount-settle-owner');
+      await settle(8000);
+      expect(drafts(live)).toHaveLength(0);
+      ended.node.remove();
+      if (variant === 'temporarily unmounted') {
+        held = false;
+        await live.hook.pullActivity();
+        expect(drafts(live)).toHaveLength(0);
+      }
+      if (variant === 'duplicate answer') {
+        const duplicate = assistantTurn(live.document, 'other-claimant', []);
+        prose(live.document, duplicate, final, 'An ambiguous duplicate.');
+      }
+      const remounted = assistantTurn(live.document, 'after-remount', []);
+      prose(live.document, remounted, variant === 'different answer' ? different :
+        variant === 'unknown answer' ? 'no-native-id' : final, 'The first unit is finished.');
+      held = false;
+      await live.hook.pullActivity();
+      if (variant === 'later user') userTurn(live.document, different, 'A newer question', { sent: false });
+      await settle(800);
+      await live.hook.pullActivity();
+      await settle(200);
+      expect(drafts(live).map(request => request.turnId)).toEqual(
+        ['same answer', 'temporarily unmounted'].includes(variant) ? ['remount-settle-owner'] : []);
+      expect(live.document.querySelector('#prompt-textarea')!.textContent).toBe('');
+    });
+
   it('collects an exact durable Loop reply immediately when the companion wakes the live page', async () => {
     let offered = false;
     let draftAttempts = 0;

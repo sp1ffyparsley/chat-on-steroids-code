@@ -6,7 +6,9 @@ This source snapshot covers original tool-request/result verification, completed
 
 The existing one-hour Loop notice now includes the projected blocker. A native-result verification hold uses its original age and can coexist with current verified tool work. Research priorities are exact historical joins after a handoff, safe recovery of unknown Send outcomes, helper and replacement tab retirement, and recovery after one to two hours of real inactivity.
 
-Recorder 166 is the verified private installation. Recorder 167 is source under test. The public source is not an installer or a claim of live automatic recovery.
+The completed-turn watcher now rebinds to the same native question and terminal answer after a same-document remount. Its original settling and application authorization checks still govern draft pickup. Stall notices include the held step, and safe retired-helper cleanup requires a current browser inventory.
+
+The corresponding private Windows Recorder 167 package passed 14,162 release and installer checks, with 62 existing skips. Recorder 166 remains the verified installation after safe shutdown deferred activation. This public snapshot contains the reviewed application and companion source and regressions. The private installer, account data, and operational prompts remain private. Executing browser generation and live automatic next-turn acceptance are tracked separately.
 
 ## Recorder 159 source and verification
 

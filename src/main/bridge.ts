@@ -3371,6 +3371,10 @@ export type AutomationChatProjection = {
   nextAction: string;
   nextRetryAt: number | null;
   lastWorkedAt: number;
+  /** Durable activity for quiet notices. Chat errors, input and transport do not renew it. */
+  stallProgressAt?: number;
+  receiptStalled?: true;
+  stallNoticeSuppressed?: true;
   activeWorkers: number;
   /** Current-run workers that ended in failure; retained separately from active capacity. */
   failedWorkers?: number;
@@ -4319,6 +4323,15 @@ export async function automationSupervisorSnapshot(
       title: session.title,
       mode,
       lastWorkedAt,
+      ...(mode === 'loop' ? {
+        stallProgressAt: Math.max(session.startedAt, session.lastAssistantFinalAt ?? 0,
+          session.lastToolCallAt ?? 0, session.lastFileChangeAt ?? 0),
+        ...(coreBrowserEvidence(id)?.pendingCompletion ||
+            health.recoveryStage === 'checking-activity' &&
+            continuationForSession(session.id)?.destinationSend.state === 'dispatched-unresolved'
+          ? { receiptStalled: true as const } : {}),
+        ...(approvalCardWaiting(id) || stopRequestedFor(id) ? { stallNoticeSuppressed: true as const } : {})
+      } : {}),
       activeWorkers,
       failedWorkers,
       ...(pause ? { pause } : {}),

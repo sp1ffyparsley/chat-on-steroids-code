@@ -8836,10 +8836,9 @@ describe('the loop that never stops', () => {
     expect(view.stage).toBe('ready');
     expect(view.reply).toContain('Reminder: Finish the release workflow without adding unrelated scope.');
     expect(view.reply).toContain('Progress checkpoint: 2h of proven accumulated active work');
-    expect(view.reply).toContain('current task, verified deliverables, remaining requirements/tests, evidence paths, uncertainty, and done=true/false');
-    expect(view.reply).toContain('Separate implemented, tested, installed, and live-verified results.');
-    expect(view.reply).toContain('verified acceptance items / total original acceptance items');
-    expect(view.reply).toContain('not a new tracking system');
+    expect(view.reply).toContain('Done — what changed; Verified — the actual test, artifact or measurement; Still needed');
+    expect(view.reply).toContain('distinguish source tests, installation, and live verification');
+    expect(view.reply).toContain('Leave unverified items pending, then keep independent authorized work moving.');
     expect(view.reply.match(/^Progress checkpoint:/gm)).toHaveLength(1);
   });
 
