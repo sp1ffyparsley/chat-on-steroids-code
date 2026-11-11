@@ -1,5 +1,11 @@
 # Chat On Steroids - code research mirror
 
+## Recorder 167 installed after R84 qualification
+
+The combined private Windows package passed 14,167 strict release and final installer checks with 62 existing skips, then installed successfully. Independent verification matched all 290 packaged program files and the complete 291-file installed tree. All 24 protected account settings and key-state checkpoint files matched before eight desktop profiles reopened.
+
+The original queued manual input advanced to the browser head under its existing identity after restart. Fresh browser observations still show older executing background workers in sampled profiles. Native extension activation and useful automatic next-turn acceptance remain open. This mirror provides the reviewed source and tests. Private installer and account data stay local.
+
 ## R84 queue and update recovery
 
 The browser queue now advances its saved manual head during ordinary outbox reads, including after restart. The next unoffered message gets its own attention window even if Chrome has stopped polling. That window starts no earlier than the message's scheduled time.
