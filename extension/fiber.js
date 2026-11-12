@@ -42,7 +42,7 @@
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
   const VERSION = 19;
   /** Private implementation epoch, independent of the stable cross-world wire schema. */
-  const PRODUCER_VERSION = 167;
+  const PRODUCER_VERSION = 168;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -78,8 +78,11 @@
   // bounded frames per minute; no ids, tool names, arguments, result text or witness values.
   let nativeReferenceTraceAt = -Infinity;
   const nativeReferenceTraceKeys = new Set();
-  /** Connector requests reported for one turn. Far above any real turn's call count. */
+  /** Connector requests reported for one turn. Far above most turns' call count, but a long working
+   * turn can pass it (#2157). The limit bounds what is reported, never the turn's public messages. */
   const MAX_CALLS = 200;
+  /** Items one turn may hold before it is not read at all; a bound against a runaway tree, far above real turns. */
+  const MAX_TURN_ITEMS = 5000;
   // Native ancestry includes invocation AND result nodes for both MCP and Code Mode,
   // in addition to public items. The layout/item bound is not a native branch-depth bound.
   const MAX_NATIVE_PATH_NODES = MAX_ROWS + 4 * MAX_CALLS;
@@ -2702,6 +2705,45 @@
             }
             return true;
           };
+          // A provider may contract a same-user hidden header while retaining its
+          // exact metadata parent. Prove the declared sibling, its native namespace
+          // and cache copy; an arbitrary off-path system node is not ancestry.
+          // This supplies request ancestry only. All group/result/final receipts
+          // below remain mandatory, including an opaque Core witness per call.
+          const contractedHeader = (id, parent, metadata) => {
+            if (pending || missingTerminal || !userAnchorsHeader || parent !== typedUserId ||
+                currentIds.has(id) || selected.has(id)) return false;
+            const userNode = nativeField(mapping, typedUserId), children = nativeField(userNode, 'children');
+            if (!Array.isArray(children) || children.length < 2 || children.length > MAX_ROWS) return false;
+            const declared = new Set();
+            for (let at = 0; at < children.length; at++) {
+              const child = str(nativeField(children, String(at)));
+              if (!child || declared.has(child)) return false;
+              declared.add(child);
+            }
+            if (!declared.has(id) || !declared.has(currentPath[1])) return false;
+            const node = nativeField(mapping, id), message = nativeField(node, 'message');
+            const meta = nativeField(message, 'metadata');
+            if (nativeField(node, 'id') !== id || nativeField(message, 'id') !== id ||
+                nativeField(node, 'parent') !== typedUserId || nativeField(meta, 'parent_id') !== typedUserId ||
+                nativeField(nativeField(message, 'author'), 'role') !== 'system' ||
+                nativeField(message, 'recipient') !== 'all' || nativeField(message, 'status') !== 'finished_successfully' ||
+                nativeField(meta, 'is_visually_hidden_from_conversation') !== true ||
+                nativeField(meta, 'message_type') !== 'next' || nativeField(meta, 'rebase_developer_message') !== false ||
+                !['request_id', 'working_turn_id', 'turn_exchange_id'].every(key =>
+                  str(nativeField(meta, key)) && nativeField(meta, key) === nativeField(metadata, key) &&
+                  nativeField(meta, key) === nativeField(userMeta, key))) return false;
+            const cached = nativeField(nativeField(data, 'mapping'), id);
+            if (cached && cached !== node) {
+              const prior = nativeField(cached, 'message'), priorMeta = nativeField(prior, 'metadata');
+              if (nativeField(cached, 'id') !== id || nativeField(cached, 'parent') !== typedUserId ||
+                  nativeField(prior, 'id') !== id || nativeField(nativeField(prior, 'author'), 'role') !== 'system' ||
+                  ['recipient', 'status'].some(key => nativeField(prior, key) !== nativeField(message, key)) ||
+                  ['parent_id', 'request_id', 'working_turn_id', 'turn_exchange_id', 'is_visually_hidden_from_conversation',
+                    'message_type', 'rebase_developer_message'].some(key => nativeField(priorMeta, key) !== nativeField(meta, key))) return false;
+            }
+            return true;
+          };
           for (let at = 1; at < currentPath.length; at++) {
             const id = currentPath[at], node = nativeField(mapping, id), message = nativeField(node, 'message');
             const author = nativeField(message, 'author'), metadata = nativeField(message, 'metadata');
@@ -2710,10 +2752,12 @@
             if (nativeField(node, 'id') !== id || nativeField(message, 'id') !== id)
               return refuse('nativeScopeBranchConflict', 'group-node');
             if (parent !== currentPath[at - 1]) return refuse('nativeScopeBranchConflict', 'group-parent');
-            const contracted = at > 1 && role === 'assistant' &&
-              (recipient === 'functions.exec' || recipient === 'api_tool.call_tool') &&
-              retainedParent && retainedParent !== parent && own.call(mapping, retainedParent) &&
-              contractedNarration(retainedParent, parent, metadata);
+            const contracted = retainedParent && retainedParent !== parent && own.call(mapping, retainedParent) &&
+              (at === 1 && role === 'system'
+                ? contractedHeader(retainedParent, parent, metadata)
+                : at > 1 && role === 'assistant' &&
+                  (recipient === 'functions.exec' || recipient === 'api_tool.call_tool') &&
+                  contractedNarration(retainedParent, parent, metadata));
             if (!retainedParent || retainedParent !== parent && own.call(mapping, retainedParent) && !contracted) {
               // Fixed shape of the first refused edge only. Do not export either
               // parent, inspect its node or change the original ancestry guard.
@@ -3642,7 +3686,7 @@
       if (Array.isArray(at.memoizedProps?.entry?.turn?.items)) { entry = at.memoizedProps.entry; break; }
     }
     if (!entry) { shellDiagnostic(rejects, 'ownerMissing'); return null; }
-    if (entry.turn.items.length > MAX_ROWS) { shellDiagnostic(rejects, 'itemsOverLimit'); return null; }
+    if (entry.turn.items.length > MAX_TURN_ITEMS) { shellDiagnostic(rejects, 'itemsOverLimit'); return null; }
     const stableTurnId = shellStableTurnId(entry, turnId);
     if (!stableTurnId) { shellDiagnostic(rejects, 'stableKeyMismatch'); return null; }
     // Search-unit keys describe layout, including fallback-turn-N after a native reload.
@@ -3660,7 +3704,6 @@
     const remember = id => { if (!id || seen.has(id)) return false; seen.add(id); return true; };
     let work = 0;
     for (const [index, item] of entry.turn.items.entries()) {
-      if (++work > MAX_ROWS) return null;
       if (item?.type === 'user-message' || item?.type === 'assistant-message') {
         const user = item.type === 'user-message';
         const id = str(item.messageId) || (user ? str(item.serverMessageId) : null);
@@ -3694,7 +3737,17 @@
       }
       const steps = item?.type === 'chatgpt-reasoning-group' && Array.isArray(item.items) ? item.items : [item];
       for (const step of steps) {
-        if (++work > MAX_ROWS) return null;
+        // Past the row limit the working rows are not reported; the turn's own questions and answers
+        // (the top-level items) always are, so a long turn can still end (#2157). Their identities are
+        // still checked, so a repeated one refuses the turn however far down it sits.
+        if (++work > MAX_ROWS) {
+          if (work > MAX_TURN_ITEMS) return null;
+          const counted = step?.type === 'dynamic-tool-call' ? step.tool === 'exec'
+            : step?.type === 'mcp-tool-call' && ourApp(step.invocation?.server);
+          const spare = counted ? str(step.callId) : null;
+          if (spare && !remember(spare)) return null;
+          continue;
+        }
         if (step?.type === 'assistant-message' && step !== item) {
           // Only these typed phases are known public output, never private analysis.
           // Nested text is progress evidence, not the final answer of this turn.
@@ -3713,13 +3766,17 @@
         }
         if (step?.type === 'dynamic-tool-call' && step.tool === 'exec') {
           const id = str(step.callId);
-          if (!id || !remember(id) || executionIds.length >= MAX_CALLS) return null;
+          if (!id) continue;
+          if (!remember(id)) return null;
+          if (executionIds.length >= MAX_CALLS) continue;
           executionIds.push(id);
           continue;
         }
         if (step?.type !== 'mcp-tool-call' || !ourApp(step.invocation?.server)) continue;
         const id = str(step.callId), tool = toolName(step.invocation?.tool);
-        if (!id || !tool || !remember(id) || calls.length >= MAX_CALLS) return null;
+        if (!id || !tool) continue;
+        if (!remember(id)) return null;
+        if (calls.length >= MAX_CALLS) continue;
         const completedProperty = Object.getOwnPropertyDescriptor(step, 'completed');
         const statusProperty = Object.getOwnPropertyDescriptor(step, 'status');
         const completedValue = completedProperty && own.call(completedProperty, 'value') ? completedProperty.value : undefined;

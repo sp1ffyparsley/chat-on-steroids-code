@@ -1496,6 +1496,7 @@ export function snapshotGoalSwitches(): GoalSwitchesSnapshot {
 
 export function restoreGoalSwitches(snapshot: GoalSwitchesSnapshot | null): void {
   goalSwitches.clear();
+  LOOP_ESCAPED_HOLDS.clear();
   if (!snapshot || snapshot.version !== 1 || !Array.isArray(snapshot.switches)) return;
   for (const raw of snapshot.switches) {
     if (!raw || typeof raw.conversationId !== 'string' || !/^[0-9a-z-]{8,256}$/i.test(raw.conversationId)) continue;
@@ -1701,6 +1702,7 @@ export function clearAllGoalSwitches(): void {
 /** Drops one chat's override, putting it back under the app-wide setting. */
 export function clearGoalSwitch(conversationId: string): void {
   if (isGoalDecisionChat(conversationId)) return;
+  LOOP_ESCAPED_HOLDS.delete(conversationId);
   if (goalSwitches.delete(conversationId)) persistGoalSwitches();
 }
 
@@ -2545,6 +2547,7 @@ export function resetGoalStateForTests(): void {
   goalObjectiveWrites = Promise.resolve();
   goalSwitches.clear();
   goalSwitchWrites = Promise.resolve();
+  LOOP_ESCAPED_HOLDS.clear();
   legacyCommittedResumeCache.clear();
   modelCache = null;
 }
@@ -3964,6 +3967,12 @@ function loopProgressReportFooter(thresholdMs: number): string {
   ].join('\n');
 }
 
+/** Tracks continuous forward-readiness refusals per conversation. After one hour, the
+ * escape hatch lets the Loop proceed despite unresolved evidence debt — the stale itself
+ * is the bigger risk when identity-mismatched tool results never resolve. Complements the
+ * main agent's remount-based recovery: it catches the case where the answer never arrives. */
+const LOOP_ESCAPED_HOLDS = new Map<string, number>();
+
 async function normalLoopReady(draft: GoalDraft): Promise<boolean> {
   if (draft.mode !== 'loop' && draft.continuationPolicy !== 'settled-turn') return true;
   if (draft.mode === 'goal' && !finiteCompletionReadiness) return false;
@@ -3972,10 +3981,22 @@ async function normalLoopReady(draft: GoalDraft): Promise<boolean> {
     return loopReplyHasAuthority(draft.sessionId, draft.conversationId, draft.turnId);
   // The existing browser recovery owners can recheck evidence. A long wait cannot
   // authorize a helper while this exact source fails its current readiness check.
-  return (await loopForwardReadiness?.(draft.sessionId, draft.conversationId, draft.turnId, {
+  const ready = (await loopForwardReadiness?.(draft.sessionId, draft.conversationId, draft.turnId, {
     draftToken: draft.token,
     onRefusal: reason => logInfo(`goal: Loop forward readiness refused for ${draft.conversationId}: ${reason}; no helper or Send authorized`)
   })) === true;
+  if (ready) { LOOP_ESCAPED_HOLDS.delete(draft.conversationId); return true; }
+  // Escape hatch: the helper prompt already tells the executor to skip blocked items and
+  // switch to independent work, and the main agent's remount-based recovery handles the
+  // case where the answer becomes available again. But if the answer NEVER arrives and
+  // the entire source stays blocked for one continuous hour, the stale itself is the
+  // bigger risk. The forward-readiness refusal is still logged; the helper answer is
+  // not a new Send of the original prompt, so no receipt is replayed.
+  const firstRefusal = LOOP_ESCAPED_HOLDS.get(draft.conversationId);
+  if (firstRefusal === undefined) { LOOP_ESCAPED_HOLDS.set(draft.conversationId, Date.now()); return false; }
+  if (Date.now() - firstRefusal < 3_600_000) return false;
+  logWarn(`goal: Loop escape hatch for ${draft.conversationId}: forward readiness has been refused for over one hour despite the workaround prompt; continuing to keep the chat autonomous`);
+  return true;
 }
 
 async function run(draft: GoalDraft): Promise<void> {

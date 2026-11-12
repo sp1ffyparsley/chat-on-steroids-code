@@ -1337,3 +1337,13 @@ it('accepts exactly48 picker entries and refuses49 without an invented model', a
     expect(await f.api.selectModelSettings('gpt-5-6-thinking', 'high'), count + ' ' + part).toBe(count === 48);
   }
 });
+
+it('reports the specific failure reason and summarizes offered models when selection fails', async () => {
+  const f = fixture();
+  expect(await f.api.selectModelSettings('no-such-model', 'high')).toBe(false);
+  const why = f.api.modelSelectionFailure();
+  expect(why).toContain('model no-such-model with high is not offered');
+  expect(why).toMatch(/the picker offers /);
+  expect(await f.api.selectModelSettings('gpt-5-6-thinking', 'high')).toBe(true);
+  expect(f.api.modelSelectionFailure()).toBe('');
+});

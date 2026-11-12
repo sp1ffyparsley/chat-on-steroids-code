@@ -81,3 +81,14 @@ it('indexes authored user text instead of the app transport envelope', async () 
   expect((await search('refactor parser')).results.map(row => row.id)).toEqual([id]);
   expect((await search('SECRETPROTOCOLWORD')).results).toEqual([]);
 });
+
+it('searches complete long conversations beyond 1M characters without truncating history', async () => {
+  const chunk = 'ordinary log entry '.repeat(3_000); // ~57k chars per message
+  const rows: Array<['user' | 'assistant', string]> = [];
+  for (let i = 0; i < 20; i++) rows.push([i % 2 === 0 ? 'user' : 'assistant', chunk]);
+  rows.push(['assistant', 'Tail needle LONGBOUNDARYTOKEN found at the end of a huge session.']);
+  const id = await chat('Long conversation', rows);
+  const reply = await search('LONGBOUNDARYTOKEN');
+  expect(reply.results.map(row => row.id)).toEqual([id]);
+  expect(reply.results[0]?.snippet?.text).toContain('LONGBOUNDARYTOKEN');
+});

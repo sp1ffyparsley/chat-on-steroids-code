@@ -4848,6 +4848,29 @@ export async function maintainLoopLanes(now = Date.now()): Promise<boolean> {
     : configuredLimit === null
       ? 16
       : Math.max(1, Math.min(16, configuredLimit));
+  // Proactive revival: a Loop chat with no activity for 20+ minutes should get one 'continue'
+  // message per staleness episode. This prevents the 9-hour stale deadlocks where identity-
+  // mismatched tool results never resolve and nothing re-triggers the chat.
+  const PROACTIVE_REVIVAL_MS = 20 * 60_000;
+  for (const session of sessions) {
+    const rid = session.conversationId;
+    if (!rid || session.origin?.kind === 'worker' || session.origin?.kind === 'helper') continue;
+    if (!goalArmedFor(rid) || goalSwitchFor(rid)?.mode !== 'loop') continue;
+    if (getConfig().ui.automationPaused === true) continue;
+    const lastWork = sessionLastWorkedAt(session);
+    if (!Number.isFinite(lastWork) || lastWork <= 0) continue;
+    if (now - lastWork < PROACTIVE_REVIVAL_MS) continue;
+    // The chat is stale. Enqueue one 'continue' message if none is already queued/delivered for this episode.
+    try {
+      const pending = goalPendingReplyFor(rid);
+      if (!pending && !goalDraftBusy(rid) && !isChatBlocked(rid)) {
+        const input = await enqueueInterruptedContinue(session.id, rid, session.startedAt ? `stale-${session.startedAt}` : `stale-${Date.now()}`);
+        if (input && input.state === 'queued') {
+          logInfo(`bridge: proactive revival for ${rid}: stale for ${Math.round((now - lastWork) / 60_000)}m; queued continue message ${input.id}`);
+        }
+      }
+    } catch { /* revival failure is diagnostic; the normal scheduler will still see the chat */ }
+  }
   let eligible = 0;
   let occupied = 0;
   for (const session of sessions) {

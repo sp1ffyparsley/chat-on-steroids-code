@@ -165,6 +165,18 @@ function persist(): void {
 }
 
 /**
+ * A same-owner re-sighting only moves a request later in the eviction order. Page scans repeat
+ * them constantly, and each used to rewrite the whole registry (about 1 MB after a few months,
+ * up to 50,000 rows): 15 rewrites in 4 minutes with 14 changing one timestamp (#2133). They are
+ * saved in batches instead; a new owner still saves at once and pulls this save forward, and
+ * quitting saves it too. A crash can lose a few minutes of order, never an owner.
+ */
+const FRESHNESS_SAVE_MS = 5 * 60_000;
+function persistFreshness(): void {
+  writeDurableSnapshotSoon(CORRELATIONS_STATE, snapshot, FRESHNESS_SAVE_MS);
+}
+
+/**
  * Whether a persisted row still carries everything an owner needs to be restored.
  *
  * The bar is exactly what this registry answers with: a request id, the conversation that
@@ -472,7 +484,7 @@ export function observeRequestCorrelation(input: RequestCorrelation): 'stored' |
 export function observeRequestCorrelations(
   inputs: readonly RequestCorrelation[]
 ): Array<'stored' | 'same' | 'refused'> {
-  let changed = false;
+  let changed = false, fresher = false;
   const results = inputs.map((input) => {
     const previousObservedAt = byRequest.get(joinKey(input.requestId))?.observedAt;
     const previousTurnId = byRequest.get(joinKey(input.requestId))?.turnId;
@@ -483,18 +495,22 @@ export function observeRequestCorrelations(
     // A same-owner observation can still advance durable freshness/order. Persist that too so
     // an app restart cannot resurrect the pre-refresh eviction order. A refusal changes nothing
     // and therefore writes nothing.
-    if (result === 'stored' || (result === 'same' && (previousObservedAt !== undefined && input.observedAt > previousObservedAt ||
+    if (result === 'stored' || (result === 'same' && (
         previousTurnId !== byRequest.get(joinKey(input.requestId))?.turnId ||
         previousTool !== byRequest.get(joinKey(input.requestId))?.tool ||
         previousNativeCall !== byRequest.get(joinKey(input.requestId))?.nativeCallMessageId ||
         previouslyAmbiguous !== byRequest.get(joinKey(input.requestId))?.nativeCallAmbiguous))) {
       changed = true;
+    } else if (result === 'same' && previousObservedAt !== undefined && input.observedAt > previousObservedAt) {
+      fresher = true;
     }
     return result;
   });
   if (changed) {
     correlationRevision++;
     persist();
+  } else if (fresher) {
+    persistFreshness();
   }
   return results;
 }

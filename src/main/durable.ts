@@ -33,6 +33,8 @@ interface PendingWrite {
 
 const pending = new Map<string, PendingWrite>();
 const timers = new Map<string, NodeJS.Timeout>();
+/** When each timer fires, so a nearer deadline can pull a later one forward. Read only while its timer exists. */
+const timerDue = new Map<string, number>();
 const retryAttempts = new Map<string, number>();
 const inFlight = new Map<string, Promise<void>>();
 let nextGeneration = 1;
@@ -141,9 +143,19 @@ function enqueueSlot(name: string, slot: PendingWrite): Promise<void> {
 }
 
 function schedule(name: string, delay: number): void {
-  if (timers.has(name) || !pending.has(name)) return;
+  if (!pending.has(name)) return;
+  const existing = timers.get(name);
+  if (existing) {
+    // A booked later save does not hold back an earlier one: the nearer deadline wins.
+    if ((timerDue.get(name) ?? 0) <= Date.now() + delay) return;
+    clearTimeout(existing);
+    timers.delete(name);
+    timerDue.delete(name);
+  }
+  timerDue.set(name, Date.now() + delay);
   const timer = setTimeout(() => {
     timers.delete(name);
+    timerDue.delete(name);
     const slot = pending.get(name);
     if (!slot) return;
     void enqueueSlot(name, slot).catch(() => scheduleRetry(name));
@@ -217,10 +229,11 @@ export function writeDurableSoon(name: string, value: unknown): void {
 }
 
 /** Coalesces background projections before allocating a snapshot. Never use for a commit barrier. */
-export function writeDurableSnapshotSoon(name: string, snapshot: () => unknown): void {
+export function writeDurableSnapshotSoon(name: string, snapshot: () => unknown, delayMs = WRITE_DELAY_MS): void {
   if (!root) return;
   pending.set(name, { ...nextWrite(undefined), snapshot, background: true });
-  schedule(name, WRITE_DELAY_MS);
+  // A longer delay is for a change that only refreshes a timestamp; a later short one still saves sooner.
+  schedule(name, delayMs);
 }
 
 /**
@@ -236,6 +249,7 @@ export async function writeDurableNow(name: string, value: unknown): Promise<voi
   if (timer) {
     clearTimeout(timer);
     timers.delete(name);
+    timerDue.delete(name);
   }
   const slot = nextWrite(value);
   pending.set(name, slot);
@@ -257,6 +271,7 @@ export async function flushDurable(): Promise<void> {
   for (const [name, timer] of timers) {
     clearTimeout(timer);
     timers.delete(name);
+    timerDue.delete(name);
   }
   // A failed background write deliberately survives without a timer until retry scheduling,
   // so shutdown must look at pending state itself rather than treating `timers` as authority.
@@ -277,6 +292,7 @@ export async function flushDurable(): Promise<void> {
 export function resetDurableForTests(): void {
   for (const timer of timers.values()) clearTimeout(timer);
   timers.clear();
+  timerDue.clear();
   pending.clear();
   retryAttempts.clear();
   root = '';

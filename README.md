@@ -1,5 +1,19 @@
 # Chat On Steroids - code research mirror
 
+## Current research snapshot — R86 / Recorder 168 source
+
+This checkpoint supersedes the older installation notes below. It preserves the user-authorized one-hour Loop fallback. After continuous readiness refusal for one hour, the existing Loop helper may propose independent authorized work. The fallback does not mark old tool results complete or prove a native Send. Its regression covers the exact deadline and a fresh waiting window after readiness returns.
+
+TypeScript and 2,876 affected checks across nine suites passed on this public snapshot. These are source checks, not full release qualification or live acceptance.
+
+The source now includes a guarded same-user hidden-header contraction repair for native request ancestry, native picker diagnostics and Send discovery, coalesced correlation freshness saves, session-search improvements, clearer result tables, and the current 20-minute proactive revival candidate. The latter is included for source review; its incident key, trigger eligibility, and duplicate prevention still need explicit acceptance. Existing native Retry, interrupted-stream recovery, helper collection, handoff custody, and separate worker tab groups remain implemented.
+
+Current live problems include long original-request identity holds, visible message-delivery timeout cards that are not reliably retried, helper failures, idle enabled Loops, accumulated old handoff tabs, and inconsistent executing companion generations. A step timer is not a measure of useful inactivity. Some automatic turns and real project tests succeeded before later stalls; this does not establish overnight fleet reliability.
+
+A separate private header-repair candidate passed 14,143 strict checks plus 37 installer checks. Another local installation replaced its accepted predecessor during verification and reported `strictBuild=false`. This public source snapshot is not an installer release or a certification of that combined installation. Installation, executing browser versions, and useful automatic next turns must be observed separately.
+
+Research should improve liveness while preserving implemented features, the one-hour fallback, saved work, account isolation, and the existing retry/delivery owners. Do not solve the stalls by disabling the fallback, inventing terminal receipts, replaying an original prompt, or adding another scheduler. Private account data, operational prompt libraries, credentials, and installer receipts are not published here.
+
 ## Recorder 167 installed after R84 qualification
 
 The combined private Windows package passed 14,167 strict release and final installer checks with 62 existing skips, then installed successfully. Independent verification matched all 290 packaged program files and the complete 291-file installed tree. All 24 protected account settings and key-state checkpoint files matched before eight desktop profiles reopened.

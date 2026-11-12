@@ -199,7 +199,7 @@ function shellEntry(options: ShellOptions, identity: {
     items.splice(1, 0, { type: 'dynamic-tool-call', tool: 'exec', callId: EXEC, completed: true });
   }
   if (options.oversizedShellItems) {
-    while (items.length <= 400) items.push({ type: 'unknown-fixture-item' });
+    while (items.length <= 5000) items.push({ type: 'unknown-fixture-item' });
   }
   return {
     id: identity.entryId ?? TURN,
@@ -2486,6 +2486,10 @@ describe('alternate shell turn/message provenance', () => {
     'header unfinished', 'header message type', 'header rebase flag', 'header rebase accessor',
     'unfinished execution', 'unfinished execution result', 'foreign retained parent',
     'exact retained commentary parent', 'exact retained execution commentary parent', 'exact retained commentary image result',
+    'exact retained header parent', 'retained header missing children', 'retained header duplicate child',
+    'retained header foreign user', 'retained header foreign working', 'retained header foreign exchange',
+    'retained header foreign request', 'retained header visible', 'retained header unfinished',
+    'retained header rebase', 'retained header accessor', 'retained header cache conflict', 'retained header missing receipt',
     'retained commentary foreign request', 'retained commentary foreign working',
     'retained commentary foreign exchange', 'retained commentary wrong parent', 'retained commentary wrong metadata parent',
     'retained commentary unfinished', 'retained commentary terminal', 'retained commentary tool',
@@ -2507,7 +2511,7 @@ describe('alternate shell turn/message provenance', () => {
         nativeCurrentNode: variant.startsWith('pending ') ? CALL :
           variant.startsWith('missing terminal ') && variant !== 'missing terminal hidden final' ? EXEC_RESULT : ASSISTANT,
         nativeCallLive: variant !== 'missing live branch', nativeCallCacheConflict: variant === 'cached conflict' ||
-          variant === 'retained commentary cached conflict' || variant === 'missing receipt late cache',
+          variant === 'retained commentary cached conflict' || variant === 'retained header cache conflict' || variant === 'missing receipt late cache',
         callCompleted: false, assistantCompleted: false,
         nativeCallMutation(mapping, entry) {
           observedMapping = mapping;
@@ -2581,6 +2585,30 @@ describe('alternate shell turn/message provenance', () => {
             get() { getterReads++; throw new Error('PRIVATE_HEADER_REBASE_GETTER'); } });
           if (variant === 'unfinished execution') mapping[EXEC].message.status = 'in_progress';
           if (variant === 'unfinished execution result') mapping[EXEC_RESULT].message.status = 'in_progress';
+          if (variant === 'exact retained header parent' || variant.startsWith('retained header ')) {
+            const retained = 'PRIVATE_RETAINED_HEADER';
+            Object.assign(mapping[USER].message.metadata, scope);
+            mapping[USER].children = [HEADER, retained];
+            mapping[retained] = { id: retained, parent: USER, message: { id: retained,
+              author: { role: 'system' }, recipient: 'all', status: 'finished_successfully',
+              content: { content_type: 'text', parts: ['PRIVATE_RETAINED_HEADER_TEXT'] },
+              metadata: { ...scope, parent_id: USER, is_visually_hidden_from_conversation: true,
+                message_type: 'next', rebase_developer_message: false } } };
+            mapping[HEADER].message.metadata.parent_id = retained;
+            if (variant === 'retained header missing children') delete mapping[USER].children;
+            if (variant === 'retained header duplicate child') mapping[USER].children.push(retained);
+            if (variant === 'retained header foreign user') mapping[retained].parent = 'foreign-user';
+            if (variant === 'retained header foreign working') mapping[retained].message.metadata.working_turn_id = 'foreign';
+            if (variant === 'retained header foreign exchange') mapping[retained].message.metadata.turn_exchange_id = 'foreign';
+            if (variant === 'retained header foreign request') mapping[retained].message.metadata.request_id = 'foreign';
+            if (variant === 'retained header visible') mapping[retained].message.metadata.is_visually_hidden_from_conversation = false;
+            if (variant === 'retained header unfinished') mapping[retained].message.status = 'in_progress';
+            if (variant === 'retained header rebase') mapping[retained].message.metadata.rebase_developer_message = true;
+            if (variant === 'retained header accessor') Object.defineProperty(mapping[retained].message.metadata, 'rebase_developer_message', {
+              get() { getterReads++; throw new Error('PRIVATE_RETAINED_HEADER_GETTER'); } });
+            if (variant === 'retained header missing receipt')
+              mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: '{"content":[]}' };
+          }
           if (variant === 'foreign retained parent') mapping[EXEC].message.metadata.parent_id = USER;
           if (variant === 'missing retained header parent') delete mapping[HEADER].message.metadata.parent_id;
           if (variant === 'missing retained execution parent') {
@@ -2676,9 +2704,9 @@ describe('alternate shell turn/message provenance', () => {
       try {
         const accepted = variant === 'direct Core' || variant === 'exact canonical group' || variant === 'exact final reference' ||
           variant === 'exact retained commentary parent' || variant === 'exact retained execution commentary parent' ||
-          variant === 'exact retained commentary image result';
+          variant === 'exact retained commentary image result' || variant === 'exact retained header parent';
         const identityOnly = variant === 'direct Core missing receipt' || variant.startsWith('core receipt missing') ||
-          variant === 'retained commentary missing receipt' || variant === 'missing terminal exact user';
+          variant === 'retained commentary missing receipt' || variant === 'retained header missing receipt' || variant === 'missing terminal exact user';
         expect(page.fiber.turns[0].calls[0]).toMatchObject({
           requestId: accepted || identityOnly || ['pending canonical group', 'pending direct Core'].includes(variant) ? REQUEST : null, answered: accepted });
         if (accepted || identityOnly || ['pending canonical group', 'pending direct Core'].includes(variant))
@@ -2775,7 +2803,7 @@ describe('alternate shell turn/message provenance', () => {
         }
         expect(getterReads).toBe(0);
         expect(JSON.stringify(page.fiber)).not.toContain('anchorRetained');
-        expect(JSON.stringify(page.fiber)).not.toMatch(/PRIVATE_SYSTEM_TEXT|PRIVATE_SYSTEM_GETTER|retired-header-parent|retired-exec-parent|PRIVATE_RETAINED_COMMENTARY/);
+        expect(JSON.stringify(page.fiber)).not.toMatch(/PRIVATE_SYSTEM_TEXT|PRIVATE_SYSTEM_GETTER|retired-header-parent|retired-exec-parent|PRIVATE_RETAINED_COMMENTARY|PRIVATE_RETAINED_HEADER/);
         if (identityOnly && variant !== 'missing terminal exact user') {
           // Request ownership survives result hydration. It is not completion:
           // no result witness or terminal may be invented before the real receipt.

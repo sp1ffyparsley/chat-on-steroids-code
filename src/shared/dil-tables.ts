@@ -47,6 +47,7 @@ export function completedDilText(text: string, capture?: { text: string; truncat
   let fence = '';
   let fenceLength = 0;
   let completedTable = false;
+  let tableIndex = 0;
   for (let at = 0; at < lines.length; at++) {
     const line = lines[at]!;
     const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
@@ -74,8 +75,28 @@ export function completedDilText(text: string, capture?: { text: string; truncat
     const matches = tables.filter(rows => rows.length > 1 && rows[0]!.length === header.length &&
       rows.every(row => row.length === header.length) &&
       rows[0]!.every((value, index) => value === header[index]));
-    if (matches.length !== 1) continue;
-    const match = matches[0]!;
+    if (!matches.length) continue;
+    let match: string[][] | undefined;
+    if (matches.length === 1) {
+      match = matches[0];
+    } else {
+      // Drawings and Markdown describe the same ordered tables. If the document has
+      // matching headers for each drawing, pair them in document sequence.
+      const matchingHeadersInDoc = lines.filter((l, idx) => l.trim().startsWith('|') && SEPARATOR.test(lines[idx + 1] ?? '') &&
+        markdownCells(l).length === header.length &&
+        markdownCells(l).every((val, i) => val === header[i]) &&
+        !(lines[idx + 2] ?? '').trim().startsWith('|')).length;
+      if (matchingHeadersInDoc === matches.length) {
+        const matchIndex = tables.findIndex((rows, index) => index >= tableIndex && rows.length > 1 && rows[0]!.length === header.length &&
+          rows.every(row => row.length === header.length) &&
+          rows[0]!.every((value, index) => value === header[index]));
+        if (matchIndex >= 0) {
+          tableIndex = matchIndex + 1;
+          match = tables[matchIndex];
+        }
+      }
+    }
+    if (!match) continue;
     out.push(lines[at + 1]!);
     for (const row of match.slice(1)) out.push(`| ${row.map(escapeCell).join(' | ')} |`);
     completedTable = true;

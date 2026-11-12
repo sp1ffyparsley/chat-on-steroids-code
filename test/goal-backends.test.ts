@@ -379,29 +379,43 @@ describe('Goal decision backends', () => {
     expect(await goal.draftFastFollowup(session.id)).toBeNull();
     expect(check).not.toHaveBeenCalled();
   });
-  it('keeps a refused Loop source unsent after ten hours and uses fresh readiness when it returns', async () => {
+  it('keeps the authorized one-hour Loop fallback and resets its wait after fresh readiness', async () => {
     await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true, mode: 'loop',
       loopBackend: 'chatgpt', continuationPolicy: 'settled-turn' } });
     const id = 'loop-long-readiness-refusal';
-    const sessionId = await recording(id, 'The local test cannot start without a native approval.');
+    const sessionId = await recording(id, 'Earlier native result identities could not be matched.');
     const start = Date.now();
     const clock = vi.spyOn(Date, 'now').mockReturnValue(start);
     let ready = false;
     goal.configureLoopForwardReadiness(async () => ready);
     browser.request.mockResolvedValue('{"action":"continue","reply":"Validate an independent export path."}');
-    for (const elapsed of [0, 60 * 60_000, 10 * 60 * 60_000]) {
+    for (const elapsed of [0, 60 * 60_000 - 1]) {
       clock.mockReturnValue(start + elapsed);
       const draft = goal.startGoalDraft({ sessionId, conversationId: id, turnId: 'source' });
       expect(await settled(id)).toMatchObject({ stage: 'failed', error: 'goal_readiness_changed' });
       expect(goal.ackGoalDraft(id, draft.token)).toBe(true);
     }
     expect(browser.request).not.toHaveBeenCalled();
-    ready = true;
-    goal.startGoalDraft({ sessionId, conversationId: id, turnId: 'source' });
+    clock.mockReturnValue(start + 60 * 60_000);
+    const fallback = goal.startGoalDraft({ sessionId, conversationId: id, turnId: 'source' });
     expect(await settled(id)).toMatchObject({ stage: 'ready' });
     expect(browser.request).toHaveBeenCalledTimes(1);
+    expect(goal.ackGoalDraft(id, fallback.token)).toBe(true);
+
+    clock.mockReturnValue(start + 10 * 60 * 60_000);
+    ready = true;
+    const recovered = goal.startGoalDraft({ sessionId, conversationId: id, turnId: 'source-after-fallback' });
+    expect(await settled(id)).toMatchObject({ stage: 'ready' });
+    expect(browser.request).toHaveBeenCalledTimes(2);
+    expect(goal.ackGoalDraft(id, recovered.token)).toBe(true);
     expect(browser.request.mock.calls[0]?.[0]).toContain('switch to independent authorized work');
     expect(browser.request.mock.calls[0]?.[0]).toContain('keep unchecked claims pending without halting other work');
+
+    ready = false;
+    clock.mockReturnValue(start + 10 * 60 * 60_000 + 1);
+    goal.startGoalDraft({ sessionId, conversationId: id, turnId: 'source-after-recovery' });
+    expect(await settled(id)).toMatchObject({ stage: 'failed', error: 'goal_readiness_changed' });
+    expect(browser.request).toHaveBeenCalledTimes(2);
   });
   it.each(['goal', 'loop'] as const)('fits the %s helper envelope after proving a provider-wrapped Resume is automatic, preserving the whole human correction', async mode => {
     await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true,

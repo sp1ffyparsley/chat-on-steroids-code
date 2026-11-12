@@ -2326,10 +2326,35 @@ var CLF_DOM = (() => {
     return true;
   }
 
+  function localeFreeSendControls() {
+    const box = composer();
+    if (!box || !box.isConnected) return [];
+    const form = box.closest('form');
+    if (!form) return [];
+    const drafted = (typeof box.innerText === 'string' ? box.innerText : editorText(box)).trim();
+    if (drafted === '') return [];
+    const stops = new Set(stopControls());
+    return [...form.querySelectorAll('button[class*="size-token-button-composer"][class*="bg-composer-primary"]')]
+      .filter(button => {
+        if (!renderedComposerNode(button) || button.closest('form') !== form || stops.has(button)) return false;
+        // Dictation keeps a popover state on itself; send never does.
+        if (button.hasAttribute('data-state')) return false;
+        const paths = button.querySelectorAll('svg path');
+        // Not the stop square, and not the four-path microphone.
+        if (paths.length === 1 && STOP_SQUARE.test(paths[0].getAttribute('d') || '')) return false;
+        return paths.length >= 1 && paths.length <= 2;
+      });
+  }
+
+  function sendControls() {
+    const labelled = nativeComposerControls(SEND);
+    return labelled.length > 0 ? labelled : localeFreeSendControls();
+  }
+
   /** The page-owned Send control, exposed so content.js can witness an actual submission. */
   function sendButton() {
     return safe(() => {
-      const buttons = nativeComposerControls(SEND);
+      const buttons = sendControls();
       return buttons.length === 1 ? buttons[0] : null;
     }, null);
   }
@@ -4514,6 +4539,18 @@ var CLF_DOM = (() => {
     const result = await inspectModelCatalogState(stillCurrent, failure);
     return result?.models.length ? { models: result.models, availability: result.availability } : null;
   }
+  let modelSelectionWhy = '';
+  const selectionFailed = reason => { modelSelectionWhy = reason; return false; };
+  /** The models and efforts the picker offered, from every version read, as one short line (capped). */
+  const offeredSummary = choices => safe(() => {
+    const byFamily = new Map();
+    for (const choice of choices ?? []) {
+      if (choice.available === false) continue;
+      const key = choice.familyId || choice.id; const efforts = byFamily.get(key) ?? new Set(); if (choice.effort) efforts.add(choice.effort); byFamily.set(key, efforts);
+    }
+    return [...byFamily].slice(0, 6).map(([key, efforts]) => `${String(key).slice(0, 24)}:${[...efforts].join('/')}`).join(' ').slice(0, 160);
+  }, '');
+
   function requestedPickerChoice(choice, model, effort) {
     const name = normalizeModelLabel(model);
     return (choice.id === model || choice.familyId === model ||
@@ -4522,6 +4559,7 @@ var CLF_DOM = (() => {
   }
 
   async function selectModelSettings(model, effort, stillCurrent = () => true, options = {}) {
+    modelSelectionWhy = '';
     let refusal = null, missingPair = false;
     const deadline = Number.isFinite(options.deadline) ? options.deadline : Infinity;
     const current = () => stillCurrent() && Date.now() < deadline;
@@ -4532,7 +4570,10 @@ var CLF_DOM = (() => {
     };
     const attempt = () => selectModelSettingsOnce(model, effort, stillCurrent,
       { ...options, failure: reason => { refusal = reason; } }, () => { missingPair = true; });
-    if (await attempt()) return true;
+    if (await attempt()) {
+      modelSelectionWhy = '';
+      return true;
+    }
     // Only a fully observed missing exact pair may hydrate within this same preparation.
     // Disabled controls, positive denial, ambiguous state and failed closure never retry.
     if (!missingPair || refusal !== 'choice_unavailable' || options.exact !== true ||
@@ -4551,7 +4592,9 @@ var CLF_DOM = (() => {
     }
     // The unchanged selector owns all version/effort actions, restoration and final proof.
     // It runs at most once more, with the original deadline and currentness predicate.
-    return await attempt() || failed();
+    const retry = await attempt();
+    if (retry) modelSelectionWhy = '';
+    return retry || failed();
   }
 
   async function selectModelSettingsOnce(model, effort, stillCurrent = () => true, options = {}, missingPair = () => {}) {
@@ -4564,16 +4607,17 @@ var CLF_DOM = (() => {
     const remaining = timeout => Math.max(0, Math.min(timeout, deadline - Date.now()));
     const ui = modelPickerAccess(selectionCurrent, options);
     let success = false, refusal = null;
-    const refused = fallback => {
+    const refused = (fallback, why) => {
       refusal ??= ui.failure() || fallback;
+      selectionFailed(why || fallback);
       return false;
     };
     try {
-      if (!selectionCurrent()) return refused('selection_unconfirmed');
+      if (!selectionCurrent()) return refused('owner_changed', 'the chat changed meanwhile');
       const original = await ui.open();
       if (!original) {
         if (!await ui.close()) refusal = 'picker_not_closed';
-        return refused('selection_unconfirmed');
+        return refused('selection_unconfirmed', 'the picker did not open or could not be read');
       }
       // Do not traverse versions when the native picker already proves the exact requested pair.
       // Apart from being unnecessary work, selecting another version and restoring it can remount
@@ -4584,7 +4628,8 @@ var CLF_DOM = (() => {
           (!effort || current.effort === effort)) {
         const closed = await ui.close();
         if (!closed) refusal = 'picker_not_closed';
-        if (!closed || !selectionCurrent()) return refused('picker_not_closed');
+        if (!closed) return refused('picker_not_closed', 'the picker did not close');
+        if (!selectionCurrent()) return refused('owner_changed', 'the chat changed meanwhile');
         success = await waitComposerWritable(selectionCurrent, remaining(15000));
         return success || refused('composer_unwritable');
       }
@@ -4599,12 +4644,13 @@ var CLF_DOM = (() => {
         // denial must survive an unrelated version's missing/hydrating snapshot below.
         if (deniedRequestedChoice(original)) return refused('choice_denied');
         let requestedFamily = model ? original.choices.find(choice => choice.id === model)?.familyId : null;
-        const offered = [];
+        const offered = [], seen = [];
         for (const version of [original.versions.find(v => v.id === original.version), ...original.versions.filter(v => v.id !== original.version)]) {
-          const state = await ui.version(version.id); if (!state) return refused('selection_unconfirmed');
+          const state = await ui.version(version.id); if (!state) return refused('selection_unconfirmed', 'a model version could not be read');
           if (deniedRequestedChoice(state)) return refused('choice_denied');
           requestedFamily ||= model ? state.choices.find(choice => choice.id === model)?.familyId : null;
           for (const choice of state.choices) {
+            seen.push(choice);
             if (!choice.available) continue;
             const exact = !model || choice.familyId === model || choice.id === model ||
               (requestedFamily && choice.familyId === requestedFamily);
@@ -4640,13 +4686,20 @@ var CLF_DOM = (() => {
         const candidates = offered.filter(entry => !wantedEffort || entry.choice.effort === wantedEffort);
         const rank = Math.max(0, ...candidates.map(candidate => candidate.rank));
         const matches = candidates.filter(candidate => candidate.rank === rank);
-        if (!matches.length) { missingPair(); return refused('choice_unavailable'); }
-        if ((model && new Set(matches.map(candidate => candidate.choice.familyId)).size !== 1) ||
-            (model && wantedEffort && new Set(matches.map(candidate => `${candidate.choice.id}\u0000${candidate.choice.effort}`)).size !== 1)) return refused('selection_ambiguous');
+        if (!matches.length) {
+          missingPair();
+          return refused('choice_unavailable', `${model ? `model ${String(model).slice(0, 30)}` : 'the current model'}${wantedEffort ? ` with ${wantedEffort}` : ''} is not offered; the picker offers ${offeredSummary(seen) || 'nothing readable'}`);
+        }
+        if ((model && new Set(matches.map(candidate => candidate.choice.familyId)).size !== 1)) {
+          return refused('selection_ambiguous', 'more than one model matches the request');
+        }
+        if ((model && wantedEffort && new Set(matches.map(candidate => `${candidate.choice.id}\u0000${candidate.choice.effort}`)).size !== 1)) {
+          return refused('selection_ambiguous', 'more than one choice matches the request');
+        }
         const wanted = matches.find(candidate => candidate.version === original.version &&
           candidate.choice.bucket === original.currentBucket) || matches[0];
         const state = await ui.version(wanted.version), choice = wanted.choice;
-        if (!state) return refused('selection_unconfirmed');
+        if (!state) return refused('selection_unconfirmed', 'a model version could not be read');
         const after = await ui.bucket(choice.bucket);
         const confirmed = after?.choices.find(candidate => candidate.bucket === after.currentBucket);
         selected = selectionCurrent() && confirmed?.available === true && confirmed.id === choice.id &&
@@ -4656,6 +4709,7 @@ var CLF_DOM = (() => {
         closed = await ui.close();
         if (!closed) refusal = 'picker_not_closed';
       }
+      if (selected && !closed) return refused('picker_not_closed', 'the picker did not close');
       if (!selected || !closed || !selectionCurrent()) return refused(!closed ? 'picker_not_closed' : 'selection_unconfirmed');
       success = await waitComposerWritable(selectionCurrent, remaining(15000));
       return success || refused('composer_unwritable');
@@ -5433,6 +5487,7 @@ var CLF_DOM = (() => {
     pluginInstalledButtons,
     pluginManagementIdle,
     selectModelSettings,
+    modelSelectionFailure: () => modelSelectionWhy,
     nextCooldownSelection,
     ensurePreferredAutomationModel,
     recoverModelCooldown,

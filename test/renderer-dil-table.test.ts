@@ -92,3 +92,17 @@ it('keeps malformed captured entities and unrelated button labels inert', () => 
   expect(completedDilText(header, { text: invalid, truncated: false })).toBe(header);
   expect(completedDilText('[Copiar lista completa]', capture)).toBe('[Copiar lista completa]');
 });
+
+it('pairs repeated headers in document order when each header in the document has a matching drawing', () => {
+  const multiDrawing = '<div data-d-component="table"><table>' + row(['A', 'B'], true) + row(['First', '1']) + '</table></div>' +
+    '<div data-d-component="table"><table>' + row(['A', 'B'], true) + row(['Second', '2']) + '</table></div>';
+  const source = '## Part 1\n| A | B |\n|---|---|\n\n## Part 2\n| A | B |\n|---|---|';
+  const completed = completedDilText(source, { text: multiDrawing, truncated: false });
+  expect(completed).toContain('| First | 1 |');
+  expect(completed).toContain('| Second | 2 |');
+  const [part1, part2] = completed.split('## Part 2\n');
+  expect(part1).toContain('| First | 1 |');
+  expect(part1).not.toContain('| Second | 2 |');
+  expect(part2).toContain('| Second | 2 |');
+  expect(part2).not.toContain('| First | 1 |');
+});
