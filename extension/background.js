@@ -4403,7 +4403,13 @@ async function cleanupRetiredInputTabs(elections, activeIds, absentProof = null)
     const source = { tab: tab.id, documentId: tabDocuments[String(tab.id)], navigationEpoch: tabEpochs[String(tab.id)] };
     if (!ownsDocument(source)) continue;
     try {
-      if (typeof row.owner === 'string' && !await temporaryHelperOutputSaved(id, row.owner, conversationFromUrl(tab.url), source)) continue;
+      // An expired helper (goal_browser_answer_expired) never collects an answer. Its Main
+      // record carries the confirmed native Send receipt but no decisionOutput, so the
+      // output check below would permanently fence the tab. A retired opening that was
+      // explicitly marked outputSaved:false by the terminal-input sweep is a confirmed
+      // terminal helper whose tab is disposable without an archived answer.
+      if (typeof row.owner === 'string' && row.outputSaved !== false &&
+          !await temporaryHelperOutputSaved(id, row.owner, conversationFromUrl(tab.url), source)) continue;
       const proof = await tabReply(tab.id, routedTemporary
         ? { type: 'clf-close-temporary-planner', id, owner: row.owner }
         : { type: 'clf-tab-close-check', conversationId: null, temporaryHelper: true }, { documentId: source.documentId });
@@ -4611,7 +4617,12 @@ async function deliverDesktopInputs(inputs, background, reusableConversations = 
     const row = inputOpenings[id];
     if (row && Number.isInteger(row.tab)) inputOpenings[id] = {
       ...row, stage: 'retired', retiredAt: Number.isFinite(row.retiredAt) ? row.retiredAt : Date.now(),
-      temporary: true, owner: terminal.owner || row.owner, conversationId: terminal.conversationId || row.conversationId
+      temporary: true, owner: terminal.owner || row.owner, conversationId: terminal.conversationId || row.conversationId,
+      // An expired helper (goal_browser_answer_expired) never collects an answer, so
+      // temporaryHelperOutputSaved always returns false and its tab can never pass the
+      // existing cleanup gate. Recording whether Main actually archived an output lets
+      // cleanupRetiredInputTabs close a confirmed terminal helper's tab without one.
+      outputSaved: Boolean(terminal.decisionOutput)
     };
   }
   // Only the app's complete outbox projection retires spent opening authority.
@@ -4754,7 +4765,12 @@ async function deliverDesktopInputs(inputs, background, reusableConversations = 
       const documentId = tabDocuments[String(tab.id)];
       const source = { tab: tab.id, documentId, navigationEpoch: tabEpochs[String(tab.id)] };
       try {
-        if (!await temporaryHelperOutputSaved(input.id, input.owner, conversationFromUrl(tab.url), source)) continue;
+        // Main sent close=true for this terminal helper. An expired helper
+        // (goal_browser_answer_expired) never collects an answer, so the output
+        // check would permanently fence the tab. A terminal close without a
+        // decisionOutput is a positively confirmed expired helper: close the tab.
+        const expired = input.state === 'cancelled' && input.error === 'goal_browser_answer_expired';
+        if (!expired && !await temporaryHelperOutputSaved(input.id, input.owner, conversationFromUrl(tab.url), source)) continue;
         const proof = await tabReply(tab.id, { type: 'clf-close-temporary-planner', id: input.id, owner: input.owner, accepted: true }, { documentId });
         const current = await chrome.tabs.get(tab.id);
         if (proof?.safe === true && proof.navigationEpoch === source.navigationEpoch && ownsDocument(source) &&
