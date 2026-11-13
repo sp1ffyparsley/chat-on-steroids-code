@@ -1,6 +1,6 @@
 import { APPROVAL_ANSWERED_TEXT, APPROVAL_PROGRESS_PREFIX, APPROVAL_WAITING_TEXT } from '../shared/approval-wait.js';
 
-export const APPROVAL_FRESH_MS = 75_000;
+export const APPROVAL_FRESH_MS = 300_000;
 export const APPROVAL_NOTICE_GRACE_MS = 30_000;
 
 export interface ApprovalWaitDeps {

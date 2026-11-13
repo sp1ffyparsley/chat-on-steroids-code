@@ -67,7 +67,7 @@ function readerProvenanceDiagnostic(raw, scan) {
   let upstream = {};
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
     try {
-      for (const key of ['fiberWire', 'fiberKeys', 'contentRecorder', 'contentKeys']) {
+      for (const key of ['fiberWire', 'fiberProducer', 'fiberKeys', 'contentRecorder', 'contentKeys']) {
         const descriptor = Object.getOwnPropertyDescriptor(raw, key);
         if (!descriptor) continue;
         const value = descriptor.value;
@@ -81,7 +81,7 @@ function readerProvenanceDiagnostic(raw, scan) {
   // older values. The worker always supplies its own executing generation, never raw's.
   // contentRecorder is retained without a census: it reflects what the content script
   // self-reported, not a Fiber capability requiring scan verification.
-  if (!scan) for (const key of ['fiberWire', 'fiberKeys', 'contentKeys']) delete upstream[key];
+  if (!scan) for (const key of ['fiberWire', 'fiberProducer', 'fiberKeys', 'contentKeys']) delete upstream[key];
   return { ...upstream, workerRecorder: PAGE_RECORDER_VERSION,
     ...(scan ? { workerKeys: Object.keys(scan.rejects).length } : {}) };
 }
@@ -111,6 +111,20 @@ function shellScanDiagnostic(raw) {
     'callIdentityNativeUnproved', 'callIdentityScopeUnproved', 'callIdentityParentUnproved',
     'callIdentitySelectedWithheld',
     'nativeAnchorLiveMissing', 'nativeAnchorUserMissing', 'nativeAnchorTurnIncomplete', 'nativeAnchorPathEmpty', 'nativeAnchorUserPathMismatch', 'nativeAnchorUnselectedPath', 'nativeAnchorPrerequisite',
+    'nativeBranchCoreInvocation', 'nativeBranchCoreResult', 'nativeBranchDuplicateReceipt',
+    'nativeBranchExecutionResultChildCount', 'nativeBranchExecutionResultNoOwner', 'nativeBranchExecutionResultRequest',
+    'nativeBranchExecutionStart', 'nativeBranchFinalNamespace', 'nativeBranchGroupExchange',
+    'nativeBranchGroupNode', 'nativeBranchGroupParent', 'nativeBranchGroupRetainedParent',
+    'nativeBranchGroupRole', 'nativeBranchGroupStatus', 'nativeBranchGroupWorkingTurn',
+    'nativeBranchHeaderRole', 'nativeBranchHeaderShape', 'nativeBranchSelectedExchange',
+    'nativeBranchSelectedMetadataParent', 'nativeBranchSelectedParent', 'nativeBranchSelectedRole',
+    'nativeBranchSelectedWorkingTurn', 'nativeBranchUserScope', 'nativeHeaderWorkingMissing',
+    'nativeHeaderExchangeMissing', 'nativeHeaderUserScope', 'nativeHeaderRecipient',
+    'nativeHeaderStatus', 'nativeHeaderVisible', 'nativeHeaderRebase',
+    'nativeCoreResultRequest', 'nativeCoreResultReceipt', 'nativeCoreResultResource',
+    'nativeHeaderValueAbsent', 'nativeHeaderValueAccessor', 'nativeHeaderValueUndefined',
+    'nativeHeaderValueNull', 'nativeHeaderValueString', 'nativeHeaderValueTrue',
+    'nativeHeaderValueFalse', 'nativeHeaderValueOther',
     'identityReasonCurrentQuestionMissing',
     'identityReasonCurrentQuestionUnselected',
     'identityReasonCurrentQuestionConflict',
@@ -168,7 +182,7 @@ function shellScanDiagnostic(raw) {
   try {
     const upstream = Object.getOwnPropertyDescriptor(raw, 'reader')?.value;
     if (upstream && typeof upstream === 'object' && !Array.isArray(upstream)) {
-      for (const key of ['fiberWire', 'fiberKeys', 'contentRecorder', 'contentKeys']) {
+      for (const key of ['fiberWire', 'fiberProducer', 'fiberKeys', 'contentRecorder', 'contentKeys']) {
         const descriptor = Object.getOwnPropertyDescriptor(upstream, key);
         if (!descriptor) continue;
         const value = descriptor.value;
@@ -10739,7 +10753,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 168;
+const PAGE_RECORDER_VERSION = 172;
 
 let deferredRecoveryWork = null;
 

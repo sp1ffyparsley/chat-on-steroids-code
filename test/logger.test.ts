@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import {
   flushLogBeforeExit, flushLogFile, formatLogAsJson, getLog, initLogFile, logEvent, logInfo,
   onLog, resetLoggerForTests, setLogProfileContext, snapshotLogOnCrash, logWarn
@@ -31,6 +32,108 @@ async function logFile(): Promise<string> {
 describe('bounded asynchronous diagnostic mirror', () => {
   const debugInput = { sessionId: '2026-10-14-test', conversationId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
     reason: 'stream_gone', errors: 1, runningTools: 0, automationPaused: true, screenEnabled: true };
+
+  it('retains the first bounded native reader refusal after recovery and a cold restart', async () => {
+    const profile = 'profile-5555555a-555a-4555-8555-555555555555';
+    setLogProfileContext(profile);
+    const file = await logFile();
+    const scan = { selectorMatches: 1, mapped: 1, rejects: {
+      fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0,
+      nativeBranchHeaderShape: 1, nativeHeaderRebase: 1, PRIVATE_FIELD: 'private body'
+    }, reader: { fiberProducer: 172, contentRecorder: 172, workerRecorder: 172, privateText: 'private body' } };
+    const nativeCompletion = { openCalls: 3, openCodeCalls: 0, traceRequestIds: 0, exactRequestJoins: 0,
+      checkpointKey: 'b'.repeat(64) };
+    expect(await noteLocalIncident({ source: 'browser-debug', reason: 'native_terminal_open_call',
+      sessionId: debugInput.sessionId, conversationId: debugInput.conversationId, nativeCompletion, readerScan: scan } as any)).toBe(true);
+    const first = (await listLocalIncidents()).incidents[0]!;
+    expect(first.readerScan).toMatchObject({ rejects: { nativeHeaderRebase: 1 }, reader: { fiberProducer: 172 } });
+    expect(JSON.stringify(first)).not.toContain('private body');
+    expect(await noteLocalIncident({ source: 'browser-debug', reason: 'native_terminal_open_call', status: 'resolved',
+      sessionId: debugInput.sessionId, conversationId: debugInput.conversationId,
+      nativeCompletion } as any)).toBe(true);
+    resetLoggerForTests(); setLogProfileContext(profile); initLogFile(file);
+    expect((await listLocalIncidents(first.id)).incidents[0]).toMatchObject({ id: first.id, status: 'resolved',
+      readerScan: { rejects: { nativeBranchHeaderShape: 1, nativeHeaderRebase: 1 }, reader: { fiberProducer: 172 } } });
+  });
+
+  it.each(['verified', 'masked-slot', 'archive-full', 'profile-change'] as const)(
+    'archives diagnostic overflow without replacing protected holds: %s', async mode => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+    const profile = 'profile-5555555a-555a-4555-8555-555555555555';
+    setLogProfileContext(profile);
+    const file = await logFile();
+    for (let index = 0; index < LOCAL_INCIDENT_SLOTS; index++) {
+      expect(await noteLocalIncident({ source: 'browser-debug', reason: 'native_terminal_open_call',
+        sessionId: debugInput.sessionId, conversationId: debugInput.conversationId, turnId: `protected-${index}`,
+        nativeCompletion: { openCalls: 1, openCodeCalls: 0, traceRequestIds: 0, exactRequestJoins: 0 } })).toBe(true);
+    }
+    const folder = path.join(path.dirname(file), 'local-incidents');
+    if (mode === 'masked-slot') {
+      const target = path.join(folder, 'incident-31.json');
+      const retained = JSON.parse(await fs.readFile(target, 'utf8'));
+      await fs.writeFile(target, JSON.stringify({ ...retained, profileId: '***' }));
+      resetLoggerForTests(); setLogProfileContext(profile); initLogFile(file);
+    }
+    const before = await Promise.all(Array.from({ length: LOCAL_INCIDENT_SLOTS }, (_, index) =>
+      fs.readFile(path.join(folder, `incident-${index}.json`), 'utf8')));
+    const open = fs.open.bind(fs);
+    let restoreOpen = () => {};
+    if (mode === 'archive-full' || mode === 'profile-change') {
+      const opening = vi.spyOn(fs, 'open').mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+        if (String(args[0]).includes(`${path.sep}archive${path.sep}`) && String(args[0]).endsWith('.tmp')) {
+          if (mode === 'archive-full') throw Object.assign(new Error('fixture full'), { code: 'ENOSPC' });
+          setLogProfileContext('profile-44444444-4444-4444-8444-444444444444');
+        }
+        return open(...args);
+      });
+      restoreOpen = () => opening.mockRestore();
+    }
+    const accepted = await noteLocalIncident({ source: 'app', reason: 'new_failure_after_ring_saturation', detail: 'private tool body' });
+    const failed = mode === 'archive-full' || mode === 'profile-change';
+    expect(accepted).toBe(!failed);
+    let names = await fs.readdir(path.join(folder, 'archive'));
+    expect(names).toHaveLength(failed ? 0 : 1);
+    const archived = failed ? null : JSON.parse(await fs.readFile(path.join(folder, 'archive', names[0]!), 'utf8'));
+    if (archived) {
+      expect(archived).toMatchObject({ profileId: profile, reason: 'new_failure_after_ring_saturation', status: 'unresolved' });
+      expect(archived.id).toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-8[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
+      expect(JSON.stringify(archived)).not.toContain('private tool body');
+      expect(await noteLocalIncident({ source: 'app', reason: 'new_failure_after_ring_saturation' })).toBe(true);
+      expect(await fs.readdir(path.join(folder, 'archive'))).toEqual(names);
+      if (mode === 'verified') {
+        const readerScan = { selectorMatches: 1, mapped: 1, rejects: {
+          fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0,
+          nativeBranchHeaderShape: 1, nativeHeaderRebase: 1
+        }, reader: { fiberProducer: 172 } };
+        expect(await noteLocalIncident({ source: 'app', reason: 'new_failure_after_ring_saturation', readerScan })).toBe(true);
+        expect(await fs.readdir(path.join(folder, 'archive'))).toHaveLength(2);
+        expect(await noteLocalIncident({ source: 'app', reason: 'new_failure_after_ring_saturation',
+          readerScan: { ...readerScan, reader: { fiberProducer: 173 } } })).toBe(true);
+        expect(await fs.readdir(path.join(folder, 'archive'))).toHaveLength(3);
+        // Growing counts for the same refusal are still one snapshot.
+        expect(await noteLocalIncident({ source: 'app', reason: 'new_failure_after_ring_saturation',
+          readerScan: { ...readerScan, reader: { fiberProducer: 173 },
+            rejects: { ...readerScan.rejects, nativeBranchHeaderShape: 91 } } })).toBe(true);
+        names = await fs.readdir(path.join(folder, 'archive'));
+        expect(names).toHaveLength(3);
+      }
+    }
+    expect(await Promise.all(Array.from({ length: LOCAL_INCIDENT_SLOTS }, (_, index) =>
+      fs.readFile(path.join(folder, `incident-${index}.json`), 'utf8')))).toEqual(before);
+    if (mode === 'archive-full') {
+      restoreOpen();
+      expect(await noteLocalIncident({ source: 'app', reason: 'new_failure_after_ring_saturation' })).toBe(true);
+      expect((await listLocalIncidents()).storageError).toBeNull();
+    }
+    resetLoggerForTests(); setLogProfileContext(profile); initLogFile(file);
+    expect((await listLocalIncidents()).incidents).toHaveLength(LOCAL_INCIDENT_SLOTS - (mode === 'masked-slot' ? 1 : 0));
+    if (archived) expect((await listLocalIncidents(archived.id)).incidents[0]).toMatchObject({ id: archived.id, status: 'unresolved' });
+    if (archived) {
+      expect(await noteLocalIncident({ source: 'app', reason: 'new_failure_after_ring_saturation' })).toBe(true);
+      expect(await fs.readdir(path.join(folder, 'archive'))).toEqual(names);
+    }
+    expect((await listLocalIncidents()).incidents.every(row => row.nativeCompletion && row.status === 'unresolved')).toBe(true);
+  });
 
   it('restores real profile-owned incidents after a cold logger reset without exposing log credentials', async () => {
     const profile = 'profile-5555555a-555a-4555-8555-555555555555';
@@ -541,6 +644,36 @@ describe('bounded asynchronous diagnostic mirror', () => {
     ] });
   });
 
+  it('continues preserving small incident history beyond the old file-count ceiling within the same byte budget', async () => {
+    const file = await logFile();
+    expect(await noteLocalIncident({ source: 'app', reason: 'history_before_legacy_ceiling' })).toBe(true);
+    const folder = path.join(path.dirname(file), 'local-incidents');
+    const template = JSON.parse(await fs.readFile(path.join(folder, 'incident-0.json'), 'utf8'));
+    const archive = path.join(folder, 'archive');
+    await fs.mkdir(archive);
+    let oldestId = '';
+    for (let start = 0; start < 4096; start += 64) {
+      await Promise.all(Array.from({ length: 64 }, async (_, offset) => {
+        const index = start + offset;
+        const id = `00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`;
+        if (index === 0) oldestId = id;
+        const body = JSON.stringify({ ...template, id });
+        const digest = createHash('sha256').update(body).digest('hex');
+        await fs.writeFile(path.join(archive, `incident-${id}-${digest}.json`), body, { flag: 'wx' });
+      }));
+    }
+    for (let index = 1; index < LOCAL_INCIDENT_SLOTS; index++) {
+      expect(await noteLocalIncident({ source: 'app', reason: `newer_history_${index}` })).toBe(true);
+    }
+    expect(await noteLocalIncident({ source: 'app', reason: 'new_error_after_legacy_ceiling' })).toBe(true);
+    const current = await listLocalIncidents();
+    expect(current).toMatchObject({ status: 'ready', archive: { count: 4097, maxBytes: 128 * 1024 * 1024 } });
+    expect(current.incidents).toHaveLength(LOCAL_INCIDENT_SLOTS);
+    expect((await listLocalIncidents(oldestId)).incidents).toEqual([
+      expect.objectContaining({ id: oldestId, reason: 'history_before_legacy_ceiling' })
+    ]);
+  });
+
   it('leaves every hot incident intact when archival durability fails, then accepts a later diagnostic retry', async () => {
     const file = await logFile();
     for (let i = 0; i < LOCAL_INCIDENT_SLOTS; i++) {
@@ -659,7 +792,10 @@ describe('bounded asynchronous diagnostic mirror', () => {
     expect(await fs.readFile(path.join(folder, 'incident-0.json'), 'utf8')).toBe(before);
   });
 
-  it('bounds archive indexing and preserves all original hot records when the archive file budget is exhausted', async () => {
+  it.each([
+    { budget: 'file', files: 16385, bytes: undefined },
+    { budget: 'byte', files: 4097, bytes: 32 * 1024 }
+  ])('bounds archive indexing and preserves all original hot records when the archive $budget budget is exhausted', async ({ files, bytes }) => {
     const file = await logFile();
     for (let i = 0; i < LOCAL_INCIDENT_SLOTS; i++) {
       await noteLocalIncident({ source: 'app', reason: `archive_budget_${i}` });
@@ -669,7 +805,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
     const info = await fs.lstat(path.join(folder, 'incident-0.json'));
     const stat = fs.lstat.bind(fs), openDirectory = fs.opendir.bind(fs);
     const fakeDirectory = { async *[Symbol.asyncIterator]() {
-      for (let i = 0; i < 4097; i++) yield {
+      for (let i = 0; i < files; i++) yield {
         name: `incident-${i.toString(16).padStart(8, '0')}-bbbb-4ccc-8ddd-eeeeeeeeeeee-${'a'.repeat(64)}.json`
       };
     } };
@@ -679,7 +815,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
         : openDirectory(...args));
     vi.spyOn(fs, 'lstat').mockImplementation((...args: Parameters<typeof fs.lstat>) =>
       String(args[0]).includes(`${path.sep}archive${path.sep}incident-`)
-        ? Promise.resolve(info) : stat(...args));
+        ? Promise.resolve(bytes === undefined ? info : Object.assign(Object.create(info), { size: bytes })) : stat(...args));
     expect(await noteLocalIncident({ source: 'app', reason: 'must_preserve_at_archive_limit' })).toBe(false);
     expect(await fs.readFile(path.join(folder, 'incident-0.json'), 'utf8')).toBe(before);
     expect((await listLocalIncidents()).storageError).toBe('ENOSPC');
@@ -776,7 +912,7 @@ describe('bounded asynchronous diagnostic mirror', () => {
     }
   });
 
-  it('preserves every active restart fence and reports capacity loss if no incident can safely leave the hot index', async () => {
+  it('preserves every active restart fence while archiving diagnostic overflow outside the hot index', async () => {
     const file = await logFile();
     for (let i = 0; i < LOCAL_INCIDENT_SLOTS; i++) {
       await noteLocalIncident({ source: 'browser-debug', reason: 'native_terminal_open_call',
@@ -786,10 +922,10 @@ describe('bounded asynchronous diagnostic mirror', () => {
     const folder = path.join(path.dirname(file), 'local-incidents');
     const before = await Promise.all(Array.from({ length: LOCAL_INCIDENT_SLOTS }, (_, i) =>
       fs.readFile(path.join(folder, `incident-${i}.json`), 'utf8')));
-    expect(await noteLocalIncident({ source: 'app', reason: 'must_not_remove_any_restart_fence' })).toBe(false);
+    expect(await noteLocalIncident({ source: 'app', reason: 'must_not_remove_any_restart_fence' })).toBe(true);
     expect(await Promise.all(Array.from({ length: LOCAL_INCIDENT_SLOTS }, (_, i) =>
       fs.readFile(path.join(folder, `incident-${i}.json`), 'utf8')))).toEqual(before);
-    expect((await listLocalIncidents()).dropped).toBe(1);
+    expect(await listLocalIncidents()).toMatchObject({ dropped: 0, archive: { count: 1 } });
   });
 
   it('coalesces hot incidents, refuses private bodies and bounds active storage while archiving older evidence', async () => {
@@ -832,6 +968,81 @@ describe('bounded asynchronous diagnostic mirror', () => {
     const list = await listLocalIncidents();
     expect(list.incidents.map(item => item.reason)).toEqual(['still_unresolved']);
     expect(list.incidents[0]?.status).toBe('unresolved');
+  });
+
+  it('keeps an hour-later recovery and its original failure readable after hot expiry and a cold restart', async () => {
+    const profile = 'profile-5555555a-555a-4555-8555-555555555555';
+    setLogProfileContext(profile);
+    const file = await logFile();
+    const startedAt = Date.now();
+    const now = vi.spyOn(Date, 'now').mockReturnValue(startedAt);
+    const input = { source: 'app' as const, reason: 'activity_unknown_recovered',
+      sessionId: '2026-11-12-recovery', fingerprint: 'b'.repeat(64) };
+    expect(await noteLocalIncident(input)).toBe(true);
+    const original = (await listLocalIncidents()).incidents[0]!;
+    now.mockReturnValue(startedAt + 60 * 60_000);
+    expect(await noteLocalIncident({ ...input, status: 'resolved' })).toBe(true);
+    const recovered = (await listLocalIncidents()).incidents[0]!;
+    expect(recovered).toMatchObject({ id: original.id, reason: input.reason, createdAt: startedAt,
+      updatedAt: startedAt + 60 * 60_000, status: 'resolved', occurrences: 2 });
+    const folder = path.join(path.dirname(file), 'local-incidents');
+    const exact = await fs.readFile(path.join(folder, 'incident-0.json'), 'utf8');
+    now.mockReturnValue(startedAt + 9 * 24 * 60 * 60_000);
+    expect((await listLocalIncidents()).incidents).toEqual([]);
+    await expect(fs.stat(path.join(folder, 'incident-0.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+    const archived = await fs.readdir(path.join(folder, 'archive'));
+    expect(archived).toHaveLength(1);
+    expect(await fs.readFile(path.join(folder, 'archive', archived[0]!), 'utf8')).toBe(exact);
+    await flushLogFile();
+    resetLoggerForTests();
+    setLogProfileContext(profile);
+    initLogFile(file);
+    const restored = await listLocalIncidents(original.id);
+    expect(restored).toMatchObject({ status: 'ready', archive: { count: 1 }, incidents: [
+      expect.objectContaining({ id: original.id, reason: input.reason, status: 'resolved',
+        createdAt: startedAt, updatedAt: startedAt + 60 * 60_000, occurrences: 2 })
+    ] });
+  });
+
+  it('preserves expired recovery history when archival fails and never reuses those occupied slots', async () => {
+    const file = await logFile();
+    const startedAt = Date.now();
+    for (let index = 0; index < LOCAL_INCIDENT_SLOTS; index++) {
+      expect(await noteLocalIncident({ source: 'app', reason: `recovered_history_${index}`, status: 'resolved' })).toBe(true);
+    }
+    const folder = path.join(path.dirname(file), 'local-incidents');
+    const before = await Promise.all(Array.from({ length: LOCAL_INCIDENT_SLOTS }, (_, index) =>
+      fs.readFile(path.join(folder, `incident-${index}.json`), 'utf8')));
+    vi.spyOn(Date, 'now').mockReturnValue(startedAt + 9 * 24 * 60 * 60_000);
+    vi.spyOn(fs, 'link').mockRejectedValue(Object.assign(new Error('archive unavailable'), { code: 'ENOSPC' }));
+    const read = await listLocalIncidents();
+    expect(read).toMatchObject({ status: 'storage_unavailable', storageError: 'ENOSPC' });
+    expect(read.incidents).toHaveLength(LOCAL_INCIDENT_SLOTS);
+    expect(await noteLocalIncident({ source: 'app', reason: 'new_error_after_failed_history_archive' })).toBe(false);
+    expect(await Promise.all(Array.from({ length: LOCAL_INCIDENT_SLOTS }, (_, index) =>
+      fs.readFile(path.join(folder, `incident-${index}.json`), 'utf8')))).toEqual(before);
+  });
+
+  it('keeps the hot recovery record when its account changes during expiry archival', async () => {
+    const profile = 'profile-5555555a-555a-4555-8555-555555555555';
+    setLogProfileContext(profile);
+    const file = await logFile();
+    const startedAt = Date.now();
+    expect(await noteLocalIncident({ source: 'app', reason: 'recovered_before_switch', status: 'resolved' })).toBe(true);
+    const slot = path.join(path.dirname(file), 'local-incidents', 'incident-0.json');
+    const before = await fs.readFile(slot, 'utf8');
+    vi.spyOn(Date, 'now').mockReturnValue(startedAt + 9 * 24 * 60 * 60_000);
+    const link = fs.link.bind(fs);
+    vi.spyOn(fs, 'link').mockImplementationOnce(async (...args) => {
+      await link(...args);
+      setLogProfileContext('profile-6666666a-666a-4666-8666-666666666666');
+    });
+    expect(await listLocalIncidents()).toMatchObject({ status: 'storage_unavailable',
+      storageError: 'incident_profile_unverified', incidents: [] });
+    expect(await fs.readFile(slot, 'utf8')).toBe(before);
+    setLogProfileContext(profile);
+    expect(await listLocalIncidents(JSON.parse(before).id)).toMatchObject({ status: 'ready',
+      archive: { count: 1 }, incidents: [expect.objectContaining({ reason: 'recovered_before_switch' })] });
   });
 
   it('reports disk-full safely without claiming saved evidence or weakening the original error', async () => {

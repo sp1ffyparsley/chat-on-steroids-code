@@ -50,6 +50,7 @@ vi.mock('../src/main/session/store.js', () => ({
   findSessionByConversation: vi.fn(async (id: string) => binding.recorded && id === binding.conversationId ? { id: 'session-one', conversationId: id } : null)
 }));
 vi.mock('../src/main/config.js', () => ({ getConfig: () => ({ ui: { finishTool: binding.finishEnabled, finishAction: 'goal', finishLeadMinutes: binding.leadMinutes, automationPaused: binding.automationPaused }, goal: { impulseMinutes: binding.impulseMinutes } }) }));
+vi.mock('../src/main/user-notice.js', () => ({ noticeChatStopped: vi.fn() }));
 vi.mock('../src/main/session/blocked-chats.js', () => ({ isChatBlocked: () => binding.blocked }));
 let directory: string;
 let now: number;

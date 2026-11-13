@@ -139,7 +139,8 @@ const entrySchema = inputArgs.extend({
   /** One after-turn pickup earned by confirmed silence or settled Thinking failed. */
   silenceBoundary: z.object({ turnId: z.string().min(1).max(256), conversationId: z.string().min(1).max(256), workSeq: z.number().int().nonnegative(), acceptedAt: z.number().nonnegative().optional(), listenUntil: z.number().nonnegative().optional(), nativeBusy: z.boolean().optional() }).optional(),
   /** Shared unfinished-response fallback belongs to this exact native question. */
-  recovery: z.object({ questionId: z.string(), episode: z.string().max(200).optional(), pro: z.boolean(), busyUntil: z.number(), phase: z.enum(['ready', 'stopping', 'reloading', 'resumed']), reloadOwner: z.string().optional() }).optional(),
+  recovery: z.object({ questionId: z.string(), episode: z.string().max(200).optional(), pro: z.boolean(), busyUntil: z.number(), phase: z.enum(['ready', 'stopping', 'reloading', 'resumed']), reloadOwner: z.string().optional(),
+    revival: z.object({ progressAt: z.number().positive(), attempt: z.number().int().min(1).max(4) }).optional() }).optional(),
   /** Exact tool-free turn this explicit browser correction may interrupt. */
   directTurn: z.object({ id: z.string().min(1).max(256), startedAt: z.number() }).optional(),
   finishOwner: z.object({ turnId: z.string().min(1).max(256), periodic: z.boolean(), userRequested: z.boolean().optional() }).optional(),
@@ -671,7 +672,7 @@ async function browserInputAllowed(entry: InputEntry, firstRefusal?: (reason: Br
   if (entry.sourceHelperId && (!entry.conversationId || !goalArmedFor(entry.conversationId))) {
     noteInputContinuationHold(entry, 'automation_not_armed'); return disallow('helper-automation-not-armed');
   }
-  if (entry.recovery?.episode?.startsWith('interruption:')) return await interruptedInputCurrent(entry)
+  if (entry.recovery?.revival || entry.recovery?.episode?.startsWith('interruption:')) return await interruptedInputCurrent(entry)
     ? true : disallow('interrupted-source-stale');
   if (!manualInput(entry)) {
     const rotationConversation = entry.conversationId ?? (entry.sessionId ? (await getSession(entry.sessionId))?.conversationId : null);
@@ -1634,13 +1635,24 @@ async function interruptedInputCurrent(entry: InputEntry): Promise<boolean> {
     /^(?:connection interrupted\.? (?:waiting|please wait) for the complete answer\.?(?: retry)?|message delivery timed out\.? please try again\.?)$/i.test(
       failure.message.text.replace(/\s+/g, ' ').trim());
   const current = await getSession(entry.sessionId);
+  const revival = entry.recovery.revival;
+  // Revival owns a distinct idle completed-source boundary. It does not relax Stop/Retry
+  // custody: exact question, unchanged journal, no running work and all Send fences remain.
+  const idleRevival = !!revival && !!session &&
+    getConfig().sessions.record && !browserDecisionSignedOut && goalSwitchFor(id)?.own && goalSwitchFor(id)?.mode === 'loop' &&
+    session.origin?.kind !== 'worker' && session.origin?.kind !== 'helper' &&
+    Math.max(session.startedAt, session.lastToolCallAt ?? 0, session.lastAssistantFinalAt ?? 0,
+      session.lastTurnOutcome === 'completed' ? session.lastTurnEndAt ?? 0 : 0) === revival.progressAt &&
+    Date.now() - Math.max(revival.progressAt, session.lastMessageAt ?? 0) >= PROACTIVE_REVIVAL_MS &&
+    backgroundExecObligations(entry.sessionId).running.length === 0 && automationRotationAdmits(id) &&
+    profileWorkAdmission.decideNew('message').allowed;
   // Stop -> Continue is a terminal transition, not permission derived from
   // an interrupted-stream banner or a browser action offer. The recorder must
   // have committed Stop or the exact provider interruption's failed end before
   // this sender can reserve or deliver Continue. An unrelated failure is not proof.
   // A newer native turn revokes this recovery instead of receiving a duplicate.
   return current?.conversationId === id && !current.activeTurnId &&
-    (current.lastTurnOutcome === 'stopped' || current.lastTurnOutcome === 'failed' && failedInterruption) &&
+    (revival ? idleRevival : current.lastTurnOutcome === 'stopped' || current.lastTurnOutcome === 'failed' && failedInterruption) &&
     current.events === session?.events && current.updatedAt === session?.updatedAt &&
     question?.messageId === entry.recovery.questionId &&
     !superseded && !callsHoldRecovery(id) && getConfig().ui.automationPaused !== true &&
@@ -1648,10 +1660,23 @@ async function interruptedInputCurrent(entry: InputEntry): Promise<boolean> {
     !continuationForSession(entry.sessionId);
 }
 
-export function enqueueInterruptedContinue(sessionId: string, conversationId: string, questionId: string): Promise<InputEntry | null> {
+export const PROACTIVE_REVIVAL_MS = 20 * 60_000;
+export const REVIVAL_ESCALATION = 'The previous continue did not produce new work. Skip whatever is blocking the current step and continue with the next independent task in the goal.';
+
+export function enqueueInterruptedContinue(sessionId: string, conversationId: string, questionId: string,
+  revival?: { progressAt: number }): Promise<InputEntry | null> {
   return serial(async () => {
     const current = await load();
-    const episode = `interruption:${questionId}`;
+    const attempts = revival ? current.filter(row => row.sessionId === sessionId &&
+      row.conversationId === conversationId &&
+      row.recovery?.revival?.progressAt === revival.progressAt) : [];
+    const last = attempts.sort((a, b) => (b.recovery!.revival!.attempt - a.recovery!.revival!.attempt))[0];
+    const attempt = (last?.recovery?.revival?.attempt ?? 0) + 1;
+    // Persisted rows own the budget across restart. No enqueue/claim/ambiguous Send spends
+    // another attempt, and the next pass waits a full 20 minutes after the previous filing.
+    if (revival && (attempt > 4 || last && (Date.now() - last.createdAt < PROACTIVE_REVIVAL_MS ||
+        last.state !== 'sent' || !last.messageId || last.deliveredAt === undefined))) return null;
+    const episode = revival ? `revival:${revival.progressAt}:${attempt}` : `interruption:${questionId}`;
     const prior = current.find(row => row.sessionId === sessionId && row.recovery?.episode === episode);
     if (prior) return { ...prior }; // Sent, ambiguous, failed and cancelled rows never become a new Send.
     if (current.some(row => (row.sessionId === sessionId || row.decisionSourceSessionId === sessionId) &&
@@ -1659,15 +1684,16 @@ export function enqueueInterruptedContinue(sessionId: string, conversationId: st
     const session = await getSession(sessionId);
     const selection = session?.selectedModel?.conversationId === conversationId ? session.selectedModel : null;
     const row: InputEntry = {
-      id: randomUUID(), sessionId, conversationId, text: 'continue', mode: 'auto',
+      id: randomUUID(), sessionId, conversationId, text: revival && attempt > 2 ? REVIVAL_ESCALATION : 'continue', mode: 'auto',
       model: selection?.model ?? null, reasoningEffort: selection?.reasoningEffort ?? null,
       dueAt: Date.now(), createdAt: Date.now(), state: 'queued', owner: null, transportIntent: 'browser',
-      recovery: { questionId, episode, pro: false, busyUntil: 0, phase: 'ready' }
+      recovery: { questionId, episode, pro: false, busyUntil: 0, phase: 'ready',
+        ...(revival ? { revival: { progressAt: revival.progressAt, attempt } } : {}) }
     };
     if (!await interruptedInputCurrent(row)) return null;
     assertNewWorkAllowed('message');
     await commit([...current, row]);
-    logInfo(`input ${row.id}: interrupted native turn stopped; one Continue saved for exact question`);
+    logInfo(`input ${row.id}: ${revival ? `idle Loop revival ${attempt}/4` : 'interrupted native turn stopped'}; one continuation saved for exact question`);
     wakeBrowserWork();
     return { ...row };
   });
@@ -3886,8 +3912,10 @@ async function recoverySourceStillCurrent(entry: InputEntry): Promise<boolean> {
   // boundary permanently failed every positively unsent withdrawal, including
   // a temporary native composer refusal. Reuse its existing claim/Send fences;
   // never revive an already-failed historical row or infer a new source turn.
-  if (entry.recovery?.episode?.startsWith('interruption:')) {
-    return entry.recovery.episode === `interruption:${entry.recovery.questionId}` &&
+  if (entry.recovery?.revival || entry.recovery?.episode?.startsWith('interruption:')) {
+    return (entry.recovery.revival
+      ? entry.recovery.episode === `revival:${entry.recovery.revival.progressAt}:${entry.recovery.revival.attempt}`
+      : entry.recovery.episode === `interruption:${entry.recovery.questionId}`) &&
       await interruptedInputCurrent(entry);
   }
   // A helper authors its continuation after the source final. Withdrawal must

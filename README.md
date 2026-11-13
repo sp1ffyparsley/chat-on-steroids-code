@@ -1,6 +1,18 @@
 # Chat On Steroids - code research mirror
 
-## Current research snapshot — R86 / Recorder 168 source
+## Current research snapshot — R87 / Recorder 172 source
+
+This checkpoint supersedes the historical R86 and installation notes below. It publishes the reviewed committed runtime and regression changes through Recorder172. Private operational prompt libraries, deployed account identities, installer pins, local evidence and credentials remain outside the mirror. The four R87 research lanes cover exact request/result identity, useful and safe autonomy, safeguards and updates, and new creative workflow capabilities. Research should extend existing owners, validate genuinely new functions against current maintained primary sources, and reject duplicate systems.
+
+The combined private Windows172 package passed14,262 release and installer checks with62 existing conditional skips and installed successfully. Independent comparison matched292 payload files, the complete293-file installed program and24 protected account settings/encryption-state files. All eight desktop/Core connections were verified. All eight accounts are explicitly automation-paused; neither research nor monitoring may silently resume them. This mirror is source for review, not a public binary release or certification of live task completion.
+
+Recorder171 removed an incidental transport message-type header assumption while preserving native ancestry, namespace, rebase and opaque result-receipt checks. Recorder172 adds independent MAIN producer identity, bounded first-refusal counters and durable first reader snapshots. Protected hot incident overflow uses the existing bounded immutable archive; it neither overwrites unresolved custody nor grants a new completion fence. Exact mixed/current request recovery, hidden typed-user recovery, helper model/error handling, bounded native capture admission and packaging fixes are included. The one-hour independent-work Loop fallback, existing20-minute revival owner, delayed handoff recovery and exact retired-helper cleanup remain implemented. Do not rebuild these as new systems.
+
+The remaining live request association failure is still unresolved. Latest pre-activation observations had content171/worker171 running against desktop172, with91 selected calls and77 retained original-request holds in one sampled chat. A disk install does not prove executing MAIN, content or worker code. Fresh172 browser activation, first refusal, useful per-chat tool work and subsequent automatic native turns require independent evidence. Historical bounded automatic progress does not prove overnight fleet reliability. Preserve unresolved effects, exact Send ownership, human Pause/Off/Stop, approved scope and native approval boundaries. Diagnostics should be collected automatically rather than repeatedly asking an operator to navigate Console.
+
+Public TypeScript and7,077 affected checks across12 suites passed, with2 existing skips. The mirror also synchronizes the qualified source's existing approval freshness constant; its focused approval controls were checked separately. Export privacy validation precedes publication; private package qualification remains a separate receipt. No deployed account identity or private history is needed to reproduce the synthetic regression fixtures.
+
+## Historical R86 / Recorder 168 research checkpoint
 
 This checkpoint supersedes the older installation notes below. It preserves the user-authorized one-hour Loop fallback. After continuous readiness refusal for one hour, the existing Loop helper may propose independent authorized work. The fallback does not mark old tool results complete or prove a native Send. Its regression covers the exact deadline and a fresh waiting window after readiness returns.
 

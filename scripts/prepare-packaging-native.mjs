@@ -13,7 +13,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { chmod, copyFile, cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createRequire } from 'node:module';
 import { nativePrebuildDir, parseTarget, sharpPackagesFor, tarExecutableForPlatform } from './packaging-targets.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -134,6 +135,7 @@ async function stageTargetPayload(platform, arch, sharpPackages) {
   const payloadRoot = path.join(stagingRoot, platform, arch, 'node_modules');
   await rm(path.join(stagingRoot, platform, arch), { recursive: true, force: true });
   await mkdir(payloadRoot, { recursive: true });
+  await stageSharpRuntimeDependencies(root, payloadRoot);
 
   for (const packageName of sharpPackages) {
     const relative = packageName.split('/');
@@ -153,6 +155,33 @@ async function stageTargetPayload(platform, arch, sharpPackages) {
     await chmod(path.join(payloadRoot, 'node-pty', 'prebuilds', prebuildDir, 'spawn-helper'), 0o755);
   }
   say(`${platform}-${arch} native packaging payload staged.`);
+}
+
+/** Keep Sharp's portable runtime closure beside the target-native payload. Some builder
+ * dependency collectors omit hoisted transitive packages even after a successful npm ci. */
+export async function stageSharpRuntimeDependencies(sourceRoot, payloadRoot) {
+  const lock = JSON.parse(await readFile(path.join(sourceRoot, 'package-lock.json'), 'utf8'));
+  const visited = new Set();
+  async function stage(manifestPath) {
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    const resolve = createRequire(manifestPath);
+    for (const name of Object.keys(manifest.dependencies ?? {})) {
+      if (visited.has(name)) continue;
+      visited.add(name);
+      let dependencyManifest;
+      try { dependencyManifest = resolve.resolve(`${name}/package.json`); }
+      catch (error) { throw new Error(`Sharp runtime dependency ${name} is missing below ${sourceRoot}; run npm ci before packaging: ${error.message}`); }
+      const relative = path.relative(sourceRoot, path.dirname(dependencyManifest)).split(path.sep).join('/');
+      const installed = JSON.parse(await readFile(dependencyManifest, 'utf8'));
+      if (!lock.packages?.[relative] || lock.packages[relative].version !== installed.version) {
+        throw new Error(`Sharp runtime dependency ${name} at ${dependencyManifest} does not match package-lock.json; run npm ci before packaging`);
+      }
+      await cp(path.dirname(dependencyManifest), path.join(payloadRoot, ...name.split('/')), { recursive: true });
+      say(`Sharp runtime dependency staged: ${name}@${installed.version}`);
+      await stage(dependencyManifest);
+    }
+  }
+  await stage(path.join(sourceRoot, 'node_modules', 'sharp', 'package.json'));
 }
 
 async function main() {
@@ -178,7 +207,7 @@ async function main() {
   say(`${platform}-${arch} native dependency prebuilds are ready.`);
 }
 
-main().catch((error) => {
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) main().catch((error) => {
   process.stderr.write(`\nCould not prepare native packaging dependencies: ${error.message}\n`);
   process.exit(1);
 });

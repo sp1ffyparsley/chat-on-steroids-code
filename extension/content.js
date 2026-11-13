@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 168;
+  const RECORDER_VERSION = 172;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -4656,6 +4656,20 @@
       'callIdentityNativeUnproved', 'callIdentityScopeUnproved', 'callIdentityParentUnproved',
       'callIdentitySelectedWithheld',
     'nativeAnchorLiveMissing', 'nativeAnchorUserMissing', 'nativeAnchorTurnIncomplete', 'nativeAnchorPathEmpty', 'nativeAnchorUserPathMismatch', 'nativeAnchorUnselectedPath', 'nativeAnchorPrerequisite',
+    'nativeBranchCoreInvocation', 'nativeBranchCoreResult', 'nativeBranchDuplicateReceipt',
+    'nativeBranchExecutionResultChildCount', 'nativeBranchExecutionResultNoOwner', 'nativeBranchExecutionResultRequest',
+    'nativeBranchExecutionStart', 'nativeBranchFinalNamespace', 'nativeBranchGroupExchange',
+    'nativeBranchGroupNode', 'nativeBranchGroupParent', 'nativeBranchGroupRetainedParent',
+    'nativeBranchGroupRole', 'nativeBranchGroupStatus', 'nativeBranchGroupWorkingTurn',
+    'nativeBranchHeaderRole', 'nativeBranchHeaderShape', 'nativeBranchSelectedExchange',
+    'nativeBranchSelectedMetadataParent', 'nativeBranchSelectedParent', 'nativeBranchSelectedRole',
+    'nativeBranchSelectedWorkingTurn', 'nativeBranchUserScope', 'nativeHeaderWorkingMissing',
+    'nativeHeaderExchangeMissing', 'nativeHeaderUserScope', 'nativeHeaderRecipient',
+    'nativeHeaderStatus', 'nativeHeaderVisible', 'nativeHeaderRebase',
+    'nativeCoreResultRequest', 'nativeCoreResultReceipt', 'nativeCoreResultResource',
+    'nativeHeaderValueAbsent', 'nativeHeaderValueAccessor', 'nativeHeaderValueUndefined',
+    'nativeHeaderValueNull', 'nativeHeaderValueString', 'nativeHeaderValueTrue',
+    'nativeHeaderValueFalse', 'nativeHeaderValueOther',
       'identityReasonCurrentQuestionMissing',
       'identityReasonCurrentQuestionUnselected',
       'identityReasonCurrentQuestionConflict',
@@ -4714,7 +4728,7 @@
     try {
       const upstream = Object.getOwnPropertyDescriptor(raw, 'reader')?.value;
       if (upstream && typeof upstream === 'object' && !Array.isArray(upstream)) {
-        for (const key of ['fiberWire', 'fiberKeys']) {
+        for (const key of ['fiberWire', 'fiberProducer', 'fiberKeys']) {
           const descriptor = Object.getOwnPropertyDescriptor(upstream, key);
           if (!descriptor) continue;
           const value = descriptor.value;
@@ -6240,7 +6254,7 @@
     let upstream = {};
     try {
       const reader = input.shellScan && Object.getOwnPropertyDescriptor(input.shellScan, 'reader')?.value;
-      for (const key of ['fiberWire', 'fiberKeys']) {
+      for (const key of ['fiberWire', 'fiberProducer', 'fiberKeys']) {
         const descriptor = reader && typeof reader === 'object' ? Object.getOwnPropertyDescriptor(reader, key) : null;
         if (!descriptor) continue;
         const value = descriptor.value;

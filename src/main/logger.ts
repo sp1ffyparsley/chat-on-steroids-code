@@ -20,6 +20,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import type { LogEntry } from '../shared/types.js';
 import { currentAgent, currentCaller } from './mcp/call-context.js';
+import { shellScanDiagnostic, type CoreShellScanDiagnostic } from './core-browser-evidence.js';
 
 const MAX_ENTRIES = 500;
 /** One rotation keeps the previous file, so the last two of these are always on disk. */
@@ -108,6 +109,8 @@ interface LocalIncident {
   nativeCompletion?: { openCalls: number; openCodeCalls: number; traceRequestIds: number; exactRequestJoins: number;
     /** Opaque immutable-origin grouping only; neither identities nor completion proof. */
     checkpointKey?: string };
+  /** First normalized reader refusal. Independent of native-completion custody. */
+  readerScan?: CoreShellScanDiagnostic;
   sendEvidence: 'not_observed';
   domEvidence: 'not_captured';
   screenshot?: { metadataFile: string; sha256: string; bytes: number };
@@ -190,6 +193,7 @@ const incidentSlotDigest = (body: string | Buffer): string =>
   createHash('sha256').update(body).digest('hex');
 function parseLocalIncident(body: string, profileId: string | null): LocalIncident | null {
   const raw = JSON.parse(body) as LocalIncident;
+  const readerScan = shellScanDiagnostic(Object.getOwnPropertyDescriptor(raw, 'readerScan')?.value);
   if (raw?.version !== 1 || !/^[a-f0-9]{8}-[a-f0-9-]{27,36}$/i.test(raw.id) || !Number.isFinite(raw.createdAt) ||
           !['unresolved', 'resolved'].includes(raw.status) || !['app', 'browser-debug', 'worker', 'helper',
             'model', 'send', 'handoff', 'pairing'].includes(raw.source) ||
@@ -201,6 +205,7 @@ function parseLocalIncident(body: string, profileId: string | null): LocalIncide
         updatedAt: Number.isFinite(raw.updatedAt) ? raw.updatedAt : raw.createdAt,
         occurrences: Number.isInteger(raw.occurrences) ? Math.min(10000, Math.max(1, raw.occurrences)) : 1,
         status: raw.status,
+        ...(readerScan ? { readerScan } : {}),
         sessionId: incidentIdentity(raw.sessionId), conversationId: incidentUuid(raw.conversationId),
         turnId: incidentIdentity(raw.turnId), inputId: incidentUuid(raw.inputId),
         commandId: incidentIdentity(raw.commandId), requestId: incidentIdentity(raw.requestId),
@@ -289,7 +294,7 @@ async function readIncidentSlots(owner: IncidentFolderOwner, refresh = false): P
   return owner.rows = rows;
 }
 async function expireSettledIncidentSlots(owner: IncidentFolderOwner,
-  rows: IncidentSlotRow[]): Promise<void> {
+  rows: IncidentSlotRow[], stillOwned: () => boolean): Promise<void> {
   const now = Date.now();
   for (let n = rows.length - 1; n >= 0; n--) {
     const row = rows[n]!;
@@ -297,9 +302,19 @@ async function expireSettledIncidentSlots(owner: IncidentFolderOwner,
         now - row.incident.updatedAt < LOCAL_INCIDENT_RETENTION_MS) continue;
     const file = path.join(owner.folder, `incident-${row.slot}.json`);
     try {
+      if (!stillOwned()) return;
       // The original id is not proof of unchanged ownership: a substituted
       // unresolved incident could reuse the same id and must survive expiry.
       if (!(await incidentSlotStillOwned(owner, row.slot, row))) {
+        owner.rows = null;
+        owner.storageError = 'incident_slot_unverified';
+        continue;
+      }
+      // Recovery closes the active failure, not its diagnostic history. Reuse
+      // the existing hash-verified archive before releasing this hot slot;
+      // failed/full storage must leave the original evidence available.
+      if (!(await archiveIncidentSlot(owner, row, stillOwned)) || !stillOwned() ||
+          !(await incidentSlotStillOwned(owner, row.slot, row))) {
         owner.rows = null;
         owner.storageError = 'incident_slot_unverified';
         continue;
@@ -347,7 +362,10 @@ async function incidentSlotStillOwned(owner: IncidentFolderOwner, slot: number,
 }
 
 interface IncidentArchiveIndex { files: Array<{ name: string; bytes: number }>; bytes: number }
-const INCIDENT_ARCHIVE_FILES = 4096;
+// Small structured incidents can reach the legacy count limit long before
+// using the existing byte budget. Retain more history without growing that
+// 128 MiB ceiling or removing earlier evidence to make room.
+const INCIDENT_ARCHIVE_FILES = 16384;
 const INCIDENT_ARCHIVE_BYTES = 128 * 1024 * 1024;
 const INCIDENT_ARCHIVE_NAME = /^incident-([a-f\d]{8}-[a-f\d-]{27,36})-([a-f\d]{64})\.json$/i;
 const archiveFailure = (code: 'EIO' | 'ENOSPC' = 'EIO'): Error =>
@@ -418,21 +436,31 @@ async function archiveIncidentSlot(owner: IncidentFolderOwner, row: IncidentSlot
   const body = await fs.readFile(path.join(owner.folder, 'incident-' + row.slot + '.json'));
   if (!stillOwned() || incidentSlotDigest(body) !== row.diskSha256 ||
       parseLocalIncident(body.toString('utf8'), owner.profileId)?.id !== row.incident.id) return false;
+  return publishArchivedIncident(owner, row.incident, body, stillOwned,
+    () => incidentSlotStillOwned(owner, row.slot, row));
+}
+/** The same immutable archive also captures NEW diagnostic-only overflow. It
+ * never replaces protected hot rows or participates in native fence restoration. */
+async function publishArchivedIncident(owner: IncidentFolderOwner, incident: LocalIncident, body: Buffer,
+  stillOwned: () => boolean, sourceStillOwned: () => Promise<boolean>): Promise<boolean> {
+  const digest = incidentSlotDigest(body);
+  if (!stillOwned() || !(await sourceStillOwned())) return false;
   const folder = await incidentArchiveDirectory(owner, true);
   if (!folder || !stillOwned()) return false;
   await syncIncidentDirectory(owner.folder);
   const index = await incidentArchiveIndex(owner);
-  const name = 'incident-' + row.incident.id + '-' + row.diskSha256 + '.json';
+  const name = 'incident-' + incident.id + '-' + digest + '.json';
   const target = path.join(folder, name);
   const existing = index.files.find(file => file.name === name);
   if (existing) {
-    if (!(await readArchivedIncident(owner, row.incident.id, index, row.diskSha256))) throw archiveFailure();
+    if (!(await readArchivedIncident(owner, incident.id, index, digest))) throw archiveFailure();
     if (!stillOwned()) return false;
     // A previous link may have survived a failed directory flush. Discovery/readback
     // does not certify its crash durability; every retry must complete this barrier.
     await syncIncidentDirectory(folder);
-    if (!(await readArchivedIncident(owner, row.incident.id, index, row.diskSha256))) throw archiveFailure();
-    return stillOwned() && await incidentSlotStillOwned(owner, row.slot, row);
+    if (!(await readArchivedIncident(owner, incident.id, index, digest))) throw archiveFailure();
+    if (!(await sourceStillOwned())) return false;
+    return stillOwned();
   }
   if (index.files.length >= INCIDENT_ARCHIVE_FILES || index.bytes + body.length > INCIDENT_ARCHIVE_BYTES) {
     throw archiveFailure('ENOSPC');
@@ -442,7 +470,7 @@ async function archiveIncidentSlot(owner: IncidentFolderOwner, row: IncidentSlot
     if (!stillOwned()) return false;
     const handle = await fs.open(temp, 'wx');
     try { await handle.writeFile(body); await handle.sync(); } finally { await handle.close(); }
-    if (!stillOwned() || !(await incidentSlotStillOwned(owner, row.slot, row))) return false;
+    if (!stillOwned() || !(await sourceStillOwned())) return false;
     await incidentArchiveDirectory(owner);
     // Publish without replacement: an external/concurrent file appearing at this path
     // cannot be overwritten between the existence check and publication. The temporary
@@ -454,18 +482,19 @@ async function archiveIncidentSlot(owner: IncidentFolderOwner, row: IncidentSlot
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       const info = await fs.lstat(target);
       if (!info.isFile() || info.isSymbolicLink() || info.size !== body.length ||
-          incidentSlotDigest(await fs.readFile(target)) !== row.diskSha256) throw archiveFailure();
+          incidentSlotDigest(await fs.readFile(target)) !== digest) throw archiveFailure();
     }
     await syncIncidentDirectory(folder);
     const info = await fs.lstat(target);
     if (!info.isFile() || info.isSymbolicLink() || info.size !== body.length ||
-        incidentSlotDigest(await fs.readFile(target)) !== row.diskSha256) throw archiveFailure();
+        incidentSlotDigest(await fs.readFile(target)) !== digest) throw archiveFailure();
     owner.archive = null;
     const committed = await incidentArchiveIndex(owner);
     if (stillOwned() && Number.isInteger(Math.log2(committed.files.length))) {
       logEvent('incident.archive.verified', `Local incident archive verified: entries=${committed.files.length} bytes=${committed.bytes}; original status retained.`);
     }
-    return stillOwned() && await incidentSlotStillOwned(owner, row.slot, row);
+    if (!(await sourceStillOwned())) return false;
+    return stillOwned();
   } finally {
     await fs.unlink(temp).catch(() => undefined);
   }
@@ -491,6 +520,7 @@ export async function noteLocalIncident(input: {
   detail?: string; fingerprint?: string;
   browserFacts?: { errors: number; runningTools: number; automationPaused: boolean };
   nativeCompletion?: LocalIncident['nativeCompletion'];
+  readerScan?: CoreShellScanDiagnostic;
 }): Promise<boolean> {
   const owner = incidentFolder;
   if (!owner) return false;
@@ -546,10 +576,11 @@ export async function noteLocalIncident(input: {
         owner.tempsReconciled = true;
       }
       const rows = await readIncidentSlots(owner);
-      await expireSettledIncidentSlots(owner, rows);
+      await expireSettledIncidentSlots(owner, rows, profileStillOwned);
       if (!owner.rows) { droppedIncident(owner, 'index_unverified'); return; }
       const reason = incidentReason(input.reason);
       const nativeCompletion = acceptedNativeCompletion(input.nativeCompletion);
+      const readerScan = shellScanDiagnostic(Object.getOwnPropertyDescriptor(input, 'readerScan')?.value);
       const sessionId = incidentIdentity(input.sessionId), conversationId = incidentUuid(input.conversationId);
       const turnId = incidentIdentity(input.turnId);
       const now = nativeNegativeAdmission && input.source === 'browser-debug' && input.status !== 'resolved' &&
@@ -609,23 +640,25 @@ export async function noteLocalIncident(input: {
         return;
       }
       const reusable = !previous ? Array.from({ length: LOCAL_INCIDENT_SLOTS }, (_, slot) => slot).find(slot =>
-        !owner.unverifiedSlots.has(slot) && !rows.some(item => item.slot === slot)) ?? rows.filter(item => item.incident.status === 'resolved' &&
-        now - item.incident.updatedAt > LOCAL_INCIDENT_RETENTION_MS)
-        .sort((a, b) => a.incident.updatedAt - b.incident.updatedAt)[0]?.slot : null;
+        !owner.unverifiedSlots.has(slot) && !rows.some(item => item.slot === slot)) : null;
       let slot = previous?.slot ?? reusable;
       let archivedRow: IncidentSlotRow | undefined;
+      let archiveOnly = false;
       if (slot === null || slot === undefined) {
         // Bridge startup restores fail-closed native-completion waits from this hot
         // index. Preserve every unresolved nativeCompletion record, regardless of
         // source/reason, so archival cannot silently withdraw a restart fence.
         archivedRow = rows.filter(row => row.incident.status !== 'unresolved' || !row.incident.nativeCompletion)
           .sort((a, b) => a.incident.updatedAt - b.incident.updatedAt || a.slot - b.slot)[0];
-        if (!archivedRow) { droppedIncident(owner, 'ring_full'); return; }
-        if (!(await archiveIncidentSlot(owner, archivedRow, profileStillOwned))) {
+        // A verified account can retain new diagnostic bytes alongside its
+        // protected native holds. Unknown/foreign hot slots are never adopted.
+        if (!archivedRow && !rows.length) { droppedIncident(owner, 'ring_full'); return; }
+        if (!archivedRow) archiveOnly = true;
+        else if (!(await archiveIncidentSlot(owner, archivedRow, profileStillOwned))) {
           if (!profileStillOwned()) lostProfile(); else staleSlot(archivedRow.slot);
           return;
         }
-        slot = archivedRow.slot;
+        if (archivedRow) slot = archivedRow.slot;
       }
       const incident: LocalIncident = previous ? {
         ...previous.incident, updatedAt: now, occurrences: Math.min(10000, previous.incident.occurrences + 1),
@@ -634,7 +667,9 @@ export async function noteLocalIncident(input: {
         ...(screenshot ? { screenshot } : {}),
         ...(errorEvidence ? { errorEvidence } : {}),
         ...(browserFacts ? { browserFacts } : {}),
-        ...(nativeCompletion ? { nativeCompletion } : {}), recentLog: incidentLogShapes()
+        ...(nativeCompletion ? { nativeCompletion } : {}),
+        ...(!previous.incident.readerScan && readerScan ? { readerScan } : {}),
+        recentLog: incidentLogShapes()
       } : {
         version: 1, id: randomUUID(), profileId: owner.profileId, source: input.source, reason,
         createdAt: now, updatedAt: now, occurrences: 1, status: input.status ?? 'unresolved',
@@ -647,6 +682,7 @@ export async function noteLocalIncident(input: {
         ...(errorEvidence ? { errorEvidence } : {}),
         ...(browserFacts ? { browserFacts } : {}),
         ...(nativeCompletion ? { nativeCompletion } : {}),
+        ...(readerScan ? { readerScan } : {}),
         ...(fingerprint ? { fingerprint } : {}),
         sourceEvidence: 'runtime-log-only', loadedCompanionEvidence: 'unverified'
       };
@@ -654,6 +690,48 @@ export async function noteLocalIncident(input: {
       // error code and bounded repository frame coordinates survive normalization.
       const body = JSON.stringify(incident);
       if (Buffer.byteLength(body, 'utf8') > LOCAL_INCIDENT_BYTES) { owner.dropped++; return; }
+      if (archiveOnly) {
+        if (!profileStillOwned()) { lostProfile(); return; }
+        // Keep the first overflow snapshot for this exact native origin, or one
+        // ordinary coalescing window. Repeated polls/restarts must not fill the
+        // immutable archive with identical failures. This key never owns work.
+        const refusalShape = (scan: CoreShellScanDiagnostic | null | undefined) => scan ? [scan.reader?.fiberProducer ?? null,
+          Object.keys(scan.rejects).filter(key => (key.startsWith('native') || key.startsWith('identityReason')) &&
+            (scan.rejects as Record<string, number>)[key]! > 0).sort()] : null;
+        const scope = createHash('sha256').update(JSON.stringify(['overflow-v1', owner.profileId,
+          input.source, reason, sessionId, conversationId, turnId,
+          nativeCompletion?.checkpointKey ?? fingerprint ?? Math.floor(now / INCIDENT_COALESCE_MS),
+          refusalShape(readerScan), errorEvidence?.code ?? null])).digest('hex');
+        // UUIDv8 carries this local hash key while retaining the normal variant.
+        const variant = ((Number.parseInt(scope[16]!, 16) & 3) | 8).toString(16);
+        const id = `${scope.slice(0, 8)}-${scope.slice(8, 12)}-8${scope.slice(13, 16)}-${variant}${scope.slice(17, 20)}-${scope.slice(20, 32)}`;
+        const index = await incidentArchiveIndex(owner);
+        const retained = await readArchivedIncident(owner, id, index);
+        if (!profileStillOwned()) { lostProfile(); return; }
+        if (retained) {
+          if (retained.source !== input.source || retained.reason !== reason || retained.sessionId !== sessionId ||
+              retained.conversationId !== conversationId || retained.turnId !== turnId ||
+              retained.nativeCompletion?.checkpointKey !== nativeCompletion?.checkpointKey ||
+              JSON.stringify(refusalShape(retained.readerScan)) !== JSON.stringify(refusalShape(readerScan)) ||
+              (retained.errorEvidence?.code ?? null) !== (errorEvidence?.code ?? null)) throw archiveFailure();
+          const archiveFolder = await incidentArchiveDirectory(owner);
+          if (!archiveFolder) throw archiveFailure();
+          await syncIncidentDirectory(archiveFolder);
+          const confirmed = await readArchivedIncident(owner, id, index);
+          if (!confirmed || JSON.stringify(confirmed) !== JSON.stringify(retained)) throw archiveFailure();
+          accepted = profileStillOwned();
+          if (accepted) owner.storageError = owner.unverifiedSlots.size ? 'incident_slot_unverified' : null;
+          return;
+        }
+        const overflowBody = Buffer.from(JSON.stringify({ ...incident, id }));
+        accepted = await publishArchivedIncident(owner, { ...incident, id }, overflowBody, profileStillOwned,
+          async () => profileStillOwned());
+        if (!profileStillOwned()) lostProfile();
+        else if (accepted) owner.storageError = owner.unverifiedSlots.size ? 'incident_slot_unverified' : null;
+        return;
+      }
+      if (typeof slot !== 'number' || !Number.isInteger(slot) || slot < 0 || slot >= LOCAL_INCIDENT_SLOTS)
+        throw archiveFailure();
       const target = path.join(owner.folder, `incident-${slot}.json`);
       const temp = `${target}.${randomUUID()}.tmp`;
       try {
@@ -741,7 +819,7 @@ export async function listLocalIncidents(id?: string): Promise<{
   if (!stillOwned()) return unavailable();
   const run = async () => {
     let rows = await readIncidentSlots(owner, true);
-    await expireSettledIncidentSlots(owner, rows);
+    await expireSettledIncidentSlots(owner, rows, stillOwned);
     if (!owner.rows) rows = await readIncidentSlots(owner, true);
     let archive: IncidentArchiveIndex | null = null;
     let archived: LocalIncident | null = null;

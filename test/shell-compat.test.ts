@@ -12,6 +12,7 @@ import { JSDOM } from 'jsdom';
 import { beforeAll, describe, expect, it } from 'vitest';
 
 let fiberSource = '';
+let currentFiberProducer = 0;
 let domSource = '';
 
 beforeAll(async () => {
@@ -19,6 +20,8 @@ beforeAll(async () => {
     fs.readFile(path.join(process.cwd(), 'extension', 'fiber.js'), 'utf8'),
     fs.readFile(path.join(process.cwd(), 'extension', 'chatgpt-dom.js'), 'utf8')
   ]);
+  currentFiberProducer = Number(/const PRODUCER_VERSION = (\d+);/.exec(fiberSource)?.[1]);
+  expect(currentFiberProducer).toBeGreaterThan(0);
 });
 
 // Identity discovery reads provider metadata only when a selected, exact native
@@ -113,6 +116,7 @@ interface ShellOptions {
   omitFiber?: boolean;
   missingShellEntry?: boolean;
   oversizedShellItems?: boolean;
+  shellItemsMutation?: (items: any[]) => void;
   omitShellSelector?: boolean;
   userIdentity?: 'server-only' | 'discordant' | 'duplicate';
   secondShell?: 'exact' | 'foreign-entry' | 'foreign-conversation' | 'foreign-assistant';
@@ -201,6 +205,7 @@ function shellEntry(options: ShellOptions, identity: {
   if (options.oversizedShellItems) {
     while (items.length <= 5000) items.push({ type: 'unknown-fixture-item' });
   }
+  options.shellItemsMutation?.(items);
   return {
     id: identity.entryId ?? TURN,
     conversationId,
@@ -1201,6 +1206,23 @@ describe('alternate shell turn/message provenance', () => {
       const diagnostic = JSON.stringify(page.fiber.shellScan);
       for (const privateValue of [USER, CALL, RESULT, REQUEST, APP, LINK, 'PRIVATE_TOOL_RESULT', 'hello shell'])
         expect(diagnostic).not.toContain(privateValue);
+    } finally { page.dom.window.close(); }
+  });
+
+  it.each([
+    ['callLiveMappingConflict', { nativeCallLiveConflict: true }],
+    ['callReceiptConflict', { nativeCallCacheConflict: true }]
+  ] as const)('keeps the upstream %s visible beside an explicit completion veto', async (reason, options) => {
+    const page = await shellHarness({ withCall: true, nativeCallReceipt: true, callCompleted: false, ...options });
+    try {
+      for (const view of [page.fiber, await shellRescan(page, 'upstream-veto-reobserve')]) {
+        expect(view.turns[0].calls[0].answered).toBe(false);
+        expect(view.turns[0].calls[0].requestId).toBeNull();
+        expect(view.shellScan.rejects.callCompletionVeto).toBe(1);
+        expect(view.shellScan.rejects[reason]).toBe(1);
+        for (const privateValue of [USER, CALL, RESULT, REQUEST, APP, LINK])
+          expect(JSON.stringify(view.shellScan)).not.toContain(privateValue);
+      }
     } finally { page.dom.window.close(); }
   });
 
@@ -2384,11 +2406,12 @@ describe('alternate shell turn/message provenance', () => {
       } finally { page.dom.window.close(); }
     });
 
-  it.each(['exact retained sibling', 'retained sibling without user request', 'missing children',
+  it.each(['exact retained sibling', 'retained sibling without user request', 'retained sibling alternate annotations',
+    'retained sibling alternate annotations foreign scope', 'missing children',
     'undeclared current header', 'duplicate child', 'missing sibling node', 'foreign sibling parent',
     'foreign sibling working', 'foreign sibling exchange', 'foreign sibling request', 'visible sibling',
     'unfinished sibling', 'rebased sibling', 'ambiguous siblings', 'sibling metadata accessor',
-    'children accessor', 'cached sibling conflict', 'cached user conflict', 'missing result receipt'] as const)(
+    'children accessor', 'cached sibling conflict', 'cached sibling annotation drift', 'cached user conflict', 'missing result receipt'] as const)(
     'recovers a native Retry namespace only through a unique canonical retained sibling: %s', async variant => {
       const HEADER = 'retry-current-header', PRIOR = 'retry-prior-header';
       const diagnosticLogs: string[] = [];
@@ -2427,6 +2450,11 @@ describe('alternate shell turn/message provenance', () => {
             structuredContent: { cosResultReceipt: { version: 1, id: 'a'.repeat(48) } }
           }) };
           if (variant === 'retained sibling without user request') delete mapping[USER].message.metadata.request_id;
+          if (variant.startsWith('retained sibling alternate annotations')) {
+            mapping[HEADER].message.metadata.message_type = 'PRIVATE_CURRENT_TRANSPORT_TYPE';
+            delete mapping[PRIOR].message.metadata.message_type;
+            if (variant.endsWith('foreign scope')) mapping[PRIOR].message.metadata.working_turn_id = 'foreign-working';
+          }
           if (variant === 'missing children') delete mapping[USER].children;
           if (variant === 'undeclared current header') mapping[USER].children = [PRIOR];
           if (variant === 'duplicate child') mapping[USER].children.push(PRIOR);
@@ -2453,16 +2481,19 @@ describe('alternate shell turn/message provenance', () => {
         } });
       try {
         let frame = page.fiber;
-        if (variant === 'cached sibling conflict' || variant === 'cached user conflict') {
+        if (variant === 'cached sibling conflict' || variant === 'cached sibling annotation drift' || variant === 'cached user conflict') {
           const owner = (page.exchange as any).__reactFiber$shellfixture;
           const mapping = owner.memoizedState.memoizedState.renderedConversation.mapping;
           const id = variant === 'cached sibling conflict' ? PRIOR : USER;
           owner.memoizedProps.client = queryClient({ ...mapping, [id]: { ...mapping[id],
-            message: { ...mapping[id].message, metadata: { ...mapping[id].message.metadata, working_turn_id: 'cached-foreign' } }
+            message: { ...mapping[id].message, metadata: { ...mapping[id].message.metadata,
+              ...(variant === 'cached sibling annotation drift' ? { message_type: 'PRIVATE_CACHED_TRANSPORT_TYPE' }
+                : { working_turn_id: 'cached-foreign' }) } }
           } }, {});
           frame = await shellRescan(page, `retry-sibling-${variant}`);
         }
-        const accepted = variant === 'exact retained sibling' || variant === 'retained sibling without user request';
+        const accepted = variant === 'exact retained sibling' || variant === 'retained sibling without user request' ||
+          variant === 'retained sibling alternate annotations' || variant === 'cached sibling annotation drift';
         const identityOnly = variant === 'missing result receipt';
         expect(frame.turns[0].calls[0]).toMatchObject({ requestId: accepted || identityOnly ? REQUEST : null, answered: accepted });
         expect(frame.turns[0].requests.some((row: any) => row.requestId === REQUEST && row.messageId === EXEC)).toBe(accepted || identityOnly);
@@ -2483,10 +2514,13 @@ describe('alternate shell turn/message provenance', () => {
     'orphan execution result', 'execution result request mismatch', 'execution child result missing', 'execution child result extra',
     'pending canonical group', 'pending direct Core', 'pending direct Core foreign header', 'pending header mismatch', 'missing system header', 'visible system header', 'foreign header scope',
     'missing header working', 'missing header exchange', 'user header scope mismatch', 'header recipient',
-    'header unfinished', 'header message type', 'header rebase flag', 'header rebase accessor',
+    'header unfinished', 'header message type', 'header annotation absent', 'header annotation null',
+    'header annotation accessor', 'pending header annotation', 'header annotation foreign scope',
+    'header annotation missing receipt', 'header rebase flag', 'header rebase accessor',
     'unfinished execution', 'unfinished execution result', 'foreign retained parent',
     'exact retained commentary parent', 'exact retained execution commentary parent', 'exact retained commentary image result',
-    'exact retained header parent', 'retained header missing children', 'retained header duplicate child',
+    'exact retained header parent', 'retained header transport annotation', 'retained header transport annotation foreign scope',
+    'retained header missing children', 'retained header duplicate child',
     'retained header foreign user', 'retained header foreign working', 'retained header foreign exchange',
     'retained header foreign request', 'retained header visible', 'retained header unfinished',
     'retained header rebase', 'retained header accessor', 'retained header cache conflict', 'retained header missing receipt',
@@ -2580,6 +2614,14 @@ describe('alternate shell turn/message provenance', () => {
           if (variant === 'header recipient') mapping[HEADER].message.recipient = 'PRIVATE_HEADER_RECIPIENT';
           if (variant === 'header unfinished') mapping[HEADER].message.status = 'in_progress';
           if (variant === 'header message type') mapping[HEADER].message.metadata.message_type = 'PRIVATE_HEADER_TYPE';
+          if (variant === 'header annotation absent') delete mapping[HEADER].message.metadata.message_type;
+          if (variant === 'header annotation null') mapping[HEADER].message.metadata.message_type = null;
+          if (variant === 'header annotation accessor') Object.defineProperty(mapping[HEADER].message.metadata, 'message_type', {
+            get() { getterReads++; throw new Error('PRIVATE_HEADER_TYPE_GETTER'); } });
+          if (variant === 'pending header annotation' || variant === 'header annotation foreign scope' || variant === 'header annotation missing receipt')
+            mapping[HEADER].message.metadata.message_type = 'PRIVATE_HEADER_TYPE';
+          if (variant === 'header annotation foreign scope') mapping[HEADER].message.metadata.working_turn_id = 'foreign';
+          if (variant === 'header annotation missing receipt') mapping[RESULT].message.content.text = '{"content":[]}';
           if (variant === 'header rebase flag') mapping[HEADER].message.metadata.rebase_developer_message = true;
           if (variant === 'header rebase accessor') Object.defineProperty(mapping[HEADER].message.metadata, 'rebase_developer_message', {
             get() { getterReads++; throw new Error('PRIVATE_HEADER_REBASE_GETTER'); } });
@@ -2595,6 +2637,11 @@ describe('alternate shell turn/message provenance', () => {
               metadata: { ...scope, parent_id: USER, is_visually_hidden_from_conversation: true,
                 message_type: 'next', rebase_developer_message: false } } };
             mapping[HEADER].message.metadata.parent_id = retained;
+            if (variant.startsWith('retained header transport annotation')) {
+              delete mapping[HEADER].message.metadata.message_type;
+              mapping[retained].message.metadata.message_type = 'PRIVATE_RETAINED_TRANSPORT_TYPE';
+              if (variant.endsWith('foreign scope')) mapping[retained].message.metadata.working_turn_id = 'foreign';
+            }
             if (variant === 'retained header missing children') delete mapping[USER].children;
             if (variant === 'retained header duplicate child') mapping[USER].children.push(retained);
             if (variant === 'retained header foreign user') mapping[retained].parent = 'foreign-user';
@@ -2704,12 +2751,15 @@ describe('alternate shell turn/message provenance', () => {
       try {
         const accepted = variant === 'direct Core' || variant === 'exact canonical group' || variant === 'exact final reference' ||
           variant === 'exact retained commentary parent' || variant === 'exact retained execution commentary parent' ||
-          variant === 'exact retained commentary image result' || variant === 'exact retained header parent';
+          variant === 'exact retained commentary image result' || variant === 'exact retained header parent' ||
+          variant === 'retained header transport annotation' ||
+          ['header message type', 'header annotation absent', 'header annotation null', 'header annotation accessor'].includes(variant);
         const identityOnly = variant === 'direct Core missing receipt' || variant.startsWith('core receipt missing') ||
-          variant === 'retained commentary missing receipt' || variant === 'retained header missing receipt' || variant === 'missing terminal exact user';
+          variant === 'retained commentary missing receipt' || variant === 'retained header missing receipt' ||
+          variant === 'missing terminal exact user' || variant === 'header annotation missing receipt';
         expect(page.fiber.turns[0].calls[0]).toMatchObject({
-          requestId: accepted || identityOnly || ['pending canonical group', 'pending direct Core'].includes(variant) ? REQUEST : null, answered: accepted });
-        if (accepted || identityOnly || ['pending canonical group', 'pending direct Core'].includes(variant))
+          requestId: accepted || identityOnly || ['pending canonical group', 'pending direct Core', 'pending header annotation'].includes(variant) ? REQUEST : null, answered: accepted });
+        if (accepted || identityOnly || ['pending canonical group', 'pending direct Core', 'pending header annotation'].includes(variant))
           expect(page.fiber.turns[0].requests.filter((row: any) => row.requestId === REQUEST))
             .toEqual([expect.objectContaining({ messageId: variant.includes('direct Core') ? CALL : EXEC })]);
         if (variant.startsWith('missing terminal ')) {
@@ -2726,11 +2776,18 @@ describe('alternate shell turn/message provenance', () => {
         const headerFacets: Record<string, string> = {
           'missing header working': 'working-missing', 'missing header exchange': 'exchange-missing',
           'user header scope mismatch': 'user-scope', 'header recipient': 'recipient', 'header unfinished': 'status',
-          'visible system header': 'visible', 'header message type': 'message-type',
+          'visible system header': 'visible',
           'header rebase flag': 'rebase', 'header rebase accessor': 'rebase'
         };
         const headerFacet = headerFacets[variant];
         if (headerFacet) {
+          const diagnosticKey = 'nativeHeader' + headerFacet.split('-')
+            .map(part => part[0]!.toUpperCase() + part.slice(1)).join('');
+          expect(page.fiber.shellScan.reader.fiberProducer).toBeGreaterThanOrEqual(171);
+          expect(page.fiber.shellScan.rejects.nativeBranchHeaderShape).toBe(1);
+          expect(page.fiber.shellScan.rejects[diagnosticKey]).toBe(1);
+          if (variant === 'header rebase flag') expect(page.fiber.shellScan.rejects.nativeHeaderValueTrue).toBe(1);
+          if (variant === 'header rebase accessor') expect(page.fiber.shellScan.rejects.nativeHeaderValueAccessor).toBe(1);
           const trace = diagnosticLogs.find(line => line.includes('native result-reference recovery diagnostic'))!;
           expect(trace).toContain('anchorBranch=header-shape');
           expect(trace).toContain(`anchorHeaderFacet=${headerFacet}`);
@@ -3981,7 +4038,7 @@ describe('alternate shell turn/message provenance', () => {
       });
       expect(page.exchange.getAttribute('data-clf-fiber-v2-turn')).toBe('shell-scan:0');
       expect(page.fiber.shellScan).toEqual({
-        reader: { fiberWire: 19, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
+        reader: { fiberWire: 19, fiberProducer: currentFiberProducer, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
         selectorMatches: 1,
         mapped: 1,
         rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
@@ -4007,7 +4064,7 @@ describe('alternate shell turn/message provenance', () => {
       });
       expect(page.exchange.getAttribute('data-clf-fiber-v2-turn')).toBe('shell-scan:0');
       expect(page.fiber.shellScan).toEqual({
-        reader: { fiberWire: 19, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
+        reader: { fiberWire: 19, fiberProducer: currentFiberProducer, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
         selectorMatches: 1,
         mapped: 1,
         rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
@@ -4016,6 +4073,58 @@ describe('alternate shell turn/message provenance', () => {
       });
     } finally { page.dom.window.close(); }
   });
+
+  it.each(['exact', 'completed exact', 'no live owner', 'conflicting live owner', 'missing native user', 'two native users',
+    'foreign branch', 'discordant native user', 'foreign public key'] as const)(
+    'joins a virtualized user key only through its exact mounted native request branch: %s', async variant => {
+      const page = await shellHarness({ domTurnKey: variant === 'foreign public key' ? 'foreign-public-key' : USER,
+        layoutKey: 'fallback-turn-0', withoutUserSlot: true, withCall: true, nativeCallReceipt: true,
+        nativeCallLive: variant !== 'no live owner', nativeCallLiveConflict: variant === 'conflicting live owner',
+        nativeCurrentNode: variant === 'completed exact' ? ASSISTANT : variant === 'conflicting live owner' ? USER : CALL,
+        status: variant === 'completed exact' ? 'complete' : 'in_progress',
+        callCompleted: variant === 'completed exact' ? 'missing' : false, assistantCompleted: variant === 'completed exact',
+        nativeCallMutation(mapping, entry) {
+          entry.turn.items = entry.turn.items.filter((item: any) => item.type !== 'user-message');
+          if (variant !== 'completed exact') {
+            entry.turn.items = entry.turn.items.filter((item: any) => item.type === 'mcp-tool-call');
+            delete entry.turn.items[0].widgetStateSource;
+            entry.turn.messageIds = [USER, CALL];
+            delete mapping[RESULT]; delete mapping[ASSISTANT];
+            mapping[CALL].message.status = 'in_progress';
+          }
+          if (variant === 'missing native user') delete mapping[USER];
+          if (variant === 'discordant native user') mapping[USER].message.id = 'foreign-message-id';
+          if (variant === 'two native users' || variant === 'foreign branch') {
+            const id = 'foreign-native-user';
+            mapping[id] = { id, message: { id, author: { role: 'user' } } };
+            if (variant === 'two native users') entry.turn.messageIds.push(id);
+            else { mapping[CALL].parent = id; mapping[CALL].message.metadata.parent_id = id; }
+          }
+        } });
+      try {
+        for (const view of [page.fiber, await shellRescan(page, 'virtualized-user-key-reobserve')]) {
+          if (variant === 'exact' || variant === 'completed exact') {
+            expect(view.shellScan.mapped).toBe(1);
+            expect(view.turns[0]).toMatchObject({ turnId: TURN, conversationId: THREAD,
+              endMessageId: variant === 'completed exact' ? ASSISTANT : null,
+              calls: [{ messageId: CALL, requestId: REQUEST, answered: variant === 'completed exact' }] });
+            expect(view.turns[0].messages.some((message: any) => message.role === 'user')).toBe(false);
+          } else {
+            expect(view.shellScan.mapped).toBe(0);
+            expect(view.turns).toEqual([]);
+          }
+          expect(JSON.stringify(view)).not.toContain('PRIVATE_TOOL_RESULT');
+        }
+        if (variant === 'exact') {
+          const owner = (page.exchange as any).__reactFiber$shellfixture;
+          owner.memoizedState.memoizedState.renderedConversation.current_node = 'gone-native-parent';
+          const changed = await shellRescan(page, 'virtualized-user-key-branch-changed');
+          expect(changed.shellScan.mapped).toBe(0);
+          expect(changed.turns).toEqual([]);
+          expect(page.exchange.hasAttribute('data-clf-fiber-v2-turn')).toBe(false);
+        }
+      } finally { page.dom.window.close(); }
+    });
 
   it('joins the exact public turn key when the typed user exposes only its server message id', async () => {
     const page = await shellHarness({
@@ -4027,7 +4136,7 @@ describe('alternate shell turn/message provenance', () => {
       expect(page.fiber.turns).toHaveLength(1);
       expect(page.fiber.turns[0]).toMatchObject({ turnId: TURN, endMessageId: ASSISTANT });
       expect(page.fiber.shellScan).toEqual({
-        reader: { fiberWire: 19, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
+        reader: { fiberWire: 19, fiberProducer: currentFiberProducer, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
         selectorMatches: 1,
         mapped: 1,
         rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
@@ -4047,7 +4156,7 @@ describe('alternate shell turn/message provenance', () => {
       expect(page.fiber.turns).toEqual([]);
       expect(page.exchange.hasAttribute('data-clf-fiber-v2-turn')).toBe(false);
       expect(page.fiber.shellScan).toEqual({
-        reader: { fiberWire: 19, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
+        reader: { fiberWire: 19, fiberProducer: currentFiberProducer, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
         selectorMatches: 1,
         mapped: 0,
         rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
@@ -4075,7 +4184,7 @@ describe('alternate shell turn/message provenance', () => {
         expect(page.exchange.getAttribute('data-clf-fiber-v2-turn')).toBe('shell-scan:0');
         expect(page.secondExchange?.hasAttribute('data-clf-fiber-v2-turn')).toBe(secondStamped);
         expect(page.fiber.shellScan).toEqual({
-        reader: { fiberWire: 19, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
+        reader: { fiberWire: 19, fiberProducer: currentFiberProducer, fiberKeys: Object.keys(page.fiber.shellScan.rejects).length },
           selectorMatches: 2,
           mapped,
           rejects: { ...EMPTY_CALL_REJECTS, ...EMPTY_CALL_JOINS, ...EMPTY_COMPLETION_VETO_SHAPES, ...EMPTY_COMPLETION_VETO_STATUSES,
@@ -4131,6 +4240,57 @@ describe('alternate shell turn/message provenance', () => {
         expect(page.fiber.shellScan.rejects.itemsOverLimit).toBe(expected.itemsOverLimit);
       expect(JSON.stringify(page.fiber.shellScan)).not.toContain(USER);
       expect(JSON.stringify(page.fiber.shellScan)).not.toContain('hello shell');
+    } finally { page.dom.window.close(); }
+  });
+
+  it.each(['pending Core', 'completed Core', 'pending Code', 'duplicate Core'] as const)(
+    'retains public output but marks an omitted %s beyond the row budget incomplete', async kind => {
+      const page = await shellHarness({ shellItemsMutation(items) {
+        const existing = { type: 'mcp-tool-call', callId: 'overflow-first', completed: true,
+          invocation: { server: APP, tool: 'read' } };
+        items.splice(1, 0, existing);
+        const steps: any[] = Array.from({ length: 400 }, () => ({ type: 'unknown-fixture-item' }));
+        steps.push(kind === 'pending Code'
+          ? { type: 'dynamic-tool-call', tool: 'exec', callId: 'overflow-code', completed: false }
+          : { type: 'mcp-tool-call', callId: kind === 'duplicate Core' ? 'overflow-first' : 'overflow-next',
+            completed: kind === 'completed Core', invocation: { server: APP, tool: 'read' } });
+        items.splice(2, 0, { type: 'chatgpt-reasoning-group', items: steps });
+      } });
+      try {
+        if (kind === 'duplicate Core') expect(page.fiber.turns).toEqual([]);
+        else {
+          expect(page.fiber.turns).toHaveLength(1);
+          expect(page.fiber.turns[0].callEvidenceComplete).toBe(false);
+          expect(page.fiber.turns[0].messages).toEqual(expect.arrayContaining([
+            expect.objectContaining({ role: 'assistant', rawMessageId: ASSISTANT })
+          ]));
+        }
+      } finally { page.dom.window.close(); }
+    });
+
+  it.each(['Core', 'Code'] as const)('marks the 201st %s call as an incomplete bounded inventory', async kind => {
+    const page = await shellHarness({ shellItemsMutation(items) {
+      const calls = Array.from({ length: 201 }, (_, at) => kind === 'Core'
+        ? { type: 'mcp-tool-call', callId: `many-core-${at}`, completed: at < 200,
+          invocation: { server: APP, tool: 'read' } }
+        : { type: 'dynamic-tool-call', tool: 'exec', callId: `many-code-${at}`, completed: at < 200 });
+      items.splice(1, 0, { type: 'chatgpt-reasoning-group', items: calls });
+    } });
+    try {
+      expect(page.fiber.turns).toHaveLength(1);
+      expect(page.fiber.turns[0].callEvidenceComplete).toBe(false);
+    } finally { page.dom.window.close(); }
+  });
+
+  it('retains a complete public answer beyond many non-tool reasoning rows', async () => {
+    const page = await shellHarness({ shellItemsMutation(items) {
+      items.splice(1, 0, { type: 'chatgpt-reasoning-group', items:
+        Array.from({ length: 450 }, () => ({ type: 'unknown-fixture-item' })) });
+    } });
+    try {
+      expect(page.fiber.turns).toHaveLength(1);
+      expect(page.fiber.turns[0].callEvidenceComplete).not.toBe(false);
+      expect(page.fiber.turns[0].endMessageId).toBe(ASSISTANT);
     } finally { page.dom.window.close(); }
   });
 

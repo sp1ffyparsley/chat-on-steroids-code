@@ -194,8 +194,15 @@ try {
   $result = Act 'expand' 'collapse'; if (-not $result.ok) { throw 'collapse failed' }
   $result = Act 'scroll' 'scroll_up'; if (-not $result.ok) { throw 'scroll up failed' }
   $result = Act 'scroll' 'scroll_left'; if (-not $result.ok) { throw 'scroll left failed' }
-  $state = Read-State
-  if ($state[2] -ne '0' -or [double]$state[4] -ne 0 -or [double]$state[5] -ne 0) { throw 'reverse actions failed' }
+  # Native patterns may return before WPF finishes layout/scroll dispatch. Observe
+  # only this owned fixture until the exact requested state settles; never repeat input.
+  $reverseReady = [System.Diagnostics.Stopwatch]::StartNew()
+  do {
+    $state = Read-State
+    if ($state[2] -eq '0' -and [double]$state[4] -eq 0 -and [double]$state[5] -eq 0) { break }
+    Start-Sleep -Milliseconds 25
+  } while ($reverseReady.ElapsedMilliseconds -lt 2000)
+  if ($state[2] -ne '0' -or [double]$state[4] -ne 0 -or [double]$state[5] -ne 0) { throw ('reverse actions failed: ' + ($state -join '|')) }
   # click_ref on a checkbox should use its TogglePattern without physical input.
   $row = $rows.toggle
   $result = Handle-Request @{ op = 'act'; actions = @(@{ type = 'click_ui'; window = $id; snapshotId = $snapshot.snapshotId; runtimeKey = $row.runtimeKey }) }
@@ -205,8 +212,28 @@ try {
   # at their time budget; an unrelated slow provider must not turn an absent row
   # into a false claim that SelectionItemPattern reported false.
   if ((Read-State)[1] -ne '1') { throw 'native selected item changed before observation' }
-  $fresh = Handle-Request @{ op = 'snapshot'; id = $id; includeScreenshot = $false; includeUi = $true; query = 'second'; role = 'ListItem'; maxResults = 1 }
+  function Read-Selection {
+    return Handle-Request @{ op = 'snapshot'; id = $id; includeScreenshot = $false; includeUi = $true; query = 'second'; role = 'ListItem'; maxResults = 1 }
+  }
+  $fresh = Read-Selection
   $selected = @($fresh.elements | Where-Object { $_.automationId -eq 'second' })[0]
+  $selectionAttempts = 1
+  $firstSelectionShape = @{ truncated=$fresh.truncated; visited=$fresh.visited; rows=@($fresh.elements).Count;
+    selectedPresent=($null -ne $selected); selected=($null -ne $selected -and $selected.selected -eq $true) }
+  # A truthful first partial snapshot can spend the entire production 2s budget.
+  # Like the Document fixture below, start this owned fixture's bounded readiness
+  # phase after that first observation. Never repeat input or retry observed false.
+  $selectionReady = [System.Diagnostics.Stopwatch]::StartNew()
+  while ($null -eq $selected -and $fresh.truncated -eq $true -and
+      $selectionAttempts -lt 3 -and $selectionReady.ElapsedMilliseconds -lt 2000) {
+    Start-Sleep -Milliseconds 25
+    $fresh = Read-Selection
+    $selected = @($fresh.elements | Where-Object { $_.automationId -eq 'second' })[0]
+    $selectionAttempts += 1
+  }
+  Write-Output ('WINDOWS_ACCESSIBILITY_SELECTION ' + (@{ attempts=$selectionAttempts; first=$firstSelectionShape;
+    last=@{ truncated=$fresh.truncated; visited=$fresh.visited; rows=@($fresh.elements).Count;
+      selectedPresent=($null -ne $selected); selected=($null -ne $selected -and $selected.selected -eq $true) } } | ConvertTo-Json -Depth 4 -Compress))
   if ($null -eq $selected -or $selected.selected -ne $true) { throw ('selection state not projected: ' + ($fresh | ConvertTo-Json -Depth 8 -Compress)) }
   # Like a browser toolbar editor preceding its page, an earlier TextPattern
   # must not claim document_text before the actual Document is visited.
@@ -292,7 +319,8 @@ try {
           child.once('error', reject);
           child.once('close', resolve);
         });
-        for (const line of stdout.split(/\r?\n/).filter(line => line.startsWith('WINDOWS_ACCESSIBILITY_BROWSER_')))
+        for (const line of stdout.split(/\r?\n/).filter(line =>
+          line.startsWith('WINDOWS_ACCESSIBILITY_BROWSER_') || line.startsWith('WINDOWS_ACCESSIBILITY_SELECTION ')))
           console.info(line);
         expect(timedOut, stderr + stdout).toBe(false);
         expect(status, stderr + stdout).toBe(0);

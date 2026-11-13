@@ -9990,7 +9990,9 @@ describe('activity feed', () => {
     'successor work starts during receipt check', 'successor source changes during receipt check',
     'successor duplicate original final', 'successor missing original end', 'successor stopped original end',
     'successor missing original start', 'multiple completed successors', 'successor heartbeat during receipt check',
-    'successor stopped original with earlier time', 'successor reopened original'] as const)(
+    'successor stopped original with earlier time', 'successor reopened original',
+    'mixed completed Code parents', 'mixed missing Code identity', 'mixed substituted Code parent',
+    'mixed reordered Code parents', 'mixed pending Code parent', 'mixed completed successor', 'mixed cross-role parents'] as const)(
     'recovers only the missing original request half from exact durable owned receipts after a new document (%s)', async variant => {
     const recorder = await import('../src/main/session/recorder.js');
     const store = await import('../src/main/session/store.js');
@@ -9998,6 +10000,8 @@ describe('activity feed', () => {
     const conversationId = randomUUID(), userId = randomUUID(), finalId = randomUUID();
     const requestId = 'wfr_recovered_owned_' + randomUUID();
     const messageIds = [randomUUID(), randomUUID()];
+    const codeMessageIds = variant === 'mixed cross-role parents' ? [...messageIds] : [randomUUID(), randomUUID()];
+    const mixed = variant.startsWith('mixed ');
     const receipts = [randomBytes(24).toString('hex'), randomBytes(24).toString('hex')];
     const args = [{ paths: ['/project/original-one.txt'] }, { paths: ['/project/original-two.txt'] }];
     const turnId = 'g-owned-recovery-' + randomUUID();
@@ -10010,7 +10014,9 @@ describe('activity feed', () => {
     const native = { documentId: 'owned-request-original-document', navigationEpoch: 4,
       shell: 'alternate', shellDiscovery: 'compatible', requestIds: [requestId] };
     const pending = { reason: 'open-call', questions: 1, calls: 2, openCalls: 2,
-      codeCalls: 0, openCodeCalls: 0, activeTurnMapped: false,
+      codeCalls: mixed ? 2 : 0, openCodeCalls: 0, activeTurnMapped: false,
+      ...(mixed && variant !== 'mixed missing Code identity'
+        ? { codeCallMessageIds: codeMessageIds, answeredCodeCallMessageIds: codeMessageIds } : {}),
       sourceUserMessageId: userId, coreCallMessageIds: messageIds,
       ...(variant === 'known request half' ? { allCoreRequestIds: ['wfr_prior_one', 'wfr_prior_two'] } : {}) };
     const report = (ordinaryFinal: Record<string, unknown>, replacement = false) => request('POST',
@@ -10098,6 +10104,13 @@ describe('activity feed', () => {
     };
     if (variant.startsWith('browser omitted requests')) delete (final as { allCoreRequestIds?: string[] }).allCoreRequestIds;
     if (variant === 'source edited' || variant === 'successor source edited') await editSource();
+    if (mixed) {
+      const codeParents = variant === 'mixed substituted Code parent' ? [randomUUID(), codeMessageIds[1]!] :
+        variant === 'mixed reordered Code parents' ? [...codeMessageIds].reverse() : codeMessageIds;
+      Object.assign(final, { codeCallMessageIds: successor ? [] : codeParents,
+        answeredCodeCallMessageIds: successor ? [] : variant === 'mixed pending Code parent' ? [codeParents[0]] : codeParents,
+        codeCalls: successor ? 0 : 2, openCodeCalls: variant === 'mixed pending Code parent' ? 1 : 0 });
+    }
     if (variant === 'foreign current question') final.sourceUserMessageId = randomUUID();
     if (variant === 'reordered parents') final.coreCallMessageIds = [...messageIds].reverse();
     if (variant === 'different parent') final.coreCallMessageIds = [randomUUID(), messageIds[1]!];
@@ -10213,7 +10226,8 @@ describe('activity feed', () => {
       response = { status: 200 };
     } else response = await report(final, true);
     const historicalSuccess = ['completed successor', 'multiple completed successors', 'successor heartbeat during receipt check'].includes(variant);
-    if (variant !== 'exact' && variant !== 'concurrent controls' && variant !== 'browser omitted requests' && !historicalSuccess) {
+    if (variant !== 'exact' && variant !== 'concurrent controls' && variant !== 'browser omitted requests' &&
+        variant !== 'mixed completed Code parents' && !historicalSuccess) {
       expect(coreBrowserEvidence(conversationId)!.pendingCompletion).toEqual(original);
       expect(await input.listInputs()).toEqual(priorInputs);
       expect(await fs.readFile(journal)).toEqual(bytes);
@@ -11498,9 +11512,46 @@ describe('activity feed', () => {
     }
   });
 
-  it('records a bounded exact-session incident for a native final with unresolved Core completion and no proven request identity', async () => {
+  it.each([false, true])('stores an invalid-turn reader refusal without creating native custody (prior fence: %s)', async priorFence => {
     const logger = await import('../src/main/logger.js');
-    logger.initLogFile(path.join(dir, 'native-terminal-identity-gap', 'app.log'));
+    const { listInputs } = await import('../src/main/session/input.js');
+    logger.initLogFile(path.join(dir, `invalid-turn-reader-${priorFence}`, 'app.log'));
+    try {
+      await pair(); resetCoreBrowserEvidenceForTests();
+      const conversationId = randomUUID();
+      await request('POST', '/events', { body: { conversationId, events: [{ kind: 'user_message', time: Date.now(),
+        messageId: 'reader-refusal-question', text: 'Same existing work.' }] } });
+      const ordinaryFinal = { reason: 'turn-invalid', questions: 1, calls: 1, openCalls: 1, codeCalls: 0,
+        openCodeCalls: 0, activeTurnMapped: false, coreCallMessageIds: ['reader-refusal-call'],
+        identityRefusals: [{ messageId: 'reader-refusal-call', reasons: ['nativeScopeBranchConflict'] }] };
+      const diagnostic = { shell: 'alternate', shellDiscovery: 'compatible', documentId: 'reader-refusal-doc',
+        navigationEpoch: 0, requestIds: [], ordinaryFinal };
+      const report = (value: object) => request('POST', `/activity?conversationId=${conversationId}`,
+        { body: { coreDiagnostic: { ...diagnostic, observedAt: Date.now(), ...value } } });
+      if (priorFence) expect((await report({ ordinaryFinal: { ...ordinaryFinal, reason: 'open-call' } })).status).toBe(200);
+      const before = coreBrowserEvidence(conversationId)?.pendingCompletion;
+      const inputs = await listInputs(), commands = pendingCommands();
+      expect((await report({ shellScan: { selectorMatches: 1, mapped: 1,
+        reader: { fiberProducer: 172, privateText: 'private native text' }, rejects: {
+          fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0,
+          nativeBranchHeaderShape: 1, nativeHeaderRebase: 1, nativeHeaderValueAbsent: 1 } } })).status).toBe(200);
+      await logger.flushLocalIncidents();
+      const rows = (await logger.listLocalIncidents()).incidents;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.readerScan).toMatchObject({ reader: { fiberProducer: 172 },
+        rejects: { nativeHeaderRebase: 1, nativeHeaderValueAbsent: 1 } });
+      expect(rows[0]?.reason).toBe(priorFence ? 'native_terminal_open_call' : 'native_reader_identity_refusal');
+      if (!priorFence) expect(rows[0]?.nativeCompletion).toBeUndefined();
+      expect(coreBrowserEvidence(conversationId)?.pendingCompletion ?? null).toEqual(before ?? null);
+      expect(await listInputs()).toEqual(inputs); expect(pendingCommands()).toEqual(commands);
+      expect(JSON.stringify(rows)).not.toContain('private native text');
+    } finally { await logger.flushLocalIncidents(); logger.resetLoggerForTests(); resetCoreBrowserEvidenceForTests(); }
+  });
+
+  it('records a bounded exact-session reader refusal without proven request identity', async () => {
+    const reason = 'open-call';
+    const logger = await import('../src/main/logger.js');
+    logger.initLogFile(path.join(dir, `native-terminal-identity-gap-${reason}`, 'app.log'));
     try {
       await pair(); resetCoreBrowserEvidenceForTests();
       const conversationId = randomUUID();
@@ -11510,7 +11561,13 @@ describe('activity feed', () => {
       expect(start.status).toBe(200);
       const observation = { shell: 'alternate', shellDiscovery: 'compatible',
         documentId: 'native-terminal-document', navigationEpoch: 7, observedAt: Date.now(),
-        requestIds: [], ordinaryFinal: { reason: 'open-call', questions: 1, calls: 1,
+        requestIds: [], shellScan: { selectorMatches: 1, mapped: 1,
+          reader: { fiberProducer: 172, privateText: 'never persist private response' },
+          rejects: { fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0,
+            nativeBranchHeaderShape: 1, nativeHeaderRebase: 1 } },
+        ordinaryFinal: { reason, questions: 1, calls: 1,
+          coreCallMessageIds: ['native-final-call'],
+          identityRefusals: [{ messageId: 'native-final-call', reasons: ['nativeScopeBranchConflict'] }],
           openCalls: 1, codeCalls: 0, openCodeCalls: 0, activeTurnMapped: false,
           privateText: 'never persist private response' } };
       const report = (input: Record<string, unknown>) => request('GET',
@@ -11526,6 +11583,8 @@ describe('activity feed', () => {
         nativeCompletion: { openCalls: 1, openCodeCalls: 0, traceRequestIds: 0, exactRequestJoins: 0,
           checkpointKey: expect.stringMatching(/^[a-f0-9]{64}$/) } });
       expect(JSON.stringify(read)).not.toContain('never persist private response');
+      expect(read[0]?.readerScan).toMatchObject({ reader: { fiberProducer: 172 },
+        rejects: { nativeBranchHeaderShape: 1, nativeHeaderRebase: 1 } });
       expect((await report({ ...observation, observedAt: Date.now() })).status).toBe(200);
       await logger.flushLocalIncidents();
       expect((await logger.listLocalIncidents()).incidents).toHaveLength(1);
@@ -26481,6 +26540,40 @@ describe('unattributed activity recovery', () => {
     } finally { await saveConfig(previous); vi.useRealTimers(); }
   });
 
+  it.each([false, true])('scopes native Retry receipt debt to its exact failed question (newer question: %s)', async newerQuestion => {
+    await pair();
+    const evidence = await import('../src/main/core-browser-evidence.js');
+    const originalUser = randomUUID(), nextUser = randomUUID();
+    const originalCall = randomUUID();
+    await events(PRIME, [
+      { kind: 'user_message', time: Date.now(), messageId: originalUser, text: 'Finish the original work.' },
+      openTurn('retry-original-debt-turn'), endTurn('retry-original-debt-turn', 'failed')
+    ]);
+    expect(evidence.noteCoreBrowserEvidence({ conversationId: PRIME, documentId: 'retry-older-debt-document',
+      navigationEpoch: 0, observedAt: Date.now(), shell: 'alternate', shellDiscovery: 'compatible',
+      requestIds: ['wfr_retry_original_debt'], turnId: 'retry-original-debt-turn', ordinaryFinal: {
+        reason: 'open-call', questions: 1, calls: 1, openCalls: 1, codeCalls: 0, openCodeCalls: 0,
+        activeTurnMapped: false, sourceUserMessageId: originalUser,
+        openRequestIds: ['wfr_retry_original_debt'], coreCallMessageIds: [originalCall]
+      } })).toBe(true);
+    const debt = evidence.coreBrowserEvidence(PRIME)?.pendingCompletion;
+    expect(debt?.sourceUserMessageId).toBe(originalUser);
+    const turn = newerQuestion ? 'retry-new-question-turn' : 'retry-original-debt-turn';
+    if (newerQuestion) await events(PRIME, [
+      { kind: 'user_message', time: Date.now(), messageId: nextUser, text: 'Continue independent work.' },
+      openTurn(turn)
+    ]);
+    await events(PRIME, [{ kind: 'chat_error', time: Date.now(), turnId: turn,
+      text: 'Message delivery timed out. Please try again.', recoverable: true, retryAvailable: true },
+      endTurn(turn, 'failed')]);
+    const retry = await maintenance();
+    if (newerQuestion) {
+      expect(retry).toMatchObject({ conversationId: PRIME, reason: 'assistant-error', action: 'retry' });
+      expect((await request('POST', '/repairs/claim', { body: { token: retry!.token } })).body.allowed).toBe(true);
+    } else expect(retry).toBeNull();
+    expect(evidence.coreBrowserEvidence(PRIME)?.pendingCompletion).toEqual(debt);
+  });
+
   it('keeps an exact native Retry queued until the failed chat local tool drains', async () => {
     let releaseTool = () => {};
     let heldTool: Promise<void> = Promise.resolve();
@@ -26826,6 +26919,107 @@ describe('unattributed activity recovery', () => {
       expect((await input.listInputs()).filter(row => row.recovery?.questionId === questionId)).toHaveLength(1);
     }
   });
+
+  it('persists changed Loop diagnostic summaries without calling an open turn verified work or hiding receipt debt', async () => {
+    await pair();
+    const source = randomUUID();
+    await events(PRIME, [{ kind: 'user_message', time: Date.now(), messageId: source, text: 'Work on this project' },
+      openTurn('g-diagnostic-summary')]);
+    await setGoalSwitchNow(PRIME, 'loop', true, true);
+    const before = getLog().filter(row => row.message.startsWith('Loop diagnostics:')).length;
+    await maintainLoopLanes();
+    await maintainLoopLanes();
+    let emitted = getLog().filter(row => row.message.startsWith('Loop diagnostics:')).slice(before);
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]!.message).toContain('[turn-open]');
+    expect(emitted[0]!.message).not.toContain('[active]');
+    expect((await import('../src/main/core-browser-evidence.js')).noteCoreBrowserEvidence({ conversationId: PRIME, documentId: 'diagnostic-summary-document',
+      navigationEpoch: 0, turnId: 'g-diagnostic-summary', observedAt: Date.now(), shell: 'alternate', shellDiscovery: 'compatible', requestIds: [],
+      ordinaryFinal: { reason: 'open-call', questions: 1, calls: 1, openCalls: 1, codeCalls: 0, openCodeCalls: 0,
+        activeTurnMapped: false, sourceUserMessageId: source, coreCallMessageIds: [randomUUID()] } })).toBe(true);
+    const debt = coreBrowserEvidence(PRIME)!.pendingCompletion;
+    await maintainLoopLanes();
+    emitted = getLog().filter(row => row.message.startsWith('Loop diagnostics:')).slice(before);
+    expect(emitted).toHaveLength(2);
+    expect(emitted[1]!.message).toContain('unresolved:1/original-request-identity-missing');
+    expect(coreBrowserEvidence(PRIME)!.pendingCompletion).toEqual(debt);
+  });
+
+  it('revives an idle Loop four times with bounded escalation, preserving its budget across restart', async () => {
+    await pair();
+    let questionId = 'idle-revival-question-' + randomUUID();
+    await events(PRIME, [
+      { kind: 'user_message', time: Date.now(), messageId: questionId, text: 'Finish the same authorized project' },
+      openTurn('idle-revival-source'), endTurn('idle-revival-source', 'completed')
+    ]);
+    await setGoalSwitchNow(PRIME, 'loop', true, true);
+    const input = await import('../src/main/session/input.js');
+    const session = (await findSessionByConversation(PRIME))!;
+    const progressAt = Math.max(session.startedAt, session.lastToolCallAt ?? 0,
+      session.lastAssistantFinalAt ?? 0, session.lastTurnEndAt ?? 0);
+    const base = Math.max(progressAt, session.lastMessageAt ?? 0);
+    const clock = vi.spyOn(Date, 'now');
+    onTestFinished(() => clock.mockRestore());
+    clock.mockReturnValue(base + input.PROACTIVE_REVIVAL_MS - 1);
+    expect(await input.enqueueInterruptedContinue(session.id, PRIME, questionId, { progressAt })).toBeNull();
+    const ids: string[] = [];
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      clock.mockReturnValue(base + attempt * input.PROACTIVE_REVIVAL_MS + 1);
+      if (attempt === 1) await maintainLoopLanes();
+      const row = attempt === 1
+        ? (await input.listInputs()).find(row => row.recovery?.revival && row.sessionId === session.id)!
+        : await input.enqueueInterruptedContinue(session.id, PRIME, questionId, { progressAt });
+      expect(row).toMatchObject({ state: 'queued', recovery: { revival: { attempt, progressAt } } });
+      expect(row!.text).toBe(attempt <= 2 ? 'continue' : input.REVIVAL_ESCALATION);
+      ids.push(row!.id);
+      expect(await input.enqueueInterruptedContinue(session.id, PRIME, questionId, { progressAt })).toBeNull();
+      const owner = `idle-revival-document-${attempt}`;
+      expect(await input.claimBrowserInput(row!.id, owner, PRIME, true)).not.toBeNull();
+      expect(await input.authorizeBrowserInput(row!.id, owner, PRIME)).toBe(true);
+      expect(await input.acknowledgeBrowserInput(row!.id, owner, PRIME, `revival-native-${attempt}`)).toBe(true);
+      questionId = `revival-native-${attempt}`;
+      await events(PRIME, [{ kind: 'user_message', time: Date.now(), messageId: questionId, text: row!.text }]);
+      input.resetInputForTests();
+    }
+    clock.mockReturnValue(base + 6 * input.PROACTIVE_REVIVAL_MS);
+    expect(await input.enqueueInterruptedContinue(session.id, PRIME, questionId, { progressAt })).toBeNull();
+    expect((await input.listInputs()).filter(row => row.sessionId === session.id && row.recovery?.revival)).toHaveLength(4);
+    expect(new Set(ids).size).toBe(4);
+    // A genuine new completed pass starts a fresh episode; our own prompts did not.
+    await events(PRIME, [openTurn('revival-made-progress'), endTurn('revival-made-progress', 'completed')]);
+    const progressed = (await findSessionByConversation(PRIME))!;
+    const nextProgress = Math.max(progressed.startedAt, progressed.lastToolCallAt ?? 0,
+      progressed.lastAssistantFinalAt ?? 0, progressed.lastTurnEndAt ?? 0);
+    expect(await input.enqueueInterruptedContinue(session.id, PRIME, questionId, { progressAt: nextProgress })).toBeNull();
+    clock.mockReturnValue(base + 7 * input.PROACTIVE_REVIVAL_MS + 1);
+    expect(await input.enqueueInterruptedContinue(session.id, PRIME, questionId, { progressAt: nextProgress }))
+      .toMatchObject({ text: 'continue', recovery: { revival: { attempt: 1, progressAt: nextProgress } } });
+  });
+
+  it.each(['active-turn', 'Loop-Off', 'blocked', 'global-pause', 'superseded-question'] as const)(
+    'keeps idle revival fenced when %s wins before enqueue', async veto => {
+      await pair();
+      const questionId = 'revival-veto-question-' + randomUUID();
+      await events(PRIME, [
+        { kind: 'user_message', time: Date.now(), messageId: questionId, text: 'Finish the authorized work' },
+        openTurn('revival-veto-source'), endTurn('revival-veto-source', 'completed')
+      ]);
+      await setGoalSwitchNow(PRIME, 'loop', true, true);
+      const session = (await findSessionByConversation(PRIME))!;
+      const input = await import('../src/main/session/input.js');
+      const progressAt = Math.max(session.startedAt, session.lastToolCallAt ?? 0,
+        session.lastAssistantFinalAt ?? 0, session.lastTurnEndAt ?? 0);
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + input.PROACTIVE_REVIVAL_MS + 100);
+      onTestFinished(() => { clock.mockRestore(); setChatBlocked(PRIME, false); });
+      if (veto === 'active-turn') await events(PRIME, [openTurn('revival-veto-live-successor')]);
+      if (veto === 'Loop-Off') await setGoalSwitchNow(PRIME, 'loop', false);
+      if (veto === 'blocked') setChatBlocked(PRIME, true);
+      if (veto === 'global-pause') await saveConfig({ ...getConfig(), ui: { ...getConfig().ui, automationPaused: true } });
+      if (veto === 'superseded-question') await events(PRIME, [{ kind: 'user_message', time: Date.now(),
+        messageId: 'later-' + questionId, text: 'Use my new correction' }]);
+      expect(await input.enqueueInterruptedContinue(session.id, PRIME, questionId, { progressAt })).toBeNull();
+      expect((await input.listInputs()).filter(row => row.sessionId === session.id && row.recovery?.revival)).toHaveLength(0);
+    });
 
   it.each(['goal', 'loop'] as const)('requires an actually stopped %s turn before saving interruption Continue', async mode => {
     await pair();

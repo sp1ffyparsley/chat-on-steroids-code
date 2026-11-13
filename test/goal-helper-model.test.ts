@@ -36,6 +36,36 @@ it('uses the same GPT-6 default for execution and progress when helper settings 
   expect(goalProgressFor('goal').model).toBe('gpt-6-thinking');
 });
 
+it.each([false, true])('never uses an explicitly Instant helper, including before catalog discovery (%s)', catalogKnown => {
+  state.goal = { helperModel: 'gpt-6-instant', helperReasoning: 'none' };
+  state.models = catalogKnown ? [
+    { id: 'gpt-6-instant', label: 'GPT-6 Instant', efforts: ['none'] },
+    { id: 'gpt-6-thinking', label: 'GPT-6 Thinking', efforts: ['high'] }
+  ] : [];
+  expect(goalHelperSelection()).toEqual({ model: 'gpt-6-thinking', reasoningEffort: 'high' });
+});
+
+it('recognizes an Instant native label behind an opaque saved helper id', () => {
+  state.goal = { helperModel: 'provider-fast-choice', helperReasoning: 'none' };
+  state.models = [
+    { id: 'provider-fast-choice', label: 'GPT-6 Instant', efforts: ['none'] },
+    { id: 'gpt-6-thinking', label: 'GPT-6 Thinking', efforts: ['high'] }
+  ];
+  expect(goalHelperSelection()).toEqual({ model: 'gpt-6-thinking', reasoningEffort: 'high' });
+});
+
+it('keeps an unrecognized helper pin instead of inheriting the browser default', () => {
+  state.goal = { helperModel: 'unavailable-reasoning-model', helperReasoning: 'high' };
+  state.models = [{ id: 'provider-default', label: 'GPT-6 Instant', efforts: ['none'] }];
+  expect(goalHelperSelection()).toEqual({ model: 'unavailable-reasoning-model', reasoningEffort: 'high' });
+});
+
+it('never resolves a reasoning-family alias to a named Instant choice even if High is advertised', () => {
+  state.goal = { helperModel: '5.6', helperReasoning: 'high' };
+  state.models = [{ id: 'gpt-5-6-instant', label: '5.6 Instant', efforts: ['high'] }];
+  expect(goalHelperSelection()).toEqual({ model: '5.6', reasoningEffort: 'high' });
+});
+
 it('resolves the stable 5.6 profile setting to the observed thinking picker instead of inheriting Medium or Instant', () => {
   state.models = [
     { id: 'gpt-5-6-thinking', label: '5.6', efforts: ['medium', 'high'] },

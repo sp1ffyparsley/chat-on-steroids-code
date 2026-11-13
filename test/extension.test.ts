@@ -10317,7 +10317,7 @@ describe('extension observation journal', () => {
         FIBER_MAX_ROWS: 400, RECORDER_VERSION: currentRecorderVersion,
         settledFinalProjectionBlocked: () => false, settledFinalProjectionReady: () => true,
         raw: { selectorMatches: 1, mapped: 1, rejects,
-          reader: { fiberWire: 19, fiberKeys: Object.keys(rejects).length, privateText: 'PRIVATE_STAGE' } },
+          reader: { fiberWire: 19, fiberProducer: 172, fiberKeys: Object.keys(rejects).length, privateText: 'PRIVATE_STAGE' } },
         input: { shell: 'alternate', shellDiscovery: 'compatible', requestIds: [], turnId: 'native-turn',
           ordinaryFinal: { reason: 'open-call', questions: 1, calls, openCalls: calls, codeCalls: 0,
             openCodeCalls: 0, activeTurnMapped: false, sourceUserMessageId: 'native-user',
@@ -10348,7 +10348,7 @@ describe('extension observation journal', () => {
       expect(result).toMatchObject({ ok: true }); expect(published).toBe(true);
       expect(method).toBe(mode === 'small' ? undefined : 'POST');
       const native = coreBrowserEvidence(conversationId)!;
-      expect(native.shellScan?.reader).toEqual({ fiberWire: 19, fiberKeys: Object.keys(rejects).length,
+      expect(native.shellScan?.reader).toEqual({ fiberWire: 19, fiberProducer: 172, fiberKeys: Object.keys(rejects).length,
         contentRecorder: currentRecorderVersion, contentKeys: Object.keys(rejects).length,
         workerRecorder: currentRecorderVersion, workerKeys: Object.keys(rejects).length,
         mainKeys: Object.keys(rejects).length });

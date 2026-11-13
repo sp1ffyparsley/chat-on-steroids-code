@@ -1,4 +1,5 @@
 import { conversationProgress } from './session/progress.js';
+import type { CoreShellScanDiagnostic } from './core-browser-evidence.js';
 import { promises as fs } from 'node:fs';
 import { SURFACE_LIST, configuredConnectorName } from './mcp/surfaces.js';
 import { connectorApps, conversationCreatedAt, noteAppSightings, type AppSighting } from './connector-identity.js';
@@ -419,6 +420,9 @@ async function recoverCoreIdentityForInput(rows: InputLedgerRow[]): Promise<bool
   // Core endpoint cannot complete that provider-side receipt and would introduce competing work.
   if (pluginRefreshPublications().some(row => row.surface === 'core') &&
       (connectionState === undefined || connectionState === 'connected')) return false;
+  // The Loop supervisor already owns a Connection check. A status/Input read must not
+  // start another reconnect or wait behind that slow request before returning queued work.
+  if (missingMcpRecoveryFlight) return false;
   const now = Date.now();
   const currentState = coreConnectionStateProvider?.();
   if (currentState !== undefined && currentState !== 'connected' && currentState !== 'offline') return false;
@@ -4117,6 +4121,7 @@ async function restoreAutomaticLoopDebt(
 }
 
 let missingMcpRecoveryLogKey = '';
+let missingMcpRecoveryFlight: Promise<boolean> | null = null;
 
 /**
  * Advances durable global-Loop debt that stopped because its final answer recorded no Core
@@ -4124,12 +4129,26 @@ let missingMcpRecoveryLogKey = '';
  * requested one-minute cadence, and Connection remains the sole tunnel lifecycle owner.
  */
 async function maintainMissingMcpLoopDebt(now: number): Promise<boolean> {
+  if (missingMcpRecoveryFlight) return missingMcpRecoveryFlight;
+  const flight = maintainMissingMcpLoopDebtOwned(now);
+  missingMcpRecoveryFlight = flight;
+  try { return await flight; }
+  finally { if (missingMcpRecoveryFlight === flight) missingMcpRecoveryFlight = null; }
+}
+
+async function maintainMissingMcpLoopDebtOwned(now: number): Promise<boolean> {
   const due = missingMcpLoopRecoveriesDue(now);
   if (due.length === 0) return false;
   let state = coreConnectionStateProvider?.() ?? 'disconnected';
   if (state !== 'connected' && coreConnectionRecoveryProvider) {
     try {
-      state = await coreConnectionRecoveryProvider();
+      // Share the existing Input recovery owner when it already holds Connection. The
+      // cooldown also prevents a subsequent status read from immediately reconnecting again.
+      coreInputRecoveryAt = now;
+      if (coreInputRecoveryFlight) {
+        await coreInputRecoveryFlight;
+        state = coreConnectionStateProvider?.() ?? state;
+      } else state = await coreConnectionRecoveryProvider();
     } catch (error) {
       logWarn(`bridge: Core recovery check failed — ${error instanceof Error ? error.message : String(error)}`);
       state = coreConnectionStateProvider?.() ?? state;
@@ -4813,6 +4832,9 @@ export async function resumeAutomationChats(options: AutomationResumeOptions = {
 }
 
 let loopLaneStatusLogKey = '';
+/** Diagnostic cache only; persisted Input recovery rows own the actual attempt budget. */
+const proactiveRevivalCounts = new Map<string, number>();
+let lastLoopDiagnosticSummary: string | null = null;
 
 /**
  * Keeps the configured number of top-level Loop tasks moving without counting their workers.
@@ -4822,6 +4844,35 @@ let loopLaneStatusLogKey = '';
  * filled through the same durable automation repair used by Resume all. A compaction, active
  * decision draft, browser recovery, live turn or local tool call occupies its task's lane.
  */
+/** Structured one-glance diagnostic: which chats are stale, blocked, or working, and why.
+ * Called from the maintenance pass so issues are immediately visible without debugging. */
+export function diagnosticSummary(sessions: readonly SessionSummary[], now = Date.now()): string {
+  const rows: string[] = [];
+  for (const session of sessions) {
+    const id = session.conversationId;
+    if (!id || session.origin?.kind === 'worker' || session.origin?.kind === 'helper') continue;
+    const automation = goalSwitchFor(id);
+    if (!automation?.enabled) continue;
+    const lastWork = sessionLastWorkedAt(session);
+    const staleMin = Number.isFinite(lastWork) && lastWork > 0 ? Math.round((now - lastWork) / 60_000) : -1;
+    const repair = repairsInFlight.get(id);
+    const draft = goalViewFor(id);
+    const state = repair ? `repair:${repair.reason}/${repair.state}` :
+      draft?.stage === 'failed' ? `failed:${draft.error ?? 'unknown'}` :
+      goalPendingReplyFor(id) ? 'saved-reply' :
+      goalDraftBusy(id) ? 'drafting' :
+      session.activeTurnId ? 'turn-open' : staleMin > 20 ? `stale:${staleMin}m` : 'recent-work';
+    const title = (session.title || id).slice(0, 40);
+    const reason = repair ? repair.reason : draft?.error ?? '';
+    const revivals = proactiveRevivalCounts.get(`revival:${id}`);
+    const pending = nativeCompletionDiagnostic(id, now);
+    const debt = pending && pending.retainedCalls + pending.retainedCodeCalls > 0
+      ? ` unresolved:${pending.retainedCalls + pending.retainedCodeCalls}/${pending.reason}` : '';
+    rows.push(`${title} [${state}]${reason ? ` (${reason.slice(0, 60)})` : ''}${revivals ? ` revivals:${revivals}/4` : ''}${debt}`);
+  }
+  return rows.length ? rows.join('\n') : 'No active Loop/Goal chats.';
+}
+
 export async function maintainLoopLanes(now = Date.now()): Promise<boolean> {
   const config = getConfig();
   if (config.ui.automationPaused === true || !config.sessions.record) return false;
@@ -4841,6 +4892,13 @@ export async function maintainLoopLanes(now = Date.now()): Promise<boolean> {
   // ceiling. Sixteen remains the existing global settings/schema maximum and bounds one sweep.
   const sessions = await listAllSessions();
   const rotation = await reconcileLoopRotation(sessions, now);
+  const summary = diagnosticSummary(sessions, now);
+  if (summary !== lastLoopDiagnosticSummary) {
+    lastLoopDiagnosticSummary = summary;
+    logInfo(`Loop diagnostics: ${summary}`);
+  }
+  const liveRevivalKeys = new Set(sessions.map(session => `revival:${session.conversationId}`));
+  for (const key of proactiveRevivalCounts.keys()) if (!liveRevivalKeys.has(key)) proactiveRevivalCounts.delete(key);
   const configuredLimit = automaticChatLimit();
   const resumeDrain = explicitResumeDrainActive();
   const target = resumeDrain
@@ -4848,28 +4906,39 @@ export async function maintainLoopLanes(now = Date.now()): Promise<boolean> {
     : configuredLimit === null
       ? 16
       : Math.max(1, Math.min(16, configuredLimit));
-  // Proactive revival: a Loop chat with no activity for 20+ minutes should get one 'continue'
-  // message per staleness episode. This prevents the 9-hour stale deadlocks where identity-
-  // mismatched tool results never resolve and nothing re-triggers the chat.
+  // Durable Input rows own the four-attempt budget, including restart and concurrent passes.
+  // The existing 20-minute supervisor never opens a second delivery queue or replays a Send.
   const PROACTIVE_REVIVAL_MS = 20 * 60_000;
   for (const session of sessions) {
     const rid = session.conversationId;
     if (!rid || session.origin?.kind === 'worker' || session.origin?.kind === 'helper') continue;
-    if (!goalArmedFor(rid) || goalSwitchFor(rid)?.mode !== 'loop') continue;
-    if (getConfig().ui.automationPaused === true) continue;
+    const automation = goalSwitchFor(rid);
+    if (!automation.own || !automation.enabled || automation.mode !== 'loop' || !goalArmedFor(rid)) continue;
+    const progressAt = Math.max(session.startedAt, session.lastToolCallAt ?? 0,
+      session.lastAssistantFinalAt ?? 0, session.lastTurnOutcome === 'completed' ? session.lastTurnEndAt ?? 0 : 0);
     const lastWork = sessionLastWorkedAt(session);
     if (!Number.isFinite(lastWork) || lastWork <= 0) continue;
-    if (now - lastWork < PROACTIVE_REVIVAL_MS) continue;
-    // The chat is stale. Enqueue one 'continue' message if none is already queued/delivered for this episode.
+    if (now - progressAt < PROACTIVE_REVIVAL_MS) {
+      proactiveRevivalCounts.delete(`revival:${rid}`);
+      continue;
+    }
+    if (now - lastWork < PROACTIVE_REVIVAL_MS || getConfig().ui.automationPaused === true ||
+        manuallyClosedTabAt.has(rid) || goalBlockReason(rid) || session.activeTurnId ||
+        !automationRotationAdmits(rid) || !await goalKeyPresent('loop') ||
+        goalPendingReplyFor(rid) || goalDraftBusy(rid) || isChatBlocked(rid) || repairsInFlight.has(rid) ||
+        continuationForSession(session.id)) continue;
     try {
-      const pending = goalPendingReplyFor(rid);
-      if (!pending && !goalDraftBusy(rid) && !isChatBlocked(rid)) {
-        const input = await enqueueInterruptedContinue(session.id, rid, session.startedAt ? `stale-${session.startedAt}` : `stale-${Date.now()}`);
-        if (input && input.state === 'queued') {
-          logInfo(`bridge: proactive revival for ${rid}: stale for ${Math.round((now - lastWork) / 60_000)}m; queued continue message ${input.id}`);
-        }
+      const question = await readLatestUserMessage(session.id);
+      if (!question?.messageId) continue;
+      const input = await enqueueInterruptedContinue(session.id, rid, question.messageId, { progressAt });
+      if (input?.state === 'queued' && input.recovery?.revival) {
+        const attempt = input.recovery.revival.attempt;
+        proactiveRevivalCounts.set(`revival:${rid}`, attempt);
+        logInfo(`bridge: proactive revival for ${rid}: stale for ${Math.round((now - lastWork) / 60_000)}m; attempt ${attempt}/4; queued ${input.id}${attempt > 2 ? '; skip-blocker escalation' : ''}`);
       }
-    } catch { /* revival failure is diagnostic; the normal scheduler will still see the chat */ }
+    } catch (error) {
+      logWarn(`bridge: proactive revival for ${rid} could not be saved; existing queues retained — ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
   let eligible = 0;
   let occupied = 0;
@@ -6911,7 +6980,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }
     let nativeCompletionIncident: { reason: 'native_terminal_open_call' | 'native_terminal_open_code' |
       'native_terminal_inventory_incomplete';
-      openCalls: number; openCodeCalls: number; traceRequestIds: number; exactRequestJoins: number } | null = null;
+      openCalls: number; openCodeCalls: number; traceRequestIds: number; exactRequestJoins: number;
+      scan?: CoreShellScanDiagnostic; diagnosticOnly?: true } | null = null;
     const coreDiagnostic = url.searchParams.get('coreDiagnostic');
     let diagnosticAccepted = false;
     if (postedDiagnostic || coreDiagnostic && coreDiagnostic.length <= 8_000) {
@@ -6964,6 +7034,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
             (previous === null || previous.documentId !== current.documentId);
           const epochChanged = current !== null &&
             (previous === null || previous.navigationEpoch !== current.navigationEpoch);
+          const readerChanged = JSON.stringify(current?.reader ?? scan?.reader) !==
+            JSON.stringify(previous?.reader ?? priorScan?.reader);
           const countersChanged = scan !== null && (priorScan === null ||
             priorScan.selectorMatches !== scan.selectorMatches ||
             priorScan.mapped !== scan.mapped ||
@@ -6974,13 +7046,14 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
             CORE_SHELL_CALL_REJECTION_KEYS.some(key => priorScan.rejects[key] !== scan.rejects[key]));
           // This is the supported, bounded observation of the existing process-local cache.
           // Never log the raw diagnostic, document id, request ids, turn id or private shell data.
-          if (current && scan && (documentChanged || epochChanged || countersChanged)) {
+          if (current && scan && (documentChanged || epochChanged || countersChanged || readerChanged)) {
             logInfo(
               `bridge: Core shell scan conversation=${JSON.stringify(current.conversationId)} ` +
               `documentChanged=${documentChanged} navigationEpoch=${current.navigationEpoch} ` +
               `selectorMatches=${scan.selectorMatches} mapped=${scan.mapped} ` +
               `fiberMissing=${scan.rejects.fiberMissing} ownerMissing=${scan.rejects.ownerMissing} ` +
               `stableKeyMismatch=${scan.rejects.stableKeyMismatch} itemsOverLimit=${scan.rejects.itemsOverLimit}` +
+              ` fiberProducer=${current.reader?.fiberProducer ?? scan.reader?.fiberProducer ?? 'unavailable'}` +
               CORE_SHELL_CALL_REJECTION_KEYS.flatMap(key =>
                 scan.rejects[key] === undefined ? [] : [` ${key}=${scan.rejects[key]}`]).join('')
             );
@@ -6988,7 +7061,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
           const terminal = current?.ordinaryFinal ?? null;
           const priorTerminal = previous?.ordinaryFinal ?? null;
           if (current && (terminal || priorTerminal) &&
-              (documentChanged || epochChanged || JSON.stringify(terminal) !== JSON.stringify(priorTerminal))) {
+              (documentChanged || epochChanged || countersChanged || readerChanged || JSON.stringify(terminal) !== JSON.stringify(priorTerminal))) {
             // Same validated current-parent witness as controls. Fixed enums/counts only:
             // a log explains the missing join, never supplies an identity or terminal receipt.
             const identity = nativeIdentityRefusalSummary(current);
@@ -7000,7 +7073,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
                 ` identityReasons=${identity ? identity.reasons.map(row => `${row.code}:${row.calls}`).join(',') || 'none' : 'unavailable'}`
                 : 'reason=unknown'));
             if (current.shellDiscovery === 'compatible' && terminal && terminal.questions > 0 &&
-                ((terminal.reason === 'turn-invalid' && terminal.callInventoryComplete === false) ||
+                ((terminal.reason === 'turn-invalid' && (terminal.callInventoryComplete === false ||
+                  Boolean(identity?.calls && (terminal.openCalls > 0 || terminal.openCodeCalls > 0)))) ||
                  (terminal.reason === 'open-call' && terminal.openCalls > 0) ||
                  (terminal.reason === 'open-code' && terminal.openCodeCalls > 0))) {
               // A native terminal frame with an unresolved tool is already an actionable
@@ -7010,8 +7084,11 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
               nativeCompletionIncident = {
                 reason: terminal.callInventoryComplete === false
                   ? 'native_terminal_inventory_incomplete'
-                  : terminal.reason === 'open-call' ? 'native_terminal_open_call' : 'native_terminal_open_code',
+                  : terminal.openCalls > 0 ? 'native_terminal_open_call' : 'native_terminal_open_code',
                 openCalls: terminal.openCalls, openCodeCalls: terminal.openCodeCalls,
+                ...(scan ? { scan: { ...scan, ...(current.reader ? { reader: { ...current.reader } } : {}) } } : {}),
+                ...(terminal.reason === 'turn-invalid' && terminal.callInventoryComplete !== false
+                  ? { diagnosticOnly: true as const } : {}),
                 // A truncated native census lacks an exact selected invocation
                 // owner; global request sightings cannot fill that gap.
                 traceRequestIds: terminal.callInventoryComplete === false ? 0 : current.requestIds.length,
@@ -7059,16 +7136,19 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         !await persistNativeCompletionCheckpoint(astraSession.id, id))
       return json(res, 503, { error: 'native_completion_checkpoint_unverified' }, origin);
     if (nativeCompletionIncident && astraSession?.conversationId === id) {
-      const { reason: observedReason, ...nativeCompletion } = nativeCompletionIncident;
+      const { reason: observedReason, scan: readerScan, diagnosticOnly, ...nativeCompletion } = nativeCompletionIncident;
       const original = nativeCompletionCheckpoint(astraSession.id, id);
       const reason = original ? original.reason === 'inventory-incomplete'
         ? 'native_terminal_inventory_incomplete'
         : original.reason === 'open-call' ? 'native_terminal_open_call' : 'native_terminal_open_code'
         : observedReason;
-      void noteLocalIncident({ source: 'browser-debug', reason, status: 'unresolved', sessionId: astraSession.id,
-        conversationId: id, capture: 'not_requested', nativeCompletion: { ...nativeCompletion,
+      void noteLocalIncident({ source: 'browser-debug',
+        reason: diagnosticOnly && !original ? 'native_reader_identity_refusal' : reason,
+        status: 'unresolved', sessionId: astraSession.id, conversationId: id, capture: 'not_requested',
+        ...(readerScan ? { readerScan } : {}),
+        ...(!diagnosticOnly || original ? { nativeCompletion: { ...nativeCompletion,
           ...(original ? { openCalls: original.openCalls, openCodeCalls: original.openCodeCalls,
-            checkpointKey: nativeCompletionCheckpointKey(original) } : {}) } });
+            checkpointKey: nativeCompletionCheckpointKey(original) } : {}) } } : {}) });
     }
     // Resolve with the SAME durable evidence check used by Goal draft admission.
     // A final can arrive BEFORE recorder publication, and a subsequent legitimate
@@ -12623,11 +12703,18 @@ async function reconcileOwnedNativeRequestIdentity(conversationId: string, sessi
   const historyIdle = () => !historical || (inFlightMcpRequests() === 0 && runningToolCalls(null) === 0 &&
     settlingToolCalls(null) === 0 && unifiedExecManager.listProcesses().length === 0 &&
     observationWritesInFlight === 0 && !settledNativeObserverBusy(conversationId));
+  // A settled mixed turn can recover its missing Core request half while retaining
+  // its exact original Code parents. A successor cannot supply that Code proof.
   if (!original || original.reason === 'inventory-incomplete' || original.allCoreRequestIds !== null ||
-      original.calls < 1 || original.codeCalls !== 0 || !original.sourceUserMessageId ||
+      original.calls < 1 || !original.sourceUserMessageId ||
+      !original.codeCallMessageIds || original.codeCallMessageIds.length !== original.codeCalls ||
+      (historical && original.codeCalls !== 0) ||
       !original.coreCallMessageIds || original.coreCallMessageIds.length !== original.calls ||
+      original.codeCallMessageIds.some(id => original.coreCallMessageIds!.includes(id)) ||
       !native || !snapshot?.ordinaryFinal || !historyIdle() ||
-      (!historical && (native.coreCallMessageIds.length !== original.calls || native.codeCallMessageIds.length !== 0 ||
+      (!historical && (native.coreCallMessageIds.length !== original.calls ||
+        native.codeCallMessageIds.length !== original.codeCalls ||
+        original.codeCallMessageIds.some((id, at) => native.codeCallMessageIds[at] !== id) ||
         original.coreCallMessageIds.some((id, at) => native.coreCallMessageIds[at] !== id) ||
         snapshot.ordinaryFinal.allCoreRequestIds != null && snapshot.ordinaryFinal.allCoreRequestIds.length !== original.calls))) return false;
   const profile = getActiveInstanceRuntime().profile.id;
@@ -13517,7 +13604,7 @@ function noteBrowserRecoveryHold(conversationId: string, repair: Repair, cause: 
  * Only the due repair owner requests diagnosis; passive status readers remain silent. */
 async function goalBrowserRecoveryHeld(conversationId: string, now = Date.now(), forwardSessionId?: string,
   onHold?: (cause: BrowserRecoveryHold) => void,
-  options?: { skipEvidenceWait?: boolean }): Promise<boolean> {
+  options?: { skipEvidenceWait?: boolean; retrySourceKey?: string }): Promise<boolean> {
   const refuse = (cause: BrowserRecoveryHold): true => { onHold?.(cause); return true; };
   if (runningToolCalls(conversationId) > 0) return refuse('tools');
   if (settlingToolCalls(conversationId) > 0) return refuse('settling');
@@ -13529,7 +13616,7 @@ async function goalBrowserRecoveryHeld(conversationId: string, now = Date.now(),
     if (settlingToolCalls(null) > 0) return refuse('settling');
     // Known requests under the current native question keep the existing completion/opt-in
     // proof. Only older/unidentified receipt debt is independent of this exact Retry.
-    if (!nativeRetryCurrentRequestUnresolved(conversationId)) return false;
+    if (!nativeRetryCurrentRequestUnresolved(conversationId, options.retrySourceKey)) return false;
   }
   if (nativeFinalEvidenceWait(coreBrowserEvidence(conversationId), now) === null) return false;
   const pending = forwardSessionId ? goalPendingReplyFor(conversationId) : null;
@@ -13548,12 +13635,19 @@ function repairBrowserRecoveryHeld(conversationId: string, repair: Repair, now =
   onHold?: (cause: BrowserRecoveryHold) => void): Promise<boolean> {
   return goalBrowserRecoveryHeld(conversationId, now, repair.sessionId, onHold,
     repair.reason === 'assistant-error' && repair.action === 'retry'
-      ? { skipEvidenceWait: true } : undefined);
+      ? { skipEvidenceWait: true, retrySourceKey: repair.assistantSource?.key } : undefined);
 }
 
-function nativeRetryCurrentRequestUnresolved(conversationId: string): boolean {
+function nativeRetryCurrentRequestUnresolved(conversationId: string, retrySourceKey?: string): boolean {
   const evidence = coreBrowserEvidence(conversationId);
   const current = evidence?.ordinaryFinal, pending = evidence?.pendingCompletion;
+  // The repair already belongs to the latest durable native user row. Both
+  // ordinaryFinal and pendingCompletion may still describe the same OLDER
+  // question after a new delivery fails before producing a final. Their
+  // equality is not evidence that the failed question owns the old requests.
+  // Unknown source keys retain the existing conservative fallback below.
+  if (retrySourceKey?.startsWith('user:') && pending?.sourceUserMessageId && pending.openRequestIds?.length)
+    return retrySourceKey === `user:${pending.sourceUserMessageId}`;
   return Boolean(pending?.sourceUserMessageId &&
     pending.sourceUserMessageId === current?.sourceUserMessageId && pending.openRequestIds?.length);
 }
@@ -13587,7 +13681,7 @@ async function goalWaitFor(conversationId: string, sessionId: string, now = Date
     const repair = repairsInFlight.get(conversationId);
     if (!wait || repair?.sessionId !== sessionId || repair.reason !== 'assistant-error' ||
         repair.action !== 'retry' || repair.state !== 'queued' || repair.attempts !== 0) return wait;
-    if (!nativeRetryCurrentRequestUnresolved(conversationId) && inFlightMcpRequests() === 0 &&
+    if (!nativeRetryCurrentRequestUnresolved(conversationId, repair.assistantSource?.key) && inFlightMcpRequests() === 0 &&
         runningToolCalls(null) === 0 && settlingToolCalls(null) === 0 &&
         unifiedExecManager.listProcesses().length === 0) return {
       reason: 'pickup' as const,
@@ -20606,6 +20700,8 @@ export async function restoreCommands(): Promise<void> {
 
 /** Test seam. */
 export function resetBridgeForTests(): void {
+  proactiveRevivalCounts.clear();
+  lastLoopDiagnosticSummary = null;
   cancelRestrictionResume();
   restrictionResumeEpisodes.clear();
   deliveryGeneration++;
@@ -20667,6 +20763,7 @@ export function resetBridgeForTests(): void {
   restoredRepairClaims.clear();
   manuallyClosedTabAt.clear();
   missingMcpRecoveryLogKey = '';
+  missingMcpRecoveryFlight = null;
   coreInputRecoveryAt = 0;
   coreInputRecoveryFlight = null;
   automationPresentationAttributionLogKey = '';

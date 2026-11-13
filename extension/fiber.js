@@ -42,7 +42,7 @@
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
   const VERSION = 19;
   /** Private implementation epoch, independent of the stable cross-world wire schema. */
-  const PRODUCER_VERSION = 168;
+  const PRODUCER_VERSION = 172;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -81,6 +81,23 @@
   /** Connector requests reported for one turn. Far above most turns' call count, but a long working
    * turn can pass it (#2157). The limit bounds what is reported, never the turn's public messages. */
   const MAX_CALLS = 200;
+  // Fixed internal refusal sites only; no provider values or identifiers.
+  const NATIVE_FAILURE_DIAGNOSTICS = new Set([
+    'nativeBranchCoreInvocation', 'nativeBranchCoreResult', 'nativeBranchDuplicateReceipt',
+    'nativeBranchExecutionResultChildCount', 'nativeBranchExecutionResultNoOwner', 'nativeBranchExecutionResultRequest',
+    'nativeBranchExecutionStart', 'nativeBranchFinalNamespace', 'nativeBranchGroupExchange',
+    'nativeBranchGroupNode', 'nativeBranchGroupParent', 'nativeBranchGroupRetainedParent',
+    'nativeBranchGroupRole', 'nativeBranchGroupStatus', 'nativeBranchGroupWorkingTurn',
+    'nativeBranchHeaderRole', 'nativeBranchHeaderShape', 'nativeBranchSelectedExchange',
+    'nativeBranchSelectedMetadataParent', 'nativeBranchSelectedParent', 'nativeBranchSelectedRole',
+    'nativeBranchSelectedWorkingTurn', 'nativeBranchUserScope', 'nativeHeaderWorkingMissing',
+    'nativeHeaderExchangeMissing', 'nativeHeaderUserScope', 'nativeHeaderRecipient',
+    'nativeHeaderStatus', 'nativeHeaderVisible', 'nativeHeaderRebase',
+    'nativeCoreResultRequest', 'nativeCoreResultReceipt', 'nativeCoreResultResource',
+    'nativeHeaderValueAbsent', 'nativeHeaderValueAccessor', 'nativeHeaderValueUndefined',
+    'nativeHeaderValueNull', 'nativeHeaderValueString', 'nativeHeaderValueTrue',
+    'nativeHeaderValueFalse', 'nativeHeaderValueOther',
+  ]);
   /** Items one turn may hold before it is not read at all; a bound against a runaway tree, far above real turns. */
   const MAX_TURN_ITEMS = 5000;
   // Native ancestry includes invocation AND result nodes for both MCP and Code Mode,
@@ -2338,7 +2355,11 @@
     const noMetadata = reason => {
       // A later mapping/cache contradiction invalidates any staged match, not its inspection.
       for (const id of vetoReceiptChecks.keys()) vetoReceiptChecks.set(id, false);
-      for (const call of shell.calls) note(call, reason);
+      for (const call of shell.calls) {
+        // Preserve the completion veto and expose the earlier mapping failure it masks.
+        if (completionReasons.get(call.messageId) === 'callCompletionVeto') shellDiagnostic(rejects, reason);
+        note(call, reason);
+      }
       report();
       return [];
     };
@@ -2544,7 +2565,15 @@
       const refuse = (reason, branch = 'none') => {
         mountedNativeScopeRefusal = reason;
         if (nativeAnchorReason === 'none') nativeAnchorReason = reason;
-        if (nativeAnchorBranch === 'none' && reason === 'nativeScopeBranchConflict') nativeAnchorBranch = branch;
+        if (nativeAnchorBranch === 'none' && reason === 'nativeScopeBranchConflict') {
+          nativeAnchorBranch = branch;
+          // Branch is a fixed internal refusal site, never provider text. Carry
+          // its bounded count through the existing scan instead of Console only.
+          shellDiagnostic(rejects, 'nativeBranch' + branch.split('-')
+            .map(part => part[0].toUpperCase() + part.slice(1)).join(''));
+          if (nativeAnchorCoreResultFacet !== 'none') shellDiagnostic(rejects,
+            'nativeCoreResult' + nativeAnchorCoreResultFacet[0].toUpperCase() + nativeAnchorCoreResultFacet.slice(1));
+        }
         return null;
       };
       const nativeUser = messageAt(typedUserId);
@@ -2612,7 +2641,6 @@
               if (currentIds.has(id) || nativeField(message, 'recipient') !== 'all' ||
                   nativeField(message, 'status') !== 'finished_successfully' ||
                   nativeField(metadata, 'is_visually_hidden_from_conversation') !== true ||
-                  nativeField(metadata, 'message_type') !== 'next' ||
                   nativeField(metadata, 'rebase_developer_message') !== false ||
                   (str(nativeField(userMeta, 'request_id')) &&
                     nativeField(metadata, 'request_id') !== nativeField(userMeta, 'request_id')))
@@ -2624,7 +2652,7 @@
                     nativeField(prior, 'id') !== id || nativeField(nativeField(prior, 'author'), 'role') !== 'system' ||
                     ['recipient', 'status'].some(key => nativeField(prior, key) !== nativeField(message, key)) ||
                     ['parent_id', 'working_turn_id', 'turn_exchange_id', 'request_id', 'is_visually_hidden_from_conversation',
-                      'message_type', 'rebase_developer_message'].some(key =>
+                      'rebase_developer_message'].some(key =>
                         nativeField(priorMeta, key) !== nativeField(metadata, key))) return held('prior-cache-conflict');
               }
               if (++witnesses > 1) return held('prior-header-ambiguous');
@@ -2635,17 +2663,36 @@
             nativeAnchorRetryScope = 'matched';
             return true;
           };
-          // Preserve the guard's exact order and short-circuit reads. Report only
-          // its first fixed refusal; provider values and identities stay local.
+          // message_type is transport annotation, not branch identity. The
+          // provider can change/omit it while this exact selected user, hidden
+          // header, namespace, native ancestry and result receipts stay intact.
+          // Never read/emit that optional value (including accessors). All
+          // ownership/rebase/terminal checks retain their existing order.
           const headerFacet = !headerWorking ? 'working-missing' : !headerExchange ? 'exchange-missing'
             : hasUserScope && (working !== headerWorking || exchange !== headerExchange) && !retainedRetryScope() ? 'user-scope'
             : nativeField(header, 'recipient') !== 'all' ? 'recipient'
             : nativeField(header, 'status') !== 'finished_successfully' ? 'status'
             : nativeField(headerMeta, 'is_visually_hidden_from_conversation') !== true ? 'visible'
-            : nativeField(headerMeta, 'message_type') !== 'next' ? 'message-type'
             : nativeField(headerMeta, 'rebase_developer_message') !== false ? 'rebase' : null;
           if (headerFacet) {
             nativeAnchorHeaderFacet = headerFacet;
+            shellDiagnostic(rejects, 'nativeHeader' + headerFacet.split('-')
+              .map(part => part[0].toUpperCase() + part.slice(1)).join(''));
+            // Classify the failed field's shape without exporting its value or
+            // evaluating a getter. One packet must distinguish omission from an
+            // explicit rebase/visible flag; neither classification grants identity.
+            try {
+              const fields = { 'working-missing': [headerMeta, 'working_turn_id'],
+                'exchange-missing': [headerMeta, 'turn_exchange_id'], 'user-scope': [headerMeta, 'working_turn_id'],
+                recipient: [header, 'recipient'], status: [header, 'status'],
+                visible: [headerMeta, 'is_visually_hidden_from_conversation'], rebase: [headerMeta, 'rebase_developer_message'] };
+              const field = fields[headerFacet], descriptor = Object.getOwnPropertyDescriptor(field[0], field[1]);
+              const value = descriptor?.value;
+              const shape = !descriptor ? 'Absent' : !own.call(descriptor, 'value') ? 'Accessor'
+                : value === undefined ? 'Undefined' : value === null ? 'Null' : typeof value === 'string' ? 'String'
+                : value === true ? 'True' : value === false ? 'False' : 'Other';
+              shellDiagnostic(rejects, 'nativeHeaderValue' + shape);
+            } catch { /* Optional shape diagnostics never change the refusal. */ }
             return refuse('nativeScopeBranchConflict', 'header-shape');
           }
           const userAnchorsHeader = hasUserScope && working === headerWorking && exchange === headerExchange &&
@@ -2729,7 +2776,7 @@
                 nativeField(nativeField(message, 'author'), 'role') !== 'system' ||
                 nativeField(message, 'recipient') !== 'all' || nativeField(message, 'status') !== 'finished_successfully' ||
                 nativeField(meta, 'is_visually_hidden_from_conversation') !== true ||
-                nativeField(meta, 'message_type') !== 'next' || nativeField(meta, 'rebase_developer_message') !== false ||
+                nativeField(meta, 'rebase_developer_message') !== false ||
                 !['request_id', 'working_turn_id', 'turn_exchange_id'].every(key =>
                   str(nativeField(meta, key)) && nativeField(meta, key) === nativeField(metadata, key) &&
                   nativeField(meta, key) === nativeField(userMeta, key))) return false;
@@ -2740,7 +2787,7 @@
                   nativeField(prior, 'id') !== id || nativeField(nativeField(prior, 'author'), 'role') !== 'system' ||
                   ['recipient', 'status'].some(key => nativeField(prior, key) !== nativeField(message, key)) ||
                   ['parent_id', 'request_id', 'working_turn_id', 'turn_exchange_id', 'is_visually_hidden_from_conversation',
-                    'message_type', 'rebase_developer_message'].some(key => nativeField(priorMeta, key) !== nativeField(meta, key))) return false;
+                    'rebase_developer_message'].some(key => nativeField(priorMeta, key) !== nativeField(meta, key))) return false;
             }
             return true;
           };
@@ -3241,7 +3288,7 @@
           if (!nativeReferenceTraceKeys.has(key) && nativeReferenceTraceKeys.size < MAX_TURNS) {
             nativeReferenceTraceKeys.add(key);
             console.info('[Chat On Steroids] native result-reference recovery diagnostic' +
-              ` version=5 calls=${shape.typedCalls} missing=${shape.missingReferences}` +
+              ` version=5 producer=${PRODUCER_VERSION} observedAt=${now} calls=${shape.typedCalls} missing=${shape.missingReferences}` +
               ` liveMapping=${shape.liveMapping} pathNodes=${shape.currentPathNodes}` +
               ` selectedCalls=${shape.selectedMissingCalls} nativeCalls=${shape.nativeMissingCalls}` +
               ` typedUser=${shape.typedUserPresent} selectedUser=${shape.typedUserSelected}` +
@@ -3660,13 +3707,14 @@
     // Optional capability counters only appear when observed.
     if (!Object.prototype.hasOwnProperty.call(rejects, reason)) {
       if (reason !== 'callRequestIdPresent' && reason !== 'callRequestIdMissing' &&
-          !/^nativeAnchor(?:LiveMissing|UserMissing|TurnIncomplete|PathEmpty|UserPathMismatch|UnselectedPath|Prerequisite)$/.test(reason)) return;
+          !/^nativeAnchor(?:LiveMissing|UserMissing|TurnIncomplete|PathEmpty|UserPathMismatch|UnselectedPath|Prerequisite)$/.test(reason) &&
+          !NATIVE_FAILURE_DIAGNOSTICS.has(reason)) return;
       rejects[reason] = 0;
     }
     rejects[reason] = Math.min(MAX_ROWS, rejects[reason] + 1);
   }
 
-  function shellStableTurnId(entry, publicTurnKey) {
+  function shellStableTurnId(entry, publicTurnKey, fiber) {
     const entryId = str(entry?.id), turnKey = str(publicTurnKey);
     if (!entryId || !turnKey) return null;
     if (entryId === turnKey) return entryId;
@@ -3674,6 +3722,16 @@
     // while the typed owner retains a distinct g-* turn id. Join only that one typed user
     // item; positional search/unit keys and a multi-user/discordant entry cannot authorize it.
     const users = entry.turn.items.filter(item => item?.type === 'user-message');
+    if (users.length === 0) {
+      // Virtualization can remove the typed user while the public exchange still
+      // uses its native id. Reuse the exact mounted branch proof, not layout keys
+      // or cached text. This restores reader ownership only, never completion.
+      try {
+        const live = shellLiveMapping(fiber, entry);
+        return live && shellSelectedUserId(entry, live.renderedConversation.mapping) === turnKey &&
+          shellRequestPath(live, entry)[0] === turnKey ? entryId : null;
+      } catch { return null; }
+    }
     if (users.length !== 1) return null;
     const messageId = str(users[0].messageId), serverMessageId = str(users[0].serverMessageId);
     if (messageId && serverMessageId && messageId !== serverMessageId) return null;
@@ -3687,7 +3745,7 @@
     }
     if (!entry) { shellDiagnostic(rejects, 'ownerMissing'); return null; }
     if (entry.turn.items.length > MAX_TURN_ITEMS) { shellDiagnostic(rejects, 'itemsOverLimit'); return null; }
-    const stableTurnId = shellStableTurnId(entry, turnId);
+    const stableTurnId = shellStableTurnId(entry, turnId, fiber);
     if (!stableTurnId) { shellDiagnostic(rejects, 'stableKeyMismatch'); return null; }
     // Search-unit keys describe layout, including fallback-turn-N after a native reload.
     // They must not replace the exact stable turn identity proved against this Fiber entry.
@@ -3702,7 +3760,7 @@
       .filter(item => item?.type === 'assistant-message')
       .map(item => str(item.messageId)).filter(Boolean));
     const remember = id => { if (!id || seen.has(id)) return false; seen.add(id); return true; };
-    let work = 0;
+    let work = 0, callEvidenceComplete = true;
     for (const [index, item] of entry.turn.items.entries()) {
       if (item?.type === 'user-message' || item?.type === 'assistant-message') {
         const user = item.type === 'user-message';
@@ -3737,15 +3795,18 @@
       }
       const steps = item?.type === 'chatgpt-reasoning-group' && Array.isArray(item.items) ? item.items : [item];
       for (const step of steps) {
-        // Past the row limit the working rows are not reported; the turn's own questions and answers
-        // (the top-level items) always are, so a long turn can still end (#2157). Their identities are
-        // still checked, so a repeated one refuses the turn however far down it sits.
+        // Keep public output readable on long turns without presenting an omitted
+        // tool prefix as a complete census. The existing incomplete-inventory flag
+        // retains result debt; the independent Loop fallback remains available.
         if (++work > MAX_ROWS) {
           if (work > MAX_TURN_ITEMS) return null;
           const counted = step?.type === 'dynamic-tool-call' ? step.tool === 'exec'
             : step?.type === 'mcp-tool-call' && ourApp(step.invocation?.server);
           const spare = counted ? str(step.callId) : null;
-          if (spare && !remember(spare)) return null;
+          if (counted) {
+            callEvidenceComplete = false;
+            if (spare && !remember(spare)) return null;
+          }
           continue;
         }
         if (step?.type === 'assistant-message' && step !== item) {
@@ -3766,17 +3827,17 @@
         }
         if (step?.type === 'dynamic-tool-call' && step.tool === 'exec') {
           const id = str(step.callId);
-          if (!id) continue;
+          if (!id) { callEvidenceComplete = false; continue; }
           if (!remember(id)) return null;
-          if (executionIds.length >= MAX_CALLS) continue;
+          if (executionIds.length >= MAX_CALLS) { callEvidenceComplete = false; continue; }
           executionIds.push(id);
           continue;
         }
         if (step?.type !== 'mcp-tool-call' || !ourApp(step.invocation?.server)) continue;
         const id = str(step.callId), tool = toolName(step.invocation?.tool);
-        if (!id || !tool) continue;
+        if (!id || !tool) { callEvidenceComplete = false; continue; }
         if (!remember(id)) return null;
-        if (calls.length >= MAX_CALLS) continue;
+        if (calls.length >= MAX_CALLS) { callEvidenceComplete = false; continue; }
         const completedProperty = Object.getOwnPropertyDescriptor(step, 'completed');
         const statusProperty = Object.getOwnPropertyDescriptor(step, 'status');
         const completedValue = completedProperty && own.call(completedProperty, 'value') ? completedProperty.value : undefined;
@@ -3822,7 +3883,8 @@
         callSources.set(id, reference);
       }
     }
-    return { entry, turnId: stableTurnId, messages, calls, slots, callSources, executionIds, terminalCandidate, userDiagnostics };
+    return { entry, turnId: stableTurnId, messages, calls, slots, callSources, executionIds,
+      terminalCandidate, userDiagnostics, callEvidenceComplete };
   }
 
   /**
@@ -3942,7 +4004,7 @@
           }));
         const classic = shell ? null : callsOf(messages, codeReceipts);
         const calls = shell ? shell.calls : classic.calls;
-        const callEvidenceComplete = Boolean(shell || classic.complete) && codeParentsUnique;
+        const callEvidenceComplete = (shell ? shell.callEvidenceComplete : classic.complete) && codeParentsUnique;
         const shellSightings = [];
         const metadata = shell ? shellRequestMetadata(fiber, queries, shell, conversation, shellSightings, shellScan.rejects) : messages;
         const sightings = shell ? shellSightings : sightingsOf(metadata);
@@ -4155,7 +4217,7 @@
       found = [...document.querySelectorAll(TOOL)].filter(row => !row.closest(OWN_SURFACES));
       for (const old of document.querySelectorAll(CONNECTOR)) old.removeAttribute('data-clf-fiber-v2');
     } catch {
-      shellScan.reader = { fiberWire: VERSION, fiberKeys: Object.keys(shellScan.rejects).length };
+      shellScan.reader = { fiberWire: VERSION, fiberProducer: PRODUCER_VERSION, fiberKeys: Object.keys(shellScan.rejects).length };
       return post({ source: REPLY, nonce, scanToken, v: VERSION, scanOk: false, rows: [], turns, shellScan }, location.origin);
     }
     const limit = Math.min(found.length, MAX_ROWS);
@@ -4184,7 +4246,7 @@
       turns = [];
       scanOk = false;
     }
-    shellScan.reader = { fiberWire: VERSION, fiberKeys: Object.keys(shellScan.rejects).length };
+    shellScan.reader = { fiberWire: VERSION, fiberProducer: PRODUCER_VERSION, fiberKeys: Object.keys(shellScan.rejects).length };
     if (digestJobs.size && !afterDigest) {
       // Do not publish a provisional final and depend on a later UI mutation to
       // rerun it. The original reader request already owns the bounded timeout.

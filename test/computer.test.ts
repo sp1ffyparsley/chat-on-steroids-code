@@ -80,6 +80,23 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
     const target = windows.find(window => window.title === title && window.processId === child.pid);
     if (!target) throw new Error('Owned native fixture was not present in the real window inventory');
     fixtureWindow = target.id;
+    // Form paint is not a DWM capture-surface receipt. Require one real frame
+    // before testing background capture semantics, with no alternate target or
+    // skipped assertions. A permanently unavailable surface still fails setup.
+    let captureFailure: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const frame = await screenshot({ window: fixtureWindow, maxWidth: 320 });
+        if (frame.captureMode !== 'window' || frame.width <= 0 || frame.height <= 0)
+          throw new Error('Owned native fixture did not return an exact positive window frame');
+        captureFailure = null;
+        break;
+      } catch (error) {
+        if (!/CAPTURE_FAILED:.*HRESULT 0x80070057/.test(error instanceof Error ? error.message : String(error))) throw error;
+        captureFailure = error;
+      }
+    }
+    if (captureFailure) throw new Error(`Owned native fixture surface never became ready: ${String(captureFailure)}`);
   });
   afterAll(async () => {
     if (fixtureDirectory) await fs.writeFile(path.join(fixtureDirectory, 'close'), 'close owned fixture');

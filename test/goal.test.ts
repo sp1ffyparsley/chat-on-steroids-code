@@ -10252,3 +10252,91 @@ describe('a custom OpenAI-compatible provider', () => {
     expect(goal.resolveGoalBaseUrl({ kind: 'openrouter', baseUrl: '' })).toBe('https://openrouter.ai/api/v1');
   });
 });
+
+
+it.each([
+  ['timeout_or_cancelled', 'retryable'], ['network connection failed', 'retryable'],
+  ['rate limit exceeded', 'retryable'], ['http_503', 'retryable'],
+  ['auth_rejected: timeout', 'non-retryable'], ['authentication failed', 'non-retryable'], ['no credits', 'non-retryable'],
+  ['invalid model', 'non-retryable'], ['unexpected provider failure', 'unknown']
+])('classifies helper error %s as %s', (error, classification) => {
+  expect(goal.classifyHelperError(error)).toBe(classification);
+});
+
+it('allows only one automatic retry for an unknown provider error on the same turn', async () => {
+  const id = 'unknown-provider-retry-budget';
+  const { id: sessionId } = await createSession({ conversationId: id });
+  await appendEvent(sessionId, { source: 'extension', time: Date.now(), kind: 'user_message',
+    message: { text: 'Finish the implementation.', chars: 26, truncated: false } });
+  let calls = 0;
+  globalThis.fetch = (async () => { calls++; throw new Error('unexpected provider failure'); }) as never;
+  goal.startGoalDraft({ sessionId, conversationId: id, turnId: 'g-1' });
+  const first = await settled(id);
+  expect(first).toMatchObject({ stage: 'failed', retryable: true });
+  expect(goal.ackGoalDraft(id, first.token)).toBe(true);
+  goal.startGoalDraft({ sessionId, conversationId: id, turnId: 'g-1' });
+  const second = await settled(id);
+  expect(second).toMatchObject({ stage: 'failed', retryable: false });
+  expect(goal.ackGoalDraft(id, second.token)).toBe(true);
+  goal.startGoalDraft({ sessionId, conversationId: id, turnId: 'g-1' });
+  expect((await settled(id)).token).toBe(second.token);
+  expect(calls).toBe(2);
+});
+
+
+it('carries the one-hour escape hint into the helper and retries one generic stalled reply', async () => {
+  const conversationId = 'stall-escape-substance';
+  const { id: sessionId } = await createSession({ conversationId });
+  await appendEvent(sessionId, { source: 'extension', time: Date.now(), kind: 'user_message',
+    message: { text: 'Finish the implementation.', chars: 26, truncated: false } });
+  await goal.setGoalSwitchNow(conversationId, 'loop', true);
+  await saveConfig({ ...getConfig(), goal: { ...getConfig().goal, continuationPolicy: 'settled-turn' } });
+  goal.configureLoopForwardReadiness(async () => false);
+  let calls = 0;
+  const systems: string[] = [];
+  globalThis.fetch = (async (_url: unknown, options: RequestInit) => {
+    systems.push(JSON.stringify(JSON.parse(String(options.body)).messages));
+    return ++calls === 1 ? decision('continue', 'continue')
+      : decision('continue', 'Inspect the failed render log and implement the independent audio export validation next.');
+  }) as never;
+  goal.startGoalDraft({ sessionId, conversationId, turnId: 'g-1' });
+  const refused = await settled(conversationId);
+  expect(refused).toMatchObject({ stage: 'failed', error: 'goal_readiness_changed' });
+  expect(calls).toBe(0);
+  goal.ackGoalDraft(conversationId, refused.token);
+  const now = Date.now();
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 3_600_001);
+  try {
+    goal.startGoalDraft({ sessionId, conversationId, turnId: 'g-1' });
+    const escaped = await settled(conversationId);
+    expect(escaped.stage).toBe('ready');
+    expect(calls).toBe(2);
+    expect(systems[0]).toContain('Avoid the recurring error');
+    expect(systems[1]).toContain('previous continuation was too generic');
+    expect(operatorPromptBody(escaped.reply)).toContain('audio export validation');
+  } finally { clock.mockRestore(); }
+});
+
+
+it('notifies once and refuses another helper request after a permanent provider error', async () => {
+  const notice = await import('../src/main/user-notice.js');
+  const notify = vi.fn();
+  notice.setUserNoticeNotifier(notify);
+  try {
+    const conversationId = 'permanent-provider-notification';
+    const { id: sessionId } = await createSession({ conversationId });
+    await appendEvent(sessionId, { source: 'extension', time: Date.now(), kind: 'user_message',
+      message: { text: 'Finish the implementation.', chars: 26, truncated: false } });
+    const fetch = vi.fn(async () => { throw new Error('invalid model: check provider settings'); });
+    globalThis.fetch = fetch as never;
+    goal.startGoalDraft({ sessionId, conversationId, turnId: 'g-1' });
+    const failed = await settled(conversationId);
+    expect(failed).toMatchObject({ stage: 'failed', retryable: false });
+    expect(notify).toHaveBeenCalledExactlyOnceWith('Helper needs attention', expect.stringContaining('invalid model'), sessionId);
+    goal.ackGoalDraft(conversationId, failed.token);
+    goal.startGoalDraft({ sessionId, conversationId, turnId: 'g-1' });
+    expect((await settled(conversationId)).token).toBe(failed.token);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledTimes(1);
+  } finally { notice.setUserNoticeNotifier(null); }
+});

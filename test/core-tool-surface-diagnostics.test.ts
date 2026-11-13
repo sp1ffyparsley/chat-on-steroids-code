@@ -1088,7 +1088,21 @@ describe('Core tool-surface incident diagnostics', () => {
       'callIdentityRecovered', 'callIdentityPriorPair', 'callIdentityUserUnproved',
       'callIdentityNativeUnproved', 'callIdentityScopeUnproved', 'callIdentityParentUnproved',
       'callIdentitySelectedWithheld',
-      'nativeAnchorLiveMissing', 'nativeAnchorUserMissing', 'nativeAnchorTurnIncomplete', 'nativeAnchorPathEmpty', 'nativeAnchorUserPathMismatch', 'nativeAnchorUnselectedPath', 'nativeAnchorPrerequisite',
+    'nativeAnchorLiveMissing', 'nativeAnchorUserMissing', 'nativeAnchorTurnIncomplete', 'nativeAnchorPathEmpty', 'nativeAnchorUserPathMismatch', 'nativeAnchorUnselectedPath', 'nativeAnchorPrerequisite',
+    'nativeBranchCoreInvocation', 'nativeBranchCoreResult', 'nativeBranchDuplicateReceipt',
+    'nativeBranchExecutionResultChildCount', 'nativeBranchExecutionResultNoOwner', 'nativeBranchExecutionResultRequest',
+    'nativeBranchExecutionStart', 'nativeBranchFinalNamespace', 'nativeBranchGroupExchange',
+    'nativeBranchGroupNode', 'nativeBranchGroupParent', 'nativeBranchGroupRetainedParent',
+    'nativeBranchGroupRole', 'nativeBranchGroupStatus', 'nativeBranchGroupWorkingTurn',
+    'nativeBranchHeaderRole', 'nativeBranchHeaderShape', 'nativeBranchSelectedExchange',
+    'nativeBranchSelectedMetadataParent', 'nativeBranchSelectedParent', 'nativeBranchSelectedRole',
+    'nativeBranchSelectedWorkingTurn', 'nativeBranchUserScope', 'nativeHeaderWorkingMissing',
+    'nativeHeaderExchangeMissing', 'nativeHeaderUserScope', 'nativeHeaderRecipient',
+    'nativeHeaderStatus', 'nativeHeaderVisible', 'nativeHeaderRebase',
+    'nativeCoreResultRequest', 'nativeCoreResultReceipt', 'nativeCoreResultResource',
+    'nativeHeaderValueAbsent', 'nativeHeaderValueAccessor', 'nativeHeaderValueUndefined',
+    'nativeHeaderValueNull', 'nativeHeaderValueString', 'nativeHeaderValueTrue',
+    'nativeHeaderValueFalse', 'nativeHeaderValueOther',
       'identityReasonCurrentQuestionMissing',
       'identityReasonCurrentQuestionUnselected',
       'identityReasonCurrentQuestionConflict',
@@ -1260,10 +1274,10 @@ describe('Core tool-surface incident diagnostics', () => {
         shellScan: { selectorMatches: 0, mapped: 0, rejects, reader } });
       return coreBrowserEvidence(TARGET);
     };
-    const reader = { fiberWire, fiberKeys: 88, contentRecorder: 133, contentKeys: 88,
+    const reader = { fiberWire, fiberProducer: 172, fiberKeys: 88, contentRecorder: 133, contentKeys: 88,
       workerRecorder: 132, workerKeys: 53, mainKeys: 399, privateText: 'PRIVATE_FRAME' };
     const observed = project(reader);
-    expect((observed?.shellScan as any)?.reader).toEqual({ fiberWire, fiberKeys: 88,
+    expect((observed?.shellScan as any)?.reader).toEqual({ fiberWire, fiberProducer: 172, fiberKeys: 88,
       contentRecorder: 133, contentKeys: 88, workerRecorder: 132, workerKeys: 53, mainKeys: 4 });
     expect(observed?.ordinaryFinal).toBeNull();
     expect(JSON.stringify(observed)).not.toContain('PRIVATE_FRAME');

@@ -61,6 +61,7 @@ import { getActiveInstanceRuntime, getConfig } from './config.js';
 import { getChatModels, refreshForUnoffered, exactChatModelAvailableAfter, requestDeniedChatModelRecheck } from './chat-models.js';
 import { readDurableStrict, writeDurableNow, writeDurableSoon } from './durable.js';
 import { logInfo, logWarn } from './logger.js';
+import { noticeChatStopped } from './user-notice.js';
 import { getSecret, profileProviderSecretSlot } from './secrets.js';
 import { isReviewedCompactGoal, readVerifiedSavedGoalOriginal, type VerifiedSavedGoalOriginal } from './session/canonical-original.js';
 import { findSessionByConversation, getSession, readAsset, readEvents, readHandoff, readRecentEvents, readSessionPlan, sessionDirectoryMissing, turnHasMcpCall } from './session/store.js';
@@ -250,6 +251,13 @@ const SETTLED_FAILURE = /^(?:auth_rejected|out_of_credit|unknown_model|no_api_ke
 /** One failure classification shared by ordinary drafts and the conversation-less opening request. */
 const NATIVE_COMPLETION_WAIT = /^(?:request_failed:\s*)?native_completion_unverified(?:$|:)/;
 
+export function classifyHelperError(error: string): 'retryable' | 'non-retryable' | 'unknown' {
+  // Permanent provider failures win even when their detail also mentions a timeout.
+  if (/auth(?:entication)?[_ -]?(?:rejected|failure|failed)|unauthori[sz]ed|forbidden|invalid[_ -]?(?:api[_ -]?)?key|no[_ -]?api[_ -]?key|out[_ -]?of[_ -]?credit|no[_ -]?credits?|insufficient[_ -]?(?:credits?|funds|balance)|invalid[_ -]?model|unknown[_ -]?model|model[_ -]?not[_ -]?found/i.test(error)) return 'non-retryable';
+  if (/timeout|timed[_ -]?out|network|fetch failed|socket|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|rate[_ -]?limit|too many requests|(?:http[_ :]*|status[_ :]*)(?:408|429|5\d\d)\b/i.test(error)) return 'retryable';
+  return 'unknown';
+}
+
 function retryableGoalFailure(error: string, draft?: GoalDraft): boolean {
   // Exact model denial or an owned quota rejection is not a transient picker miss.
   // Retain the same obligation/model; one due account/pair probe does not spend the
@@ -281,7 +289,12 @@ function retryableGoalFailure(error: string, draft?: GoalDraft): boolean {
   // ChatGPT message exists to duplicate. It is weather (missing composer, transient throttle,
   // unloaded page), not an ambiguous send. `goal_browser_send_unconfirmed` remains settled and
   // requires positive evidence or an explicit reactivation before another helper may be made.
-  return !SETTLED_FAILURE.test(error);
+  if (SETTLED_FAILURE.test(error)) return false;
+  const classification = classifyHelperError(error);
+  if (classification === 'non-retryable') return false;
+  // Internal protocol/admission failures retain their exact-source circuit and custody rules.
+  if (/^(?:request_failed:\s*)?goal_|^(?:reply_too_long|stream_record_too_long|loop_stop_refused|invalid_goal_decision_json)/.test(error)) return true;
+  return classification === 'retryable' || (draft?.unknownHelperFailures ?? 0) < 2;
 }
 /** Bound failed attempts, including confirmed-unsent transport failures. Busy admission is not an attempt. */
 function countsTowardBrowserHelperCircuit(error: string): boolean {
@@ -515,6 +528,8 @@ interface GoalDraft extends Omit<GoalDraftView, 'retryable'> {
   helper: GoalHelperSelection | null;
   /** Feedback stays with the existing chat draft, not another retry/cache owner. */
   shorterReply: boolean;
+  stallEscapeHint?: string;
+  unknownHelperFailures?: number;
   /**
    * Which mode this draft was started in, frozen with its prompts.
    *
@@ -2628,6 +2643,7 @@ export function startGoalDraft(input: StartGoalDraftInput): GoalDraftView {
     loopSystemPrompt: settings.loopPrompt,
     helper,
     shorterReply: existing?.error === 'reply_too_long' || existing?.shorterReply === true,
+    unknownHelperFailures: existing?.sessionId === input.sessionId && existing.turnId === input.turnId ? existing.unknownHelperFailures : 0,
     mode: goalDrivingMode(input.conversationId),
     continuationPolicy: settings.continuationPolicy ?? 'strict',
     objective: goalObjectiveFor(input.conversationId),
@@ -2700,6 +2716,14 @@ function settle(draft: GoalDraft, stage: GoalStage, error: string | null = null)
   if (draft.stage !== stage) draft.stageStartedAt = Date.now();
   draft.stage = stage;
   draft.error = error;
+  if (stage === 'failed' && error && classifyHelperError(error) === 'unknown' &&
+      !/^(?:request_failed:\s*)?goal_|^(?:reply_too_long|stream_record_too_long|loop_stop_refused|invalid_goal_decision_json)/.test(error)) {
+    draft.unknownHelperFailures = (draft.unknownHelperFailures ?? 0) + 1;
+  }
+  if (stage === 'failed' && error && !retryableGoalFailure(error, draft) &&
+      (classifyHelperError(error) === 'non-retryable' || (draft.unknownHelperFailures ?? 0) >= 2)) {
+    noticeChatStopped('Helper needs attention', `Automatic helper retries stopped: ${error}. Check the provider credentials, balance, model, or reported error before retrying.`, draft.sessionId);
+  }
   draft.settledAt = Date.now();
   notifyGoalChange();
   // A failed helper has not answered the source. Keep its debt; the failed draft
@@ -2719,6 +2743,9 @@ interface GoalRequest {
   /** Captured with the draft/deadline; later settings saves cannot replace this pair. */
   helper?: GoalHelperSelection | null;
   shorterReply?: boolean;
+  /** Set by the Loop escape hatch when the same error keeps recurring: the helper must
+   * write an error-avoidance or workaround instruction instead of another blind continue. */
+  stallEscapeHint?: string;
   lifetime?: 'temporary-planner';
   sourceSessionId?: string;
   /** The exact source Goal/Loop turn; different turns may create different helpers. */
@@ -2780,6 +2807,7 @@ const GOAL_REFERENCE_RESPONSE_REFUSED = 'The previous helper returned an unreada
 async function requestGoalDecision(request: GoalRequest): Promise<GoalDecision | { action: 'http'; error: string; retryAfterMs?: number }> {
   const continueOnly = request.mode === 'loop';
   const policySystem = [...request.system, ...settledTurnInstruction(request.mode),
+    ...(request.stallEscapeHint ? [request.stallEscapeHint] : []),
     ...(request.continuationOnly ? [SETTLED_TURN_RECONCILIATION,
       'Keep this finite Goal and its original acceptance intact. Continue only with concrete authorized executor work that remains unfinished. If no useful executor action remains, return a stop proposal: the app will retain its unverified completion hold rather than certify success. Never invent status-only turns, repeat unchanged verification, or turn external certification into another executor assignment.'] : [])];
   const referenceContract = request.lifetime === 'temporary-planner'
@@ -3055,9 +3083,22 @@ export function goalHelperSelection(): GoalHelperSelection {
   let model: string | null = settings.helperModel ?? 'gpt-6-thinking';
   let reasoningEffort: ReasoningEffort | null = settings.helperReasoning ?? 'high';
   const models = getChatModels().models;
-  if (!models.length) return { model, reasoningEffort };
-  const exactMatching = (id: string) => models.filter(choice => choice.id === id || choice.aliases?.includes(id));
   const notes: string[] = [];
+  const instant = (value: string) => /(?:^|[\s_-])instant(?:$|[\s_-])/i.test(value);
+  const exactMatching = (id: string) => models.filter(choice => choice.id === id || choice.aliases?.includes(id));
+  // Autonomous helpers never use Instant, including an old explicit setting or
+  // an opaque picker id whose native label identifies it as Instant. Keep an
+  // explicit reasoning pair before discovery; never inherit the page default.
+  if (model && (instant(model) || exactMatching(model).some(choice => instant(choice.id) || instant(choice.label)))) {
+    model = 'gpt-6-thinking';
+    reasoningEffort = 'high';
+    notes.push('Instant helper selection replaced with GPT-6 Thinking High');
+  }
+  if (!models.length) {
+    const key = notes.join(',');
+    if (key && key !== helperFallbackLogged) { helperFallbackLogged = key; logWarn(`goal: ${key}`); }
+    return { model, reasoningEffort };
+  }
   let choices = model ? exactMatching(model) : models;
   // Stable family pins, including an explicitly selected legacy fallback, may resolve
   // to one observed native picker id. Never turn that selection into the page default.
@@ -3069,7 +3110,7 @@ export function goalHelperSelection(): GoalHelperSelection {
   const familyLabel = requestedFamily === 'gpt6' ? 'GPT-6' : requestedFamily === 'gpt55' ? '5.5' : '5.6';
   if (model && choices.length !== 1 && protectedPair) {
     const familyChoices = requestedFamily === 'gpt56' || requestedFamily === 'gpt55' || genericSix
-      ? models.filter(choice => modelFamily(choice) === requestedFamily &&
+      ? models.filter(choice => !instant(choice.id) && !instant(choice.label) && modelFamily(choice) === requestedFamily &&
         (!genericSix || !/(?:^|[-_ ])(?:pro|instant)(?:$|[-_ ])/i.test(`${choice.id} ${choice.label}`)))
       : [];
     const requestedEffort = reasoningEffort;
@@ -3103,16 +3144,15 @@ export function goalHelperSelection(): GoalHelperSelection {
     }
     return { model, reasoningEffort };
   }
-  if (model && choices.length !== 1) { notes.push(`model "${model}"`); model = null; choices = models; }
+  if (model && choices.length !== 1) notes.push(`model "${model}" (keeping its exact pin; native choice is not verified)`);
   if (reasoningEffort && !choices.some(choice => choice.efforts.includes(reasoningEffort!))) {
-    notes.push(`reasoning "${reasoningEffort}"`);
-    reasoningEffort = null;
+    notes.push(`reasoning "${reasoningEffort}" (keeping its exact pin; native effort is not verified)`);
   }
   const key = notes.join(',');
   if (key) refreshForUnoffered(`goal helper ${key}`);
   if (key && key !== helperFallbackLogged) {
     helperFallbackLogged = key;
-    logWarn(`goal: adjusted the saved helper ${notes.join(' and ')} against this ChatGPT account's observed picker`);
+    logWarn(`goal: ${notes.join(' and ')}`);
   }
   return { model, reasoningEffort };
 }
@@ -3172,7 +3212,35 @@ async function requestDrivingDecision(
     });
     if (!(await stillCurrent())) return { action: 'invalid', error: 'settings_changed: Goal provider authority changed during the retry' };
   }
+  // Generic continuation quality gate: only active when the escape hatch has fired (the
+  // chat has been stalling). In normal operation the helper's reply passes through without
+  // an extra API call. When the chat IS stalling, a reply that just says "continue" wastes
+  // an executor turn; ask again with an explicit substance instruction (one retry).
+  if (request.mode === 'loop' && request.stallEscapeHint &&
+      decision.action === 'continue' && isGenericLoopReply(decision.reply)) {
+    logWarn(`goal: loop helper wrote a generic continuation (${decision.reply.slice(0, 60)}); asking again with substance instruction`);
+    if (!(await stillCurrent())) return { action: 'invalid', error: 'settings_changed: Goal provider authority changed before the generic-reply retry' };
+    const retried = await requestGoalDecision({
+      ...request,
+      system: [...request.system, GOAL_LOOP_STOP_REFUSED,
+        'Your previous continuation was too generic to be useful. Write a specific instruction that names the concrete next action, references the current state of the work, and tells the executor exactly what to do or verify next.']
+    });
+    if (!(await stillCurrent())) return { action: 'invalid', error: 'settings_changed: Goal provider authority changed during the generic-reply retry' };
+    if (retried.action === 'continue' && !isGenericLoopReply(retried.reply)) return retried;
+    if (retried.action !== 'stop') return retried;
+    // The retry also failed: keep the original decision rather than stopping the Loop.
+    logWarn('goal: generic-reply retry also failed or stopped; using the original continuation');
+  }
   return decision;
+}
+
+/** Matches replies that carry no actionable content: a bare continue/resume/go, or a
+ * status-only sentence with no concrete next step. These waste an executor turn. */
+function isGenericLoopReply(reply: string): boolean {
+  const trimmed = reply.trim();
+  if (trimmed.length < 20) return true;
+  return /^(?:continue|resume|go(?: ahead)?|keep going|try again|please continue|keep working|carry on|proceed)[.!]*$/i.test(trimmed) ||
+    /^continue (?:the|your|the current) (?:task|work|objective|goal)[.!]*$/i.test(trimmed);
 }
 
 const LOOP_REMINDER_SCOPE_CHARS = 240;
@@ -3985,7 +4053,7 @@ async function normalLoopReady(draft: GoalDraft): Promise<boolean> {
     draftToken: draft.token,
     onRefusal: reason => logInfo(`goal: Loop forward readiness refused for ${draft.conversationId}: ${reason}; no helper or Send authorized`)
   })) === true;
-  if (ready) { LOOP_ESCAPED_HOLDS.delete(draft.conversationId); return true; }
+  if (ready) { LOOP_ESCAPED_HOLDS.delete(draft.conversationId); draft.stallEscapeHint = undefined; return true; }
   // Escape hatch: the helper prompt already tells the executor to skip blocked items and
   // switch to independent work, and the main agent's remount-based recovery handles the
   // case where the answer becomes available again. But if the answer NEVER arrives and
@@ -3995,6 +4063,7 @@ async function normalLoopReady(draft: GoalDraft): Promise<boolean> {
   const firstRefusal = LOOP_ESCAPED_HOLDS.get(draft.conversationId);
   if (firstRefusal === undefined) { LOOP_ESCAPED_HOLDS.set(draft.conversationId, Date.now()); return false; }
   if (Date.now() - firstRefusal < 3_600_000) return false;
+  draft.stallEscapeHint = 'Forward readiness has refused progress for one hour. Avoid the recurring error: skip the blocked step or use a workaround, and perform the next concrete independent task within the saved objective. Preserve unresolved evidence and do not repeat ambiguous actions.';
   logWarn(`goal: Loop escape hatch for ${draft.conversationId}: forward readiness has been refused for over one hour despite the workaround prompt; continuing to keep the chat autonomous`);
   return true;
 }
@@ -4187,6 +4256,7 @@ async function run(draft: GoalDraft): Promise<void> {
       backend: draft.backend,
       helper: draft.helper,
       shorterReply: draft.shorterReply,
+      stallEscapeHint: draft.stallEscapeHint,
       endpoint,
       reasoning,
       sourceSessionId: draft.sessionId,

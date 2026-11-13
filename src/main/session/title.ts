@@ -38,6 +38,9 @@ function compactNickname(value: string): string {
   return boundedNickname(title);
 }
 
+/** Titles that match this look like provider error text, not a user task name. */
+const ERROR_LIKE_TITLE = /^(?:error|failed|failing|timed out|timeout|delivery timeout|message delivery|connection interrupted|network error|something went wrong|too many requests|temporarily limited|server error|unexpected error|internal error|rate limit|unauthorized|forbidden)[\s:,.!–—-]/i;
+
 /** Presentation only: never reinterpret a damaged frame as delivery/receipt evidence. */
 export function userTitle(text: string, authoredText?: string): string {
   const unwrapped = operatorPromptBody(text);
@@ -50,7 +53,12 @@ export function userTitle(text: string, authoredText?: string): string {
   // production request in parentheses. Keep the useful label instead of 80 characters of
   // "I want you to…" boilerplate.
   const labelled = firstLine.match(/^(.{3,60}?)\s+\((?=[A-Za-z])/u)?.[1]?.trim();
-  return compactNickname(labelled || firstLine);
+  const derived = compactNickname(labelled || firstLine);
+  // An error message is never a useful chat name: return empty so the title falls back
+  // to the stored original or the provider label instead of showing the error in the
+  // sidebar slot where the user expects to see the task name.
+  if (derived && ERROR_LIKE_TITLE.test(derived)) return '';
+  return derived;
 }
 
 export function legacyContextTitle(summary: SessionSummary): boolean {

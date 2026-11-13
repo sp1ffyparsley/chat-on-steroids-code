@@ -18,9 +18,31 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createRequire } from 'node:module';
 import { normalizeArch, normalizePlatform, PLATFORM_INFO } from './packaging-targets.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/** Packaging is incomplete unless the actual archive includes Sharp's required JS closure. */
+export function assertPackagedSharpRuntime(archive) {
+  const asar = createRequire(import.meta.url)('@electron/asar');
+  const visited = new Set();
+  function check(name) {
+    if (visited.has(name)) return;
+    visited.add(name);
+    let manifest;
+    try { manifest = JSON.parse(asar.extractFile(archive, path.join('node_modules', name, 'package.json')).toString('utf8')); }
+    catch (error) { throw new Error(`Packaged Sharp runtime is missing ${name} in ${archive}; check dependency staging and builder file filters: ${error.message}`); }
+    if (manifest.main) {
+      const entry = path.join('node_modules', name, manifest.main);
+      try { asar.statFile(archive, entry); }
+      catch { throw new Error(`Packaged Sharp runtime entry is missing: ${entry} in ${archive}`); }
+    }
+    for (const dependency of Object.keys(manifest.dependencies ?? {})) check(dependency);
+  }
+  check('sharp');
+  process.stdout.write(`Packaged Sharp runtime verified: ${[...visited].join(', ')}\n`);
+}
 export const SOURCE_PROVENANCE_SCHEMA = 2;
 export const SOURCE_PROVENANCE_RELATIVE = path.join('resources', 'packaging', 'SOURCE_PROVENANCE.json');
 const IGNORED_SOURCE_INPUTS = ['.env', '.env.*', 'src', 'scripts', 'native', 'extension', 'artwork'];
@@ -1048,6 +1070,10 @@ async function main() {
     }
     if (dirOnly) builderArgs.push('--dir');
     run(process.execPath, builderArgs, { cwd: root, env: { ...childEnv, COS_PACKAGE_ARCH: arch } });
+    const resources = platform === 'darwin'
+      ? path.join(root, 'release', arch === 'arm64' ? 'mac-arm64' : 'mac', 'Chat On Steroids.app', 'Contents', 'Resources')
+      : path.join(root, 'release', platform === 'win32' ? (arch === 'x64' ? 'win-unpacked' : `win-${arch}-unpacked`) : (arch === 'x64' ? 'linux-unpacked' : `linux-${arch}-unpacked`), 'resources');
+    assertPackagedSharpRuntime(path.join(resources, 'app.asar'));
     if (personalBuild) assertPackagedNativeApproval(root, platform, arch);
     if (platform === 'win32' && !dirOnly) writeWindowsUpdateMetadata(root, arch);
     if (strict) {

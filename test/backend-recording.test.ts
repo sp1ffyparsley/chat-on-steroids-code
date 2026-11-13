@@ -112,10 +112,10 @@ it('exact evidence bypasses a blocked canonical transcript write without inventi
   } finally { release.resolve(); await transcript; spy.mockRestore(); }
 });
 
-it('commits a newly proved owner to disk before request evidence is acknowledged', async () => {
+it.each(['shutdown', 'new owner'] as const)('commits new owners before ACK and batches freshness until %s', async boundary => {
   const id = await sessionForConversation('conv-committed');
   const ledger = path.join(dir, 'state', 'request-correlations.json');
-  const observedAt = Date.now();
+  const observedAt = Date.now() - 10;
   const evidence = (requestId: string, time = observedAt) => [{ kind: 'tool_evidence' as const, time, fiberConversationId: 'conv-committed', calls: [{ requestId, messageId: 'tool', tool: 'read', order: 0, answered: false }] }];
   expect(await recordRequestEvidence('conv-committed', evidence('committed-proof'))).toBe(id);
   const saved = JSON.parse(await fs.readFile(ledger, 'utf8'));
@@ -124,13 +124,27 @@ it('commits a newly proved owner to disk before request evidence is acknowledged
   const write = vi.spyOn(fs, 'rename');
   expect(await recordRequestEvidence('conv-committed', evidence('committed-proof'))).toBe(id);
   expect(write).not.toHaveBeenCalled();
-  // A genuinely newer observation advances durable freshness. It is not an
-  // unchanged duplicate, and its ACK must wait for the updated owner snapshot.
+  // Timestamp-only re-sightings preserve an already committed owner. Batch that
+  // eviction-order refresh instead of rewriting the entire registry on every poll.
   expect(await recordRequestEvidence('conv-committed', evidence('committed-proof', observedAt + 1))).toBe(id);
-  expect(write).toHaveBeenCalledTimes(1);
+  expect(write).not.toHaveBeenCalled();
+  expect(requestCorrelation('committed-proof')?.observedAt).toBe(observedAt + 1);
   expect(JSON.parse(await fs.readFile(ledger, 'utf8')).entries).toEqual([
-    expect.objectContaining({ requestId: 'committed-proof', observedAt: observedAt + 1 })
+    expect.objectContaining({ requestId: 'committed-proof', observedAt })
   ]);
+  // Shutdown flushes the queued snapshot; a new owner instead pulls it forward
+  // through the normal browser-ACK barrier. Neither boundary may lose freshness.
+  if (boundary === 'shutdown') await flushDurable();
+  else expect(await recordRequestEvidence('conv-committed', evidence('next-owner', observedAt + 2))).toBe(id);
+  expect(write).toHaveBeenCalledTimes(1);
+  const committed = JSON.parse(await fs.readFile(ledger, 'utf8')).entries;
+  expect(committed).toEqual(expect.arrayContaining([
+    expect.objectContaining({ requestId: 'committed-proof', observedAt: observedAt + 1 })
+  ]));
+  expect(committed).toHaveLength(boundary === 'shutdown' ? 1 : 2);
+  if (boundary === 'new owner') expect(committed).toContainEqual(
+    expect.objectContaining({ requestId: 'next-owner', observedAt: observedAt + 2 })
+  );
 });
 
 it('concurrent headerless calls share one initialized unattributed bucket', async () => {

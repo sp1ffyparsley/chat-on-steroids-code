@@ -51,6 +51,20 @@ export const CORE_SHELL_CALL_REJECTION_KEYS = Object.freeze([
   'callIdentityScopeUnproved', 'callIdentityParentUnproved',
   'callIdentitySelectedWithheld',
     'nativeAnchorLiveMissing', 'nativeAnchorUserMissing', 'nativeAnchorTurnIncomplete', 'nativeAnchorPathEmpty', 'nativeAnchorUserPathMismatch', 'nativeAnchorUnselectedPath', 'nativeAnchorPrerequisite',
+    'nativeBranchCoreInvocation', 'nativeBranchCoreResult', 'nativeBranchDuplicateReceipt',
+    'nativeBranchExecutionResultChildCount', 'nativeBranchExecutionResultNoOwner', 'nativeBranchExecutionResultRequest',
+    'nativeBranchExecutionStart', 'nativeBranchFinalNamespace', 'nativeBranchGroupExchange',
+    'nativeBranchGroupNode', 'nativeBranchGroupParent', 'nativeBranchGroupRetainedParent',
+    'nativeBranchGroupRole', 'nativeBranchGroupStatus', 'nativeBranchGroupWorkingTurn',
+    'nativeBranchHeaderRole', 'nativeBranchHeaderShape', 'nativeBranchSelectedExchange',
+    'nativeBranchSelectedMetadataParent', 'nativeBranchSelectedParent', 'nativeBranchSelectedRole',
+    'nativeBranchSelectedWorkingTurn', 'nativeBranchUserScope', 'nativeHeaderWorkingMissing',
+    'nativeHeaderExchangeMissing', 'nativeHeaderUserScope', 'nativeHeaderRecipient',
+    'nativeHeaderStatus', 'nativeHeaderVisible', 'nativeHeaderRebase',
+    'nativeCoreResultRequest', 'nativeCoreResultReceipt', 'nativeCoreResultResource',
+    'nativeHeaderValueAbsent', 'nativeHeaderValueAccessor', 'nativeHeaderValueUndefined',
+    'nativeHeaderValueNull', 'nativeHeaderValueString', 'nativeHeaderValueTrue',
+    'nativeHeaderValueFalse', 'nativeHeaderValueOther',
   'identityReasonCurrentQuestionMissing',
   'identityReasonCurrentQuestionUnselected',
   'identityReasonCurrentQuestionConflict',
@@ -97,13 +111,13 @@ export type CoreShellScanRejects = {
 } & Partial<Record<CoreShellCallRejectionKey, number>>;
 
 /** Self-reported shape diagnostics only. Missing stages are unknown, never a generation or receipt proof. */
-export type CoreReaderDiagnostic = Partial<Record<'fiberWire' | 'fiberKeys' | 'contentRecorder' | 'contentKeys' |
+export type CoreReaderDiagnostic = Partial<Record<'fiberWire' | 'fiberProducer' | 'fiberKeys' | 'contentRecorder' | 'contentKeys' |
   'workerRecorder' | 'workerKeys' | 'mainKeys', number>>;
 export function coreReaderDiagnostic(raw: unknown, includeMain = false): CoreReaderDiagnostic {
   const result: CoreReaderDiagnostic = {};
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return result;
   try {
-    for (const key of ['fiberWire', 'fiberKeys', 'contentRecorder', 'contentKeys', 'workerRecorder', 'workerKeys',
+    for (const key of ['fiberWire', 'fiberProducer', 'fiberKeys', 'contentRecorder', 'contentKeys', 'workerRecorder', 'workerKeys',
       ...(includeMain ? ['mainKeys'] as const : [])] as (keyof CoreReaderDiagnostic)[]) {
       const descriptor = Object.getOwnPropertyDescriptor(raw, key);
       if (!descriptor) continue;
@@ -408,20 +422,23 @@ function openNativeCompletion(final: OrdinaryFinalDiagnostic | null | undefined)
       (final.reason === 'open-code' && final.openCodeCalls > 0)));
 }
 
-function shellScanDiagnostic(raw: unknown): CoreShellScanDiagnostic | null {
+export function shellScanDiagnostic(raw: unknown): CoreShellScanDiagnostic | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const source = raw as Record<string, unknown>;
-  const rejectsRaw = source['rejects'];
+  const data = (object: object, key: string): unknown => {
+    try { return Object.getOwnPropertyDescriptor(object, key)?.value; } catch { return undefined; }
+  };
+  const rejectsRaw = data(source, 'rejects');
   if (!rejectsRaw || typeof rejectsRaw !== 'object' || Array.isArray(rejectsRaw)) return null;
   const rejects = rejectsRaw as Record<string, unknown>;
   const counter = (value: unknown): number | null =>
     Number.isInteger(value) && Number(value) >= 0 && Number(value) <= SHELL_SCAN_MAX ? Number(value) : null;
-  const selectorMatches = counter(source['selectorMatches']);
-  const mapped = counter(source['mapped']);
-  const fiberMissing = counter(rejects['fiberMissing']);
-  const ownerMissing = counter(rejects['ownerMissing']);
-  const stableKeyMismatch = counter(rejects['stableKeyMismatch']);
-  const itemsOverLimit = counter(rejects['itemsOverLimit']);
+  const selectorMatches = counter(data(source, 'selectorMatches'));
+  const mapped = counter(data(source, 'mapped'));
+  const fiberMissing = counter(data(rejects, 'fiberMissing'));
+  const ownerMissing = counter(data(rejects, 'ownerMissing'));
+  const stableKeyMismatch = counter(data(rejects, 'stableKeyMismatch'));
+  const itemsOverLimit = counter(data(rejects, 'itemsOverLimit'));
   if ([selectorMatches, mapped, fiberMissing, ownerMissing, stableKeyMismatch, itemsOverLimit]
     .some(value => value === null)) return null;
   const normalizedRejects: CoreShellScanRejects = {
@@ -593,7 +610,7 @@ export function noteCoreBrowserEvidence(input: CoreBrowserEvidenceInput): boolea
   const reader = coreReaderDiagnostic(
     shellScan?.reader !== undefined && shellScan?.reader !== null ? shellScan.reader : explicitReader,
   );
-  if (!shellScan) for (const key of ['fiberWire', 'fiberKeys', 'contentKeys', 'workerKeys'] as const) delete reader[key];
+  if (!shellScan) for (const key of ['fiberWire', 'fiberProducer', 'fiberKeys', 'contentKeys', 'workerKeys'] as const) delete reader[key];
   // Count only the fields actually normalized from this census. Null is unavailable, not zero.
   if (shellScan) reader.mainKeys = Object.keys(shellScan.rejects).length;
   // A worker/content generation mismatch (e.g. workerRecorder 153 with contentRecorder 162 after
@@ -754,12 +771,16 @@ export function retainNativeRequestIdsFromDurableReceipts(conversation: string,
     JSON.stringify(native.codeCallMessageIds) === JSON.stringify(expectedSuccessor.codeCallMessageIds));
   if (!row || !pending || !final || !native || pending.reason === 'inventory-incomplete' ||
       pending.allCoreRequestIds !== null || JSON.stringify(pending) !== JSON.stringify(expected) ||
-      pending.calls < 1 || pending.codeCalls !== 0 || !pending.coreCallMessageIds ||
-      pending.coreCallMessageIds.length !== pending.calls || !pending.codeCallMessageIds || pending.codeCallMessageIds.length !== 0 ||
+      pending.calls < 1 || !pending.coreCallMessageIds ||
+      pending.coreCallMessageIds.length !== pending.calls || !pending.codeCallMessageIds ||
+      pending.codeCallMessageIds.length !== pending.codeCalls || (historical && pending.codeCalls !== 0) ||
+      pending.codeCallMessageIds.some(id => pending.coreCallMessageIds!.includes(id)) ||
       final.callInventoryComplete === false || requestIds.length !== pending.calls ||
       requestIds.some(id => typeof id !== 'string' || !id || id.length > 100) ||
       (expectedSuccessor ? !historical : native.sourceUserMessageId !== pending.sourceUserMessageId) ||
-      (!historical && (final.calls !== pending.calls || final.codeCalls !== 0 ||
+      (!historical && (final.calls !== pending.calls || final.codeCalls !== pending.codeCalls ||
+        native.codeCallMessageIds.length !== pending.codeCalls ||
+        pending.codeCallMessageIds.some((id, at) => native.codeCallMessageIds[at] !== id) ||
         final.allCoreRequestIds != null && final.allCoreRequestIds.length !== pending.calls ||
         pending.coreCallMessageIds.some((id, at) => native.coreCallMessageIds[at] !== id) ||
         requestIds.some((id, at) => final.allCoreRequestIds != null && final.allCoreRequestIds[at] !== id)))) return false;

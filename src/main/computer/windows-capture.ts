@@ -41,6 +41,7 @@ public static class CosWindowsCapture {
   [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out RECT value, int size);
   [DllImport("user32.dll")] static extern bool IsWindow(IntPtr window);
   [DllImport("user32.dll")] static extern bool IsIconic(IntPtr window);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
   [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window, out RECT value);
 
   const int TimeoutMs = 3000;
@@ -64,9 +65,15 @@ public static class CosWindowsCapture {
     throw new InvalidOperationException("STALE_FRAME: capture geometry matches neither DWM nor outer bounds (phase=" + phase + ", hwnd=" + window.ToInt64() + ", capture=" + width + "x" + height + ", dwm=" + dwmSize + ", outer=" + outerSize + ")");
   }
 
-  static GraphicsCaptureItem CreateItem(IntPtr window) {
+  static bool CanRetrySurfaceAdmission(int result, long elapsed, bool sameOwner) {
+    return result == unchecked((int)0x80070057) && elapsed < TimeoutMs && sameOwner;
+  }
+
+  static GraphicsCaptureItem CreateItem(IntPtr window, Stopwatch clock) {
     IntPtr name = IntPtr.Zero, factory = IntPtr.Zero, item = IntPtr.Zero;
     object interopObject = null;
+    uint process, thread = GetWindowThreadProcessId(window, out process);
+    if (thread == 0 || process == 0) throw new InvalidOperationException("CAPTURE_FAILED: target window is closed or minimized");
     try {
       string className = "Windows.Graphics.Capture.GraphicsCaptureItem";
       Check(WindowsCreateString(className, className.Length, out name));
@@ -75,8 +82,24 @@ public static class CosWindowsCapture {
       interopObject = Marshal.GetObjectForIUnknown(factory);
       Guid itemId = new Guid("79C3F95B-31F7-4EC2-A464-632EF5D30760");
       int result = ((IGraphicsCaptureItemInterop)interopObject).CreateForWindow(window, ref itemId, out item);
+      bool waiting = false;
+      // First paint can precede DWM surface admission. Share the capture deadline
+      // and retain the exact HWND/process/thread; every other HRESULT stays final.
+      while (result < 0) {
+        uint currentProcess;
+        bool sameOwner = IsWindow(window) && !IsIconic(window) &&
+          GetWindowThreadProcessId(window, out currentProcess) == thread && currentProcess == process;
+        if (!CanRetrySurfaceAdmission(result, clock.ElapsedMilliseconds, sameOwner)) break;
+        if (!waiting) { Console.Error.WriteLine("[cos-capture] surface-admission-wait"); waiting = true; }
+        Release(ref item);
+        Thread.Sleep(5);
+        result = ((IGraphicsCaptureItemInterop)interopObject).CreateForWindow(window, ref itemId, out item);
+      }
       if (result < 0) throw new InvalidOperationException(
         "CAPTURE_FAILED: target window does not expose a Windows.Graphics.Capture surface (HRESULT 0x" + result.ToString("X8") + ")");
+      uint returnedProcess;
+      if (!IsWindow(window) || IsIconic(window) || GetWindowThreadProcessId(window, out returnedProcess) != thread || returnedProcess != process)
+        throw new InvalidOperationException("STALE_FRAME: capture target owner changed during surface admission");
       return (GraphicsCaptureItem)Marshal.GetObjectForIUnknown(item);
     } finally {
       Release(ref item);
@@ -128,7 +151,7 @@ public static class CosWindowsCapture {
     if (!IsWindow(window) || IsIconic(window)) throw new InvalidOperationException("CAPTURE_FAILED: target window is closed or minimized");
     var clock = Stopwatch.StartNew();
     Console.Error.WriteLine("[cos-capture] item-create");
-    var item = CreateItem(window);
+    var item = CreateItem(window, clock);
     int width = item.Size.Width, height = item.Size.Height;
     // A newly painted HWND can precede its DWM capture surface. Reobserve only an
     // empty item, inside the SAME capture deadline; never allocate from zero or
@@ -139,7 +162,7 @@ public static class CosWindowsCapture {
       if (clock.ElapsedMilliseconds >= TimeoutMs)
         throw new TimeoutException("CAPTURE_FAILED: target capture surface remained empty (hwnd=" + window.ToInt64() + ", width=" + width + ", height=" + height + ")");
       Thread.Sleep(5);
-      item = CreateItem(window);
+      item = CreateItem(window, clock);
       width = item.Size.Width; height = item.Size.Height;
     }
     Console.Error.WriteLine("[cos-capture] item-ready");

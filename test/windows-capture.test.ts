@@ -40,7 +40,7 @@ Write-Output 'CAPTURE_RUNTIME_VERIFIED'
       await rm(directory, { recursive: true, force: true });
     }
   }, 20_000);
-  it('bounds real native capture dimensions without allocation and reports exact invalid geometry', async () => {
+  it('bounds real native capture dimensions and same-owner surface admission without allocation', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'cos-wgc-dimensions-'));
     try {
       const script = path.join(directory, 'dimensions.ps1');
@@ -50,6 +50,12 @@ Initialize-WindowsCapture
 $flags=[Reflection.BindingFlags]'Static,NonPublic'
 $validate=[CosWindowsCapture].GetMethod('ValidateCaptureSize',$flags)
 if(-not $validate){throw 'Capture size validation owner missing'}
+$admission=[CosWindowsCapture].GetMethod('CanRetrySurfaceAdmission',$flags)
+if(-not $admission){throw 'Capture admission owner missing'}
+foreach($case in @(@(-2147024809,0,$true,$true),@(-2147024809,2999,$true,$true),@(-2147024809,3000,$true,$false),@(-2147024809,0,$false,$false),@(-2147024891,0,$true,$false),@(0,0,$true,$false))){
+  $allowed=$admission.Invoke($null,@([int]$case[0],[long]$case[1],[bool]$case[2]))
+  if($allowed -ne [bool]$case[3]){throw 'Capture admission ignored error, deadline or exact window owner'}
+}
 foreach($pair in @(@(1,1),@(4000,8000))){$null=$validate.Invoke($null,@([IntPtr]123,[int]$pair[0],[int]$pair[1]))}
 foreach($pair in @(@(0,64),@(64,0),@(-1,64),@(4001,8000),@([int]::MaxValue,[int]::MaxValue))){
   try {$null=$validate.Invoke($null,@([IntPtr]123,[int]$pair[0],[int]$pair[1]));throw 'Invalid capture size accepted'}

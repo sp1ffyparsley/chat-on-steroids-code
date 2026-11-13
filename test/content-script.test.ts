@@ -17849,19 +17849,19 @@ describe('the activity feed', () => {
     live = await harness(undefined, {
       activity: () => ({ ok: true, data: { entries: [], stream: [], nextSince: 0, pendingTools: 0 } })
     });
-    const reader = { fiberWire, fiberKeys: 88, contentRecorder: 999, contentKeys: 399,
+    const reader = { fiberWire, fiberProducer: 172, fiberKeys: 88, contentRecorder: 999, contentKeys: 399,
       workerRecorder: 999, mainKeys: 399, privateText: 'PRIVATE_FRAME' };
     await replyFiber([], [], null, true, null, false, { selectorMatches: 0, mapped: 0,
       rejects: { fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0 }, reader });
     live.sent.length = 0;
     await live.hook.pullActivity();
     const scan = live.sent.filter(message => message.type === 'activity').at(-1)?.coreDiagnostic?.shellScan;
-    expect(scan?.reader).toEqual({ fiberWire, fiberKeys: 88,
+    expect(scan?.reader).toEqual({ fiberWire, fiberProducer: 172, fiberKeys: 88,
       contentRecorder: expect.any(Number), contentKeys: 4 });
     expect(scan?.reader.contentRecorder).toBe(currentRecorderVersion);
     expect(JSON.stringify(scan)).not.toContain('PRIVATE_FRAME');
     expect(live.sent.filter(message => message.type === 'activity').at(-1)?.coreDiagnostic?.reader)
-      .toEqual({ fiberWire, fiberKeys: 88, contentRecorder: currentRecorderVersion, contentKeys: 4 });
+      .toEqual({ fiberWire, fiberProducer: 172, fiberKeys: 88, contentRecorder: currentRecorderVersion, contentKeys: 4 });
 
     // Losing the next census cannot retain the previous frame's Fiber generation/counts.
     await replyFiber([], [], null, true, null, false, { selectorMatches: 1.5, mapped: 0,
