@@ -2452,21 +2452,32 @@ describe('desktop input delivery and helper ownership', () => {
     ]);
     expect(stops).not.toHaveBeenCalled(); expect(sends()).toBe(0);
   });
-  it.each(['followup', 'silence', 'recovery', 'refused', 'new-user', 'navigation'])
+  it.each(['followup', 'silence', 'recovery', 'refused', 'new-user', 'navigation',
+    'revival', 'revival-refused', 'revival-new-user', 'revival-navigation', 'revival-wrong-question', 'revival-malformed',
+    'revival-open-call', 'revival-busy', 'revival-changed-final', 'revival-lost-final'])
     ('keeps completed-stage delivery distinct from unfinished recovery (%s)', async kind => {
+      const revival = kind.startsWith('revival');
+      let finalId = 'source-answer';
       const boundary = kind === 'silence' ? { silenceBoundary: { turnId: 'source-turn' } }
         : kind === 'recovery' ? { recovery: { questionId: 'source-question', pro: false, busyUntil: Date.now() + 60_000, phase: 'ready' } }
+          : revival ? { recovery: { questionId: kind === 'revival-wrong-question' ? 'foreign-question' : 'm-source-question',
+            episode: kind === 'revival-malformed' ? 'interruption:source-question' : 'revival:1:1',
+            revival: { progressAt: 1, attempt: 1 }, pro: false, busyUntil: 0, phase: 'ready' } }
           : { completedTurnId: 'source-turn', mode: 'after-turn' };
       live = await harness(`https://chatgpt.com/c/${chatA}`, {
         desktop_input: message => {
           if (message.authorize) {
-            if (kind === 'new-user') userTurn(live!.document, 'newer-question', 'Another question', { sent: false });
-            if (kind === 'navigation') live!.dom.reconfigure({ url: `https://chatgpt.com/c/${chatB}` });
-            return { ok: true, data: { ok: kind !== 'refused' } };
+            if (kind === 'new-user' || kind === 'revival-new-user') userTurn(live!.document, 'newer-question', 'Another question', { sent: false });
+            if (kind === 'navigation' || kind === 'revival-navigation') live!.dom.reconfigure({ url: `https://chatgpt.com/c/${chatB}` });
+            if (kind === 'revival-busy') startGenerating(live!.document);
+            if (kind === 'revival-changed-final') finalId = 'different-final';
+            if (kind === 'revival-lost-final') finalId = '';
+            return { ok: true, data: { ok: kind !== 'refused' && kind !== 'revival-refused' } };
           }
           return { ok: true, data: message.ack || message.fail ? { ok: true } : { input: claimed(boundary) } };
         }
       });
+      if (revival) userTurn(live.document, 'source-question', 'Finish the saved task', { sent: false });
       const section = assistantTurn(live.document, 'source-turn', []);
       prose(live.document, section, 'source-answer', 'Finished.');
       const win = live.window as any;
@@ -2480,8 +2491,9 @@ describe('desktop input delivery and helper ownership', () => {
           section.setAttribute('data-clf-fiber-v2-turn', `${nonce}:0`);
           win.dispatchEvent(new win.MessageEvent('message', { source: win, data: {
             source: 'clf-fiber-reply', nonce, scanToken: nonce, v: 19, scanOk: true, rows: [], turns: [{
-              index: 0, turnId: 'source-turn', conversationId: chatA, endMessageId: 'source-answer', calls: [], activities: [],
-              messages: [{ role: 'assistant', messageId: 'source-answer', rawMessageId: 'source-answer', rawText: 'Finished.', stable: true }]
+              index: 0, turnId: 'source-turn', conversationId: chatA, endMessageId: finalId,
+              calls: kind === 'revival-open-call' ? [{ messageId: 'unanswered-call', tool: 'read', answered: false }] : [], activities: [],
+              messages: [{ role: 'assistant', messageId: finalId, rawMessageId: finalId, rawText: 'Finished.', stable: true }]
             }]
           } }));
         });
@@ -2497,9 +2509,10 @@ describe('desktop input delivery and helper ownership', () => {
         live!.hook.observe();
       });
       const result = await live.runtimeMessage({ type: 'clf-desktop-input', id: inputId, conversationId: chatA });
-      expect(result, JSON.stringify(live.sent.filter(message => message.type === 'desktop_input'))).toEqual({ ok: kind === 'followup' });
-      expect(sends()).toBe(kind === 'followup' ? 1 : 0);
-      if (kind === 'silence' || kind === 'recovery') {
+      const delivered = kind === 'followup' || kind === 'revival';
+      expect(result, JSON.stringify(live.sent.filter(message => message.type === 'desktop_input'))).toEqual({ ok: delivered });
+      expect(sends()).toBe(delivered ? 1 : 0);
+      if (kind === 'silence' || kind === 'recovery' || kind === 'revival-wrong-question' || kind === 'revival-malformed' || kind === 'revival-open-call') {
         expect(live.sent.filter(message => message.fail)).toContainEqual(expect.objectContaining({ detail: 'page-final' }));
         expect(live.sent.some(message => message.authorize)).toBe(false);
       } else {
@@ -2507,7 +2520,7 @@ describe('desktop input delivery and helper ownership', () => {
         // because the old page-final bug rejected every completed-stage claim.
         expect(live.sent.filter(message => message.authorize)).toHaveLength(1);
       }
-      if (kind === 'followup') expect(live.sent.filter(message => message.ack)).toHaveLength(1);
+      if (delivered) expect(live.sent.filter(message => message.ack)).toHaveLength(1);
     });
   it.each(['accepted', 'interim', 'refused'])('keeps a silence pickup revocable through native Send (%s)', async change => {
     let silenceTurnId: string;

@@ -1,5 +1,19 @@
 # Chat On Steroids - code research mirror
 
+## R89 source repairs / live automation remains paused
+
+Three reproduced defects are repaired in the existing owners, with no dependency or new scheduler:
+
+- An idle revival approved by Main no longer fails merely because the previous answer is complete. The browser verifies the exact claimed question, unchanged idle native final and closed calls, flushes the journal, and rechecks before and after Main authorization. A changed or missing final, new question, open call, busy page, navigation, malformed revival or rejected authorization prevents Send. Interrupted/silence recovery still refuses a completed page.
+- The same unresolved source retains its first readiness-refusal timestamp through a brief successful preflight. Previously, readiness could pass once then fail before creating a helper, resetting the hour. A different source retains its fresh waiting window; Pause, durable-write failure and unknown native Send/helper custody continue to prevent unsafe replay.
+- Explicit Disconnect while globally paused may proceed when the exact-account census contains only valid positive native-turn counts. Local tools/processes, helpers, pending or ambiguous Sends, continuations, workers, browser commands and unknown blocker categories still prevent it. Configure/Connect remain idle-only. The existing transport owner drains accepted requests and reports remote Stop as unconfirmed.
+
+The hourly feature is a draft-readiness fallback, not an unconditional hourly message. A busy turn that never reaches draft readiness can wait upstream; an already-Sent helper with unverified completion cannot be replaced just because time elapsed. The clock repair addresses one reproduced gap, not all nativebusy or result-identity failures.
+
+All four returned research reports were checked against the full local source. Several proposals already exist (facet preservation, reader-generation health, helper non-replacement, canonical reply custody and renderer/child crash reporting). The sampled sixteen diagnostic request IDs are not the complete retained request ledger. Stop-request finish release explicitly preserves unconfirmed remote generation, and the activation function's reconstruction argument does not select unfinished recovery. Do not weaken native ancestry or infer missing final/turn ownership from diagnostic counts or an archived helper output.
+
+Validation: all 1,948 affected browser, connection-control and backend tests pass; TypeScript, JavaScript syntax and the production bundle build pass. These changes are source repairs, not a qualified installed release or proof of sustained live autonomy. Existing account/task pauses and the paused recurring check are preserved. A future explicitly authorized live acceptance run must prove useful work, exact result settlement and automatic next-turn delivery.
+
 ## Current repair research — R89 / automation paused
 
 The operator has paused all account automation and the recurring checkup while investigating the overnight run. Existing conversations, saved work, unresolved tool results and delivery receipts must be preserved. Research grants no execution, resume, retry, approval or account-switch authority. Already-running provider turns require separate, observed native Stop acknowledgement; a persisted automation pause alone is not that acknowledgement.
@@ -8,9 +22,9 @@ The rollout delivered all 17 initial task prompts and recorded real tool use in 
 
 R89 research should prioritize (1) exact native request/result identity and long-turn association, (2) useful continuation after proven completed boundaries with source-scoped idempotency and authoritative Pause/Stop, (3) safe component activation and auth/approval diagnosis, and (4) one minimal repair sequence with failure-first tests and a small user-authorized acceptance trial. Reuse current Input, Goal/Loop, recorder, bridge, incident and lifecycle owners; preserve the existing one-hour independent-work fallback. Do not add a scheduler, task database, broad permission bypass or parallel update owner. Keep observations, hypotheses, proposed changes and installed/live acceptance distinct. The private operator CLI preflight fix passed70 tests; it is not included in this sanitized mirror and does not repair the runtime identity or recovery defects.
 
-## Current source — Recorder 173 / R87 report implementation
+## Installed baseline — Recorder 173 / R87 report implementation
 
-Recorder173 extends the existing owners with durable exact-source one-hour readiness-refusal timing, optional required-audio verification through FFprobe, passive MAIN/content/worker generation health in the existing support report, and fixed retained-parent diagnostics. It adds no scheduler, database, capture backend or request-identity bypass. Fresh readiness resets its waiting window; Pause and failed durable writes withhold fallback delivery. Silent media remains valid unless audio is explicitly required.
+Recorder173 extends the existing owners with durable exact-source one-hour readiness-refusal timing, optional required-audio verification through FFprobe, passive MAIN/content/worker generation health in the existing support report, and fixed retained-parent diagnostics. It adds no scheduler, database, capture backend or request-identity bypass. In installed173, fresh readiness resets its waiting window; the uninstalled R89 source repair above retains the same unresolved source deadline. Pause and failed durable writes withhold fallback delivery. Silent media remains valid unless audio is explicitly required.
 
 The private clean-source package passed 113 preliminary, 314 serial and 13,809 main checks, with 61 existing conditional skips. All 37 final installer recovery checks also passed. The qualified Windows173 update is installed; independent comparison matched all 292 payload files, the complete 293-file program and 24 protected account settings/encryption-state files. Public TypeScript and 360 affected checks passed, with one existing skip, including real audio/video fixtures. Source tests are not proof of executing browser generation or useful automatic work.
 

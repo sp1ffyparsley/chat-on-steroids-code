@@ -4050,14 +4050,14 @@ function loopProgressReportFooter(thresholdMs: number): string {
   ].join('\n');
 }
 
-/** Tracks continuous forward-readiness refusals per conversation. After one hour, the
+/** Tracks an unresolved exact source's forward-readiness refusals. After one hour, the
  * escape hatch lets the Loop proceed despite unresolved evidence debt — the stale itself
  * is the bigger risk when identity-mismatched tool results never resolve. Complements the
  * main agent's remount-based recovery: it catches the case where the answer never arrives. */
 type LoopReadinessHold = { sessionId: string; turnId: string; firstRefusalAt: number };
 const LOOP_ESCAPED_HOLDS = new Map<string, LoopReadinessHold>();
 
-/** Share the existing reply serializer/store; a restart must not renew a continuous refusal. */
+/** Share the reply serializer/store; restart or readiness flicker must not renew source debt. */
 function saveLoopReadinessHold(draft: GoalDraft, ready: boolean): Promise<LoopReadinessHold | null> {
   return serialGoalReply(async () => {
     const current = () => drafts.get(draft.conversationId) === draft && !draft.acknowledged &&
@@ -4065,7 +4065,10 @@ function saveLoopReadinessHold(draft: GoalDraft, ready: boolean): Promise<LoopRe
     if (!current()) return null;
     const previous = LOOP_ESCAPED_HOLDS.get(draft.conversationId);
     const sameSource = previous?.sessionId === draft.sessionId && previous.turnId === draft.turnId;
-    if (!ready && sameSource) return previous;
+    // A successful preflight is not progress: a second check can refuse before any helper
+    // exists. Keep the first refusal for this exact source across that flicker. A different
+    // source gets a fresh window; helper/Send custody below remains independently enforced.
+    if (sameSource) return previous;
     if (ready && !previous) return null;
     const staged = new Map(LOOP_ESCAPED_HOLDS);
     const hold = ready ? null : { sessionId: draft.sessionId, turnId: draft.turnId, firstRefusalAt: Date.now() };
@@ -4106,12 +4109,12 @@ async function normalLoopReady(draft: GoalDraft): Promise<boolean> {
   // Escape hatch: the helper prompt already tells the executor to skip blocked items and
   // switch to independent work, and the main agent's remount-based recovery handles the
   // case where the answer becomes available again. But if the answer NEVER arrives and
-  // the entire source stays blocked for one continuous hour, the stale itself is the
+  // the same unresolved source has waited one hour, the stale itself is the
   // bigger risk. The forward-readiness refusal is still logged; the helper answer is
   // not a new Send of the original prompt, so no receipt is replayed.
   const hold = await saveLoopReadinessHold(draft, false);
   if (!hold || Date.now() - hold.firstRefusalAt < 3_600_000) return false;
-  draft.stallEscapeHint = 'Forward readiness has refused progress for one hour. Avoid the recurring error: skip the blocked step or use a workaround, and perform the next concrete independent task within the saved objective. Preserve unresolved evidence and do not repeat ambiguous actions.';
+  draft.stallEscapeHint = 'The same unresolved source has waited one hour since its first forward-readiness refusal. Avoid the recurring error: skip the blocked step or use a workaround, and perform the next concrete independent task within the saved objective. Preserve unresolved evidence and do not repeat ambiguous actions.';
   logWarn(`goal: Loop escape hatch for ${draft.conversationId}: forward readiness has been refused for over one hour despite the workaround prompt; continuing to keep the chat autonomous`);
   return true;
 }

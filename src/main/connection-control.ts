@@ -76,8 +76,17 @@ export function controlConnection(value: ConnectionControlRequest) {
       const { activeProfileWorkCensus } = await import('./profile-work-state.js');
       const census = await activeProfileWorkCensus();
       assertOwner();
-      if (census.profileId !== request.data.instanceId || census.blockers.length)
+      // Explicit Pause + Disconnect withdraws local admission; it does not assert a remote
+      // Stop. A provider spinner/recorded turn must not deadlock that user action when the
+      // census proves no local work or delivery custody. Keep every other blocker intact.
+      // disconnect() remains the transport owner and drains already accepted requests.
+      const pausedRemoteOnly = request.data.action === 'disconnect' && getConfig().ui.automationPaused === true &&
+        census.blockers.length > 0 && census.blockers.every(blocker => blocker.category === 'active-turn' &&
+          Number.isSafeInteger(blocker.count) && blocker.count > 0);
+      if (census.profileId !== request.data.instanceId || census.blockers.length && !pausedRemoteOnly)
         throw new Error('Connection control requires this account to be idle; finish active tools, turns, sends and workers first.');
+      if (pausedRemoteOnly)
+        logWarn('connection control: explicit paused disconnect with native turns only; draining accepted local requests; remote Stop remains unconfirmed');
       logInfo(`connection control: ${request.data.action} started for ${request.data.instanceId}`);
       if (request.data.action === 'configure') {
         if (request.data.kind === 'openai') {

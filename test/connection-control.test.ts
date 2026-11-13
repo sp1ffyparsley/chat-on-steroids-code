@@ -107,6 +107,44 @@ describe('exact-account connection control', () => {
     await controlConnection({ instanceId: state.id, action });
     expect(action === 'connect' ? connect : disconnect).toHaveBeenCalledOnce();
   });
+  it('allows an explicit paused disconnect with only native turns, without declaring them stopped', async () => {
+    state.blockers = [{ category: 'active-turn', count: 3 }];
+    await expect(controlConnection({ instanceId: state.id, action: 'disconnect' })).resolves.toMatchObject({ instanceId: state.id });
+    expect(disconnect).toHaveBeenCalledOnce();
+    expect(state.config.ui.automationPaused).toBe(true);
+    expect(updateConfig).not.toHaveBeenCalled();
+    expect(profileWorkAdmission.snapshot().mode).toBe('open');
+    const { logWarn } = await import('../src/main/logger.js');
+    expect(logWarn).toHaveBeenCalledWith(expect.stringContaining('remote Stop remains unconfirmed'));
+  });
+  it.each(['mcp-request', 'local-process', 'browser-helper', 'ambiguous-send', 'pending-send', 'continuation', 'worker', 'worker-bootstrap', 'browser-command', 'unknown'])
+    ('retains the %s veto alongside a native turn during paused disconnect', async category => {
+      state.blockers = [{ category: 'active-turn', count: 1 }, { category, count: 1 }];
+      await expect(controlConnection({ instanceId: state.id, action: 'disconnect' })).rejects.toThrow(/idle/);
+      expect(disconnect).not.toHaveBeenCalled();
+    });
+  it.each([0, -1, 1.5, NaN, Infinity])('refuses malformed remote-only census count %s', async count => {
+    state.blockers = [{ category: 'active-turn', count }];
+    await expect(controlConnection({ instanceId: state.id, action: 'disconnect' })).rejects.toThrow(/idle/);
+    expect(disconnect).not.toHaveBeenCalled();
+  });
+  it.each(['configure', 'connect', 'disconnect'] as const)('preserves the native-turn veto for %s without the exact paused-disconnect contract', async action => {
+    state.blockers = [{ category: 'active-turn', count: 1 }];
+    if (action === 'disconnect') state.config.ui.automationPaused = false;
+    await expect(controlConnection({ instanceId: state.id, action, ...(action === 'configure' ? { kind: 'manual' as const } : {}) })).rejects.toThrow(/idle/);
+    expect(disconnect).not.toHaveBeenCalled(); expect(connect).not.toHaveBeenCalled(); expect(updateConfig).not.toHaveBeenCalled();
+  });
+  it('rechecks Pause and census account after asynchronous disconnect preflight', async () => {
+    vi.mocked(activeProfileWorkCensus).mockImplementationOnce(async () => {
+      state.config.ui.automationPaused = false;
+      return { profileId: state.id, blockers: [{ category: 'active-turn', count: 1, detail: 'remote' }] };
+    });
+    await expect(controlConnection({ instanceId: state.id, action: 'disconnect' })).rejects.toThrow(/idle/);
+    state.config.ui.automationPaused = true;
+    vi.mocked(activeProfileWorkCensus).mockResolvedValueOnce({ profileId: 'foreign-account', blockers: [{ category: 'active-turn', count: 1, detail: 'remote' }] });
+    await expect(controlConnection({ instanceId: state.id, action: 'disconnect' })).rejects.toThrow(/idle/);
+    expect(disconnect).not.toHaveBeenCalled();
+  });
   it('refuses a wrong account before changing config or admission', async () => {
     const before = profileWorkAdmission.snapshot();
     await expect(controlConnection({ instanceId: 'wrong-profile', action: 'connect' })).rejects.toThrow(/different account/);

@@ -16350,7 +16350,7 @@
   // An automatic recovery can reach native Send before the browser journal's final reaches Main.
   // Re-read the exact latest provider turn and flush its journal before authorization. A fixed
   // reason code is diagnostic only; it never broadens this page's recovery or Send authority.
-  async function recoveryPageUnfinished(safe, note = () => undefined) {
+  async function recoveryPageReady(safe, note = () => undefined, completedRevivalSource = null) {
     const unsafe = () => { note('lease-lost'); return false; };
     const unreadable = () => { note(safe() ? 'page-unreadable' : 'lease-lost'); return false; };
     if (!safe()) return unsafe();
@@ -16362,11 +16362,35 @@
       const native = current?.role === 'assistant' ? fiberTurnFor(current) : null;
       if (!native) return unreadable();
       if (native.endMessageId) {
+        // Main's bounded idle revival intentionally follows a completed answer. It is
+        // distinct from Stop/silence recovery: re-prove the exact claimed question and
+        // unchanged idle final, never treat elapsed time as completion or Send authority.
+        const finalId = native.endMessageId;
+        const idleRevival = () => completedRevivalSource && safe() &&
+          CLF_DOM.messages().filter(row => row.role === 'user').at(-1)?.id === completedRevivalSource.questionId &&
+          (!completedRevivalSource.finalId || completedRevivalSource.finalId === finalId) &&
+          !generating && !CLF_DOM.generating() && !nativeBusy && pendingTools === 0 &&
+          CLF_DOM.turns().at(-1)?.id === current.id &&
+          fiberTurnFor(CLF_DOM.turns().at(-1)) === native &&
+          native.conversationId === conversationId && !native.conversationConflict &&
+          (native.calls || []).every(call => call?.answered === true);
+        if (idleRevival()) {
+          const flushed = await flush();
+          if (flushed && idleRevival()) {
+            completedRevivalSource.finalId = finalId;
+            return true;
+          }
+          note(flushed ? 'lease-lost' : 'journal-pending');
+          return false;
+        }
         note('page-final');
         await flush();
         return false;
       }
     }
+    // Once this attempt witnessed a final, a disappearing/remounted final cannot
+    // turn the same claim back into unfinished recovery after Main authorization.
+    if (completedRevivalSource?.finalId) return unreadable();
     const flushed = await flush();
     if (flushed && safe()) return true;
     note(flushed ? 'lease-lost' : 'journal-pending');
@@ -16548,7 +16572,7 @@
       const input = reply?.data?.input;
       const coreConnector = reply?.data?.coreConnector;
       claimedInput = input || null;
-      if (input?.recovery?.episode?.startsWith('interruption:')) sourceQuiet = true;
+      if (input?.recovery?.episode?.startsWith('interruption:') || input?.recovery?.revival) sourceQuiet = true;
       if (input?.silenceBoundary || input?.completedTurnId) { claimedSilence = input; sourceQuiet = true; }
       if (!input) return false;
       // Fresh-turn automation cannot inherit a person's interruption permission. Its original
@@ -16569,7 +16593,12 @@
       // A completed-stage claim is revocable too, but it intentionally follows a final answer.
       // Only interrupted/silent recovery requires the old provider turn to remain unfinished.
       // Keep the shared claim, draft, exact-turn and authorization guards for both kinds.
-      const requiresUnfinishedPage = Boolean(input.recovery || input.silenceBoundary);
+      const requiresRecoveryPage = Boolean(input.recovery || input.silenceBoundary);
+      const revival = input.recovery?.revival;
+      const completedRevivalSource = revival && Number.isFinite(revival.progressAt) && revival.progressAt > 0 &&
+        Number.isInteger(revival.attempt) && revival.attempt >= 1 && revival.attempt <= 4 &&
+        input.recovery.episode === `revival:${revival.progressAt}:${revival.attempt}` &&
+        input.recovery.questionId === sourceUser ? { questionId: sourceUser, finalId: null } : null;
       if (withdrawableRecoveryDraft) claimedRecovery = input;
       if (!onTarget()) { noteWithdraw(offTarget()); return false; }
       const fail = async (error, detail) => {
@@ -17029,8 +17058,8 @@
       const nativeSend = () => sendSubmittedText(sendingTarget, false, async sendCurrent => {
         if (rotation && (!rotationIdle() || !draft.current())) return false;
         // Preserve the outbox's revocable claim until the actual native Send is ready.
-        if (withdrawableRecoveryDraft && requiresUnfinishedPage &&
-            !await recoveryPageUnfinished(() => sendCurrent() && onTarget() && draft.current(), withdrawWhy)) return false;
+        if (withdrawableRecoveryDraft && requiresRecoveryPage &&
+            !await recoveryPageReady(() => sendCurrent() && onTarget() && draft.current(), withdrawWhy, completedRevivalSource)) return false;
         sendAuthorizationRequested = true;
         const authorized = await ask({ type: 'desktop_input', id: input.id, owner: input.owner, conversationId: target,
           authorize: true, freshTurnProtocol: 1, receipt: receiptProof }, null, DESKTOP_INPUT_PRECLICK_REPLY_MS);
@@ -17040,8 +17069,8 @@
           withdrawWhy('lease-lost');
           return false;
         }
-        if (withdrawableRecoveryDraft && requiresUnfinishedPage &&
-            !await recoveryPageUnfinished(() => sendCurrent() && onTarget() && draft.current(), withdrawWhy)) return false;
+        if (withdrawableRecoveryDraft && requiresRecoveryPage &&
+            !await recoveryPageReady(() => sendCurrent() && onTarget() && draft.current(), withdrawWhy, completedRevivalSource)) return false;
         // This is the final pre-click boundary. Anything already visible is history; only a
         // later error occurrence can claim the exact helper response now being sent.
         if (decision) {

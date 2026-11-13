@@ -443,6 +443,31 @@ describe('Goal decision backends', () => {
     expect(await settled(id)).toMatchObject({ stage: 'failed', error: 'goal_readiness_changed' });
     expect(browser.request).toHaveBeenCalledTimes(2);
   });
+  it('keeps the same source deadline when readiness briefly passes but refuses again before a helper exists', async () => {
+    await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true, mode: 'loop',
+      loopBackend: 'chatgpt', continuationPolicy: 'settled-turn' } });
+    const id = 'loop-readiness-flicker', sessionId = await recording(id, 'Preserve unresolved effects and continue independent work.');
+    const start = Date.now(), clock = vi.spyOn(Date, 'now').mockReturnValue(start);
+    const check = vi.fn(async () => false);
+    goal.configureLoopForwardReadiness(check);
+    browser.request.mockResolvedValue('{"action":"continue","reply":"Validate the next independent export path."}');
+    const first = goal.startGoalDraft({ sessionId, conversationId: id, turnId: 'same-source' });
+    expect(await settled(id)).toMatchObject({ stage: 'failed', error: 'goal_readiness_changed' });
+    expect(goal.ackGoalDraft(id, first.token)).toBe(true);
+    clock.mockReturnValue(start + 30 * 60_000);
+    check.mockResolvedValueOnce(true);
+    const flicker = goal.startGoalDraft({ sessionId, conversationId: id, turnId: 'same-source' });
+    expect(await settled(id)).toMatchObject({ stage: 'failed', error: 'goal_readiness_changed' });
+    expect(goal.ackGoalDraft(id, flicker.token)).toBe(true);
+    expect(browser.request).not.toHaveBeenCalled();
+    await flushDurable();
+    expect(await readDurable<GoalRepliesSnapshot>(goal.GOAL_REPLIES_STATE)).toMatchObject({
+      readinessHolds: [{ conversationId: id, sessionId, turnId: 'same-source', firstRefusalAt: start }] });
+    clock.mockReturnValue(start + 60 * 60_000);
+    goal.startGoalDraft({ sessionId, conversationId: id, turnId: 'same-source' });
+    expect(await settled(id)).toMatchObject({ stage: 'ready' });
+    expect(browser.request).toHaveBeenCalledOnce();
+  });
   it.each(['different-source', 'future-clock', 'duplicate-source', 'paused'] as const)(
     'does not borrow a restored fallback deadline for %s', async variant => {
       const id = 'loop-restored-hold-negative';
