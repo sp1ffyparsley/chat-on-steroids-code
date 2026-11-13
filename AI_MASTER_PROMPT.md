@@ -1,3 +1,5 @@
+CURRENT R89 REPAIR RESEARCH (2026-11-13): operator paused all account automation and the recurring checkup. Preserve existing turns, original scope, results and Send custody; no research-driven resume/retry/new prompt/approval bypass. Runtime remains Recorder173; browser cohorts were mixed173content/170or172worker and sustained useful autonomy is unverified. README.md contains the de-identified failure observations and four focused repair research lanes. Private operator CLI and local operational receipts remain outside this mirror. This is a documentation checkpoint, not a new installed release.
+
 # Research mirror engineering map
 
 This repository is a sanitized code mirror. Read README.md for the exact source and acceptance boundary before proposing work. Public commit hashes and private release-provenance hashes have different meanings.
