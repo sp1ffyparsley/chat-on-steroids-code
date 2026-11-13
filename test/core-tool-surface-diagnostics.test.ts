@@ -150,6 +150,30 @@ describe('Core tool-surface incident diagnostics', () => {
       identityRefusals: [{ messageId: 'private-parent-a', reasons: ['workingTurnMismatch'] },
         { messageId: 'private-parent-b', reasons: ['workingTurnMismatch', 'turnExchangeMissing'] }] } });
 
+  it('reports fresh reader skew and alignment without exposing identities or changing custody', () => {
+    resetCoreBrowserEvidenceForTests();
+    const expected = nativeEvidence.EXPECTED_READER_PRODUCER;
+    expect(nativeEvidence.coreReaderHealth(NOW)).toMatchObject({ state: 'unobserved', action: 'wait-for-observation' });
+    const frame = { ...refusalFrame(), reader: { contentRecorder: expected - 1, workerRecorder: expected - 1 } };
+    expect(noteCoreBrowserEvidence(frame)).toBe(true);
+    const held = coreBrowserEvidence(TARGET);
+    expect(nativeEvidence.coreReaderHealth(NOW)).toMatchObject({ state: 'reload-required', action: 'reload-companion', olderDocuments: 1 });
+    expect(coreBrowserEvidence(TARGET)).toEqual(held);
+    const reader = { fiberProducer: expected, contentRecorder: expected, workerRecorder: expected };
+    const aligned = { ...frame, observedAt: NOW + 1, reader,
+      shellScan: { selectorMatches: 1, mapped: 1, reader,
+        rejects: { fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0 } } };
+    expect(noteCoreBrowserEvidence(aligned)).toBe(true);
+    expect(nativeEvidence.coreReaderHealth(NOW + 1)).toMatchObject({ state: 'aligned', alignedDocuments: 1, action: 'none' });
+    expect(JSON.stringify(nativeEvidence.coreReaderHealth(NOW + 1))).not.toMatch(/private-parent|exact-diagnostic|conversationId/);
+    expect(nativeEvidence.coreReaderHealth(NOW + CORE_BROWSER_EVIDENCE_MAX_AGE_MS + 2))
+      .toMatchObject({ state: 'unobserved', staleDocuments: 1 });
+    expect(noteCoreBrowserEvidence({ ...aligned, observedAt: NOW + 2,
+      shellScan: { ...aligned.shellScan, reader: { ...reader, fiberProducer: expected + 1 } } })).toBe(true);
+    expect(nativeEvidence.coreReaderHealth(NOW + 2)).toMatchObject({ state: 'newer-reader', action: 'check-app-update' });
+    resetCoreBrowserEvidenceForTests();
+  });
+
   it('reports exact native-parent refusal reasons and observation age without granting completion', () => {
     resetCoreBrowserEvidenceForTests();
     noteCoreBrowserEvidence(refusalFrame());
@@ -1103,6 +1127,7 @@ describe('Core tool-surface incident diagnostics', () => {
     'nativeHeaderValueAbsent', 'nativeHeaderValueAccessor', 'nativeHeaderValueUndefined',
     'nativeHeaderValueNull', 'nativeHeaderValueString', 'nativeHeaderValueTrue',
     'nativeHeaderValueFalse', 'nativeHeaderValueOther',
+    'nativeRetainedParentMissing', 'nativeRetainedParentConflict', 'nativeRetainedPositionHeader', 'nativeRetainedPositionFirstMember', 'nativeRetainedPositionLaterMember', 'nativeRetainedLocationNone', 'nativeRetainedLocationOnPath', 'nativeRetainedLocationOffPath', 'nativeRetainedMemberHeader', 'nativeRetainedMemberCodeCall', 'nativeRetainedMemberCoreCall', 'nativeRetainedMemberAssistantOther', 'nativeRetainedMemberCodeResult', 'nativeRetainedMemberCoreResult', 'nativeRetainedMemberOtherToolResult', 'nativeRetainedMemberUser', 'nativeRetainedMemberOther', 'nativeContractedHeaderPending', 'nativeContractedHeaderMissingTerminal', 'nativeContractedHeaderUserAnchor', 'nativeContractedHeaderParent', 'nativeContractedHeaderSelected', 'nativeContractedHeaderChildren', 'nativeContractedHeaderChildIdentity', 'nativeContractedHeaderChildMembership', 'nativeContractedHeaderIdentity', 'nativeContractedHeaderCache',
       'identityReasonCurrentQuestionMissing',
       'identityReasonCurrentQuestionUnselected',
       'identityReasonCurrentQuestionConflict',

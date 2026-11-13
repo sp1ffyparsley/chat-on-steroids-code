@@ -37,7 +37,15 @@ export const supportConnectionSchema = z.object({
 });
 export const supportCompanionSchema = z.object({
   running: z.boolean(), paired: z.boolean(), present: z.boolean(),
-  authState: z.enum(['signed-in', 'signed-out', 'unknown']), extensionVersion: version
+  authState: z.enum(['signed-in', 'signed-out', 'unknown']), extensionVersion: version,
+  readerHealth: z.object({
+    expectedProducer: count,
+    state: z.enum(['unobserved', 'aligned', 'reload-required', 'newer-reader', 'mixed']),
+    action: z.enum(['none', 'reload-companion', 'check-app-update', 'wait-for-observation']),
+    freshDocuments: count, staleDocuments: count, alignedDocuments: count,
+    olderDocuments: count, newerDocuments: count, unknownDocuments: count,
+    observed: z.object({ main: z.array(count).max(8), content: z.array(count).max(8), worker: z.array(count).max(8) })
+  }).optional()
 });
 export const supportAutomationSchema = z.object({ paused: z.boolean(), admission: admission });
 export const supportLifecycleSchema = z.object({

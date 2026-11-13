@@ -16,7 +16,7 @@ import { pendingChatModelRequest, observeChatModels, requestChatModels } from '.
 import { isProModel } from '../shared/chat-models.js';
 import type { SessionSummary } from '../shared/session.js';
 import { evaluateAgentHealth } from '../shared/agent-health.js';
-import { CORE_BROWSER_EVIDENCE_MAX_AGE_MS, CORE_SHELL_CALL_REJECTION_KEYS, acknowledgeNativeCompletion, coreBrowserEvidence, nativeCompletionCandidate, nativeCompletionDiagnostic, nativeFinalEvidenceWait, nativeIdentityRefusalSummary, noteCoreBrowserEvidence, retainUnverifiedNativeCompletionFromIncident, retainNativeCompletionFromCheckpoint, retainNativeCompletionObservationsFromCheckpoint, retainNativeCompletionAfterClearFailure, retainAdditionalNativeCompletionUncertainty, retainNativeRequestIdsFromDurableReceipts, settledNativeTurnCandidate } from './core-browser-evidence.js';
+import { CORE_BROWSER_EVIDENCE_MAX_AGE_MS, CORE_SHELL_CALL_REJECTION_KEYS, acknowledgeNativeCompletion, coreBrowserEvidence, coreReaderHealth, nativeCompletionCandidate, nativeCompletionDiagnostic, nativeFinalEvidenceWait, nativeIdentityRefusalSummary, noteCoreBrowserEvidence, retainUnverifiedNativeCompletionFromIncident, retainNativeCompletionFromCheckpoint, retainNativeCompletionObservationsFromCheckpoint, retainNativeCompletionAfterClearFailure, retainAdditionalNativeCompletionUncertainty, retainNativeRequestIdsFromDurableReceipts, settledNativeTurnCandidate } from './core-browser-evidence.js';
 import { unifiedExecManager } from './codex/manager.js';
 import type {
   CoreToolSurfaceDiagnostic,
@@ -1453,6 +1453,7 @@ export async function bridgeStatus(): Promise<BridgeStatus> {
     present: browserPresent(),
     lastSeenAt,
     extensionVersion,
+    readerHealth: coreReaderHealth(),
     authState: browserAuthState
   };
 }

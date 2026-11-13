@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { recordLoopMcpProof } from './goal-mcp-proof.js';
 import { randomUUID } from 'node:crypto';
+import type { GoalRepliesSnapshot } from '../src/main/goal.js';
 import { GOAL_CONTINUATIONS, GOAL_MARKER_INSTRUCTION, templateGoalDecision } from '../src/shared/goal-templates.js';
 import { assertOperatorPromptEnvelope, operatorPromptBody, operatorPromptOverhead, prepareOperatorPrompt } from '../src/shared/operator-prompt.mjs';
 
@@ -379,6 +380,31 @@ describe('Goal decision backends', () => {
     expect(await goal.draftFastFollowup(session.id)).toBeNull();
     expect(check).not.toHaveBeenCalled();
   });
+  it('retains the exact continuous Loop refusal deadline across a durable cold restore', async () => {
+    await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true, mode: 'loop',
+      loopBackend: 'chatgpt', continuationPolicy: 'settled-turn' } });
+    const id = 'loop-durable-readiness-refusal';
+    const sessionId = await recording(id, 'Keep the same original unresolved result.');
+    const start = Date.now(), clock = vi.spyOn(Date, 'now').mockReturnValue(start);
+    goal.configureLoopForwardReadiness(async () => false);
+    browser.request.mockResolvedValue('{"action":"continue","reply":"Validate an independent source path."}');
+    const first = goal.startGoalDraft({ sessionId, conversationId: id, turnId: 'source' });
+    expect(await settled(id)).toMatchObject({ stage: 'failed', error: 'goal_readiness_changed' });
+    expect(goal.ackGoalDraft(id, first.token)).toBe(true);
+    await flushDurable();
+    const saved = await readDurable<GoalRepliesSnapshot>(goal.GOAL_REPLIES_STATE);
+    expect(saved).toMatchObject({ readinessHolds: [{ conversationId: id, sessionId, turnId: 'source', firstRefusalAt: start }] });
+    goal.restoreGoalReplies(null);
+    clock.mockReturnValue(start + 3_500_000);
+    goal.restoreGoalReplies(saved);
+    const before = goal.startGoalDraft({ sessionId, conversationId: id, turnId: 'source' });
+    expect(await settled(id)).toMatchObject({ stage: 'failed' });
+    expect(goal.ackGoalDraft(id, before.token)).toBe(true);
+    clock.mockReturnValue(start + 3_600_000);
+    goal.startGoalDraft({ sessionId, conversationId: id, turnId: 'source' });
+    expect(await settled(id)).toMatchObject({ stage: 'ready' });
+    expect(browser.request).toHaveBeenCalledTimes(1);
+  });
   it('keeps the authorized one-hour Loop fallback and resets its wait after fresh readiness', async () => {
     await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true, mode: 'loop',
       loopBackend: 'chatgpt', continuationPolicy: 'settled-turn' } });
@@ -416,6 +442,60 @@ describe('Goal decision backends', () => {
     goal.startGoalDraft({ sessionId, conversationId: id, turnId: 'source-after-recovery' });
     expect(await settled(id)).toMatchObject({ stage: 'failed', error: 'goal_readiness_changed' });
     expect(browser.request).toHaveBeenCalledTimes(2);
+  });
+  it.each(['different-source', 'future-clock', 'duplicate-source', 'paused'] as const)(
+    'does not borrow a restored fallback deadline for %s', async variant => {
+      const id = 'loop-restored-hold-negative';
+      await saveConfig({ ...defaultConfig(), ui: { ...defaultConfig().ui, automationPaused: variant === 'paused' },
+        goal: { ...defaultConfig().goal, enabled: true, mode: 'loop', loopBackend: 'chatgpt', continuationPolicy: 'settled-turn' } });
+      const sessionId = await recording(id, 'Original source must retain exact ownership.');
+      const now = Date.now();
+      const hold = { conversationId: id, sessionId, turnId: variant === 'different-source' ? 'prior-source' : 'source',
+        firstRefusalAt: variant === 'future-clock' ? now + 1 : now - 3_600_001 };
+      goal.restoreGoalReplies({ version: 1, savedAt: now, replies: [],
+        readinessHolds: variant === 'duplicate-source' ? [hold, hold, hold] : [hold] });
+      goal.configureLoopForwardReadiness(async () => false);
+      goal.startGoalDraft({ sessionId, conversationId: id, turnId: 'source' });
+      expect(await settled(id)).toMatchObject({ stage: 'failed', error: 'goal_readiness_changed' });
+      expect(browser.request).not.toHaveBeenCalled();
+    });
+  it('withholds a fallback helper if Pause arrives during its exact deadline write', async () => {
+    await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true, mode: 'loop',
+      loopBackend: 'chatgpt', continuationPolicy: 'settled-turn' } });
+    const id = 'loop-readiness-pause-write', sessionId = await recording(id, 'Respect the real pause.');
+    goal.configureLoopForwardReadiness(async () => false);
+    const durable = await import('../src/main/durable.js'), write = durable.writeDurableNow, gate = faultGate();
+    const spy = vi.spyOn(durable, 'writeDurableNow').mockImplementation(async (name, value) => {
+      if (name === goal.GOAL_REPLIES_STATE && (value as GoalRepliesSnapshot).readinessHolds?.length) await gate.hold();
+      return write(name, value);
+    });
+    try {
+      goal.startGoalDraft({ sessionId, conversationId: id, turnId: 'source' });
+      await gate.entered;
+      await saveConfig({ ...defaultConfig(), ui: { ...defaultConfig().ui, automationPaused: true },
+        goal: { ...defaultConfig().goal, enabled: true, mode: 'loop', loopBackend: 'chatgpt', continuationPolicy: 'settled-turn' } });
+      gate.release();
+      expect(await settled(id)).toMatchObject({ stage: 'failed', error: 'goal_readiness_changed' });
+      expect(browser.request).not.toHaveBeenCalled();
+    } finally { gate.release(); spy.mockRestore(); }
+  });
+  it('does not publish a fallback deadline or start a helper when its durable write fails', async () => {
+    await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true, mode: 'loop',
+      loopBackend: 'chatgpt', continuationPolicy: 'settled-turn' } });
+    const id = 'loop-readiness-storage-failure', sessionId = await recording(id, 'Keep uncertain effects held.');
+    goal.configureLoopForwardReadiness(async () => false);
+    const durable = await import('../src/main/durable.js'), write = durable.writeDurableNow;
+    const spy = vi.spyOn(durable, 'writeDurableNow').mockImplementation(async (name, value) => {
+      if (name === goal.GOAL_REPLIES_STATE && (value as GoalRepliesSnapshot).readinessHolds?.length)
+        throw Object.assign(new Error('deadline storage unavailable'), { code: 'ENOSPC' });
+      return write(name, value);
+    });
+    try {
+      goal.startGoalDraft({ sessionId, conversationId: id, turnId: 'source' });
+      expect(await settled(id)).toMatchObject({ stage: 'failed' });
+      expect(goal.snapshotGoalReplies().readinessHolds).toBeUndefined();
+      expect(browser.request).not.toHaveBeenCalled();
+    } finally { spy.mockRestore(); }
   });
   it.each(['goal', 'loop'] as const)('fits the %s helper envelope after proving a provider-wrapped Resume is automatic, preserving the whole human correction', async mode => {
     await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true,

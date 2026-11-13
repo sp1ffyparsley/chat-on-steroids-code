@@ -2851,6 +2851,11 @@ describe('alternate shell turn/message provenance', () => {
           expect(trace).toContain(`anchorRetainedMember=${header ? 'header' : later ? 'core-call' : 'code-call'}`);
           expect(trace).toContain(`anchorRetainedPosition=${header ? 'header' : later ? 'later-member' : 'first-member'}`);
           expect(trace).toContain(`anchorRetainedLocation=${missing ? 'none' : variant === 'off-path retained parent' ? 'off-path' : 'on-path'}`);
+          const counters = page.fiber.shellScan.rejects;
+          expect(counters[missing ? 'nativeRetainedParentMissing' : 'nativeRetainedParentConflict']).toBe(1);
+          expect(counters[header ? 'nativeRetainedPositionHeader' : later ? 'nativeRetainedPositionLaterMember' : 'nativeRetainedPositionFirstMember']).toBe(1);
+          expect(counters[header ? 'nativeRetainedMemberHeader' : later ? 'nativeRetainedMemberCoreCall' : 'nativeRetainedMemberCodeCall']).toBe(1);
+          expect(counters[missing ? 'nativeRetainedLocationNone' : variant === 'off-path retained parent' ? 'nativeRetainedLocationOffPath' : 'nativeRetainedLocationOnPath']).toBe(1);
           expect(page.fiber.turns[0].requests).not.toContainEqual(expect.objectContaining({ requestId: REQUEST, messageId: CALL }));
           expect(page.fiber.turns[0].endMessageId).toBeNull();
           for (const value of [USER, ASSISTANT, CALL, RESULT, REQUEST, EXEC, EXEC_RESULT, HEADER,

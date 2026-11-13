@@ -45,6 +45,16 @@ afterEach(async () => {
 });
 
 describe('bounded support report', () => {
+  it('includes fixed reader generation status while stripping private nested fields', async () => {
+    const dependencies = probes();
+    dependencies.companion = async () => ({ ...(await probes().companion() as Record<string, unknown>), readerHealth: { expectedProducer: 173,
+      state: 'reload-required', action: 'reload-companion', freshDocuments: 1, staleDocuments: 0,
+      alignedDocuments: 0, olderDocuments: 1, newerDocuments: 0, unknownDocuments: 0,
+      observed: { main: [], content: [172], worker: [172], token: privateText }, documentId: privateText } });
+    const report = await collectSupportReport(dependencies);
+    expect(report.companion).toMatchObject({ state: 'available', value: { readerHealth: { action: 'reload-companion' } } });
+    expect(formatSupportReport(report, 'json')).not.toContain(privateText);
+  });
   it('projects actual states/counts while excluding all arbitrary owner strings and contents', async () => {
     const report = await collectSupportReport(probes(), { now: () => 1_000 });
     expect(report.collection).toBe('complete');

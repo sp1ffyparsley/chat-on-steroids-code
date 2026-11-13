@@ -123,3 +123,25 @@ it.skipIf(!process.env.COS_WORKFLOW_FFMPEG || !process.env.COS_WORKFLOW_FFPROBE)
   media.width = 1920;
   expect((await verifyWorkflowChecks(input)).status).toBe('failed');
 });
+
+it.skipIf(!process.env.COS_WORKFLOW_FFMPEG || !process.env.COS_WORKFLOW_FFPROBE)(
+  'rejects silent exports when audio is required and verifies the real audio stream', async () => {
+    const ffmpeg = process.env.COS_WORKFLOW_FFMPEG!, ffprobe = process.env.COS_WORKFLOW_FFPROBE!;
+    const silent = path.join(directory, 'silent.mp4'), audible = path.join(directory, 'audible.mp4');
+    await promisify(execFile)(ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=64x64:r=10:d=0.5',
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', silent], { windowsHide: true, timeout: 30000 });
+    await promisify(execFile)(ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=64x64:r=10:d=0.5',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.5', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', audible],
+    { windowsHide: true, timeout: 30000 });
+    ports.roots.push({ name: 'media-tools', path: path.dirname(ffprobe) });
+    input.workflow!.checks = [workflowStepSchema.parse({ ...input.workflow, checks: [{ kind: 'media', path: silent,
+      ffprobe, minBytes: 1, width: 64, height: 64, requireAudio: true }] }).checks[0]!];
+    expect((await verifyWorkflowChecks(input)).checks[0]).toMatchObject({ ok: false, detail: expect.stringContaining('audio') });
+    const media = input.workflow!.checks[0]!;
+    if (media.kind !== 'media') throw new Error('Expected media fixture.');
+    media.path = audible;
+    expect((await verifyWorkflowChecks(input)).status).toBe('verified');
+    media.path = silent;
+    Object.assign(media, { requireAudio: false });
+    expect((await verifyWorkflowChecks(input)).status).toBe('verified');
+  });

@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 172;
+  const RECORDER_VERSION = 173;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -4670,6 +4670,7 @@
     'nativeHeaderValueAbsent', 'nativeHeaderValueAccessor', 'nativeHeaderValueUndefined',
     'nativeHeaderValueNull', 'nativeHeaderValueString', 'nativeHeaderValueTrue',
     'nativeHeaderValueFalse', 'nativeHeaderValueOther',
+    'nativeRetainedParentMissing', 'nativeRetainedParentConflict', 'nativeRetainedPositionHeader', 'nativeRetainedPositionFirstMember', 'nativeRetainedPositionLaterMember', 'nativeRetainedLocationNone', 'nativeRetainedLocationOnPath', 'nativeRetainedLocationOffPath', 'nativeRetainedMemberHeader', 'nativeRetainedMemberCodeCall', 'nativeRetainedMemberCoreCall', 'nativeRetainedMemberAssistantOther', 'nativeRetainedMemberCodeResult', 'nativeRetainedMemberCoreResult', 'nativeRetainedMemberOtherToolResult', 'nativeRetainedMemberUser', 'nativeRetainedMemberOther', 'nativeContractedHeaderPending', 'nativeContractedHeaderMissingTerminal', 'nativeContractedHeaderUserAnchor', 'nativeContractedHeaderParent', 'nativeContractedHeaderSelected', 'nativeContractedHeaderChildren', 'nativeContractedHeaderChildIdentity', 'nativeContractedHeaderChildMembership', 'nativeContractedHeaderIdentity', 'nativeContractedHeaderCache',
       'identityReasonCurrentQuestionMissing',
       'identityReasonCurrentQuestionUnselected',
       'identityReasonCurrentQuestionConflict',

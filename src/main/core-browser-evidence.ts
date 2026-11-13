@@ -8,6 +8,8 @@
  * MCP/Connection and closing their existing dependency cycle.
  */
 
+import type { ReaderHealth } from '../shared/types.js';
+export const EXPECTED_READER_PRODUCER = 173;
 export type CoreBrowserShell = 'classic' | 'alternate' | 'unknown';
 export type CoreShellDiscovery = 'compatible' | 'failed' | 'unknown';
 
@@ -65,6 +67,7 @@ export const CORE_SHELL_CALL_REJECTION_KEYS = Object.freeze([
     'nativeHeaderValueAbsent', 'nativeHeaderValueAccessor', 'nativeHeaderValueUndefined',
     'nativeHeaderValueNull', 'nativeHeaderValueString', 'nativeHeaderValueTrue',
     'nativeHeaderValueFalse', 'nativeHeaderValueOther',
+    'nativeRetainedParentMissing', 'nativeRetainedParentConflict', 'nativeRetainedPositionHeader', 'nativeRetainedPositionFirstMember', 'nativeRetainedPositionLaterMember', 'nativeRetainedLocationNone', 'nativeRetainedLocationOnPath', 'nativeRetainedLocationOffPath', 'nativeRetainedMemberHeader', 'nativeRetainedMemberCodeCall', 'nativeRetainedMemberCoreCall', 'nativeRetainedMemberAssistantOther', 'nativeRetainedMemberCodeResult', 'nativeRetainedMemberCoreResult', 'nativeRetainedMemberOtherToolResult', 'nativeRetainedMemberUser', 'nativeRetainedMemberOther', 'nativeContractedHeaderPending', 'nativeContractedHeaderMissingTerminal', 'nativeContractedHeaderUserAnchor', 'nativeContractedHeaderParent', 'nativeContractedHeaderSelected', 'nativeContractedHeaderChildren', 'nativeContractedHeaderChildIdentity', 'nativeContractedHeaderChildMembership', 'nativeContractedHeaderIdentity', 'nativeContractedHeaderCache',
   'identityReasonCurrentQuestionMissing',
   'identityReasonCurrentQuestionUnselected',
   'identityReasonCurrentQuestionConflict',
@@ -975,6 +978,34 @@ export function acknowledgeNativeCompletion(conversation: string, observedAt: nu
   if (!row) return false;
   row.pendingCompletion = null;
   return true;
+}
+
+/** Passive, bounded projection for the existing status/support report. Never mutates custody. */
+export function coreReaderHealth(now = Date.now()): ReaderHealth {
+  const health: ReaderHealth = { expectedProducer: EXPECTED_READER_PRODUCER, state: 'unobserved',
+    action: 'wait-for-observation', freshDocuments: 0, staleDocuments: 0, alignedDocuments: 0,
+    olderDocuments: 0, newerDocuments: 0, unknownDocuments: 0, observed: { main: [], content: [], worker: [] } };
+  for (const row of snapshots.values()) {
+    const age = now - row.observedAt;
+    if (!Number.isFinite(age) || age < 0 || age > CORE_BROWSER_EVIDENCE_MAX_AGE_MS) { health.staleDocuments++; continue; }
+    health.freshDocuments++;
+    const reader = row.reader ?? row.shellScan?.reader;
+    const values = [reader?.fiberProducer, reader?.contentRecorder, reader?.workerRecorder];
+    for (const [index, stage] of (['main', 'content', 'worker'] as const).entries()) {
+      const value = values[index];
+      if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0 &&
+          !health.observed[stage].includes(value) && health.observed[stage].length < 8) health.observed[stage].push(value);
+    }
+    if (values.some(value => typeof value === 'number' && value > EXPECTED_READER_PRODUCER)) health.newerDocuments++;
+    else if (values.some(value => typeof value === 'number' && value < EXPECTED_READER_PRODUCER)) health.olderDocuments++;
+    else if (values.every(value => value === EXPECTED_READER_PRODUCER)) health.alignedDocuments++;
+    else health.unknownDocuments++;
+  }
+  for (const values of Object.values(health.observed)) values.sort((a, b) => a - b);
+  if (health.newerDocuments) { health.state = 'newer-reader'; health.action = 'check-app-update'; }
+  else if (health.olderDocuments) { health.state = health.alignedDocuments ? 'mixed' : 'reload-required'; health.action = 'reload-companion'; }
+  else if (health.freshDocuments && health.alignedDocuments === health.freshDocuments) { health.state = 'aligned'; health.action = 'none'; }
+  return health;
 }
 
 export function coreBrowserEvidence(conversation: string): CoreBrowserEvidenceSnapshot | null {

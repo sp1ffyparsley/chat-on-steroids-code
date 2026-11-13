@@ -1,6 +1,14 @@
 # Chat On Steroids - code research mirror
 
-## Current research snapshot — R87 / Recorder 172 source
+## Current source — Recorder 173 / R87 report implementation
+
+Recorder173 extends the existing owners with durable exact-source one-hour readiness-refusal timing, optional required-audio verification through FFprobe, passive MAIN/content/worker generation health in the existing support report, and fixed retained-parent diagnostics. It adds no scheduler, database, capture backend or request-identity bypass. Fresh readiness resets its waiting window; Pause and failed durable writes withhold fallback delivery. Silent media remains valid unless audio is explicitly required.
+
+The private clean-source package passed 113 preliminary, 314 serial and 13,809 main checks, with 61 existing conditional skips. All 37 final installer recovery checks also passed. The qualified Windows173 update is installed; independent comparison matched all 292 payload files, the complete 293-file program and 24 protected account settings/encryption-state files. Public TypeScript and 360 affected checks passed, with one existing skip, including real audio/video fixtures. Source tests are not proof of executing browser generation or useful automatic work.
+
+The current user authorizes a new task rollout in brand-new conversations and a 55-minute checkup. Old chats must be recoverably retired before resuming eligible accounts; uncertain effects, original request debt, current native approval boundaries and later Pause/Off/Stop remain authoritative. The new rollout does not authorize replay into retired conversations or account switching around provider restrictions. Private operational receipts, task libraries, installer pins and deployed identities stay outside this mirror.
+
+## Historical research snapshot — R87 / Recorder 172 source
 
 This checkpoint supersedes the historical R86 and installation notes below. It publishes the reviewed committed runtime and regression changes through Recorder172. Private operational prompt libraries, deployed account identities, installer pins, local evidence and credentials remain outside the mirror. The four R87 research lanes cover exact request/result identity, useful and safe autonomy, safeguards and updates, and new creative workflow capabilities. Research should extend existing owners, validate genuinely new functions against current maintained primary sources, and reject duplicate systems.
 

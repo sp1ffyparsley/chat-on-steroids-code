@@ -12,6 +12,7 @@ export const workflowCheckSchema = z.discriminatedUnion('kind', [fileCheck,
     kind: z.literal('media'), ffprobe: z.string().min(1).max(32768),
     width: z.number().int().positive().optional(), height: z.number().int().positive().optional(),
     codec: z.string().regex(/^[a-z0-9_]{1,40}$/).optional(),
+    requireAudio: z.boolean().optional(),
     minDuration: z.number().finite().nonnegative().optional(),
     maxDuration: z.number().finite().positive().optional()
   }).strict(),

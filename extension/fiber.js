@@ -42,7 +42,7 @@
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
   const VERSION = 19;
   /** Private implementation epoch, independent of the stable cross-world wire schema. */
-  const PRODUCER_VERSION = 172;
+  const PRODUCER_VERSION = 173;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -97,6 +97,7 @@
     'nativeHeaderValueAbsent', 'nativeHeaderValueAccessor', 'nativeHeaderValueUndefined',
     'nativeHeaderValueNull', 'nativeHeaderValueString', 'nativeHeaderValueTrue',
     'nativeHeaderValueFalse', 'nativeHeaderValueOther',
+    'nativeRetainedParentMissing', 'nativeRetainedParentConflict', 'nativeRetainedPositionHeader', 'nativeRetainedPositionFirstMember', 'nativeRetainedPositionLaterMember', 'nativeRetainedLocationNone', 'nativeRetainedLocationOnPath', 'nativeRetainedLocationOffPath', 'nativeRetainedMemberHeader', 'nativeRetainedMemberCodeCall', 'nativeRetainedMemberCoreCall', 'nativeRetainedMemberAssistantOther', 'nativeRetainedMemberCodeResult', 'nativeRetainedMemberCoreResult', 'nativeRetainedMemberOtherToolResult', 'nativeRetainedMemberUser', 'nativeRetainedMemberOther', 'nativeContractedHeaderPending', 'nativeContractedHeaderMissingTerminal', 'nativeContractedHeaderUserAnchor', 'nativeContractedHeaderParent', 'nativeContractedHeaderSelected', 'nativeContractedHeaderChildren', 'nativeContractedHeaderChildIdentity', 'nativeContractedHeaderChildMembership', 'nativeContractedHeaderIdentity', 'nativeContractedHeaderCache',
   ]);
   /** Items one turn may hold before it is not read at all; a bound against a runaway tree, far above real turns. */
   const MAX_TURN_ITEMS = 5000;
@@ -2758,17 +2759,21 @@
           // This supplies request ancestry only. All group/result/final receipts
           // below remain mandatory, including an opaque Core witness per call.
           const contractedHeader = (id, parent, metadata) => {
-            if (pending || missingTerminal || !userAnchorsHeader || parent !== typedUserId ||
-                currentIds.has(id) || selected.has(id)) return false;
+            const rejectHeader = facet => { shellDiagnostic(rejects, 'nativeContractedHeader' + facet); return false; };
+            if (pending) return rejectHeader('Pending');
+            if (missingTerminal) return rejectHeader('MissingTerminal');
+            if (!userAnchorsHeader) return rejectHeader('UserAnchor');
+            if (parent !== typedUserId) return rejectHeader('Parent');
+            if (currentIds.has(id) || selected.has(id)) return rejectHeader('Selected');
             const userNode = nativeField(mapping, typedUserId), children = nativeField(userNode, 'children');
-            if (!Array.isArray(children) || children.length < 2 || children.length > MAX_ROWS) return false;
+            if (!Array.isArray(children) || children.length < 2 || children.length > MAX_ROWS) return rejectHeader('Children');
             const declared = new Set();
             for (let at = 0; at < children.length; at++) {
               const child = str(nativeField(children, String(at)));
-              if (!child || declared.has(child)) return false;
+              if (!child || declared.has(child)) return rejectHeader('ChildIdentity');
               declared.add(child);
             }
-            if (!declared.has(id) || !declared.has(currentPath[1])) return false;
+            if (!declared.has(id) || !declared.has(currentPath[1])) return rejectHeader('ChildMembership');
             const node = nativeField(mapping, id), message = nativeField(node, 'message');
             const meta = nativeField(message, 'metadata');
             if (nativeField(node, 'id') !== id || nativeField(message, 'id') !== id ||
@@ -2779,7 +2784,7 @@
                 nativeField(meta, 'rebase_developer_message') !== false ||
                 !['request_id', 'working_turn_id', 'turn_exchange_id'].every(key =>
                   str(nativeField(meta, key)) && nativeField(meta, key) === nativeField(metadata, key) &&
-                  nativeField(meta, key) === nativeField(userMeta, key))) return false;
+                  nativeField(meta, key) === nativeField(userMeta, key))) return rejectHeader('Identity');
             const cached = nativeField(nativeField(data, 'mapping'), id);
             if (cached && cached !== node) {
               const prior = nativeField(cached, 'message'), priorMeta = nativeField(prior, 'metadata');
@@ -2787,7 +2792,7 @@
                   nativeField(prior, 'id') !== id || nativeField(nativeField(prior, 'author'), 'role') !== 'system' ||
                   ['recipient', 'status'].some(key => nativeField(prior, key) !== nativeField(message, key)) ||
                   ['parent_id', 'request_id', 'working_turn_id', 'turn_exchange_id', 'is_visually_hidden_from_conversation',
-                    'rebase_developer_message'].some(key => nativeField(priorMeta, key) !== nativeField(meta, key))) return false;
+                    'rebase_developer_message'].some(key => nativeField(priorMeta, key) !== nativeField(meta, key))) return rejectHeader('Cache');
             }
             return true;
           };
@@ -2818,6 +2823,11 @@
                   : role === 'tool'
                     ? name === 'functions.exec' ? 'code-result' : name === 'api_tool.call_tool' ? 'core-result' : 'other-tool-result'
                     : role === 'user' ? 'user' : 'other';
+                for (const [facet, value] of [['Parent', nativeAnchorRetainedParent], ['Position', nativeAnchorRetainedPosition],
+                  ['Location', nativeAnchorRetainedLocation], ['Member', nativeAnchorRetainedMember]]) {
+                  shellDiagnostic(rejects, 'nativeRetained' + facet + value.split('-')
+                    .map(part => part[0].toUpperCase() + part.slice(1)).join(''));
+                }
               } catch { /* Optional diagnostics never change the existing refusal. */ }
               return refuse('nativeScopeBranchConflict', 'group-retained-parent');
             }

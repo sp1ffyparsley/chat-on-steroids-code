@@ -60,6 +60,11 @@ async function checkFile(check: Extract<WorkflowCheck, { kind: 'file' | 'media' 
       const { stdout } = await probe(executable.real, ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', resolved.real],
         { windowsHide: true, timeout: 30_000, maxBuffer: 1024 * 1024, encoding: 'utf8' });
       const media = JSON.parse(stdout);
+      if (check.requireAudio === true && (!Array.isArray(media.streams) ||
+          !media.streams.some((stream: { codec_type?: string; codec_name?: string; channels?: number; sample_rate?: string }) =>
+            stream?.codec_type === 'audio' && typeof stream.codec_name === 'string' && stream.codec_name !== 'unknown' &&
+            Number.isInteger(stream.channels) && stream.channels! > 0 && Number(stream.sample_rate) > 0)))
+        throw new WorkflowCheckFailure('Required usable audio stream is missing; check the export audio mapping.');
       const videos: Array<{ width?: number; height?: number; codec_name?: string; disposition?: { attached_pic?: number } }> =
         Array.isArray(media.streams) ? media.streams.filter((stream: { codec_type?: string; disposition?: { attached_pic?: number } }) =>
           stream.codec_type === 'video' && stream.disposition?.attached_pic !== 1) : [];

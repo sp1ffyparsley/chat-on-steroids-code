@@ -125,6 +125,7 @@ function shellScanDiagnostic(raw) {
     'nativeHeaderValueAbsent', 'nativeHeaderValueAccessor', 'nativeHeaderValueUndefined',
     'nativeHeaderValueNull', 'nativeHeaderValueString', 'nativeHeaderValueTrue',
     'nativeHeaderValueFalse', 'nativeHeaderValueOther',
+    'nativeRetainedParentMissing', 'nativeRetainedParentConflict', 'nativeRetainedPositionHeader', 'nativeRetainedPositionFirstMember', 'nativeRetainedPositionLaterMember', 'nativeRetainedLocationNone', 'nativeRetainedLocationOnPath', 'nativeRetainedLocationOffPath', 'nativeRetainedMemberHeader', 'nativeRetainedMemberCodeCall', 'nativeRetainedMemberCoreCall', 'nativeRetainedMemberAssistantOther', 'nativeRetainedMemberCodeResult', 'nativeRetainedMemberCoreResult', 'nativeRetainedMemberOtherToolResult', 'nativeRetainedMemberUser', 'nativeRetainedMemberOther', 'nativeContractedHeaderPending', 'nativeContractedHeaderMissingTerminal', 'nativeContractedHeaderUserAnchor', 'nativeContractedHeaderParent', 'nativeContractedHeaderSelected', 'nativeContractedHeaderChildren', 'nativeContractedHeaderChildIdentity', 'nativeContractedHeaderChildMembership', 'nativeContractedHeaderIdentity', 'nativeContractedHeaderCache',
     'identityReasonCurrentQuestionMissing',
     'identityReasonCurrentQuestionUnselected',
     'identityReasonCurrentQuestionConflict',
@@ -10753,7 +10754,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 172;
+const PAGE_RECORDER_VERSION = 173;
 
 let deferredRecoveryWork = null;
 

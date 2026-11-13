@@ -561,6 +561,16 @@ export interface LogEntry {
 }
 
 /** What the renderer needs to know about the extension bridge, without any secrets. */
+/** Fixed aggregate observations only; no document/chat identifiers or dispatch authority. */
+export interface ReaderHealth {
+  expectedProducer: number;
+  state: 'unobserved' | 'aligned' | 'reload-required' | 'newer-reader' | 'mixed';
+  action: 'none' | 'reload-companion' | 'check-app-update' | 'wait-for-observation';
+  freshDocuments: number; staleDocuments: number; alignedDocuments: number;
+  olderDocuments: number; newerDocuments: number; unknownDocuments: number;
+  observed: { main: number[]; content: number[]; worker: number[] };
+}
+
 export interface BridgeStatus {
   running: boolean;
   port: number | null;
@@ -577,6 +587,7 @@ export interface BridgeStatus {
    * this app process, which is why "no extension version" never means "outdated extension".
    */
   extensionVersion: string | null;
+  readerHealth?: ReaderHealth;
   /** Last positive ChatGPT auth proof from this paired browser profile. Unknown never grants dispatch. */
   authState: 'signed-in' | 'signed-out' | 'unknown';
 }

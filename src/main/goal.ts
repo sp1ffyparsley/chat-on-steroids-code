@@ -729,14 +729,18 @@ export interface GoalRepliesSnapshot {
   version: 1;
   savedAt: number;
   replies: GoalReplyObligation[];
+  /** A deadline is observation history, never delivery or result-completion authority. */
+  readinessHolds?: Array<LoopReadinessHold & { conversationId: string }>;
 }
 
-function goalReplySnapshotFor(rows: Map<string, GoalReplyObligation>, now = Date.now()): GoalRepliesSnapshot {
+function goalReplySnapshotFor(rows: Map<string, GoalReplyObligation>, now = Date.now(),
+  holds = LOOP_ESCAPED_HOLDS): GoalRepliesSnapshot {
   boundGoalReplies(now, rows);
   return {
     version: 1,
     savedAt: now,
-    replies: [...rows.values()].map((reply) => ({ ...reply }))
+    replies: [...rows.values()].map((reply) => ({ ...reply })),
+    ...(holds.size ? { readinessHolds: [...holds].map(([conversationId, hold]) => ({ conversationId, ...hold })) } : {})
   };
 }
 
@@ -760,8 +764,19 @@ function sameGoalReplyRevision(left: GoalReplyObligation | undefined, right: Goa
 export function restoreGoalReplies(snapshot: GoalRepliesSnapshot | null): void {
   stoppedResumeRequests = new WeakMap();
   goalReplies.clear();
+  LOOP_ESCAPED_HOLDS.clear();
   if (!snapshot || snapshot.version !== 1 || !Array.isArray(snapshot.replies)) return;
   const now = Date.now();
+  const seenHolds = new Set<string>();
+  for (const raw of Array.isArray(snapshot.readinessHolds) ? snapshot.readinessHolds.slice(0, MAX_GOAL_REPLIES) : []) {
+    if (!raw || typeof raw.conversationId !== 'string' || !/^[0-9a-z-]{8,256}$/i.test(raw.conversationId) ||
+        typeof raw.sessionId !== 'string' || !/^[\w-]{8,64}$/.test(raw.sessionId) ||
+        typeof raw.turnId !== 'string' || !raw.turnId || raw.turnId.length > 200 ||
+        !Number.isSafeInteger(raw.firstRefusalAt) || raw.firstRefusalAt <= 0 || raw.firstRefusalAt > now) continue;
+    if (seenHolds.has(raw.conversationId)) { LOOP_ESCAPED_HOLDS.delete(raw.conversationId); continue; }
+    seenHolds.add(raw.conversationId);
+    LOOP_ESCAPED_HOLDS.set(raw.conversationId, { sessionId: raw.sessionId, turnId: raw.turnId, firstRefusalAt: raw.firstRefusalAt });
+  }
   for (const raw of snapshot.replies) {
     if (
       !raw ||
@@ -1717,7 +1732,7 @@ export function clearAllGoalSwitches(): void {
 /** Drops one chat's override, putting it back under the app-wide setting. */
 export function clearGoalSwitch(conversationId: string): void {
   if (isGoalDecisionChat(conversationId)) return;
-  LOOP_ESCAPED_HOLDS.delete(conversationId);
+  if (LOOP_ESCAPED_HOLDS.delete(conversationId)) persistGoalRepliesSoon();
   if (goalSwitches.delete(conversationId)) persistGoalSwitches();
 }
 
@@ -4039,9 +4054,37 @@ function loopProgressReportFooter(thresholdMs: number): string {
  * escape hatch lets the Loop proceed despite unresolved evidence debt — the stale itself
  * is the bigger risk when identity-mismatched tool results never resolve. Complements the
  * main agent's remount-based recovery: it catches the case where the answer never arrives. */
-const LOOP_ESCAPED_HOLDS = new Map<string, number>();
+type LoopReadinessHold = { sessionId: string; turnId: string; firstRefusalAt: number };
+const LOOP_ESCAPED_HOLDS = new Map<string, LoopReadinessHold>();
+
+/** Share the existing reply serializer/store; a restart must not renew a continuous refusal. */
+function saveLoopReadinessHold(draft: GoalDraft, ready: boolean): Promise<LoopReadinessHold | null> {
+  return serialGoalReply(async () => {
+    const current = () => drafts.get(draft.conversationId) === draft && !draft.acknowledged &&
+      getConfig().ui.automationPaused !== true && goalArmedFor(draft.conversationId);
+    if (!current()) return null;
+    const previous = LOOP_ESCAPED_HOLDS.get(draft.conversationId);
+    const sameSource = previous?.sessionId === draft.sessionId && previous.turnId === draft.turnId;
+    if (!ready && sameSource) return previous;
+    if (ready && !previous) return null;
+    const staged = new Map(LOOP_ESCAPED_HOLDS);
+    const hold = ready ? null : { sessionId: draft.sessionId, turnId: draft.turnId, firstRefusalAt: Date.now() };
+    if (hold) staged.set(draft.conversationId, hold); else staged.delete(draft.conversationId);
+    if (staged.size > MAX_GOAL_REPLIES) {
+      const oldest = [...staged].sort((a, b) => a[1].firstRefusalAt - b[1].firstRefusalAt);
+      for (const [id] of oldest.slice(0, staged.size - MAX_GOAL_REPLIES)) staged.delete(id);
+    }
+    await writeDurableNow(GOAL_REPLIES_STATE, goalReplySnapshotFor(goalReplies, Date.now(), staged));
+    if (!current()) return null;
+    LOOP_ESCAPED_HOLDS.clear();
+    for (const [id, value] of staged) LOOP_ESCAPED_HOLDS.set(id, value);
+    logInfo(`goal: continuous readiness ${ready ? 'cleared' : 'saved'}; exact source retained across restart`);
+    return hold;
+  });
+}
 
 async function normalLoopReady(draft: GoalDraft): Promise<boolean> {
+  if (getConfig().ui.automationPaused === true) return false;
   if (draft.mode !== 'loop' && draft.continuationPolicy !== 'settled-turn') return true;
   if (draft.mode === 'goal' && !finiteCompletionReadiness) return false;
   if ((getConfig().goal.continuationPolicy ?? 'strict') !== draft.continuationPolicy) return false;
@@ -4053,16 +4096,21 @@ async function normalLoopReady(draft: GoalDraft): Promise<boolean> {
     draftToken: draft.token,
     onRefusal: reason => logInfo(`goal: Loop forward readiness refused for ${draft.conversationId}: ${reason}; no helper or Send authorized`)
   })) === true;
-  if (ready) { LOOP_ESCAPED_HOLDS.delete(draft.conversationId); draft.stallEscapeHint = undefined; return true; }
+  if (getConfig().ui.automationPaused === true || drafts.get(draft.conversationId) !== draft || draft.acknowledged) return false;
+  if (ready) {
+    await saveLoopReadinessHold(draft, true);
+    draft.stallEscapeHint = undefined;
+    return getConfig().ui.automationPaused !== true && drafts.get(draft.conversationId) === draft &&
+      !draft.acknowledged && goalArmedFor(draft.conversationId);
+  }
   // Escape hatch: the helper prompt already tells the executor to skip blocked items and
   // switch to independent work, and the main agent's remount-based recovery handles the
   // case where the answer becomes available again. But if the answer NEVER arrives and
   // the entire source stays blocked for one continuous hour, the stale itself is the
   // bigger risk. The forward-readiness refusal is still logged; the helper answer is
   // not a new Send of the original prompt, so no receipt is replayed.
-  const firstRefusal = LOOP_ESCAPED_HOLDS.get(draft.conversationId);
-  if (firstRefusal === undefined) { LOOP_ESCAPED_HOLDS.set(draft.conversationId, Date.now()); return false; }
-  if (Date.now() - firstRefusal < 3_600_000) return false;
+  const hold = await saveLoopReadinessHold(draft, false);
+  if (!hold || Date.now() - hold.firstRefusalAt < 3_600_000) return false;
   draft.stallEscapeHint = 'Forward readiness has refused progress for one hour. Avoid the recurring error: skip the blocked step or use a workaround, and perform the next concrete independent task within the saved objective. Preserve unresolved evidence and do not repeat ambiguous actions.';
   logWarn(`goal: Loop escape hatch for ${draft.conversationId}: forward readiness has been refused for over one hour despite the workaround prompt; continuing to keep the chat autonomous`);
   return true;
