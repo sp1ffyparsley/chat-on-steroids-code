@@ -1,5 +1,17 @@
 # Chat On Steroids - code research mirror
 
+## Automatic activation and a shared project team: feasibility, November 13
+
+Installing app/extension files is separate from activating the running browser worker, isolated recorder and MAIN reader in each Chrome profile. The existing app already requests a paired-profile companion reload, and the worker already restores dead/stale page readers after extension startup. However, reloadCompanionSafely currently refuses every open ChatGPT tab: a page-idle snapshot is not a quiescence lock. That conservative boundary can leave an open workspace on mixed versions. A reload request is not proof that every component activated.
+
+Automatic open-tab activation is possible through Chrome's supported extension reload and scripting APIs, but the missing work is a coordinated admission/quiescence handshake, drained journals and retained delivery owners, worker reload, page-reader restoration and positive fresh component acknowledgements. Preserve drafts, working turns, original results, user Pause/Stop and exact profile/document identity. Retain deferred/unknown updates in the existing owner with one clear reason; do not force periodic page reloads or add a second updater. Older workers may need one controlled bootstrap to gain the new protocol. This design is proposed, not implemented or installed in this snapshot.
+
+A useful proposed video-editor team is two CoS implementation chats (timeline/UI and media/render engine), one OpenCode session using an available explicitly selected DeepSeek model (tests/benchmarks/bounded adapters), and one independent Codex reviewer/integrator. Extend the incumbent workflow, saved goal and receipt owners. Each agent owns a module/worktree; the reviewer examines an exact patch/commit and actual test/artifact receipts, then one integration owner merges. Shared access does not mean unrestricted concurrent editing of the same checkout.
+
+Use supported Codex app-server and OpenCode client/host interfaces, preserving exact provider task identity, approvals and account/model limits. OpenCode currently lists a limited-time DeepSeek free model; DeepSeek's free chat product differs from its billed direct API. A free-only policy must stop at loss of eligibility or quota, with no silent paid fallback. No cross-provider agent adapter or new task runner has been built or deployed by this research.
+
+Official references: [Chrome runtime reload](https://developer.chrome.com/docs/extensions/reference/api/runtime#method-reload), [Chrome update lifecycle](https://developer.chrome.com/docs/extensions/develop/concepts/extensions-update-lifecycle), [Codex app-server](https://learn.chatgpt.com/docs/app-server), [OpenCode client](https://opencode.ai/docs/build/client/), [OpenCode host](https://opencode.ai/docs/build/sdk/), [free model offerings](https://opencode.ai/docs/console/models/#free-models), and [DeepSeek API pricing](https://api-docs.deepseek.com/quick_start/pricing/).
+
 ## R89 source repairs / live automation remains paused
 
 Three reproduced defects are repaired in the existing owners, with no dependency or new scheduler:
