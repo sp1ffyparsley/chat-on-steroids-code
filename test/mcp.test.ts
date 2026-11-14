@@ -805,6 +805,77 @@ describe('endpoint hardening', () => {
     } finally { unsubscribe(); }
   });
 
+  it('waits for a slow durable Core commit beyond the old 200ms window without replaying the handler', async () => {
+    const store = await import('../src/main/session/store.js');
+    const { flushRecorder } = await import('../src/main/session/recorder.js');
+    const actualAppend = store.appendEvent;
+    let appended = false, appends = 0;
+    const delayed = vi.spyOn(store, 'appendEvent').mockImplementationOnce(async (sessionId, event) => {
+      appends++;
+      await new Promise(resolve => setTimeout(resolve, 450));
+      const saved = await actualAppend(sessionId, event);
+      appended = true;
+      return saved;
+    });
+    try {
+      const returned = await modern('tools/call', { name: 'read', arguments: { paths: ['/workspace/notes.txt'] } });
+      expect(failed(returned), textOf(returned)).toBe(false);
+      expect(textOf(returned)).toContain('note line 1');
+      expect(appended).toBe(true);
+      expect(appends).toBe(1);
+      expect(textOf(returned)).not.toContain('Local recording unverified');
+      expect(returned.body.result.structuredContent.cosResultReceipt).toMatchObject({ version: 2,
+        id: expect.stringMatching(/^[a-f0-9]{48}$/), invocationSha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    } finally { delayed.mockRestore(); await flushRecorder(); }
+  });
+
+  it.each([{ value: { trace: ['kept'] } }, { value: ['kept'] }])('preserves non-string structured context and native media on recording failure ($value)', async ({ value }) => {
+    const store = await import('../src/main/session/store.js');
+    const { flushRecorder } = await import('../src/main/session/recorder.js');
+    const pixel = (await fs.readFile(path.join(approved, 'pixel.png'))).toString('base64');
+    const content = [{ type: 'image' as const, data: pixel, mimeType: 'image/png' },
+      { type: 'text' as const, text: 'Original tool failure' }];
+    const failure = vi.spyOn(store, 'appendEvent').mockRejectedValueOnce(new Error('private journal path'));
+    try {
+      const returned = await dispatch('read', {}, null, null, 'core', async () => ({ content,
+        isError: true, structuredContent: { output: 'Original tool failure', supplemental_context: value } }));
+      expect(returned.isError).toBe(true);
+      expect(returned.content.slice(0, 2)).toEqual(content);
+      expect(returned.content.at(-1)).toMatchObject({ type: 'text', text: expect.stringContaining('Local recording unverified') });
+      expect(returned.structuredContent?.supplemental_context).toEqual(value);
+      expect(returned.structuredContent?.output).toBe('Original tool failure');
+      expect(returned.structuredContent?.cosResultReceipt).toBeUndefined();
+      expect(JSON.stringify(returned)).not.toContain('private journal path');
+    } finally { failure.mockRestore(); await flushRecorder(); }
+  });
+
+  it('handles a recorder rejection after its deadline without replay, retroactive proof or an unhandled rejection', async () => {
+    const store = await import('../src/main/session/store.js');
+    const { flushRecorder } = await import('../src/main/session/recorder.js');
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const failures: unknown[] = [];
+    const onUnhandled = (error: unknown) => { failures.push(error); };
+    process.on('unhandledRejection', onUnhandled);
+    const delayed = vi.spyOn(store, 'appendEvent').mockImplementationOnce(async () => {
+      await gate; throw new Error('private late journal failure');
+    });
+    try {
+      const returned = await modern('tools/call', { name: 'read', arguments: { paths: ['/workspace/notes.txt'] } });
+      expect(failed(returned)).toBe(false);
+      expect(textOf(returned)).toContain('note line 1');
+      expect(textOf(returned)).toContain('Local recording unverified');
+      expect(returned.body.result.structuredContent.cosResultReceipt).toBeUndefined();
+      const wire = JSON.stringify(returned.body);
+      release();
+      await flushRecorder();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(failures).toEqual([]);
+      expect(JSON.stringify(returned.body)).toBe(wire);
+      expect(delayed).toHaveBeenCalledTimes(1);
+    } finally { release(); delayed.mockRestore(); await flushRecorder(); process.off('unhandledRejection', onUnhandled); }
+  });
+
   it('never retroactively announces a headerless result witness after the HTTP recorder-settle deadline', async () => {
     const { flushRecorder } = await import('../src/main/session/recorder.js');
     const store = await import('../src/main/session/store.js');
@@ -835,6 +906,10 @@ describe('endpoint hardening', () => {
       });
       await entered;
       const returned = await call;
+      expect(Date.now() - admittedAfter).toBeGreaterThanOrEqual(2_000);
+      expect(Date.now() - admittedAfter).toBeLessThan(4_500);
+      expect(textOf(returned)).toContain('Local recording unverified');
+      expect(textOf(returned)).toContain('Do not replay');
       expect(returned.status).toBe(200);
       expect(failed(returned)).toBe(false);
       expect(textOf(returned)).toContain('note line 1');
@@ -862,6 +937,8 @@ describe('endpoint hardening', () => {
     // After the delayed append, the real execution survives as exactly one
     // Unattributed record, but the wire never announced its private witness.
     // Its post-timeout existence cannot retroactively authorize a native ACK.
+    expect(observed).toHaveLength(1);
+    expect(JSON.stringify(newlySaved)).not.toContain('Local recording unverified');
     expect(newlySaved).toHaveLength(1);
     expect(newlySaved[0]).toMatchObject({ kind: 'tool_call', call: {
       tool: 'read', conversationId: null, requestId: null,

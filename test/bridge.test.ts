@@ -3207,6 +3207,17 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await stopBridge();
+  // Join queued work before clearing bookkeeping. Resets synchronously fence
+  // fixture publishers; the second drain includes their retirement writes.
+  await flushRecorder();
+  await flushSessions();
+  await flushDurable();
+  resetGoalStateForTests();
+  resetSwarm();
+  resetBridgeForTests();
+  await flushRecorder();
+  await flushSessions();
+  await flushDurable();
   resetSessionStoreForTests();
   await removeTempDir(dir);
 });

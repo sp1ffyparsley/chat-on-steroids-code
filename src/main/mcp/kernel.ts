@@ -109,6 +109,10 @@ import type { StoredText, ToolOutcome } from '../../shared/session.js';
 
 /** Best-effort local append budget for a headerless call with no browser correlation path. */
 const HEADERLESS_RECORDING_SETTLE_MS = 200;
+// A Core receipt is useful only after its durable append. The old 200ms
+// generic delivery budget regularly expired during real Windows journal I/O.
+// Wait boundedly for eligible durable Core commit; never emit proof early.
+const CORE_RESULT_RECORDING_SETTLE_MS = 2_000;
 
 /** Exact page proof used by the live tool-progress projection while a call is still running. */
 const exactRequestOwner = (requestId: string): string | null =>
@@ -1093,6 +1097,26 @@ async function dispatchTracked(
     coreReceiptOutcome = 'committed_structured';
     return true;
   };
+  const warnUnverifiedRecording = () => {
+    const notice = '\n--- Local recording unverified ---\n' +
+      'This tool returned its result, but Chat On Steroids could not confirm its local history recording. ' +
+      'Do not replay completed, sent, or ambiguous work solely to restore this receipt. ' +
+      'Native completion and automatic Loop custody still require independently recorded evidence.';
+    const priorContext = delivered.structuredContent?.['supplemental_context'];
+    delivered = {
+      ...delivered,
+      content: [...delivered.content, { type: 'text', text: notice }],
+      ...(surface === 'core' && delivered.structuredContent &&
+        (priorContext === undefined || typeof priorContext === 'string')
+        ? { structuredContent: {
+            ...delivered.structuredContent,
+            supplemental_context: [
+              typeof priorContext === 'string' ? priorContext : '', notice
+            ].filter(Boolean).join('\n')
+          } }
+        : {})
+    };
+  };
   // Both owned and unowned calls publish a witness only after their durable
   // recorder commit. Request identity scopes ownership; each witness identifies
   // one execution even when several native messages share that workflow id.
@@ -1117,34 +1141,18 @@ async function dispatchTracked(
       // But a native final also must not confuse successful HTTP delivery
       // with an absent durable Main recorder row. Report this to the *exact*
       // proved caller using a fixed, privacy-safe notice, never path/error text.
-      const notice = '\n--- Local recording unverified ---\n' +
-        'This tool returned its result, but Chat On Steroids could not confirm its local history recording. ' +
-        'Do not replay completed, sent, or ambiguous work solely to restore this receipt. ' +
-        'Native completion and automatic Loop custody still require independently recorded evidence.';
-      delivered = {
-        ...delivered,
-        content: [...delivered.content, { type: 'text', text: notice }],
-        ...(surface === 'core' && delivered.structuredContent
-          ? { structuredContent: {
-              ...delivered.structuredContent,
-              supplemental_context: [
-                typeof delivered.structuredContent['supplemental_context'] === 'string'
-                  ? delivered.structuredContent['supplemental_context'] : '', notice
-              ].filter(Boolean).join('\n')
-            } }
-          : {})
-      };
+      warnUnverifiedRecording();
     }
   } else if (resultReceiptId) {
-    // Keep the existing finite fallback settle budget. On timeout, no receipt
-    // crosses the wire, while the in-flight recorder keeps its incumbent hold.
+    // Give ordinary durable Core I/O a bounded chance to commit. A timeout
+    // returns the real result with an explicit warning, never a receipt or replay grant.
     let timeout: ReturnType<typeof setTimeout> | null = null;
     let recorded: Awaited<typeof recording> | undefined;
     try {
       recorded = await Promise.race([
         recording,
         new Promise<undefined>(resolve => {
-          timeout = setTimeout(() => resolve(undefined), HEADERLESS_RECORDING_SETTLE_MS);
+          timeout = setTimeout(() => resolve(undefined), CORE_RESULT_RECORDING_SETTLE_MS);
         })
       ]);
     } finally {
@@ -1163,9 +1171,11 @@ async function dispatchTracked(
       coreReceiptOutcome = 'not_eligible';
     } else if (recorded === undefined) {
       coreReceiptOutcome = 'settle_timeout';
+      warnUnverifiedRecording();
       holdWhileSettling(context, recording);
     } else {
       coreReceiptOutcome = 'recorder_unverified';
+      warnUnverifiedRecording();
     }
   } else {
     let deferred = true;
