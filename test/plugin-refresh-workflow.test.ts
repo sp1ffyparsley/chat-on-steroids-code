@@ -145,6 +145,41 @@ it('records an already current schema when the workspace exposes no Refresh cont
   expect(h.click).not.toHaveBeenCalled();
   expect(h.ask.mock.calls.map(([message]) => message.action)).toEqual(['current']);
 });
+it.each(['late-control', 'absent-control', 'navigation'] as const)(
+  'waits within the existing hydration budget before declaring Refresh unavailable (%s)', async mode => {
+  vi.useFakeTimers();
+  const dom = new JSDOM('<html><body></body></html>');
+  let available = false, refreshed = false;
+  const click = vi.fn(() => { refreshed = true; });
+  const ask = vi.fn(async () => ({ data: { ok: true } }));
+  const checks = new Set();
+  const context = vm.createContext({ URL, Date, crypto: { randomUUID: () => attemptToken },
+    setTimeout, clearTimeout, setInterval, clearInterval, pageViewChecks: checks,
+    MutationObserver: dom.window.MutationObserver, document: dom.window.document,
+    alive: true, generating: false, epoch: 1, ask,
+    location: { pathname: '/', href: `https://chatgpt.com/?cos-plugin-refresh=${id}#settings/Plugins/plugin_asdk_app_synthetic` },
+    CLF_DOM: { generating: () => false, pluginManagementIdle: () => true,
+      pluginRefreshView: () => ({ appId: 'asdk_app_synthetic',
+        refresh: available ? { click } : null,
+        tools: refreshed ? tools : [{ ...tools[0], description: 'Old description.' }] }) }
+  });
+  try {
+    vm.runInContext(`${markerPrelude}\n${section}\nglobalThis.run = refreshManagedPlugin;`, context);
+    const pending = (context.run as Function)({ id, appId: 'asdk_app_synthetic', connectorName: 'Chat On Steroids Core', tools });
+    await vi.advanceTimersByTimeAsync(200);
+    expect(ask).not.toHaveBeenCalled();
+    if (mode === 'late-control') available = true;
+    if (mode === 'navigation') context.epoch = 2;
+    dom.window.document.body.setAttribute('data-management-hydrated', 'true');
+    await vi.advanceTimersByTimeAsync(8_100);
+    expect(await pending).toBe(mode !== 'navigation');
+    expect(click).toHaveBeenCalledTimes(mode === 'late-control' ? 1 : 0);
+    expect(ask.mock.calls.map(([message]: any[]) => message.action)).toEqual(
+      mode === 'late-control' ? ['claim', 'complete'] : mode === 'absent-control' ? ['manual'] : []);
+    expect(checks.size).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally { dom.window.close(); vi.useRealTimers(); }
+});
 it('stops automatic retry when a changed schema has no Refresh control', async () => {
   const h = workflow({ refreshAvailable: false });
   expect(await h.run()).toBe(true);

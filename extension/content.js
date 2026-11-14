@@ -17446,14 +17446,18 @@
         const url = new URL(discovered); url.searchParams.set('cos-plugin-refresh', request.id);
         history.replaceState(history.state, '', url.href); return true;
       }
-      // Identity and Refresh paint before the tool declarations. A partial settings
-      // panel is neither an old schema nor permission to click; wait on the existing
-      // DOM observer and leave an unclaimed request available if hydration times out.
-      const view = await waitPageView(async () => {
+      // Tool declarations can paint before the management controls. Use the same
+      // bounded hydration wait before calling a missing Refresh permanent; no
+      // claim or click is authorized by an incomplete management panel.
+      let hydratedView = null;
+      const readyView = await waitPageView(async () => {
         const next = await CLF_DOM.pluginRefreshView(request.connectorName, request.tools, request.appId);
         const appId = pluginViewAppId(location.href);
-        return appId && next?.appId === appId && Array.isArray(next.tools) && next.tools.length > 0 ? next : null;
-      }, current, 8000);
+        hydratedView = appId && next?.appId === appId && Array.isArray(next.tools) && next.tools.length > 0 ? next : null;
+        return hydratedView && (schemaKey(next.tools) === schemaKey(request.tools) ||
+          (next.refresh && !next.refresh.disabled)) ? next : null;
+      }, current, 8000, 250);
+      const view = readyView || (current() ? hydratedView : null);
       if (!view) return false;
       if (!current()) return false;
       if (request.appId && view.appId !== request.appId) { await fail('Exact connector settings could not be verified'); return false; }
