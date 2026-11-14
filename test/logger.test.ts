@@ -39,7 +39,8 @@ describe('bounded asynchronous diagnostic mirror', () => {
     const file = await logFile();
     const scan = { selectorMatches: 1, mapped: 1, rejects: {
       fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0,
-      nativeBranchHeaderShape: 1, nativeHeaderRebase: 1, PRIVATE_FIELD: 'private body'
+      nativeBranchHeaderShape: 1, nativeHeaderRebase: 1, nativeExecutionCalls: 1,
+      nativeExecutionResults: 0, nativeExecutionMissingResults: 1, PRIVATE_FIELD: 'private body'
     }, reader: { fiberProducer: 172, contentRecorder: 172, workerRecorder: 172, privateText: 'private body' } };
     const nativeCompletion = { openCalls: 3, openCodeCalls: 0, traceRequestIds: 0, exactRequestJoins: 0,
       checkpointKey: 'b'.repeat(64) };
@@ -53,7 +54,8 @@ describe('bounded asynchronous diagnostic mirror', () => {
       nativeCompletion } as any)).toBe(true);
     resetLoggerForTests(); setLogProfileContext(profile); initLogFile(file);
     expect((await listLocalIncidents(first.id)).incidents[0]).toMatchObject({ id: first.id, status: 'resolved',
-      readerScan: { rejects: { nativeBranchHeaderShape: 1, nativeHeaderRebase: 1 }, reader: { fiberProducer: 172 } } });
+      readerScan: { rejects: { nativeBranchHeaderShape: 1, nativeHeaderRebase: 1,
+        nativeExecutionCalls: 1, nativeExecutionResults: 0, nativeExecutionMissingResults: 1 }, reader: { fiberProducer: 172 } } });
   });
 
   it.each(['verified', 'masked-slot', 'archive-full', 'profile-change'] as const)(

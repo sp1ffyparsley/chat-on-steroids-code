@@ -85,6 +85,7 @@
   const NATIVE_FAILURE_DIAGNOSTICS = new Set([
     'nativeBranchCoreInvocation', 'nativeBranchCoreResult', 'nativeBranchDuplicateReceipt',
     'nativeBranchExecutionResultChildCount', 'nativeBranchExecutionResultNoOwner', 'nativeBranchExecutionResultRequest',
+    'nativeExecutionCalls', 'nativeExecutionResults', 'nativeExecutionMissingResults', 'nativeExecutionExtraResults',
     'nativeBranchExecutionStart', 'nativeBranchFinalNamespace', 'nativeBranchGroupExchange',
     'nativeBranchGroupNode', 'nativeBranchGroupParent', 'nativeBranchGroupRetainedParent',
     'nativeBranchGroupRole', 'nativeBranchGroupStatus', 'nativeBranchGroupWorkingTurn',
@@ -2860,11 +2861,19 @@
                 return refuse('nativeScopeBranchConflict', 'execution-result-request');
               if (execution.calls.length !== execution.results.length) {
                 // Diagnose only this first refused group, not whole-chat totals. Counts
-                // remain bounded and console-only; unequal groups still grant no scope.
+                // remain bounded; unequal groups still grant no scope.
                 nativeAnchorExecutionCalls = Math.min(MAX_ROWS, execution.calls.length);
                 nativeAnchorExecutionResults = Math.min(MAX_ROWS, execution.results.length);
                 nativeAnchorExecutionBalance = execution.calls.length > execution.results.length
                   ? 'missing-results' : 'extra-results';
+                // Reuse the saved scan/incident pipeline, including zero results. This
+                // first failed group's cardinality is diagnostic only, never a join key.
+                if (rejects && nativeAnchorBranch === 'none') {
+                  rejects.nativeExecutionCalls = nativeAnchorExecutionCalls;
+                  rejects.nativeExecutionResults = nativeAnchorExecutionResults;
+                  shellDiagnostic(rejects, nativeAnchorExecutionBalance === 'missing-results'
+                    ? 'nativeExecutionMissingResults' : 'nativeExecutionExtraResults');
+                }
                 return refuse('nativeScopeBranchConflict', 'execution-result-child-count');
               }
               execution.closed = true; execution = null;

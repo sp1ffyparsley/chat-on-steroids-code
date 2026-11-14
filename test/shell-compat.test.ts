@@ -2828,6 +2828,11 @@ describe('alternate shell turn/message provenance', () => {
             expect(trace).toContain('anchorExecutionCalls=1');
             expect(trace).toContain(`anchorExecutionResults=${variant.endsWith('missing') ? 0 : 2}`);
             expect(trace).toContain(`anchorExecutionBalance=${variant.endsWith('missing') ? 'missing-results' : 'extra-results'}`);
+            expect(page.fiber.shellScan.rejects).toMatchObject({
+              nativeExecutionCalls: 1,
+              nativeExecutionResults: variant.endsWith('missing') ? 0 : 2,
+              [variant.endsWith('missing') ? 'nativeExecutionMissingResults' : 'nativeExecutionExtraResults']: 1
+            });
             expect(JSON.stringify(page.fiber)).not.toContain('anchorExecution');
             const before = diagnosticLogs.length;
             await shellRescan(page, 'same-child-count-refusal');

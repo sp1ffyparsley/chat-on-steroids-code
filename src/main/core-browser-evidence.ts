@@ -55,6 +55,7 @@ export const CORE_SHELL_CALL_REJECTION_KEYS = Object.freeze([
     'nativeAnchorLiveMissing', 'nativeAnchorUserMissing', 'nativeAnchorTurnIncomplete', 'nativeAnchorPathEmpty', 'nativeAnchorUserPathMismatch', 'nativeAnchorUnselectedPath', 'nativeAnchorPrerequisite',
     'nativeBranchCoreInvocation', 'nativeBranchCoreResult', 'nativeBranchDuplicateReceipt',
     'nativeBranchExecutionResultChildCount', 'nativeBranchExecutionResultNoOwner', 'nativeBranchExecutionResultRequest',
+    'nativeExecutionCalls', 'nativeExecutionResults', 'nativeExecutionMissingResults', 'nativeExecutionExtraResults',
     'nativeBranchExecutionStart', 'nativeBranchFinalNamespace', 'nativeBranchGroupExchange',
     'nativeBranchGroupNode', 'nativeBranchGroupParent', 'nativeBranchGroupRetainedParent',
     'nativeBranchGroupRole', 'nativeBranchGroupStatus', 'nativeBranchGroupWorkingTurn',
