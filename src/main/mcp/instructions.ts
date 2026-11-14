@@ -122,16 +122,15 @@ function coreInstructions(ctx: ToolContext, platform: NodeJS.Platform, includeUs
   );
   if (caps.read) lines.push('view_image inspects local images when visual evidence matters.');
   if (ctx.roots.some(root => root.name === 'skills')) lines.push(
-    'The managed skill library is /skills/<id>/SKILL.md. List and read it with the existing file tools when relevant. Install user-requested text skills there using the existing write tools. Skills do not register MCP tools or execute hooks. Keep explicit project workdir paths when installing skills.'
+    'Skills live at /skills/<id>/SKILL.md. List/read relevant skills. Install requested text skills with file tools and explicit project workdir. Skills register no MCP tools or executable hooks.'
   );
   if (caps.command) {
     lines.push(
       BROWSER_LAUNCH_GUIDANCE,
-      'Use rg or rg --files for repository searches; fall back if unavailable.',
-      'Run shell checks with exec_command cmds: [...] in project workdir; use relative/native cmd paths, not virtual.',
-      'Continue running session_id with write_stdin after transient wait errors; verify terminal results. Never replace a live job because waiting failed.',
-      'write_stdin: return session_token/session_id together; settings_read shows terminal capacity.',
-      'Narrow truncated output instead of repeating it.'
+      'Search with rg/rg --files; fall back if unavailable.',
+      'Run exec_command cmds in project workdir using native or relative paths.',
+      'Poll session_id with write_stdin after transient wait errors; include returned session_token. Failed waits never authorize replacement. settings_read reports terminal capacity.',
+      'Narrow truncated output.'
     );
     if (windows) lines.push(
       WINDOWS_SHELL_GUIDANCE,
@@ -279,7 +278,7 @@ function windowsDesktopInstructions(): string {
     'Input methods already activate their target. activate_window consumes the current observation too: if used explicitly, get_window_state again before clicking an index or coordinate. Browser tab/window management chords, including Control_L+t and Control_L+n, remain refused. For testing, observe the browser menu and choose its New window control; refresh list_windows and get_window_state to verify a separate window id before navigating there. Never replace a ChatGPT page through its address bar when a new-tab chord is refused. Address-bar focus (Control_L+l, Alt_L+d) remains available for authorized navigation in the verified test window. read_clipboard/write_clipboard remain available under their existing permissions.',
     '',
     'JavaScript example: const apps = await sky.list_apps(); nodeRepl.write(apps.map(app => ({id:app.id,name:app.displayName,windows:app.windows})));',
-    'Use nodeRepl.write(value) or text(value) for concise text. sky methods return native values or throw. tools.<name> returns an MCP envelope: read content or actual structured fields; cosResultReceipt is metadata. UI results may use structuredContent.value. Only sky.get_window_state automatically displays images.',
+    'sky returns native values or throws. tools.<name> returns MCP content/structured data; cosResultReceipt is metadata. UI values may use structuredContent.value. Use text(value) or nodeRepl.write(value); only sky.get_window_state displays images.',
     'This app reuses its bounded exec runtime: variables do not persist across calls, so carry returned Window objects or rehydrate with get_window. No Node, imports, filesystem, network or extra Codex permission system is installed. Each method still uses this app’s live capability checks, exact caller and local recording. Keep independent reads parallel only when their observations do not conflict; await actions before refreshing.',
     '',
     `Files, patches and shell commands live in the separate "${surfaceDefinition('core').connectorName}" connector. Act only within the user’s requested task.`,

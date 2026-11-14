@@ -121,7 +121,9 @@ it('offers and acknowledges the worker inbox only on the outer call, outside nes
   const result = await dispatch('exec', {}, null, 'req-chat-a', 'core', async () => {
     const parent = currentCall()!;
     const children = await Promise.all([registrar.invokeNested('read', {}, parent), registrar.invokeNested('read', {}, parent)]);
-    expect(children).toEqual([ok('private tool value'), ok('private tool value')]);
+    const readableChild = { ...ok('private tool value'), structuredContent: { output: 'private tool value' } };
+    expect(children).toEqual([readableChild, readableChild]);
+    for (const child of children) expect(child.structuredContent?.cosResultReceipt).toBeUndefined();
     expect(broker.offer).not.toHaveBeenCalled();
     expect(broker.ack).not.toHaveBeenCalled();
     return ok('filtered');
