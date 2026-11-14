@@ -2496,7 +2496,7 @@ async function ordinaryInputTerminalTurn(sessionId: string, conversationId: stri
   // A committed Resume can finish before this document observed any local
   // generation. Its exact consume-once native final still owns a deliberate
   // renewal; never require an invented watchdog just to bind that same reply.
-  const renewedResume = Boolean(match && resumeReceipt?.sourceClosed &&
+  const renewedResume = Boolean(match && (resumeReceipt?.sourceClosed || resumeReceipt?.sourceExecutionSuperseded) &&
     resumeReceipt.acceptedDestinationFinal === final.messageId &&
     resumeReceipt.acceptedDestinationFinalEpochRevoked === true &&
     Number.isFinite(resumeReceipt.acceptedDestinationFinalAt) &&
@@ -2531,7 +2531,7 @@ async function ordinaryInputTerminalTurn(sessionId: string, conversationId: stri
     if (getConfig().ui.automationPaused === true || browserDecisionSignedOut || !currentResume ||
         !resumeEpochCurrent(currentResume) || (renewedResume &&
           (currentResume.token !== resumeReceipt.token || currentResume.handoffId !== resumeReceipt.handoffId ||
-            !currentResume.sourceClosed || currentResume.acceptedDestinationFinal !== final.messageId ||
+            (!currentResume.sourceClosed && !currentResume.sourceExecutionSuperseded) || currentResume.acceptedDestinationFinal !== final.messageId ||
             currentResume.acceptedDestinationFinalAt !== resumeReceipt.acceptedDestinationFinalAt ||
             currentResume.acceptedDestinationFinalEpochRevoked !== true))) return null;
   }

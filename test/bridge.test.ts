@@ -5683,7 +5683,7 @@ describe('committed Resume native terminal pickup after restart', () => {
   };
 
   it.each(['current', 'streamed-final', 'foreign-question', 'foreign-final', 'newer-question',
-    'missing-receipt', 'unretired-source', 'wrong-epoch', 'duplicate-input', 'mutated-final-after-proof',
+    'missing-receipt', 'source-view-open', 'wrong-epoch', 'duplicate-input', 'mutated-final-after-proof',
     'changed-receipt-after-proof'] as const)(
     'keeps renewed committed Resume source exact without inventing a watchdog (%s)', async condition => {
     const { chat, userId, finalId, sessionId, answer, input } = await setup();
@@ -5722,10 +5722,10 @@ describe('committed Resume native terminal pickup after restart', () => {
     if (condition === 'newer-question') await request('POST', '/events', { body: { conversationId: chat,
       events: [{ kind: 'user_message', messageId: randomUUID(), text: 'A newer question.', time: Date.now() }] } });
     if (condition === 'missing-receipt') resetContinuationsForTests();
-    if (condition === 'unretired-source' || condition === 'wrong-epoch') {
+    if (condition === 'source-view-open' || condition === 'wrong-epoch') {
       const wal = snapshotContinuations();
       for (const row of wal.entries) if (row.to === chat) {
-        if (condition === 'unretired-source') row.sourceClosed = false;
+        if (condition === 'source-view-open') row.sourceClosed = false;
         else row.acceptedDestinationFinalAt = pending.acceptedAt;
       }
       resetContinuationsForTests(); await restoreContinuations(wal);
@@ -5736,7 +5736,7 @@ describe('committed Resume native terminal pickup after restart', () => {
     const refusals: string[] = [];
     const proof = await settledForwardBridge.settledTurnContinuationProof(sessionId, chat, pending.turnId,
       { onRefusal: reason => refusals.push(reason) });
-    const current = ['current', 'streamed-final', 'mutated-final-after-proof', 'changed-receipt-after-proof'].includes(condition);
+    const current = ['current', 'streamed-final', 'source-view-open', 'mutated-final-after-proof', 'changed-receipt-after-proof'].includes(condition);
     expect(proof ? await proof() : false, refusals.join(';')).toBe(current);
     if (condition === 'mutated-final-after-proof') {
       const canonical = (await readEvents(sessionId, { kinds: ['assistant_message'] })).find(row => row.kind === 'assistant_message' && row.messageId === finalId)!;
@@ -5832,14 +5832,23 @@ describe('committed Resume native terminal pickup after restart', () => {
     }
   );
 
-  it.each(['goal', 'loop', 'loop-serialized-path', 'loop-serialized-tilde', 'loop-interleaved-commentary',
+  it.each(['goal', 'loop', 'loop-source-open', 'loop-source-open-unknown-request', 'loop-source-open-pause',
+    'loop-source-open-not-superseded',
+    'loop-serialized-path', 'loop-serialized-tilde', 'loop-interleaved-commentary',
     'goal-late-question-watchdog', 'loop-late-question-watchdog', 'loop-late-question-watchdog-stopped',
     'loop-late-question-watchdog-wrong-detail', 'loop-late-question-watchdog-new-work'] as const)(
     'recovers the delivered Resume final association from a settled frame without certifying Core results: %s', async shape => {
       const mode = shape.startsWith('goal') ? 'goal' : 'loop';
       const lateObserver = shape.includes('late-question-watchdog');
-      const rejectedObserver = ['stopped', 'wrong-detail', 'new-work'].some(ending => shape.endsWith(ending));
-      const { chat, userId, finalId, sessionId, token, answer, input } = await setup(true, mode, shape === 'loop-serialized-path', shape === 'loop-serialized-tilde', lateObserver);
+      const rejectedObserver = ['stopped', 'wrong-detail', 'new-work', 'unknown-request', 'pause', 'not-superseded'].some(ending => shape.endsWith(ending));
+      const sourceOpen = shape.startsWith('loop-source-open');
+      const { from, chat, userId, finalId, sessionId, token, answer, input } = await setup(!sourceOpen, mode, shape === 'loop-serialized-path', shape === 'loop-serialized-tilde', lateObserver);
+      if (shape.endsWith('not-superseded')) {
+        const original = sessionStoreModule.conversationWasSuperseded;
+        const lookup = vi.spyOn(sessionStoreModule, 'conversationWasSuperseded').mockImplementation(
+          async id => id === from ? false : original(id));
+        onTestFinished(() => lookup.mockRestore());
+      }
       await saveConfig({ ...getConfig(), goal: { ...getConfig().goal, backend: 'chatgpt', loopBackend: 'chatgpt',
         continuationPolicy: 'settled-turn' } });
       await request('POST', '/status', { body: { openConversations: [], inventoryComplete: false, authState: 'signed-in' } });
@@ -5878,7 +5887,9 @@ describe('committed Resume native terminal pickup after restart', () => {
         ordinaryFinal: { reason: 'open-call', questions: 1, calls: 1, openCalls: 1,
           codeCalls: 0, openCodeCalls: 0, activeTurnMapped: false,
           sourceUserMessageId: userId, settledFinalMessageId: finalId,
-          coreCallMessageIds: [nativeCall] } };
+          coreCallMessageIds: [nativeCall],
+          ...(sourceOpen && !shape.endsWith('unknown-request') ? { allCoreRequestIds: [nativeRequest] } : {}) } };
+      if (shape.endsWith('pause')) await saveConfig({ ...getConfig(), ui: { ...getConfig().ui, automationPaused: true } });
       expect((await request('POST', '/activity?conversationId=' + chat,
         { body: { coreDiagnostic: diagnostic } })).status).toBe(200);
       if (rejectedObserver) {
@@ -5889,6 +5900,13 @@ describe('committed Resume native terminal pickup after restart', () => {
       }
       expect(goalPendingReplyFor(chat)).toMatchObject({ sessionId, replyId: finalId,
         turnId: 'reply:' + finalId });
+      if (shape === 'loop-source-open') {
+        // Closing an old browser view is not execution ownership. The committed
+        // source remains permanently fenced and its one-shot close is still owed.
+        expect(await sessionStoreModule.conversationWasSuperseded(from)).toBe(true);
+        expect(snapshotContinuations().entries.find(row => row.token === token)?.sourceClosed).toBe(false);
+        expect((await import('../src/main/session/continuation.js')).supersededSourceConversations()).toContain(from);
+      }
       const acceptedAt = goalPendingReplyFor(chat)!.acceptedAt;
       expect(settledForwardBridge.goalNativeCompletionReady(chat)).toBe(false);
       expect(nativeFinalEvidenceWait(coreBrowserEvidence(chat))?.reason).toBe('evidence');
@@ -5912,6 +5930,20 @@ describe('committed Resume native terminal pickup after restart', () => {
         { body: { coreDiagnostic: { ...diagnostic, observedAt: Date.now() } } });
       expect(goalPendingReplyFor(chat)).toBeNull();
       goal.restoreGoalReplies(retainedCursor);
+      if (shape === 'loop-source-open') {
+        const wal = snapshotContinuations();
+        await flushSessions();
+        resetSessionStoreForTests(); resetContinuationsForTests();
+        await restoreContinuations(wal);
+        expect(snapshotContinuations().entries.find(row => row.token === token))
+          .toMatchObject({ sourceClosed: false, acceptedDestinationFinal: finalId });
+        goal.restoreGoalReplies({ ...retainedCursor, replies: [] });
+        await request('POST', '/activity?conversationId=' + chat,
+          { body: { coreDiagnostic: { ...diagnostic, observedAt: Date.now() } } });
+        expect(goalPendingReplyFor(chat)).toBeNull();
+        expect(await input.listInputs()).toEqual([]);
+        goal.restoreGoalReplies(retainedCursor);
+      }
       goal.configureLoopForwardReadiness(settledForwardBridge.settledTurnContinuationAllowed,
         settledForwardBridge.goalNativeCompletionReady);
       input.configureInputDelivery({ applyAutomation: async () => undefined, changed: () => undefined,
@@ -6425,7 +6457,7 @@ describe('committed Resume native terminal pickup after restart', () => {
     } finally { writer.mockRestore(); }
   });
 
-  it.each(['malformed-final', 'missing-epoch', 'epoch-without-final', 'future-epoch', 'unretired-accepted', 'conflicting-final',
+  it.each(['malformed-final', 'missing-epoch', 'epoch-without-final', 'future-epoch', 'conflicting-final',
     'revoked-without-final', 'malformed-revocation'] as const)(
     'does not turn a damaged accepted Resume receipt into a fresh capability (%s)', async state => {
       const { chat, answer, token } = await setup();
@@ -6436,7 +6468,6 @@ describe('committed Resume native terminal pickup after restart', () => {
       if (state === 'missing-epoch') delete row.acceptedDestinationFinalAt;
       if (state === 'epoch-without-final') delete row.acceptedDestinationFinal;
       if (state === 'future-epoch') row.acceptedDestinationFinalAt = Date.now() + 60_000;
-      if (state === 'unretired-accepted') row.sourceClosed = false;
       if (state === 'conflicting-final') row.acceptedDestinationFinal = randomUUID();
       if (state === 'revoked-without-final') { delete row.acceptedDestinationFinal; delete row.acceptedDestinationFinalAt;
         row.acceptedDestinationFinalEpochRevoked = true; }

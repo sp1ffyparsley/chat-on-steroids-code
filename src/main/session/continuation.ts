@@ -78,6 +78,7 @@ import {
 import { endResumeClaim, noteResumeClaim, resetResumeGate } from './resume-gate.js';
 import {
   ensureCommittedResumeHandoff,
+  conversationWasSuperseded,
   findSessionByConversation,
   getSession,
   readEvents,
@@ -632,8 +633,9 @@ export function continuationByToken(token: string): ContinuationView | null {
  * A page annotation is not a capability: the retained WAL, current durable rebind and exact
  * original bootstrap must all agree. This never reconstructs a command or restores a brief. */
 export async function committedResumeNativeReceipt(sessionId: string, conversationId: string,
-  messageId: string, text: string, options: { includeUnretired?: true } = {}): Promise<{
+  messageId: string, text: string, options: { includeUnretired?: true; allowSupersededSource?: true } = {}): Promise<{
     token: string; openedAt: number; handoffId: string; sourceClosed: boolean;
+    sourceExecutionSuperseded?: true;
     acceptedDestinationFinal?: string; acceptedDestinationFinalAt?: number; acceptedDestinationFinalEpochRevoked?: true
   } | null> {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(messageId)) return null;
@@ -642,10 +644,16 @@ export async function committedResumeNativeReceipt(sessionId: string, conversati
   const marker = resumeMarkerToken(native);
   if (!marker) return null;
   const entry = byToken.get(marker);
-  if (!entry || entry.state !== 'committed' || (!entry.sourceClosed && !options.includeUnretired) ||
-      (!entry.sourceClosed && entry.acceptedDestinationFinal) || entry.sessionId !== sessionId || entry.to !== conversationId ||
+  if (!entry || entry.state !== 'committed' || entry.sessionId !== sessionId || entry.to !== conversationId ||
       entry.from === conversationId || !entry.handoffId || entry.destinationSend.state !== 'sent' ||
       entry.destinationSend.conversationId !== conversationId || entry.destinationSend.messageId !== messageId) return null;
+  // A selected/pinned source tab may legitimately remain open. Only Main's
+  // independently settled-frame owner opts into the permanent execution fence;
+  // neither a page annotation nor tab absence may manufacture this proof.
+  const sourceExecutionSuperseded = (options.allowSupersededSource === true || !!entry.acceptedDestinationFinal) &&
+    await conversationWasSuperseded(entry.from);
+  if (!entry.sourceClosed && !sourceExecutionSuperseded &&
+      (!options.includeUnretired || entry.acceptedDestinationFinal)) return null;
   const handoff = await readHandoff(sessionId, entry.handoffId);
   if (!handoff || !handoffMatchesContinuation(handoff, entry.token, entry.from, entry.sourceTurnId) ||
       !resumeBootstrapMatches(native.trimStart(), handoff.text)) return null;
@@ -653,6 +661,7 @@ export async function committedResumeNativeReceipt(sessionId: string, conversati
   return byToken.get(entry.token) === entry && session?.conversationId === conversationId &&
     session.lastCommittedResumeHandoffId === entry.handoffId
     ? { token: entry.token, openedAt: entry.openedAt, handoffId: entry.handoffId, sourceClosed: entry.sourceClosed,
+      ...(sourceExecutionSuperseded ? { sourceExecutionSuperseded: true as const } : {}),
       ...(entry.acceptedDestinationFinal ? { acceptedDestinationFinal: entry.acceptedDestinationFinal,
         acceptedDestinationFinalAt: entry.acceptedDestinationFinalAt,
         ...(entry.acceptedDestinationFinalEpochRevoked ? { acceptedDestinationFinalEpochRevoked: true } : {}) } : {}) } : null;
@@ -664,13 +673,14 @@ export async function committedResumeNativeReceipt(sessionId: string, conversati
 export async function revokeCommittedResumeFinalEpochNow(sessionId: string, conversationId: string,
   replyId: string, acceptedAt: number): Promise<void> {
   const entry = [...byToken.values()].find(row => row.sessionId === sessionId && row.to === conversationId &&
-    row.state === 'committed' && row.sourceClosed && row.destinationSend.state === 'sent' &&
+    row.state === 'committed' && row.destinationSend.state === 'sent' &&
     row.acceptedDestinationFinal === replyId && row.acceptedDestinationFinalAt! <= acceptedAt);
   if (!entry || entry.acceptedDestinationFinalEpochRevoked) return;
   await withCheckpointLock(entry.token, async () => {
     const session = await getSession(sessionId);
     if (byToken.get(entry.token) !== entry || entry.acceptedDestinationFinalEpochRevoked ||
         session?.conversationId !== conversationId || session.lastCommittedResumeHandoffId !== entry.handoffId) return;
+    if (!entry.sourceClosed && !await conversationWasSuperseded(entry.from)) return;
     await transitionNow(entry, record => ({ ...record, acceptedDestinationFinalEpochRevoked: true }));
   });
 }
@@ -681,7 +691,8 @@ export async function revokeCommittedResumeFinalEpochNow(sessionId: string, conv
 export async function rememberCommittedResumeFinalNow(sessionId: string, conversationId: string, replyId: string): Promise<void> {
   const user = await readLatestUserMessage(sessionId);
   if (user?.kind !== 'user_message' || !user.messageId || user.message.truncated) return;
-  const proof = await committedResumeNativeReceipt(sessionId, conversationId, user.messageId, user.message.text);
+  const proof = await committedResumeNativeReceipt(sessionId, conversationId, user.messageId, user.message.text,
+    { allowSupersededSource: true });
   if (!proof || (proof.acceptedDestinationFinal && proof.acceptedDestinationFinal !== replyId)) return;
   const cursor = snapshotGoalReplies().replies.find(row => row.sessionId === sessionId && row.conversationId === conversationId);
   if (cursor?.replyId !== replyId || cursor.turnId !== `reply:${replyId}`) return;
@@ -701,7 +712,8 @@ export async function rememberCommittedResumeFinalNow(sessionId: string, convers
         latestFinal.messageId !== replyId || latestFinal.providerMessageId !== replyId ||
         latestFinal.inputReplyTo !== user.messageId || latestFinal.goalEligible !== true ||
         !latestFinal.final || latestFinal.state !== 'final') return;
-    const current = await committedResumeNativeReceipt(sessionId, conversationId, user.messageId!, user.message.text);
+    const current = await committedResumeNativeReceipt(sessionId, conversationId, user.messageId!, user.message.text,
+      { allowSupersededSource: true });
     const entry = byToken.get(proof.token);
     const accepted = snapshotGoalReplies().replies.find(row => row.sessionId === sessionId && row.conversationId === conversationId);
     if (!current || !entry || accepted?.replyId !== replyId || accepted.turnId !== `reply:${replyId}`) return;
@@ -1980,7 +1992,10 @@ export async function restoreContinuations(snapshot: ContinuationSnapshot | null
         Number.isSafeInteger(raw.acceptedDestinationFinalAt) && raw.acceptedDestinationFinalAt! >= raw.openedAt &&
         raw.acceptedDestinationFinalAt! > 0 && raw.acceptedDestinationFinalAt! <= now + 5_000 &&
         (raw.acceptedDestinationFinalEpochRevoked === undefined || raw.acceptedDestinationFinalEpochRevoked === true) &&
-        raw.state === 'committed' && raw.sourceClosed === true && raw.destinationSend?.state === 'sent'));
+        // Consumed destination finals remain negative replay custody even while
+        // an old browser view stays open. Runtime eligibility independently
+        // rechecks the current rebind and permanent source execution fence.
+        raw.state === 'committed' && raw.destinationSend?.state === 'sent'));
   const terminalTouchedAt = (raw: ContinuationRecord): number =>
     Number.isFinite(raw.touchedAt) && raw.touchedAt! <= now ? raw.touchedAt! : raw.openedAt;
 

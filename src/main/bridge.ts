@@ -15825,6 +15825,11 @@ async function recoverSettledNativeReplyAssociation(id: string): Promise<void> {
   const native = settledNativeTurnCandidate(id);
   const policy = snapshotGoalSwitches().switches.find(row => row.conversationId === id);
   if (!native || !policy?.enabled || getConfig().goal.continuationPolicy !== 'settled-turn') return;
+  const requestScope = coreBrowserEvidence(id)?.ordinaryFinal?.allCoreRequestIds;
+  const requestScopeKey = JSON.stringify(requestScope ?? null);
+  const completeRequestScope = native.coreCallMessageIds.length === 0 ||
+    Boolean(requestScope && requestScope.length === native.coreCallMessageIds.length &&
+      requestScope.every(request => typeof request === 'string' && request.length > 0 && request.length <= 100));
   const current = () => {
     const next = settledNativeTurnCandidate(id);
     return Boolean(next && next.documentId === native.documentId &&
@@ -15833,6 +15838,7 @@ async function recoverSettledNativeReplyAssociation(id: string): Promise<void> {
       next.finalMessageId === native.finalMessageId &&
       JSON.stringify(next.coreCallMessageIds) === JSON.stringify(native.coreCallMessageIds) &&
       JSON.stringify(next.codeCallMessageIds) === JSON.stringify(native.codeCallMessageIds) &&
+      JSON.stringify(coreBrowserEvidence(id)?.ordinaryFinal?.allCoreRequestIds ?? null) === requestScopeKey &&
       JSON.stringify(snapshotGoalSwitches().switches.find(row => row.conversationId === id)) === JSON.stringify(policy) &&
       settledTurnPhysicalIdle(id) && !goalFencedChat(id) &&
       !settledNativeObserverBusy(id));
@@ -15853,8 +15859,8 @@ async function recoverSettledNativeReplyAssociation(id: string): Promise<void> {
   // Recover only immutable Resume custody or an exact Sent question whose local
   // observer timed out. Each existing receipt retains its consume-once final fence.
   const resumeReceipt = await committedResumeNativeReceipt(session.id, id, user.messageId!, user.message.text,
-    { includeUnretired: true });
-  if ((resumeReceipt && (!resumeReceipt.sourceClosed || (resumeReceipt.acceptedDestinationFinal &&
+    { includeUnretired: true, ...(completeRequestScope ? { allowSupersededSource: true as const } : {}) });
+  if ((resumeReceipt && ((!resumeReceipt.sourceClosed && !resumeReceipt.sourceExecutionSuperseded) || (resumeReceipt.acceptedDestinationFinal &&
       resumeReceipt.acceptedDestinationFinal !== native.finalMessageId))) ||
       (!resumeReceipt && !ordinaryInputWatchdogBoundary(events, user, final))) return;
   const observation: ChatObservation = { kind: 'assistant_message', messageId: final.messageId,
@@ -15863,7 +15869,8 @@ async function recoverSettledNativeReplyAssociation(id: string): Promise<void> {
   const raw = { ...observation, inputSourceUserMessageId: native.sourceUserMessageId };
   const sourceRevision = JSON.stringify(user), finalRevision = JSON.stringify(final);
   const proof = await ordinaryInputTerminalProofs(id, [raw], [observation], !resumeReceipt,
-    resumeReceipt ? { sourceRevision, finalRevision, current: async () => {
+    resumeReceipt ? { sourceRevision, finalRevision,
+      ...(resumeReceipt.sourceExecutionSuperseded ? { allowSupersededSource: true as const } : {}), current: async () => {
       if (!current()) return false;
       // Canonical message edits need not increase the logical event count. Re-read
       // both exact revisions AFTER awaited Sent/WAL proof before superseding an error.
@@ -15907,7 +15914,9 @@ async function recoverSettledNativeReplyAssociation(id: string): Promise<void> {
     // Conversely the WAL's accepted-final fence prevents a lost/evicted cursor replay.
     if (goalPendingReplyFor(id)?.replyId === native.finalMessageId && current()) {
       if (resumeReceipt) await rememberCommittedResumeFinalNow(session.id, id, native.finalMessageId);
-      logInfo('bridge: recovered settled native reply association through exact Sent custody; tool completion remains unverified');
+      logInfo('bridge: recovered settled native reply association through exact Sent custody; tool completion remains unverified; sourceOwnership=' +
+        (resumeReceipt?.sourceExecutionSuperseded && !resumeReceipt.sourceClosed
+          ? 'permanently-superseded-view-open' : resumeReceipt ? 'source-retired' : 'ordinary-input'));
     }
   });
   if (!resumeReceipt && current()) await rememberOrdinaryInputFinalNow(session.id, id, native.finalMessageId);
@@ -15918,7 +15927,7 @@ async function ordinaryInputTerminalProofs(
   rawEvents: unknown,
   observations: ChatObservation[],
   settledWatchdogAssociation = false,
-  settledResumeAssociation?: { sourceRevision: string; finalRevision: string; current(): Promise<boolean> }
+  settledResumeAssociation?: { sourceRevision: string; finalRevision: string; allowSupersededSource?: true; current(): Promise<boolean> }
 ): Promise<{ handled: Set<string>; deferred: Set<string>; awaitingSourceRetirement: boolean; awaitingSourceQuestion: boolean }> {
   const handled = new Set<string>();
   const deferred = new Set<string>();
@@ -15971,7 +15980,9 @@ async function ordinaryInputTerminalProofs(
   if (!source || source.kind !== 'user_message' || !source.messageId || source.message.truncated) return result;
   const pendingUser = observations.findLast(item => item.kind === 'user_message');
   let receiptText = source.message.text;
-  let resumeReceipt = await committedResumeNativeReceipt(session.id, id, source.messageId, receiptText, { includeUnretired: true });
+  const resumeProofOptions = { includeUnretired: true as const,
+    ...(settledResumeAssociation?.allowSupersededSource ? { allowSupersededSource: true as const } : {}) };
+  let resumeReceipt = await committedResumeNativeReceipt(session.id, id, source.messageId, receiptText, resumeProofOptions);
   // A collapsed provider projection may have replaced the stored body, while the next exact
   // native frame restores it. The same native UUID and full current Sent WAL must agree before
   // this is even a retry candidate. An incoming annotation/body alone grants no Goal admission.
@@ -16019,7 +16030,8 @@ async function ordinaryInputTerminalProofs(
     // Only Main's current settled-frame owner can supersede a historical transport
     // error. Neither a replay/annotation nor the final's display time, streaming
     // origin or a metadata revision proves that its CONTENT followed the failure.
-    const settledResumeFinal = Boolean(settledResumeAssociation && resumeReceipt?.sourceClosed && !restoringQuestion &&
+    const settledResumeFinal = Boolean(settledResumeAssociation &&
+      (resumeReceipt?.sourceClosed || resumeReceipt?.sourceExecutionSuperseded) && !restoringQuestion &&
       JSON.stringify(source) === settledResumeAssociation.sourceRevision &&
       prior?.kind === 'assistant_message' && JSON.stringify(prior) === settledResumeAssociation.finalRevision &&
       prior.source === 'extension' && prior.providerMessageId === item.messageId && !prior.turnId &&
@@ -16045,14 +16057,14 @@ async function ordinaryInputTerminalProofs(
           (row.deliveredAt ?? row.sendAuthorizedAt ?? 0) > deliveredAt)) continue;
     if (resumeReceipt && (!getConfig().sessions.record || getConfig().ui.automationPaused === true ||
         browserSignedOut() || coreBrowserDispatchStopped() ||
-        !await committedResumeNativeReceipt(session.id, id, source.messageId, receiptText, { includeUnretired: true }))) continue;
+        !await committedResumeNativeReceipt(session.id, id, source.messageId, receiptText, resumeProofOptions))) continue;
     const latest = await getSession(session.id);
     if (latest?.conversationId !== id || latest.events !== session.events || latest.activeTurnId || runningToolCalls(id) > 0 ||
         settlingToolCalls(id) > 0 || continuationForSession(session.id)) continue;
     const currentPolicy = snapshotGoalSwitches().switches.find(row => row.conversationId === id);
     const historicalPolicy = !policy || !policy.enabled || policy.at > deliveredAt ||
       !currentPolicy || JSON.stringify(currentPolicy) !== JSON.stringify(policy);
-    if (resumeReceipt && !resumeReceipt.sourceClosed) {
+    if (resumeReceipt && !resumeReceipt.sourceClosed && !resumeReceipt.sourceExecutionSuperseded) {
       // A complete exact pair except retirement is transient, not an eligible answer. No
       // annotation or Goal cursor is published, and generic/paused/foreign history is 200.
       if (!historicalPolicy) result.awaitingSourceRetirement = true;
