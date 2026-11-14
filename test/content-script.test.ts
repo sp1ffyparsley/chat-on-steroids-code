@@ -14640,7 +14640,7 @@ describe('how a turn is recorded as having ended', () => {
     expect((live.document.querySelector('#prompt-textarea')?.textContent || '').trim()).toBe('');
   });
 
-  it.each(['armed', 'paused', 'policy-unknown', 'off', 'provider-busy'] as const)(
+  it.each(['armed', 'paused', 'policy-unknown', 'off', 'provider-busy', 'timeout-lingering-stop'] as const)(
     'keeps observed Retry behind Main authorization (%s)', async mode => {
       const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
       let clicks = 0;
@@ -14655,7 +14655,9 @@ describe('how a turn is recorded as having ended', () => {
         const card = document.createElement('div');
         card.setAttribute('role', 'alert');
         const copy = document.createElement('p');
-        copy.textContent = 'Message delivery timed out. Please try again. ';
+        copy.textContent = mode === 'provider-busy'
+          ? 'A network error occurred. Please check your connection and try again. '
+          : 'Message delivery timed out. Please try again. ';
         const retry = document.createElement('button');
         retry.textContent = 'Retry';
         retry.setAttribute('data-clf-test-rendered', '1');
@@ -14664,7 +14666,7 @@ describe('how a turn is recorded as having ended', () => {
         document.body.append(card);
       });
       await live.hook.pullActivity();
-      if (mode === 'provider-busy') startGenerating(live.document);
+      if (mode === 'provider-busy' || mode === 'timeout-lingering-stop') startGenerating(live.document);
       live.hook.observe();
       await settle();
       const initial = emitted(live.sent, 'chat_error').filter(row => row.event.retryAvailable === true).length;
@@ -14673,7 +14675,9 @@ describe('how a turn is recorded as having ended', () => {
       await settle();
       expect(clicks).toBe(0);
       const after = emitted(live.sent, 'chat_error').filter(row => row.event.retryAvailable === true).length;
-      expect(after).toBe(initial + (mode === 'armed' ? 1 : 0));
+      // Native-turn adoption may already reannounce during initial observation.
+      // Require the initial failure plus one stable reannouncement, never a click.
+      expect(after).toBe(mode === 'timeout-lingering-stop' ? 2 : initial + (mode === 'armed' ? 1 : 0));
       live.hook.observe();
       await settle();
       expect(emitted(live.sent, 'chat_error').filter(row => row.event.retryAvailable === true)).toHaveLength(after);
@@ -14835,7 +14839,11 @@ describe('how a turn is recorded as having ended', () => {
     expect(clicked).not.toHaveBeenCalled();
   });
 
-  it('stops an exact interrupted stream before native Retry, without inserting a new prompt', async () => {
+  it.each([
+    'Connection interrupted. Waiting for the complete answer ',
+    'Message delivery timed out. Please try again. ',
+    'Message delivery timed out. Please try again later. '
+  ])('stops the exact failed transport before native Retry, without inserting a new prompt: %s', async failure => {
     const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
     live = await harness(`https://chatgpt.com/c/${conversationId}`, {
       activity: () => ({ ok: true, data: { entries: [], stream: [], nextSince: 0, pendingTools: 0 } })
@@ -14852,7 +14860,7 @@ describe('how a turn is recorded as having ended', () => {
     });
     const card = live.document.createElement('div');
     card.setAttribute('role', 'alert');
-    card.textContent = 'Connection interrupted. Waiting for the complete answer ';
+    card.textContent = failure;
     const retry = live.document.createElement('button');
     retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
     retry.addEventListener('click', () => actions.push('retry'));
@@ -14892,7 +14900,7 @@ describe('how a turn is recorded as having ended', () => {
     await settle();
     const card = live.document.createElement('div');
     card.setAttribute('role', 'alert');
-    card.textContent = 'Message delivery timed out. Please try again later. ';
+    card.textContent = 'A network error occurred. Please check your connection and try again. ';
     const retry = live.document.createElement('button');
     retry.textContent = 'Retry'; retry.setAttribute('data-clf-test-rendered', '1');
     const clicked = vi.fn();

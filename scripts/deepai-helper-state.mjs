@@ -150,8 +150,10 @@ export class HelperState {
       }
       if (previous) {
         const latestPrevious = this.get(previous.id);
-        if (latestPrevious.status !== 'completed' || !latestPrevious.result || !latestPrevious.resultSavedAt) throw new Error('Save the completed result into its workspace before continuing this helper.');
-        if (this.pending().some(job => job.threadId === previous.threadId)) throw new Error('This helper already has a pending continuation.');
+        if (!(latestPrevious.status === 'completed' || latestPrevious.status === 'failed' &&
+            latestPrevious.context?.status === 'exhausted') || !latestPrevious.result || !latestPrevious.resultSavedAt)
+          throw new Error('Save the completed result into its workspace before continuing this helper.');
+        if (this.pending().some(job => job.threadId === previous.threadId || job.previousJobId === previous.id)) throw new Error('This helper already has a pending continuation.');
       }
       const id = randomUUID();
       const workspace = request.workspace;
@@ -163,11 +165,15 @@ export class HelperState {
         project = { workspace, projectId, command: { type: 'project.create', commandId: randomUUID(), projectId, title: `CoS helpers: ${path.basename(workspace)}`.slice(0, 160), workspaceRoot: workspace } };
         this.db.prepare('INSERT INTO projects(workspace_key,data) VALUES(?,?)').run(key, JSON.stringify(project));
       }
-      const threadId = previous?.threadId || randomUUID(), messageId = randomUUID(), commandId = randomUUID();
-      const text = `CoS helper request ${id}. Owner label: ${request.owner}. Work only in ${workspace}. Follow that workspace's instructions. Do not delegate or start other agents, change provider/model, or modify the helper bridge's state/result directory. Do not commit, merge, or switch branches. Complete the requested work and report exact changed paths, checks actually run, results, and anything unresolved. A completed response is evidence for review, not automatic acceptance.\n\n${request.prompt}`;
+      const freshContext = previous && ['near-limit', 'exhausted'].includes(previous.context?.status);
+      const continuing = previous && !freshContext;
+      if (previous && previous.projectId !== project.projectId) throw new Error('The previous helper project binding changed; inspect its saved report before continuing.');
+      const threadId = continuing ? previous.threadId : randomUUID(), messageId = randomUUID(), commandId = randomUUID();
+      const checkpoint = freshContext ? `\n\nFresh context for previous helper ${previous.id}: native usage reached ${previous.context.usedTokens}/${previous.context.maxTokens} tokens. Before acting, read its saved checkpoint ${path.join(previous.resultDirectory, 'result.json')}. It may contain failed or incomplete work; distinguish verified results from claims. Reconcile uncertain effects before any dependent action. Do not replay the original request or assume old tools succeeded. Follow only the new authorized request below.` : '';
+      const text = `CoS helper request ${id}. Owner label: ${request.owner}. Work only in ${workspace}. Follow that workspace's instructions. Do not delegate or start other agents, change provider/model, or modify the helper bridge's state/result directory. Do not commit, merge, or switch branches. Complete the requested work and report exact changed paths, checks actually run, results, and anything unresolved. A completed response is evidence for review, not automatic acceptance.${checkpoint}\n\n${request.prompt}`;
       const modelSelection = { instanceId: 'deepai', model: request.model, options: { thinking: 'high' } };
-      const command = previous ? { type: 'message.dispatch', createdBy: 'user', creationSource: 'web', commandId, threadId, messageId, text, attachments: [], modelSelection, dispatchMode: { type: 'start_immediately' } } : { commandId, threadId, projectId: project.projectId, title: request.title, generateTitle: false, modelSelection, runtimeMode: 'auto', interactionMode: 'default', workspaceStrategy: { type: 'root' }, initialMessage: { messageId, text, attachments: [] } };
-      const job = { version: 1, id, ...request, requestHash, workspaceKey: key, projectId: project.projectId, threadId, messageId, command, operation: previous ? 'continue' : 'launch', status: 'queued', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), resultDirectory: safeResultDirectory(workspace, id), cancelRequestedAt: null, lastError: null };
+      const command = continuing ? { type: 'message.dispatch', createdBy: 'user', creationSource: 'web', commandId, threadId, messageId, text, attachments: [], modelSelection, dispatchMode: { type: 'start_immediately' } } : { commandId, threadId, projectId: project.projectId, title: request.title, generateTitle: false, modelSelection, runtimeMode: 'auto', interactionMode: 'default', workspaceStrategy: { type: 'root' }, initialMessage: { messageId, text, attachments: [] } };
+      const job = { version: 1, id, ...request, requestHash, workspaceKey: key, projectId: project.projectId, threadId, messageId, command, operation: continuing ? 'continue' : 'launch', ...(freshContext ? { contextRotation: previous.context.status === 'exhausted' ? 'native-context-exhausted' : 'native-context-near-limit' } : {}), status: 'queued', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), resultDirectory: safeResultDirectory(workspace, id), cancelRequestedAt: null, lastError: null };
       this.db.prepare('INSERT INTO jobs(id,owner,request_key,workspace_key,thread_id,status,created_ms,data) VALUES(?,?,?,?,?,?,?,?)').run(id, job.owner, job.requestKey, key, threadId, job.status, Date.now(), JSON.stringify(job));
       this.event(id, 'queued', { owner: job.owner, threadId, messageId });
       return { job, reused: false };
@@ -217,5 +223,5 @@ export function writeResultFiles(job) {
 }
 
 export function publicJob(job) {
-  return { id: job.id, owner: job.owner, requestKey: job.requestKey, status: job.status, commandId: job.command?.commandId, previousJobId: job.previousJobId ?? null, resultSavedAt: job.resultSavedAt ?? null, nativeStatus: job.nativeStatus ?? null, threadId: job.threadId, messageId: job.messageId, runId: job.runId ?? null, workspace: job.workspace, model: job.model, createdAt: job.createdAt, submittedAt: job.submittedAt ?? null, completedAt: job.completedAt ?? null, lastProgressAt: job.lastProgressAt ?? null, cancelRequested: !!job.cancelRequestedAt, waitingFor: job.waitingFor ?? null, attention: job.attention ?? null, attentionUnavailableReason: job.attentionUnavailableReason ?? null, lastError: job.lastError, resultDirectory: job.resultDirectory, resultSaved: !!job.resultSavedAt };
+  return { id: job.id, owner: job.owner, requestKey: job.requestKey, status: job.status, commandId: job.command?.commandId, previousJobId: job.previousJobId ?? null, resultSavedAt: job.resultSavedAt ?? null, nativeStatus: job.nativeStatus ?? null, threadId: job.threadId, messageId: job.messageId, runId: job.runId ?? null, workspace: job.workspace, model: job.model, createdAt: job.createdAt, submittedAt: job.submittedAt ?? null, completedAt: job.completedAt ?? null, lastProgressAt: job.lastProgressAt ?? null, cancelRequested: !!job.cancelRequestedAt, waitingFor: job.waitingFor ?? null, attention: job.attention ?? null, attentionUnavailableReason: job.attentionUnavailableReason ?? null, context: job.context ?? { status: 'unknown' }, contextRotation: job.contextRotation ?? null, lastError: job.lastError, resultDirectory: job.resultDirectory, resultSaved: !!job.resultSavedAt };
 }

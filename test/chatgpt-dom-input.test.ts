@@ -28,6 +28,7 @@ interface DomApi {
   noteStopClick(target: Node): boolean;
   clearStoppedTurn(): void;
   retryLatestTransportFailure(current?: () => boolean, beforeRetry?: () => boolean, preserveComposerDraft?: boolean): { status: string; reason?: string };
+  interruptedTransportFailure(): HTMLElement | null;
   recoverNativeDisplayFailure(current: () => boolean): { status: string; reason?: string };
   sendButton(): HTMLButtonElement | null;
   temporaryChatReady(): boolean;
@@ -1975,6 +1976,40 @@ describe('a workspace page kept mounted behind the current one', () => {
     expect(api.noteStopClick(change === 'foreign' ? button : stop)).toBe(false);
     for (const control of document.querySelectorAll('[data-testid="stop-button"]')) control.remove();
     expect(api.generating()).toBe(true);
+  });
+
+  it.each([
+    'Connection interrupted. Please wait for the complete answer.',
+    'Message delivery timed out. Please try again.',
+    'Message delivery timed out. Please try again later.'
+  ])('identifies the exact current transport failure before a lingering Stop: %s', failure => {
+    box.textContent = '';
+    const shell = document.createElement('main');
+    shell.setAttribute('data-app-shell-main-surface', 'true');
+    shell.innerHTML = `<div data-thread-find-target="conversation"><div data-turn-key="transport-failed"><div data-chatgpt-agent-turn-start="true"></div><aside role="alert"><p>${failure}</p><button>Retry</button></aside></div></div>`;
+    document.body.append(shell);
+    const notice = shell.querySelector('aside')!;
+    const stop = document.createElement('button');
+    stop.setAttribute('data-testid', 'stop-button');
+    box.closest('form')!.append(stop);
+    const clicked = vi.fn(); stop.addEventListener('click', clicked);
+    expect(api.generating()).toBe(true);
+    expect(api.interruptedTransportFailure()).toBe(notice);
+    expect(clicked).not.toHaveBeenCalled();
+    box.textContent = 'Keep my draft';
+    expect(api.interruptedTransportFailure()).toBeNull();
+    box.textContent = '';
+    notice.classList.add('markdown');
+    expect(api.interruptedTransportFailure()).toBeNull();
+    notice.classList.remove('markdown');
+    notice.hidden = true;
+    expect(api.interruptedTransportFailure()).toBeNull();
+    notice.hidden = false;
+    const later = document.createElement('div');
+    later.setAttribute('data-turn-key', 'later-current-turn');
+    later.innerHTML = '<div data-chatgpt-agent-turn-start="true"></div>';
+    shell.querySelector('[data-turn-key]')!.after(later);
+    expect(api.interruptedTransportFailure()).toBeNull();
   });
 
   it.each([

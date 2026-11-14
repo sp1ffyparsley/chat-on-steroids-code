@@ -349,6 +349,84 @@ test('empty final response is incomplete instead of a false success', async t =>
   await runCycle(state, native); native.finish(job.threadId, ''); await runCycle(state, native);
   assert.equal(state.get(job.id).status, 'incomplete');
 });
+
+test('observes exact native context usage and starts the next authorized continuation in a fresh chat', async t => {
+  const { state, request } = fixture(t), native = new FakeNative(), job = state.enqueue(request()).job;
+  await runCycle(state, native);
+  const projection = native.projections.get(job.threadId), run = projection.runs[0];
+  run.activeAttemptId = 'context-attempt';
+  projection.providerTurns = [{ id: 'context-provider-turn', providerThreadId: run.providerThreadId,
+    runAttemptId: run.activeAttemptId, tokenUsage: { usedTokens: 292000, maxTokens: 320000,
+      updatedAt: new Date().toISOString() } }];
+  await runCycle(state, native);
+  assert.deepEqual(publicJob(state.get(job.id)).context, { status: 'near-limit', usedTokens: 292000,
+    maxTokens: 320000, percentUsed: 91.25, observedAt: projection.providerTurns[0].tokenUsage.updatedAt });
+  assert.equal(native.effects.size, 1); // Budget inspection cannot start or interrupt another turn.
+  assert.throws(() => state.enqueue({ owner: job.owner, requestKey: 'premature', prompt: 'Continue.' }, job.id), /Save the completed result/);
+  native.finish(job.threadId, 'Verified checkpoint; native acceptance is still open.');
+  await runCycle(state, native);
+  const completed = state.get(job.id);
+  assert.equal(completed.result.context.status, 'near-limit');
+  const nextRequest = { owner: job.owner, requestKey: 'context-successor', prompt: 'Continue independent authorized work.' };
+  const next = state.enqueue(nextRequest, job.id).job;
+  assert.equal(next.previousJobId, job.id);
+  assert.notEqual(next.threadId, job.threadId);
+  assert.equal(next.projectId, job.projectId);
+  assert.equal(next.operation, 'launch');
+  assert.equal(next.contextRotation, 'native-context-near-limit');
+  assert.ok(next.command.initialMessage.text.includes(path.join(completed.resultDirectory, 'result.json')));
+  assert.equal(state.enqueue(nextRequest, job.id).job.id, next.id);
+  assert.throws(() => state.enqueue({ ...nextRequest, requestKey: 'duplicate-successor' }, job.id), /pending continuation/);
+  await runCycle(state, native);
+  assert.equal(native.calls.filter(call => call.tag === 'orchestration.launchThread').length, 2);
+  assert.equal(native.calls.filter(call => call.tag === 'orchestration.dispatchCommand').length, 0);
+});
+
+test('an exhausted failed run needs its saved terminal checkpoint; cancellation never grants rotation', async t => {
+  const { state, request } = fixture(t), native = new FakeNative(), job = state.enqueue(request()).job;
+  await runCycle(state, native);
+  const projection = native.projections.get(job.threadId), run = projection.runs[0];
+  run.activeAttemptId = 'exhausted-attempt';
+  projection.providerTurns = [{ id: 'exhausted-turn', providerThreadId: run.providerThreadId,
+    runAttemptId: run.activeAttemptId, tokenUsage: { usedTokens: 320001, maxTokens: 320000,
+      updatedAt: new Date().toISOString() } }];
+  native.finish(job.threadId, 'Partial checkpoint, not acceptance.');
+  run.status = 'failed';
+  await runCycle(state, native);
+  const saved = state.get(job.id);
+  assert.equal(saved.status, 'failed'); assert.equal(saved.context.status, 'exhausted');
+  state.patch(job.id, { resultSavedAt: null });
+  const next = { owner: job.owner, requestKey: 'after-exhaustion', prompt: 'Reconcile the partial report, then do the next authorized item.' };
+  assert.throws(() => state.enqueue(next, job.id), /Save the completed result/);
+  state.patch(job.id, { status: 'cancelled', resultSavedAt: saved.resultSavedAt });
+  assert.throws(() => state.enqueue(next, job.id), /Save the completed result/);
+  state.patch(job.id, { status: 'failed' });
+  const successor = state.enqueue(next, job.id).job;
+  assert.notEqual(successor.threadId, job.threadId);
+  assert.equal(successor.contextRotation, 'native-context-exhausted');
+  assert.equal(successor.model, job.model); assert.equal(successor.workspace, job.workspace);
+});
+
+test('foreign, ambiguous, stale or malformed context usage never rotates a saved continuation', async t => {
+  const { state, request } = fixture(t), native = new FakeNative(), job = state.enqueue(request()).job;
+  await runCycle(state, native);
+  const projection = native.projections.get(job.threadId), run = projection.runs[0];
+  run.activeAttemptId = 'context-attempt';
+  const valid = { id: 'native-usage', providerThreadId: run.providerThreadId, runAttemptId: run.activeAttemptId,
+    tokenUsage: { usedTokens: 310000, maxTokens: 320000, updatedAt: new Date().toISOString() } };
+  for (const turns of [[{ ...valid, runAttemptId: 'foreign' }], [valid, { ...valid }],
+    [{ ...valid, tokenUsage: { ...valid.tokenUsage, updatedAt: '2000-01-01T00:00:00.000Z' } }],
+    [{ ...valid, tokenUsage: { ...valid.tokenUsage, usedTokens: '310000' } }]]) {
+    projection.providerTurns = turns;
+    await runCycle(state, native);
+    assert.equal(publicJob(state.get(job.id)).context?.status, 'unknown');
+  }
+  native.finish(job.threadId, 'A bounded verified result.');
+  await runCycle(state, native);
+  const next = state.enqueue({ owner: job.owner, requestKey: 'ordinary-next', prompt: 'Follow up.' }, job.id).job;
+  assert.equal(next.threadId, job.threadId);
+  assert.equal(next.operation, 'continue');
+});
 test('paid catalog change blocks admission instead of selecting a fallback', async t => {
   const { state, request } = fixture(t), native = new FakeNative(), job = state.enqueue(request()).job;
   native.config.providers[0].models[0].theosPerRequest = '3'; await runCycle(state, native);

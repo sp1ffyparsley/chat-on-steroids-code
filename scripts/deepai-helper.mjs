@@ -84,6 +84,24 @@ export function diagnosedJob(state, job, now = Date.now()) {
 export const recoveryNeeded = job => job.workerStatus === 'unavailable' || job.workerStatus === 'stale' ||
   ['native_unavailable', 'parent_control_unverified', 'parent_command_disabled'].includes(job.waitingFor);
 
+/** Native usage for this exact provider attempt, never a character/token estimate. */
+export function nativeContextState(projection, run, now = Date.now()) {
+  const unknown = { status: 'unknown' };
+  if (!run?.providerThreadId || !run.activeAttemptId || !Array.isArray(projection?.providerTurns)) return unknown;
+  const matches = projection.providerTurns.filter(turn => turn?.providerThreadId === run.providerThreadId &&
+    turn.runAttemptId === run.activeAttemptId);
+  if (matches.length !== 1) return unknown;
+  const usage = matches[0].tokenUsage, at = Date.parse(usage?.updatedAt), started = Date.parse(run.startedAt);
+  if (!Number.isSafeInteger(usage?.usedTokens) || usage.usedTokens < 0 ||
+      !Number.isSafeInteger(usage.maxTokens) || usage.maxTokens <= 0 || usage.maxTokens > 10_000_000 ||
+      !Number.isFinite(at) || !Number.isFinite(started) || at < started || at > now) return unknown;
+  return { status: usage.usedTokens >= usage.maxTokens ? 'exhausted'
+      : usage.usedTokens / usage.maxTokens >= 0.9 ? 'near-limit' : 'observed',
+    usedTokens: usage.usedTokens, maxTokens: usage.maxTokens,
+    percentUsed: Math.round(usage.usedTokens / usage.maxTokens * 10000) / 100,
+    observedAt: usage.updatedAt };
+}
+
 export function activeNativeIds(threads) {
   return new Set(threads.filter(thread => thread.providerInstanceId === 'deepai' && !thread.deletedAt && (thread.activeRunId || ACTIVE_NATIVE.has(thread.activityRunStatus) || ACTIVE_NATIVE.has(thread.status) || thread.pendingRuntimeRequest || thread.pendingBackgroundTasks?.length)).map(thread => thread.id));
 }
@@ -122,6 +140,7 @@ async function collectCompleted(state, connection, job) {
   const assistant = messages.filter(message => message.role === 'assistant');
   if (assistant.some(message => message.streaming)) throw new Error('Native response is still streaming; collection will retry.');
   const assistantText = assistant.map(message => message.text).filter(text => typeof text === 'string' && text.length).join('\n\n');
+  const context = nativeContextState(projection, run);
   const current = state.get(job.id);
   const status = run.status === 'completed' ? (assistantText ? 'completed' : 'incomplete') : current.cancelRequestedAt && ['interrupted', 'cancelled'].includes(run.status) ? 'cancelled' : 'failed';
   const attention = getNativeAttention(projection, run.id);
@@ -129,8 +148,8 @@ async function collectCompleted(state, connection, job) {
   // Keep only their sanitized attention projection, never the raw private cards.
   const privateCards = new Set(['approval_request', 'user_input_request', 'secret_request']);
   const toolItems = projection.turnItems.filter(item => item.runId === run.id && !privateCards.has(item.type));
-  const result = { version: 1, kind: 'completed-turn-result', jobId: job.id, owner: job.owner, threadId: job.threadId, messageId: job.messageId, requestHash: job.requestHash, workspace: job.workspace, run, messages, assistantText, retrievedAt: new Date().toISOString(), snapshotSequence: full.snapshotSequence, nativeError: projection.thread.lastError ?? null, attention, toolEvidence: { completeness: 'Native tool bodies can be omitted or truncated; private request cards are excluded. This is not a complete execution archive.', items: toolItems }, independentVerification: 'required' };
-  return state.patch(job.id, { status, nativeStatus: run.status, runId: run.id, completedAt: run.completedAt || new Date().toISOString(), result, attention: null, attentionUnavailableReason: null, waitingFor: null, lastError: status === 'incomplete' ? 'Native run completed without a final assistant response.' : status === 'failed' ? 'Native run did not complete successfully; inspect the saved result.' : null });
+  const result = { version: 1, kind: 'completed-turn-result', jobId: job.id, owner: job.owner, threadId: job.threadId, messageId: job.messageId, requestHash: job.requestHash, workspace: job.workspace, run, context, messages, assistantText, retrievedAt: new Date().toISOString(), snapshotSequence: full.snapshotSequence, nativeError: projection.thread.lastError ?? null, attention, toolEvidence: { completeness: 'Native tool bodies can be omitted or truncated; private request cards are excluded. This is not a complete execution archive.', items: toolItems }, independentVerification: 'required' };
+  return state.patch(job.id, { status, nativeStatus: run.status, runId: run.id, context, completedAt: run.completedAt || new Date().toISOString(), result, attention: null, attentionUnavailableReason: null, waitingFor: null, lastError: status === 'incomplete' ? 'Native run completed without a final assistant response.' : status === 'failed' ? 'Native run did not complete successfully; inspect the saved result.' : null });
 }
 
 async function requestStop(state, connection, job, run, reason) {
@@ -176,7 +195,7 @@ async function observeJob(state, connection, job, threads, now) {
   const fingerprint = progressHash(projection, run, attention);
   const current = state.get(job.id);
   const effectiveAttention = preservePendingAttention(current.attention, attention);
-  state.patch(job.id, { status: current.cancelRequestedAt ? 'stopping' : run.status === 'waiting' || effectiveAttention?.pendingCount ? 'waiting' : 'active', nativeStatus: run.status, runId: run.id, nativeStartedAt: run.startedAt, attention: effectiveAttention ? { ...effectiveAttention, ...(attention.available || attention.pendingCount ? { observedAt: new Date(now).toISOString() } : {}) } : null, attentionUnavailableReason: attention.available ? null : attention.reason, waitingFor: effectiveAttention?.pendingCount ? 'native_attention' : run.status === 'waiting' ? 'native_waiting' : null, ...(fingerprint !== current.progressHash ? { progressHash: fingerprint, lastProgressAt: new Date(now).toISOString() } : {}), lastError: null });
+  state.patch(job.id, { status: current.cancelRequestedAt ? 'stopping' : run.status === 'waiting' || effectiveAttention?.pendingCount ? 'waiting' : 'active', nativeStatus: run.status, runId: run.id, context: nativeContextState(projection, run, now), nativeStartedAt: run.startedAt, attention: effectiveAttention ? { ...effectiveAttention, ...(attention.available || attention.pendingCount ? { observedAt: new Date(now).toISOString() } : {}) } : null, attentionUnavailableReason: attention.available ? null : attention.reason, waitingFor: effectiveAttention?.pendingCount ? 'native_attention' : run.status === 'waiting' ? 'native_waiting' : null, ...(fingerprint !== current.progressHash ? { progressHash: fingerprint, lastProgressAt: new Date(now).toISOString() } : {}), lastError: null });
   const elapsed = now - Date.parse(run.startedAt || current.submittedAt || current.createdAt);
   if (current.cancelRequestedAt || elapsed >= job.maxRunMinutes * 60000) await requestStop(state, connection, state.get(job.id), run, current.cancelReason || `Helper exceeded its ${job.maxRunMinutes}-minute run deadline`);
   return true;

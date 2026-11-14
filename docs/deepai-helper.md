@@ -4,6 +4,10 @@
 
 The bridge owns native execution and its shared queue. The Core integration binds helpers to their actual parent and adds bounded result notices to later eligible Core tool responses. Existing CoS Goal, Loop, input and broker owners still decide when chats run. This integration does not wake an idle chat by itself, resume a stalled CoS turn, alter production prompts or replace the parent task's acceptance checks.
 
+Verified native transport versions are 0.3.36 and 0.3.37, both with orchestration protocol 2. Other versions still fail before credential issuance; protocol equality alone does not admit a new release. A desktop upgrade can therefore require a reviewed bridge update. Source CLI readiness is separate from the CLI bundled in an already running CoS program.
+
+Helper status and saved results include exact native context usage for the matching provider thread and run attempt: used/max tokens, percentage and observation time. Missing, stale, conflicting or malformed usage is `unknown`, never an estimated healthy budget. At 90% usage, the next authorized `continue` uses a fresh native chat in the same project/workspace/model and links the saved prior result as its checkpoint. The prior run must be terminal and its report saved first; an exhausted failed run may supply a partial checkpoint, but cancellation, an active run and an unsaved result cannot. The new request retains its own durable command/job identity, parent controls and capacity checks. No background compaction interrupts accepted work, no uncertain mutation is replayed, and unrelated manually created DeepAI chats are not adopted. This checkpoint handoff is not proof that unfinished product work passed acceptance.
+
 ## CoS integration and activation boundary
 
 The source now registers a Core `deepai_helper` tool. Its actions are `submit`, `continue`, `status`, `result`, `inbox`, `cancel`, `recover`, `readiness` and `ack`. The model cannot supply an owner, target session or Chrome profile: the server derives parent custody from the exact admitted Core request, stable local session and account/profile identity. A missing identity proof refuses the request rather than guessing the chat. Submission and continuation recheck approved workspace access.
@@ -35,7 +39,7 @@ Already-dispatched work remains observable and can finish/save while paused. Exp
 
 ## Requirements and shared state
 
-- Keep **DeepAI Code 0.3.36** running and signed in. The client requires orchestration protocol **2**; another version is refused before new native work. A closed app or unsupported build leaves pending work waiting for a usable connection.
+- Keep **DeepAI Code 0.3.36 or 0.3.37** running and signed in. The client requires orchestration protocol **2**; an unreviewed version is refused before new native work. A closed app or unsupported build leaves pending work waiting for a usable connection.
 - Run commands from the checkout containing the helper scripts, using its existing dependencies and Node 24; local validation used **Node 24.19.0 on Windows**. No desktop rebuild or installer is needed for these CLI scripts.
 - Native discovery/credential-command defaults and installed acceptance currently target Windows. Portable Core declarations are not macOS native acceptance; a Mac runtime layout and activation need separate validation.
 - The default state directory is `%USERPROFILE%\.cos-deepai-bridge`, containing `state.sqlite` and `worker.log`. All Chrome profiles and callers using the same Windows user share that directory and queue. Use the same checkout and state directory for the team.

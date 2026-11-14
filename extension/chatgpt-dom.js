@@ -4908,8 +4908,9 @@ var CLF_DOM = (() => {
     const section = latest ? turnNodes(latest).at(-1) : null;
     const matches = errors().filter(error => {
       if (!error.recoverable || error.blocking || error.reason || !error.node?.isConnected ||
-          !displayed(error.node) || retriedTransportControls.has(error.node) ||
-          !/^connection interrupted\.? (?:waiting|please wait) for the complete answer\.?(?: retry)?$/i.test(
+          !displayed(error.node) || error.node.closest('[hidden],[inert],[aria-hidden="true"]') ||
+          retriedTransportControls.has(error.node) ||
+          !/^(?:connection interrupted\.? (?:waiting|please wait) for the complete answer\.?|message delivery timed out\.? please try again(?: later)?\.?)(?: retry)?$/i.test(
             String(error.text || '').replace(/\s+/g, ' ').trim())) return false;
       // An authored alert/quote can repeat the exact provider wording. It is
       // diagnostic text, never authority to interrupt the live native answer.

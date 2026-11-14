@@ -139,7 +139,21 @@ describe('DeepAI paired transport', () => {
     expect(f.sockets[0]!.listenerCount('message')).toBe(0);
   });
 
-  it.each([{ serverVersion: '0.3.37', orchestrationProtocolVersion: 2 },
+  it('accepts the reviewed 0.3.37 protocol-2 transport with the same scoped credentials', async () => {
+    const f = fixture({ descriptor: { ...descriptor, serverVersion: '0.3.37' } });
+    const client = await f.connect();
+    expect(client.descriptor.serverVersion).toBe('0.3.37');
+    expect(f.command.mock.calls[0]![0]).toEqual(['auth', 'session', 'issue', '--scope', scopes[0],
+      '--scope', scopes[1], '--ttl', '1h', '--label', 'CoS DeepAI native integration', '--json']);
+    const probe = client.rpc('server.probe', {});
+    const request = f.sockets[0]!.sent.at(-1)!;
+    f.sockets[0]!.reply(request.id, { ok: true });
+    await expect(probe).resolves.toEqual({ ok: true });
+  });
+
+  it.each([{ serverVersion: '0.3.38', orchestrationProtocolVersion: 2 },
+    { serverVersion: '0.3.37', orchestrationProtocolVersion: 1 },
+    { serverVersion: '0.3.37', orchestrationProtocolVersion: 3 },
     { serverVersion: '0.3.36', orchestrationProtocolVersion: 1 }])(
     'rejects unsupported descriptor %j before issuing credentials', async bad => {
       const f = fixture({ descriptor: bad });

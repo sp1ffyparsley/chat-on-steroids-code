@@ -10,7 +10,9 @@ import WebSocket from 'ws';
 const baseDir = process.env.COS_DEEPAI_HOME || path.join(homedir(), '.deepai-code');
 const desktop = process.env.COS_DEEPAI_DESKTOP_EXE || path.join(homedir(), 'AppData', 'Local', 'Programs', 'deepai-code-desktop', 'DeepAI Code.exe');
 const serverEntry = path.join(path.dirname(desktop), 'resources', 'server.asar', 'apps', 'server', 'dist', 'bin.mjs');
-const SERVER_VERSION = '0.3.36';
+// Reviewed native releases only: a shared protocol number is not blanket permission
+// to accept future server versions. Keep transport, custody and model checks unchanged.
+const SERVER_VERSIONS = new Set(['0.3.36', '0.3.37']);
 const PROTOCOL_VERSION = 2;
 const SCOPES = ['orchestration:read', 'orchestration:operate'];
 const MAX_BYTES = 8 * 1024 * 1024;
@@ -19,7 +21,7 @@ const READ_RPC = new Set(['server.probe', 'server.getConfig', 'orchestration.get
 const MESSAGES = {
   NATIVE_RUNTIME_UNAVAILABLE: 'Cannot read the installed DeepAI runtime descriptor.',
   NATIVE_LOOPBACK_REQUIRED: 'DeepAI requests must stay on the discovered HTTP 127.0.0.1 origin.',
-  NATIVE_VERSION_UNSUPPORTED: 'DeepAI requires verified server version 0.3.36 and orchestration protocol 2.',
+  NATIVE_VERSION_UNSUPPORTED: 'DeepAI requires verified server version 0.3.36 or 0.3.37 and orchestration protocol 2.',
   NATIVE_AUTH_ISSUE_FAILED: 'Could not issue a scoped local DeepAI client credential.',
   NATIVE_AUTH_INVALID: 'The local credential response has invalid identity, scopes or expiration.',
   NATIVE_CREDENTIAL_EXPIRED: 'The local credential expired. Reconnect, then inspect existing work before resubmission.',
@@ -280,7 +282,7 @@ export async function connectNative({ websocket = false } = {}, dependencies = {
   };
   const http = async (route, options = {}) => request(requestUrl(route, originText), options);
   const descriptor = await request(new URL('/.well-known/t3/environment', originText), {}, false);
-  if (descriptor?.serverVersion !== SERVER_VERSION || descriptor.orchestrationProtocolVersion !== PROTOCOL_VERSION)
+  if (!SERVER_VERSIONS.has(descriptor?.serverVersion) || descriptor.orchestrationProtocolVersion !== PROTOCOL_VERSION)
     throw new NativeClientError('NATIVE_VERSION_UNSUPPORTED');
 
   try {

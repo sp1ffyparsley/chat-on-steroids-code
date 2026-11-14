@@ -3515,13 +3515,17 @@
 
   function autoRetryFailedTurnObservation() {
     if (!alive || !conversationId || CLF_DOM.conversationId() !== conversationId ||
-        nativeApprovalPolicy?.paused !== false || !goalUsable() || generating || CLF_DOM.generating() ||
+        nativeApprovalPolicy?.paused !== false || !goalUsable() ||
         goalBusy || !CLF_DOM.composer() || pendingTools !== 0 || nativeBusy || job?.busy ||
         desktopInputBusy || modelCatalogBusy || pluginRefreshBusy || recoveryStopping) return;
     const candidates = CLF_DOM.errors().filter(error => error.recoverable === true &&
       error.blocking !== true && !error.reason && error.retry?.isConnected);
     if (candidates.length !== 1) return;
     const error = candidates[0];
+    // A provider-owned delivery timeout can retain Stop indefinitely. Reannounce
+    // only the exact failure admitted by the incumbent Stop -> Retry owner; this
+    // observation neither clicks Stop/Retry nor grants a new-message Send.
+    if ((generating || CLF_DOM.generating()) && CLF_DOM.interruptedTransportFailure?.() !== error.node) return;
     const now = Date.now();
     const prior = observedRetryCards.get(error.retry);
     const recordedTurn = localErrorGeneration(error) || null;
