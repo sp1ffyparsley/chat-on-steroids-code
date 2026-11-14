@@ -641,6 +641,8 @@ export interface ExecCommandRequest {
 }
 
 export interface WriteStdinRequest {
+  /** Recheck the caller's existing custody after waiting for the draining lock. */
+  current?: () => boolean;
   processId: number;
   input: string;
   yieldTimeMs: number;
@@ -821,6 +823,8 @@ export class UnifiedExecProcessManager {
     try {
       const current = this.processes.get(request.processId);
       if (!current || current.process !== locked) throw UnifiedExecError.unknownProcessId(request.processId);
+      if (request.current && !request.current())
+        throw new Error('EXEC_SESSION_OWNER_CHANGED: terminal ownership changed before input or output collection; nothing was read or written');
       const { process, tty } = { process: current.process, tty: current.tty };
 
       let statusAfterWrite: ProcessStatus | null = null;
@@ -918,6 +922,16 @@ export class UnifiedExecProcessManager {
     } finally {
       release();
     }
+  }
+
+  /** Aggregate admission pressure; no command, output, process ID or ownership is exposed. */
+  terminalCapacity(): { limit: number; retained: number; running: number; exitedRetained: number; starting: number } {
+    let running = 0, exitedRetained = 0;
+    for (const entry of this.processes.values()) {
+      if (entry.process.hasExited()) exitedRetained++; else running++;
+    }
+    return { limit: MAX_UNIFIED_EXEC_PROCESSES, retained: this.reservedProcessIds.size,
+      running, exitedRetained, starting: Math.max(0, this.reservedProcessIds.size - this.processes.size) };
   }
 
   /** Live sessions, oldest id first. */

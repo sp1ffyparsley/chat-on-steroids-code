@@ -43,6 +43,33 @@ it('retains a failed publication, rejects concurrent receipts, and retires only 
   expect(manager.backgroundState(owned).exitedUnread).toEqual([]);
 });
 
+it('reports finished unread capacity separately from live work and frees it only after collection', async () => {
+  const { manager, id } = await child('finished-but-retained', 0);
+  expect(manager.terminalCapacity()).toEqual({ limit: 64, retained: 1, running: 0, exitedRetained: 1, starting: 0 });
+  const output = await manager.writeStdin({ processId: id, input: '', yieldTimeMs: 1,
+    maxOutputTokens: undefined, truncationPolicy: policy });
+  expect(output.rawOutput.toString('utf8')).toBe('finished-but-retained');
+  expect(output.exitCode).toBe(0);
+  expect(manager.terminalCapacity()).toEqual({ limit: 64, retained: 0, running: 0, exitedRetained: 0, starting: 0 });
+});
+
+it('rechecks revoked custody under the output lock without consuming any finished output', async () => {
+  const { manager, id } = await child('retained-after-revocation', 0);
+  const entry = (manager as any).processes.get(id);
+  const release = await entry.process.interactionLock.lock();
+  let current = true;
+  const denied = manager.writeStdin({ processId: id, input: '', yieldTimeMs: 1,
+    maxOutputTokens: undefined, truncationPolicy: policy, current: () => current });
+  const expectation = expect(denied).rejects.toThrow('EXEC_SESSION_OWNER_CHANGED');
+  current = false;
+  release();
+  await expectation;
+  expect(manager.terminalCapacity().exitedRetained).toBe(1);
+  const output = await manager.writeStdin({ processId: id, input: '', yieldTimeMs: 1,
+    maxOutputTokens: undefined, truncationPolicy: policy, current: () => true });
+  expect(output.rawOutput.toString('utf8')).toBe('retained-after-revocation');
+});
+
 it('pages large Unicode results without loss and gives an explicit poll only the unacknowledged suffix', async () => {
   const output = '😀ä漢字\n'.repeat(2_000);
   const { manager, owned, id } = await child(output);

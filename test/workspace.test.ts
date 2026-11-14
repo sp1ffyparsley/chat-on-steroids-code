@@ -14,6 +14,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { emptyEvidence, runInCallContext, type CallContext } from '../src/main/mcp/call-context.js';
 import {
   execOwner,
+  execOwnershipLease,
   execOwnershipFailure,
   forgetExecOwner,
   noteExecOwner,
@@ -98,6 +99,40 @@ beforeEach(() => {
 });
 
 describe('live process ownership across chat replacement', () => {
+  it('lets an explicitly allowed external caller drain only its returned terminal capability', () => {
+    const token = noteExecOwner(104, null, 'wfr-external-command', { allowUnattributed: true });
+    expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(execOwner(104)).toBeNull();
+    expect(execOwnershipFailure(104, null, { allowUnattributed: true })).toBe('token-required');
+    expect(execOwnershipFailure(104, null, { sessionToken: 'x'.repeat(43), allowUnattributed: true })).toBe('token-mismatch');
+    expect(execOwnershipFailure(104, null, { sessionToken: token!, allowUnattributed: true })).toBeNull();
+    expect(execOwnershipFailure(104, null, { sessionToken: token!, allowUnattributed: false })).toBe('unidentified');
+    expect(execOwnershipFailure(104, 'session-other', { sessionToken: token!, allowUnattributed: true })).toBe('unidentified');
+  });
+
+  it('revokes external terminal capabilities on ID reuse and exact late chat ownership', () => {
+    const first = noteExecOwner(104, null, 'wfr-external-first', { allowUnattributed: true });
+    const oldCleanup = execOwnershipLease(104);
+    forgetExecOwner(104);
+    const second = noteExecOwner(104, null, 'wfr-external-second', { allowUnattributed: true });
+    expect(second).not.toBe(first);
+    forgetExecOwner(104, oldCleanup);
+    expect(execOwnershipFailure(104, null, { sessionToken: first!, allowUnattributed: true })).toBe('token-mismatch');
+    expect(execOwnershipFailure(104, null, { sessionToken: second!, allowUnattributed: true })).toBeNull();
+    observeRequestCorrelation({ requestId: 'wfr-external-second', conversationId: 'conv-real-owner',
+      sessionId: 'session-real-owner', messageId: 'message-real-owner', tool: 'exec_command', observedAt: 1 });
+    expect(execOwnershipFailure(104, null, { sessionToken: second!, allowUnattributed: true })).toBe('unidentified');
+    expect(execOwnershipFailure(104, 'session-real-owner')).toBeNull();
+    expect(execOwnershipFailure(104, 'session-other', { sessionToken: second!, allowUnattributed: true })).toBe('different-owner');
+  });
+
+  it('issues no external capability without the explicit permission or for a proven chat', () => {
+    expect(noteExecOwner(104, null, 'wfr-unapproved', { allowUnattributed: false })).toBeNull();
+    expect(execOwnershipFailure(104, null, { sessionToken: 'x'.repeat(43), allowUnattributed: true })).toBe('unidentified');
+    expect(noteExecOwner(105, 'session-known', 'wfr-known', { allowUnattributed: true })).toBeNull();
+    expect(execOwnershipFailure(105, null, { sessionToken: 'x'.repeat(43), allowUnattributed: true })).toBe('unidentified');
+  });
+
   it('keeps a first terminal reachable after its exact request gains late session proof', () => {
     noteExecOwner(104, null, 'wfr-first-command-late');
     observeRequestCorrelation({ requestId: 'wfr-first-command-late', conversationId: 'conv-late-owner',

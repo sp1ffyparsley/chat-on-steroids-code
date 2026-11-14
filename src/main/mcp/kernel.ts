@@ -1022,6 +1022,16 @@ async function dispatchTracked(
         part.resource?.mimeType === 'application/vnd.chat-on-steroids.result-receipt+json'));
     if (content.length !== delivered.content.length) delivered = { ...delivered, content };
   }
+  // Metadata must not turn a text-only tool into a receipt-only structured result.
+  // Mirror already bounded text for structured-preferring clients, including nested
+  // calls; preserve typed schemas and keep native binary/resource carriers in content.
+  if (surface === 'core' && (!delivered.structuredContent || Object.keys(delivered.structuredContent).length === 0) &&
+      delivered.content.some(part => part.type === 'text')) {
+    delivered = { ...delivered, structuredContent: {
+      output: delivered.content.filter((part): part is Extract<ToolContent, { type: 'text' }> =>
+        part.type === 'text').map(part => part.text).join('\n')
+    } };
+  }
   const recorderStartedAt = Date.now();
   // Event duration includes identity/handler/delivery work. Recorder and local HTTP finish
   // are measured separately because a row cannot contain the time of its own later commit.

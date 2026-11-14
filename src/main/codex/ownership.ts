@@ -15,6 +15,7 @@
  */
 
 import { requestCorrelation } from '../session/correlation.js';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { unifiedExecManager } from './manager.js';
 import type { BackgroundExecState, OutputPublication } from './unified-exec.js';
 import { truncateText } from './truncate.js';
@@ -43,7 +44,8 @@ export const UNATTENDED_EXEC_NOTICE_MS = 120_000;
 const NOTICES_PER_KIND = 3;
 
 /** The admitted launch's request retains custody until its exact page/session proof arrives. */
-interface ExecOwner { sessionId: string | null; requestId: string | null }
+interface ExecOwner { sessionId: string | null; requestId: string | null; sessionToken?: string }
+interface ExternalTerminalAccess { allowUnattributed?: boolean; sessionToken?: string }
 /** Owners, keyed by the process id `exec_command` handed back as `session_id`. */
 const owners = new Map<number, ExecOwner>();
 
@@ -97,10 +99,18 @@ export function provenSession(requestId: string | null, sessionId: string | null
  * existing first-proof-wins registry supplies the durable session. A requestless legacy launch
  * keeps its anonymous boundary and is never adopted by a subsequently identified chat.
  */
-export function noteExecOwner(processId: number | null, sessionId: string | null, requestId: string | null = null): void {
-  if (processId === null) return;
-  owners.set(processId, { sessionId, requestId });
+export function noteExecOwner(processId: number | null, sessionId: string | null, requestId: string | null = null,
+  options: ExternalTerminalAccess = {}): string | null {
+  if (processId === null) return null;
+  const resolved = provenSession(requestId, sessionId);
+  // An explicitly permitted external client may have no browser recorder to ever
+  // prove its request. Give only the returned terminal a strong capability, not
+  // an invented chat/session identity or access to another terminal.
+  const sessionToken = resolved === null && requestId && options.allowUnattributed === true
+    ? randomBytes(32).toString('base64url') : undefined;
+  owners.set(processId, { sessionId: resolved, requestId, ...(sessionToken ? { sessionToken } : {}) });
   attendedAt.set(processId, Date.now());
+  return sessionToken ?? null;
 }
 
 /**
@@ -119,8 +129,14 @@ export function noteExecAttended(processId: number | null): void {
 }
 
 /** Drops a session's owner once it can no longer be written to. */
-export function forgetExecOwner(processId: number | null): void {
+export function execOwnershipLease(processId: number): () => boolean {
+  const entry = owners.get(processId);
+  return () => owners.get(processId) === entry;
+}
+
+export function forgetExecOwner(processId: number | null, current?: () => boolean): void {
   if (processId === null) return;
+  if (current && !current()) return;
   owners.delete(processId);
   attendedAt.delete(processId);
   noticeOffers.delete(processId);
@@ -149,11 +165,12 @@ export async function releaseOwnedExecRuntime(
   if (!sessionId || !stillOwned()) return [];
   const processIds = processIdsOwnedBy(sessionId);
   if (processIds.size === 0) return [];
+  const leases = new Map([...processIds].map(id => [id, execOwnershipLease(id)]));
   const terminated = await unifiedExecManager.terminateIdleProcesses(
     processIds,
-    (processId) => resolveExecOwner(owners.get(processId)) === sessionId && stillOwned()
+    (processId) => leases.get(processId)?.() === true && resolveExecOwner(owners.get(processId)) === sessionId && stillOwned()
   );
-  for (const processId of terminated) forgetExecOwner(processId);
+  for (const processId of terminated) forgetExecOwner(processId, leases.get(processId));
   return terminated;
 }
 
@@ -200,8 +217,10 @@ export async function acknowledgeBackgroundExecOutput(
   sessionId: string | null | undefined, startedAt: number, except?: number
 ): Promise<void> {
   if (!sessionId) return;
-  const retired = await unifiedExecManager.acknowledgeCompletedOutput(processIdsOwnedBy(sessionId), startedAt, except);
-  for (const id of retired) forgetExecOwner(id);
+  const ids = processIdsOwnedBy(sessionId);
+  const leases = new Map([...ids].map(id => [id, execOwnershipLease(id)]));
+  const retired = await unifiedExecManager.acknowledgeCompletedOutput(ids, startedAt, except);
+  for (const id of retired) forgetExecOwner(id, leases.get(id));
 }
 
 /** One bounded page from the retained terminal buffer; this function never reruns a command. */
@@ -223,16 +242,27 @@ export async function offerBackgroundExecOutput(
 /**
  * Whether `sessionId` may write to `processId`.
  *
- * Proven sessions require the same proven caller. An unproven request-backed launch refuses
- * every caller until exact session proof arrives; a requestless anonymous launch keeps its
- * legacy anonymous boundary. A process with no registry entry at all is refused.
+ * Proven sessions require the same proven caller. Explicitly allowed unassigned clients can
+ * present only the capability returned for this terminal incarnation; it never grants chat
+ * identity and becomes unusable when late native proof resolves the owner. Other unproven
+ * request-backed launches remain closed. Requestless legacy semantics are unchanged.
  */
-export function execOwnershipFailure(processId: number, sessionId: string | null):
-  'unavailable' | 'anonymous' | 'unidentified' | 'different-owner' | null {
+export function execOwnershipFailure(processId: number, sessionId: string | null, options: ExternalTerminalAccess = {}):
+  'unavailable' | 'anonymous' | 'unidentified' | 'different-owner' | 'token-required' | 'token-mismatch' | null {
   if (!owners.has(processId)) return 'unavailable';
   const held = owners.get(processId)!;
   const owner = resolveExecOwner(held);
-  if (owner === null) return held.requestId ? 'unidentified' : sessionId === null ? null : 'anonymous';
+  if (owner === null) {
+    if (held.sessionToken) {
+      if (sessionId !== null) return 'unidentified';
+      if (options.allowUnattributed !== true) return 'unidentified';
+      if (!options.sessionToken) return 'token-required';
+      const token = options.sessionToken;
+      return /^[A-Za-z0-9_-]{43}$/.test(token) && token.length === held.sessionToken.length &&
+        timingSafeEqual(Buffer.from(token), Buffer.from(held.sessionToken)) ? null : 'token-mismatch';
+    }
+    return held.requestId ? 'unidentified' : sessionId === null ? null : 'anonymous';
+  }
   if (!sessionId) return 'unidentified';
   return owner === sessionId ? null : 'different-owner';
 }

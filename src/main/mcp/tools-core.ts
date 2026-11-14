@@ -53,6 +53,8 @@ import { formatExecOutputForModel, newStreamOutput } from '../codex/exec-output.
 import { DEFAULT_TRUNCATION_POLICY, EXEC_OUTPUT_CEILING_POLICY, unifiedExecManager } from '../codex/manager.js';
 import {
   backgroundExecObligations,
+  execOwner,
+  execOwnershipLease,
   execOwnershipFailure,
   forgetExecOwner,
   MAX_UNREAD_EXEC_RESULTS_PER_CONVERSATION,
@@ -202,6 +204,7 @@ const unifiedExecOutputSchema = z
       .number()
       .optional()
       .describe('Use with write_stdin while the process is running.'),
+    session_token: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(),
     original_token_count: z.number().optional().describe('Estimated tokens before truncation.'),
     output: z.string().describe('Command output; may be truncated.'),
     supplemental_context: z.string().optional().describe('App context, not process output.'),
@@ -272,7 +275,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   })), async () => guard('settings_read', async () => {
     if (!caps.read && !caps.browse && !caps.metadata && !caps.command) return fail('TOOL_DISABLED: settings inspection requires a reading or command permission.');
-    try { return ok(JSON.stringify(readRemoteAgentSettings())); }
+    try { return ok(JSON.stringify({ ...readRemoteAgentSettings(), terminalSessions: unifiedExecManager.terminalCapacity() })); }
     catch (error) {
       if (error instanceof SettingsControlError) return fail(error.message);
       throw error;
@@ -851,30 +854,48 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
             // separate registry. Clear any stale row at the allocation boundary so a recycled
             // id cannot briefly authorize its previous chat before this call publishes the new owner.
             forgetExecOwner(processId);
-
-            const ripgrep = locateRipgrep();
-            const executionCommand = deriveExecArgs(shell,
-              withPosixPathPrefix(boundCommand, shell.shellType, ripgrep ? nodePath.dirname(ripgrep) : null), useLoginShell);
-            const output = await unifiedExecManager.execCommand({
-              batchMarker: batch?.marker,
-              command: executionCommand,
-              shellType: shell.shellType,
-              hookCommand: commandDetail,
-              processId,
-              yieldTimeMs: input.yield_time_ms ?? DEFAULT_EXEC_YIELD_TIME_MS,
-              maxOutputTokens: undefined,
-              truncationPolicy: EXEC_OUTPUT_CEILING_POLICY,
-              cwd: dir.real,
-              displayCwd: dir.virtual,
-              env: execChildEnvironment(),
-              tty: input.tty ?? DEFAULT_TTY
-            });
+            let sessionToken: string | null = null;
+            let custody: (() => boolean) | undefined;
+            let managerCalled = false;
+            let output: ExecCommandToolOutput;
+            try {
+              // Register while the ID is exclusively reserved, before yielding to
+              // process creation. A recycled ID can never briefly expose a new
+              // process through its predecessor's delayed owner publication.
+              sessionToken = noteExecOwner(processId, owner, launchRequestId,
+                { allowUnattributed: getConfig().multiAgent.allowUnattributedCalls });
+              custody = execOwnershipLease(processId);
+              const ripgrep = locateRipgrep();
+              const executionCommand = deriveExecArgs(shell,
+                withPosixPathPrefix(boundCommand, shell.shellType, ripgrep ? nodePath.dirname(ripgrep) : null), useLoginShell);
+              managerCalled = true;
+              output = await unifiedExecManager.execCommand({
+                batchMarker: batch?.marker,
+                command: executionCommand,
+                shellType: shell.shellType,
+                hookCommand: commandDetail,
+                processId,
+                yieldTimeMs: input.yield_time_ms ?? DEFAULT_EXEC_YIELD_TIME_MS,
+                maxOutputTokens: undefined,
+                truncationPolicy: EXEC_OUTPUT_CEILING_POLICY,
+                cwd: dir.real,
+                displayCwd: dir.virtual,
+                env: execChildEnvironment(),
+                tty: input.tty ?? DEFAULT_TTY
+              });
+            } catch (error) {
+              forgetExecOwner(processId, custody);
+              if (!managerCalled) unifiedExecManager.releaseProcessId(processId);
+              throw error;
+            }
             // Which durable local session may later write to this process id. The frontend
             // conversation is replaceable during Compact & Resume; the local session is not.
             if (output.processId === null) {
-              forgetExecOwner(processId);
+              forgetExecOwner(processId, custody);
+              sessionToken = null;
             } else {
-              noteExecOwner(output.processId, owner, launchRequestId);
+              if (execOwner(output.processId) !== null) sessionToken = null;
+              if (sessionToken) logInfo(`exec_command: unassigned terminal capability issued for session ${output.processId}; chat identity remains unverified`);
             }
             const responseText = execCommandResponseText(output);
             // A search that found nothing exits 1 and has not failed. Recording it as an
@@ -927,6 +948,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
                   ]
                 : [];
             const notes = [
+              ...(sessionToken ? [`This unassigned terminal requires session_token=${sessionToken} with the same session_id in write_stdin. Keep this capability with the original command; it grants no chat identity.`] : []),
               ...commandNotes,
               ...mixedBatch,
               ...(benign
@@ -960,11 +982,17 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
               content: [{ type: 'text' as const, text: withExecNotes(responseText, notes) }],
               structuredContent: {
                 ...execCommandStructuredOutput(output),
+                ...(sessionToken ? { session_token: sessionToken } : {}),
                 ...(notes.length > 0 ? { supplemental_context: execNotesText(notes) } : {})
               }
             };
           } catch (error) {
             const detail = error instanceof UnifiedExecError ? error.debug() : friendlyError(error);
+            if (error instanceof UnifiedExecError && detail.includes('too many retained terminal sessions')) {
+              const capacity = unifiedExecManager.terminalCapacity();
+              logWarn(`exec_command: terminal capacity exhausted; running=${capacity.running} exitedRetained=${capacity.exitedRetained} starting=${capacity.starting} limit=${capacity.limit}`);
+              return fail(`EXEC_TERMINAL_CAPACITY: ${detail}. Running=${capacity.running}, finished-but-retained=${capacity.exitedRetained}, starting=${capacity.starting}. Collect your original session_id/session_token with write_stdin; settings_read also reports aggregate terminalSessions. No command was started; do not replay an uncertain earlier command.`);
+            }
             return fail(`exec_command failed for \`${shlexJoin(command)}\`: ${detail}`);
           }
         })
@@ -977,6 +1005,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
         inputSchema: z
           .object({
             session_id: int32Number.describe(WRITE_STDIN_SESSION_ID_DESCRIPTION),
+            session_token: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(),
             chars: z.string().optional().describe(WRITE_STDIN_CHARS_DESCRIPTION),
             yield_time_ms: unsignedIntegerNumber.optional().describe(WRITE_STDIN_YIELD_TIME_DESCRIPTION),
             max_output_tokens: unsignedIntegerNumber.optional().describe(MAX_OUTPUT_TOKENS_DESCRIPTION)
@@ -989,12 +1018,15 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
           // The ownership registry decides both admission and the reason for refusal.
           // Missing caller proof is retryable; anonymous custody and a different owner are not.
           const asking = await execSession('write_stdin');
-          const denied = execOwnershipFailure(input.session_id, asking);
+          const denied = execOwnershipFailure(input.session_id, asking,
+            { sessionToken: input.session_token, allowUnattributed: getConfig().multiAgent.allowUnattributedCalls });
           if (denied) {
             const reason = {
               unavailable: 'EXEC_SESSION_UNAVAILABLE: This process id is not available to this call in the running app. Check the original exec_command response and earlier results for its exit/output before deciding what remains; do not rerun the command solely because its id is unavailable.',
               anonymous: 'EXEC_SESSION_ANONYMOUS: This process was launched without proven chat identity. An identified chat cannot adopt it. Check the original command and its saved output; retrying from this identified chat cannot change its ownership.',
               unidentified: 'EXEC_CALLER_UNIDENTIFIED: The exact chat ownership of this call or its launching request is not yet proven, so it cannot access this owned process. After exact identity recovers, retry this same session_id once; do not launch a replacement command.',
+              'token-required': 'EXEC_SESSION_TOKEN_REQUIRED: Return session_token from the original exec_command result with this same session_id. No replacement command is needed. The token does not establish chat ownership.',
+              'token-mismatch': 'EXEC_SESSION_TOKEN_MISMATCH: This capability does not match this terminal incarnation. Read the original command result and keep its session_id/token pair; do not relaunch an uncertain command.',
               'different-owner': 'EXEC_SESSION_OWNER_MISMATCH: This process belongs to a different local session. Only its owning session can poll it or send input; use a process id returned to this session.'
             }[denied];
             const message = `write_stdin failed for session ${input.session_id}: ${reason} No input was sent and no output was read. This refusal concerns this process id, not Read-only mode or permission to edit files or launch other authorized work.`;
@@ -1003,15 +1035,18 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
           // Both sides of the wait. An empty poll blocks for seconds by design, and a caller
           // sitting in one is attending its session rather than neglecting it.
           noteExecAttended(input.session_id);
+          const custody = execOwnershipLease(input.session_id);
           try {
             const output = await unifiedExecManager.writeStdin({
               processId: input.session_id,
               input: input.chars ?? '',
               yieldTimeMs: input.yield_time_ms ?? DEFAULT_WRITE_STDIN_YIELD_TIME_MS,
               maxOutputTokens: undefined,
-              truncationPolicy: EXEC_OUTPUT_CEILING_POLICY
+              truncationPolicy: EXEC_OUTPUT_CEILING_POLICY,
+              current: () => custody() && execOwnershipFailure(input.session_id, asking,
+                { sessionToken: input.session_token, allowUnattributed: getConfig().multiAgent.allowUnattributedCalls }) === null
             });
-            if (output.processId === null) forgetExecOwner(input.session_id);
+            if (output.processId === null) forgetExecOwner(input.session_id, custody);
             else noteExecAttended(input.session_id);
             noteExec({
               ...(output.processId === null ? {} : { id: String(output.processId) }),
@@ -1026,7 +1061,9 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
             logInfo(`tool write_stdin ${input.session_id} (${(input.chars ?? '').length} chars)`);
             return {
               content: [{ type: 'text' as const, text: execCommandResponseText(output) }],
-              structuredContent: execCommandStructuredOutput(output)
+              structuredContent: { ...execCommandStructuredOutput(output),
+                ...(output.processId !== null && execOwner(output.processId) === null && input.session_token
+                  ? { session_token: input.session_token } : {}) }
             };
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);

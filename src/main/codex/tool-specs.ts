@@ -38,7 +38,7 @@ export const BROWSER_LAUNCH_GUIDANCE =
 // Metadata describes execution and side effects. Operational safety guidance belongs to the
 // existing server-instruction owner, not a tool description that reads like classifier policy.
 export const EXEC_COMMAND_DESCRIPTION =
-  'Runs a shell command with optional PTY, returning output or a session ID. Commands can read or modify local files and start processes within the configured permissions. Completed output also arrives on later tool calls; write_stdin continues the returned session.';
+  'Shell commands can read or modify local files and start processes. Optional PTY; returns output or session_id/session_token.';
 
 /**
  * Codex's text is 'Shell command to execute.'; two measured additions.
@@ -91,7 +91,7 @@ export const EXEC_COMMAND_LOGIN_DESCRIPTION =
     : 'True runs the shell with -l/-i semantics; false disables them. Defaults to true.';
 
 export const WRITE_STDIN_DESCRIPTION =
-  'Polls or writes to the returned session ID. Empty chars request output without writing. Input to completed processes is rejected.';
+  'Poll/write session_id with session_token; empty chars polls.';
 
 export const WRITE_STDIN_SESSION_ID_DESCRIPTION = 'Identifier of the running unified exec session.';
 

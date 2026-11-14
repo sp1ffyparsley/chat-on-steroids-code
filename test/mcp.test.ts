@@ -607,6 +607,41 @@ describe('endpoint hardening', () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it('preserves readable legacy data for structured-preferring clients alongside committed custody', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      for (const name of ['read']) {
+        const returned = await modern('tools/call', { name,
+          arguments: name === 'read' ? { paths: ['/workspace/notes.txt'] } : {} });
+        expect(failed(returned), textOf(returned)).toBe(false);
+        expect(returned.body.result.structuredContent.output).toBe(textOf(returned));
+        expect(returned.body.result.structuredContent.output.length).toBeGreaterThan(0);
+        expect(returned.body.result.structuredContent.cosResultReceipt.id).toMatch(/^[a-f0-9]{48}$/);
+      }
+      const settings = await dispatch('settings_read', {}, null, null, 'core', async () => ({
+        content: [{ type: 'text', text: '{"terminalSessions":{"retained":64}}' }]
+      }));
+      expect(settings.structuredContent?.output).toContain('"retained":64');
+      const error = await dispatch('read', {}, null, null, 'core', async () => ({
+        isError: true, content: [{ type: 'text', text: 'Exact read failure; no file opened' }]
+      }));
+      expect(error.isError).toBe(true);
+      expect(error.structuredContent?.output).toContain('Exact read failure; no file opened');
+      const typed = await dispatch('exec_command', {}, null, null, 'core', async () => ({
+        content: [{ type: 'text', text: 'formatted terminal reply' }],
+        structuredContent: { output: 'actual stdout', exit_code: 7, wall_time_seconds: 0.1 }
+      }));
+      expect(typed.structuredContent).toMatchObject({ output: 'actual stdout', exit_code: 7 });
+      const media = await dispatch('read', {}, null, null, 'core', async () => ({ content: [
+        { type: 'image', data: 'native-image-bytes', mimeType: 'image/png' },
+        { type: 'text', text: 'Image caption' }
+      ] }));
+      expect(media.content.filter(part => part.type === 'image')).toHaveLength(1);
+      expect(media.structuredContent?.output).toContain('Image caption');
+      expect(JSON.stringify(media.structuredContent)).not.toContain('native-image-bytes');
+    } finally { vi.useRealTimers(); }
+  });
+
   it('binds two headerless same-tool results in one workflow only with their original invocation digest', async () => {
     const { attachNativeCoreResultReceipt, recordRequestEvidence, flushRecorder, receiptDurableOwnerUnique } =
       await import('../src/main/session/recorder.js');
@@ -4706,6 +4741,7 @@ describe('exec_command and write_stdin', () => {
 
     expect(Object.keys(stdin.inputSchema.properties)).toEqual([
       'session_id',
+      'session_token',
       'chars',
       'yield_time_ms',
       'max_output_tokens'
@@ -4713,6 +4749,7 @@ describe('exec_command and write_stdin', () => {
     expect(stdin.inputSchema.required).toEqual(['session_id']);
     expect(stdin.inputSchema.additionalProperties).toBe(false);
     expect(stdin.inputSchema.properties.session_id.type).toBe('number');
+    expect(stdin.inputSchema.properties.session_token).toMatchObject({ type: 'string', pattern: '^[A-Za-z0-9_-]{43}$' });
     expect(stdin.inputSchema.properties.chars.type).toBe('string');
     expect(stdin.inputSchema.properties.yield_time_ms.type).toBe('number');
     expect(stdin.inputSchema.properties.max_output_tokens.type).toBe('number');
@@ -6264,6 +6301,56 @@ describe('exec sessions belong to the chat that opened them', () => {
     expect(textOf(owner)).toContain('Process exited with code 0');
   });
 
+  it('reports terminal capacity without starting another command or discarding retained sessions', async () => {
+    const held: number[] = [];
+    const original = unifiedExecManager.terminalCapacity().retained;
+    try {
+      for (let index = original; index < 64; index++) held.push(unifiedExecManager.allocateProcessId());
+      const denied = await asChat('wfr-external-full-capacity', 'exec_command', {
+        cmd: 'node -e "require(\'fs\').writeFileSync(\'capacity-must-not-start.txt\',\'bad\')"', workdir: '/workspace'
+      });
+      expect(failed(denied), textOf(denied)).toBe(true);
+      expect(textOf(denied)).toContain('EXEC_TERMINAL_CAPACITY');
+      expect(textOf(denied)).toContain('limit 64');
+      expect(textOf(denied)).toContain('No command was started');
+      expect(unifiedExecManager.terminalCapacity().retained).toBe(64);
+      await expect(fs.stat(path.join(approved, 'capacity-must-not-start.txt'))).rejects.toThrow();
+    } finally { for (const id of held) unifiedExecManager.releaseProcessId(id); }
+    expect(unifiedExecManager.terminalCapacity().retained).toBe(original);
+  });
+
+  it('returns and accepts only the exact permitted external terminal capability across request ids', async () => {
+    const config = getConfig(), previous = config.multiAgent.allowUnattributedCalls;
+    config.multiAgent.allowUnattributedCalls = true;
+    try {
+    const started = await asChat('wfr-external-cap-launch', 'exec_command', {
+      cmd: 'node -e "setTimeout(()=>{console.log(\'external-terminal-complete\')},900)"',
+      workdir: '/workspace', yield_time_ms: 250
+    });
+    expect(failed(started), textOf(started)).toBe(false);
+    const output = started.body.result!.structuredContent!;
+    const sessionId = output.session_id as number, token = output.session_token as string;
+    expect(sessionId).toBeTypeOf('number');
+    expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(textOf(started)).toContain('session_token=' + token);
+    const missing = await asChat('wfr-external-cap-missing', 'write_stdin', { session_id: sessionId, chars: '' });
+    expect(textOf(missing)).toContain('EXEC_SESSION_TOKEN_REQUIRED');
+    const wrong = await asChat('wfr-external-cap-wrong', 'write_stdin', {
+      session_id: sessionId, session_token: 'x'.repeat(43), chars: ''
+    });
+    expect(textOf(wrong)).toContain('EXEC_SESSION_TOKEN_MISMATCH');
+    const finished = await asChat('wfr-external-cap-return', 'write_stdin', {
+      session_id: sessionId, session_token: token, chars: '', yield_time_ms: 1
+    });
+    expect(failed(finished), textOf(finished)).toBe(false);
+    expect(finished.body.result!.structuredContent).toMatchObject({ exit_code: 0, output: expect.stringContaining('external-terminal-complete') });
+    expect(finished.body.result!.structuredContent).not.toHaveProperty('session_token');
+    expect(textOf(await asChat('wfr-external-cap-reused', 'write_stdin', {
+      session_id: sessionId, session_token: token, chars: ''
+    }))).toContain('EXEC_SESSION_UNAVAILABLE');
+    } finally { config.multiAgent.allowUnattributedCalls = previous; }
+  });
+
   it('distinguishes anonymous launch custody from an unavailable terminal and reports identity recovery', async () => {
     const source = await createSession({ conversationId: 'exec-return-owner' });
     expect(prove('wfr_exec_return_owner', 'exec-return-owner', source.id)).toBe('stored');
@@ -6440,17 +6527,17 @@ describe('exec sessions belong to the chat that opened them', () => {
         { timeout: 5_000, interval: 10 }
       );
 
-      // Allocation must have removed the stale principal before the new process became
+      // Allocation must have replaced the stale principal before the new process became
       // writable. The old chat knows this integer from its own previous session, but it no
       // longer has authority over what now happens to occupy that slot.
-      expect(execOwner(recycledId)).toBeNull();
+      expect(execOwner(recycledId)).toBe('session-conv-execown-new');
       const stolen = await asChat('wfr_execown_old_recycled', 'write_stdin', {
         session_id: recycledId,
         chars: 'stolen\r',
         yield_time_ms: 50
       });
       expect(stolen.body.result?.isError).toBe(true);
-      expect(textOf(stolen)).toContain('EXEC_SESSION_UNAVAILABLE');
+      expect(textOf(stolen)).toContain('EXEC_SESSION_OWNER_MISMATCH');
 
       const started = await starting;
       expect(started.body.result?.isError, textOf(started)).not.toBe(true);
