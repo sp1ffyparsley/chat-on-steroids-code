@@ -1281,7 +1281,7 @@ describe('native approval automation ownership', () => {
     return { card, allow, clicked: () => clicks };
   }
 
-  it.each((['active', 'paused', 'off', 'expired', 'route-changed'] as const).flatMap(mode =>
+  it.each((['active', 'paused', 'off', 'aged', 'route-changed'] as const).flatMap(mode =>
     [{ mode, referenced: false }, { mode, referenced: true }]))(
     'routes response-only view recovery through the current elected policy: $mode / referenced=$referenced', async ({ mode, referenced }) => {
       const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
@@ -1290,7 +1290,7 @@ describe('native approval automation ownership', () => {
           goal: { enabled: mode !== 'off', own: true, mode: 'loop' } } })
       });
       live.hook.observe(); await live.hook.pullActivity();
-      if (mode === 'expired') live.advance(75_000);
+      if (mode === 'aged') live.advance(300_000);
       if (mode === 'route-changed') live.window.history.pushState(null, '', '/c/bbbbbbbb-cccc-dddd-eeee-ffffffffffff');
       const section = assistantTurn(live.document, 'native-render-turn', []);
       const root = live.document.createElement('div'); root.setAttribute('data-dil-message-id', '754061e2-81c4-4102-9b81-d431a314700b');
@@ -1316,11 +1316,11 @@ describe('native approval automation ownership', () => {
       }
       const before = live.sent.length;
       live.hook.observe(); await settle();
-      expect(click).toHaveBeenCalledTimes(mode === 'active' ? 1 : 0);
+      expect(click).toHaveBeenCalledTimes(mode === 'active' || mode === 'aged' ? 1 : 0);
       expect(live.sent.slice(before).some(message => ['input_ack', 'goal_ack', 'desktop_input', 'compact'].includes(message.type))).toBe(false);
     });
 
-  it.each(['ready', 'paused', 'expired', 'missing-adapter', 'missing-prompt-guard', 'route-changed'] as const)(
+  it.each(['ready', 'paused', 'aged', 'missing-adapter', 'missing-prompt-guard', 'route-changed'] as const)(
     'reports passive approval health without dispatching a click: %s', async mode => {
       live = await ready();
       const approval = addApproval(live, true);
@@ -1328,13 +1328,13 @@ describe('native approval automation ownership', () => {
         live.reply.set('activity', () => ({ ok: true, data: { automationPaused: true } }));
         await live.hook.pullActivity();
       }
-      if (mode === 'expired') live.advance(75_000);
+      if (mode === 'aged') live.advance(300_000);
       if (mode === 'missing-adapter') (live.window as any).CLF_DOM.autoApproveIfNeeded = undefined;
       if (mode === 'missing-prompt-guard') (live.window as any).CLF_DOM.promptEnvelopeReady = () => false;
       if (mode === 'route-changed') live.window.history.pushState(null, '', '/c/bbbbbbbb-cccc-dddd-eeee-ffffffffffff');
       const status = await live.runtimeMessage({ type: 'clf-page-status' }) as any;
       expect(status.nativeApproval).toEqual({ protocol: mode === 'missing-adapter' ? 0 : 1,
-        state: { ready: 'ready', paused: 'paused', expired: 'policy-unverified',
+        state: { ready: 'ready', paused: 'paused', aged: 'ready',
           'missing-adapter': 'adapter-unavailable', 'missing-prompt-guard': 'required-feature-unavailable',
           'route-changed': 'route-unverified' }[mode] });
       const ping = await live.runtimeMessage({ type: 'clf-recorder-ping' }) as any;
@@ -1467,9 +1467,9 @@ describe('native approval automation ownership', () => {
     } finally { other.close(); }
   });
 
-  it.each(['paused', 'missing', 'expired', 'unreachable'] as const)('holds approvals with %s Main policy', async reason => {
+  it.each(['paused', 'missing', 'future-clock', 'unreachable'] as const)('holds approvals with %s Main policy', async reason => {
     live = await ready();
-    if (reason === 'expired') live.advance(75_000);
+    if (reason === 'future-clock') live.window.Date.now = () => -1;
     else {
       live.reply.set('activity', () => reason === 'unreachable' ? { ok: false }
         : { ok: true, data: reason === 'paused' ? { automationPaused: true } : {} });

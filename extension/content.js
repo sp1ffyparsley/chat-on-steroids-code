@@ -1425,7 +1425,7 @@
    * /activity poll as everything else.
    */
   let goalConfig = null;
-  // Reuse the activity feed; missing/expired policy cannot grant a native permission.
+  // Reuse the activity feed; missing or invalid policy cannot grant a native permission.
   let nativeApprovalPolicy = null;
   let goalDraft = null;
   /** Exact durable main-process proof that this conversation is a completed finite one-off. */
@@ -3479,8 +3479,10 @@
         return { protocol, state: 'route-unverified' };
       const policy = nativeApprovalPolicy;
       const now = Date.now();
+      // Forward age alone does not revoke this policy (5ccb84c4b). Recorder health,
+      // exact route/epoch, explicit Pause and future-clock refusal remain required.
       if (!policy || policy.conversationId !== conversationId || policy.epoch !== epoch ||
-          now < policy.at || now - policy.at >= 75_000)
+          now < policy.at)
         return { protocol, state: 'policy-unverified' };
       return { protocol, state: policy.paused === false ? 'ready' : 'paused' };
     } catch { return { protocol, state: 'error' }; }

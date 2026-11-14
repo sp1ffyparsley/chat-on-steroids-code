@@ -118,7 +118,7 @@ const CORE: SurfaceDefinition = {
     'enabled it — spawns and coordinates worker agents, subagents or a parallel swarm across several ChatGPT conversations.',
   cardSummary: 'Files, patches and the terminal. Required — this is the coding connector.',
   required: true,
-  tools: ['settings_read', 'settings_update', 'read', 'view_image', 'find', 'apply_patch', 'exec_command', 'write_stdin', 'download_artifact', 'session', 'session_route', 'update_plan', 'agents', 'session_finish', 'exec']
+  tools: ['deepai_helper', 'settings_read', 'settings_update', 'read', 'view_image', 'find', 'apply_patch', 'exec_command', 'write_stdin', 'download_artifact', 'session', 'session_route', 'update_plan', 'agents', 'session_finish', 'exec']
 };
 
 /**

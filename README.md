@@ -1,5 +1,17 @@
 # Chat On Steroids - code research mirror
 
+## Current parent-bound helper runtime and account-preserving deployment — November 13, 2026
+
+The reviewed runtime now exposes parent-bound DeepAI helpers through existing Core/queue owners. Exact request/session/conversation identity, stable request keys, two native slots, selected free-model admission, Pause/Off controls, saved reports and durable notice/acknowledgment receipts are implemented. The failed-write repair retains a confirmed publication witness until its ledger save succeeds. Native approvals/authentication remain human-owned. Read [the helper guide](docs/deepai-helper.md). Readiness checks the default GLM model; dispatch independently checks the actual selected model.
+
+Helper notices join later eligible Core responses. They do not wake an idle parent or verify a model's claims. Reuse existing Goal/Loop/Input owners for useful continuation carrying the actual result and next assignment. The existing one-hour readiness fallback is not an unconditional hourly Continue; exact source, Pause, uncertain Send and native-result checks remain. Codex is intended for bounded periodic review and diagnosed recovery, rather than continuous token forwarding.
+
+The clean private runtime passed 65 Node, 113 preliminary, 315 serial and 13,908 Main checks, with 63 conditional Main skips. All 315 installer payload files independently matched win-unpacked. Public TypeScript, production build, 65 Node helper checks and six connected runtime suites (2,095 checks) passed. Private packaging/history fixtures are outside this public denominator. Public commits and private package provenance are different identities.
+
+The personal account must stay on its old running program. Global NSIS was therefore not invoked. A separately tested private deployment owner published the exact immutable qualified payload for six isolated profiles, verified their executing paths and retained the protected personal process. Clients verify each binding and reject a differently rooted warm owner before admission. Private operator clients, release pins, account stores, task prompts and deployment receipts remain excluded from this mirror. Loaded browser components, actual parent/helper delivery and sustained useful progress are separate live acceptance gates, still unproved by source tests or a connected endpoint.
+
+Four research lanes now target practical workflow/result-driven continuation and compaction; useful new creative-workstation functions; correctness and recovery improvements; and reproducible testing/component activation/long-run acceptance. Preserve the protected account, exact result/Send custody, human approvals and free-only routing. Older feasibility/no-adapter statements below describe earlier snapshots.
+
 ## Automatic activation and a shared project team: feasibility, November 13
 
 Installing app/extension files is separate from activating the running browser worker, isolated recorder and MAIN reader in each Chrome profile. The existing app already requests a paired-profile companion reload, and the worker already restores dead/stale page readers after extension startup. However, reloadCompanionSafely currently refuses every open ChatGPT tab: a page-idle snapshot is not a quiescence lock. That conservative boundary can leave an open workspace on mixed versions. A reload request is not proof that every component activated.

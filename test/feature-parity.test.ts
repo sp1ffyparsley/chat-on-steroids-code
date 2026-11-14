@@ -67,6 +67,7 @@ describe('portable browser-backed feature parity', () => {
     // Darwin release of the machine running Vitest.
     const config = defaultConfig('darwin', '21.4.0');
     expect(surfaceDefinition('core').tools).toEqual([
+      'deepai_helper',
       'settings_read',
       'settings_update',
       'read',

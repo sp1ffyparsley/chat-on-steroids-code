@@ -24,6 +24,17 @@ files:
 # Common real-filesystem resources. Platform-specific tunnel/rg/native notices are appended
 # below because their filenames and executable formats differ by OS.
 extraResources:
+  # The native helper runs under external Node, outside Electron's asar module resolver.
+  - from: scripts
+    to: deepai-helper
+    filter:
+      - deepai-helper.mjs
+      - deepai-helper-state.mjs
+      - deepai-native.mjs
+      - deepai-attention.mjs
+  - from: node_modules/ws
+    to: deepai-helper/node_modules/ws
+    filter: ['**/*']
   - from: resources/packaging/SOURCE_PROVENANCE.json
     to: SOURCE_PROVENANCE.json
   - from: CUSTOM_BUILD

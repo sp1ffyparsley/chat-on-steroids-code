@@ -100,6 +100,7 @@ import { invocationArgumentsDigest, requestCorrelation } from '../session/correl
 import { BLOCKED_CHAT_REFUSAL, anyChatBlocked, isChatBlocked } from '../session/blocked-chats.js';
 import { anyContinuationOpen, compactingConversation } from '../session/continuation.js';
 import { acknowledgeBackgroundExecOutput, backgroundExecRecoveryNotices, offerBackgroundExecOutput } from '../codex/ownership.js';
+import { offerDeepAIHelperNotice } from '../deepai-helper.js';
 import { DEFAULT_MAX_OUTPUT_TOKENS } from '../codex/unified-exec-constants.js';
 import { unattributedRepairEta } from '../bridge.js';
 import { conversationAttachment, loadedSessionTurn, readOverflowText, replacementOf } from '../session/store.js';
@@ -655,7 +656,7 @@ async function dispatchTracked(
   const finishDeadline = name === 'session_finish' ? sessionFinishDeadline(startedAt) : null;
   const identityWindow = (requested: number): number => finishDeadline === null
     ? requested : Math.min(requested, Math.max(0, finishDeadline - Date.now()));
-  if (!context.caller.conversationId && (desktopContext || name === 'exec' || name === 'update_plan' || name === 'session_finish' || name === 'session_route' || isFinish || (identitySensitive && swarmRunning())) && requestId) {
+  if (!context.caller.conversationId && (desktopContext || name === 'exec' || name === 'update_plan' || name === 'session_finish' || name === 'session_route' || name === 'deepai_helper' || isFinish || (identitySensitive && swarmRunning())) && requestId) {
     setCallerConversation(
       context,
       await awaitFreshCallOrigin(name, startedAt, identityWindow(name === 'session_finish' ? SPAWN_EVIDENCE_MS : IDENTITY_EVIDENCE_MS), { requestId })
@@ -971,6 +972,17 @@ async function dispatchTracked(
   }
   if (!nested && !staleFinish && handlerRan && !blockedChat && !supersededConversation && !compacting) {
     delivered = await withBackgroundExecRecovery(context, delivered);
+    if (surface === 'core' && !result.isError && name !== 'deepai_helper') {
+      const used = delivered.content.reduce((bytes, part) => bytes + (part.type === 'text' ? Buffer.byteLength(part.text, 'utf8') : 0), 0);
+      const budget = Math.min(8_000, DEFAULT_MAX_OUTPUT_TOKENS * 4 - used - 64);
+      try {
+        const notice = await offerDeepAIHelperNotice(context, budget);
+        if (notice) delivered = { ...delivered, content: [...delivered.content, { type: 'text', text: notice }] };
+      } catch {
+        // A helper projection must never replace a completed Core result, nor retry native work.
+        // Its durable binding/result remains available through deepai_helper on a later call.
+      }
+    }
   }
   if (!nested && !staleFinish) delivered = await withIdentityRecoveredNotice(context, delivered);
   if (surface === 'plugins' && delivered.content.length > baseResult.content.length) {

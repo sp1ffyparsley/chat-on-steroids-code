@@ -1694,7 +1694,7 @@ describe('endpoint hardening', () => {
   });
 
   it('retains a privacy-safe, comparable missing-header fingerprint in actual app.log and one bounded first-cause incident', async () => {
-    // Reproduce the native Delta profile's real ingress shape: a successful Core tool call
+    // Reproduce the native Timothy profile's real ingress shape: a successful Core tool call
     // with all three request headers absent and a numeric JSON-RPC id. The full 64-hex
     // diagnostic digest currently gets redacted as a token in app.log.
     const logPath = path.join(base, 'rpc-attribution-first-cause', 'app.log');
@@ -2043,6 +2043,7 @@ describe('endpoint hardening', () => {
 // ---------------------------------------------------------------------------
 
 describe('surface boundaries', () => {
+  const coreOnly = ['agents', 'apply_patch', 'deepai_helper', 'download_artifact', 'exec', 'exec_command', 'read', 'session', 'session_route', 'settings_read', 'settings_update', 'update_plan', 'view_image', 'write_stdin'];
   /** Turns everything on, so each surface advertises the most it ever can. */
   const everything = (): void => {
     ctx.caps = allCaps();
@@ -2055,7 +2056,6 @@ describe('surface boundaries', () => {
     everything();
     const names = toolNames(await core('tools/list'));
     // find is absent because exec_command is present — they are mutually exclusive.
-    const coreOnly = ['agents', 'apply_patch', 'download_artifact', 'exec', 'exec_command', 'read', 'session', 'session_route', 'settings_read', 'settings_update', 'update_plan', 'view_image', 'write_stdin'];
     if (IS_WINDOWS) {
       const desktopNames = [...BROWSER_TOOLS, ...WINDOWS_COMPUTER_METHODS, 'read_clipboard', 'write_clipboard', 'exec'];
       expect(names).toEqual([...new Set([...coreOnly, ...desktopNames])].sort());
@@ -2189,6 +2189,10 @@ describe('surface boundaries', () => {
       for (const name of toolNames(await call(id, 'tools/list'))) {
         expect(declared.has(name), `${id} advertised ${name}`).toBe(true);
       }
+      // Declaring the intentional helper must not turn this into an open tool-name allowlist.
+      const unknown = 'deepai_helper_unknown';
+      expect(declared.has(unknown), id).toBe(false);
+      expect(failed(await call(id, 'tools/call', { name: unknown, arguments: {} })), id).toBe(true);
     }
   });
 
@@ -2287,7 +2291,7 @@ describe('surface boundaries', () => {
     const desktopTools = toolList(await desktop('tools/list'));
 
     // Each populated surface includes code mode; find and the shell exec pair remain exclusive.
-    expect(coreTools).toHaveLength(IS_WINDOWS ? 36 : 12);
+    expect(coreTools).toHaveLength(IS_WINDOWS ? 37 : coreOnly.length);
     expect(desktopTools).toHaveLength(IS_WINDOWS ? 24 : process.platform === 'darwin' ? 11 : 9);
 
     // And the size, which is what a discovery pull actually costs the model on every
@@ -2297,7 +2301,16 @@ describe('surface boundaries', () => {
     // catches the regression it exists to catch.
     const coreBytes = Buffer.byteLength(JSON.stringify(coreTools), 'utf8');
     const desktopBytes = Buffer.byteLength(JSON.stringify(desktopTools), 'utf8');
-    expect(coreBytes, `core tools/list is ${coreBytes} bytes`).toBeLessThan(IS_WINDOWS ? 40_750 : 21_250);
+    // The prior Windows catalog measured 40,719 bytes, only 31 below its existing cap.
+    // Adding one intentional tool has an explicit 1,800-byte allowance; it must not
+    // relax the prior catalog's budget or hide growth in another tool or surface.
+    const priorCoreBytes = Buffer.byteLength(JSON.stringify(coreTools.filter(tool => tool.name !== 'deepai_helper')), 'utf8');
+    const helperBytes = Buffer.byteLength(JSON.stringify(coreTools.find(tool => tool.name === 'deepai_helper')), 'utf8');
+    const priorCoreBudget = IS_WINDOWS ? 40_750 : 21_250;
+    const helperBudget = 1_800;
+    expect(priorCoreBytes, `prior Core catalog is ${priorCoreBytes} bytes`).toBeLessThan(priorCoreBudget);
+    expect(helperBytes, `deepai_helper metadata is ${helperBytes} bytes`).toBeLessThan(helperBudget);
+    expect(coreBytes, `core tools/list is ${coreBytes} bytes (${helperBytes} from deepai_helper)`).toBeLessThan(priorCoreBudget + helperBudget);
     expect(desktopBytes, `desktop tools/list is ${desktopBytes} bytes`).toBeLessThan(
       process.platform === 'linux' ? 10_000 : 19_000
     );
@@ -7032,7 +7045,7 @@ describe('persistent external endpoint', () => {
       let settle!: (report: unknown) => void;
       const result = new Promise(resolve => { settle = resolve; });
       tunnel = await startTunnel({ localUrl: a.urls[surface], settings: { ...defaultConfig().tunnel,
-        kind: 'manual', manualPublicOrigin: 'https://Delta.example.com' }, apiKey: null, externalRouteProof: a.externalRouteProof,
+        kind: 'manual', manualPublicOrigin: 'https://timothy.example.com' }, apiKey: null, externalRouteProof: a.externalRouteProof,
         report: report => { if (report.state !== 'connecting-tunnel') settle(report); } });
       expect(await result).toMatchObject({ state: 'tunnel-unavailable', publicUrl: null });
       expect(lastRequestAt()).toBeNull(); expect(recentMcpIngress(surface, 0).records).toEqual([]);
@@ -7052,7 +7065,7 @@ describe('persistent external endpoint', () => {
     let tunnel: TunnelHandle | undefined;
     try {
       vi.stubGlobal('fetch', (url: string, options: RequestInit) => nativeFetch(new URL(url).pathname.replace(/^/, new URL(destination.url).origin), options));
-      const settings = { ...defaultConfig().tunnel, kind: 'manual' as const, manualPublicOrigin: 'https://Delta.example.com' };
+      const settings = { ...defaultConfig().tunnel, kind: 'manual' as const, manualPublicOrigin: 'https://timothy.example.com' };
       const inspect = async () => {
         let settle!: (state: string) => void;
         const finished = new Promise<string>(resolve => { settle = resolve; });

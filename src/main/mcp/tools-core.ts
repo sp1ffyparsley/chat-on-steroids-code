@@ -157,6 +157,7 @@ import {
   type ToolResult
 } from './kernel.js';
 import { registerSessionTool as registerSessionSearchReadTool } from './session-tool.js';
+import { registerDeepAIHelperTool } from './deepai-helper-tool.js';
 import { ArtifactFetchError } from './artifact-fetch.js';
 import { ArtifactTargetError } from './artifact-target.js';
 import { downloadArtifactFile } from './artifact-download.js';
@@ -263,6 +264,7 @@ async function execSession(tool: 'exec_command' | 'write_stdin'): Promise<string
 
 export function registerCoreTools(reg: SurfaceRegistrar): void {
   const { ctx, caps, exposedCaps } = reg;
+  registerDeepAIHelperTool(reg);
   if (exposedCaps.read || exposedCaps.browse || exposedCaps.metadata || exposedCaps.command) reg.register('settings_read', toolDeclaration('settings_read', () => ({
     title: 'Inspect account settings',
     description: 'Read preferences/schema/revision/status. instanceId=Core caller; sharedPreferences.owner=shared edit owner. Core files/commands need no CoS window.',
