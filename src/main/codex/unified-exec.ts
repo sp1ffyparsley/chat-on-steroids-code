@@ -825,6 +825,8 @@ export class UnifiedExecProcessManager {
       if (!current || current.process !== locked) throw UnifiedExecError.unknownProcessId(request.processId);
       if (request.current && !request.current())
         throw new Error('EXEC_SESSION_OWNER_CHANGED: terminal ownership changed before input or output collection; nothing was read or written');
+      if (current.initialExecCommandActive)
+        throw new Error('EXEC_SESSION_STARTING: the original exec_command is still collecting its initial response; wait for that response before polling. Nothing was read or written.');
       const { process, tty } = { process: current.process, tty: current.tty };
 
       let statusAfterWrite: ProcessStatus | null = null;

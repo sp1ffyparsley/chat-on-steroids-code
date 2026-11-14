@@ -107,3 +107,27 @@ it('delivers every bounded page and an empty successful result before retirement
     expect(received).toBe(output);
   }
 });
+
+it('does not let an early poll steal output from the initial command response', async () => {
+  const manager = new UnifiedExecProcessManager(60_000);
+  managers.push(manager);
+  const id = manager.allocateProcessId();
+  const starting = manager.execCommand({
+    command: [process.execPath, '-e', "process.stdout.write('initial-result'); setTimeout(() => process.exit(0), 1500)"],
+    shellType: process.platform === 'win32' ? 'powershell' : 'bash', hookCommand: 'initial delivery guard', processId: id,
+    yieldTimeMs: 1000, maxOutputTokens: undefined, truncationPolicy: policy, cwd: process.cwd(), displayCwd: process.cwd(),
+    env: applyUnifiedExecEnv(process.env), tty: false
+  });
+  await expect.poll(() => manager.listProcesses().some(entry => entry.processId === id), { timeout: 3000 }).toBe(true);
+  const early = manager.writeStdin({ processId: id, input: '', yieldTimeMs: 1,
+    maxOutputTokens: undefined, truncationPolicy: policy });
+  const check = expect(early).rejects.toThrow('EXEC_SESSION_STARTING');
+  const initial = await starting;
+  await check;
+  expect(initial.rawOutput.toString('utf8')).toBe('initial-result');
+  if (initial.processId !== null) {
+    const finished = await manager.writeStdin({ processId: id, input: '', yieldTimeMs: 5000,
+      maxOutputTokens: undefined, truncationPolicy: policy });
+    expect(finished.exitCode).toBe(0);
+  }
+});
