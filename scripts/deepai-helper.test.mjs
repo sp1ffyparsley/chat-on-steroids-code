@@ -440,6 +440,30 @@ test('readiness checks only native configuration, closes connections and refuses
     assert.equal(failed.blocker.code, code); assert.equal(JSON.stringify(failed).includes('private detail'), false);
   }
 });
+
+test('readiness discovers bounded native free choices without replacing an unavailable requested model', async () => {
+  const changed = structuredClone(config), base = structuredClone(changed.providers[0].models[0]);
+  changed.providers[0].models[0].theosPerRequest = '1';
+  changed.providers[0].models.push({ ...base, slug: 'deepai/other-free' },
+    { ...base, slug: 'deepai/custom', isCustom: true }, { ...base, slug: 'deepai/paid', theosPerRequest: 1 },
+    { ...base, slug: 'deepai/linked', subProvider: 'linked' }, { ...base, slug: 'private-secret-invalid-model' });
+  let calls = 0, closed = 0;
+  const connect = async () => ({ descriptor: { serverVersion: '0.3.36', orchestrationProtocolVersion: 2 },
+    rpc: async tag => { assert.equal(tag, 'server.getConfig'); calls++; return changed; }, close: async () => { closed++; } });
+  const held = await nativeReadiness(connect);
+  assert.equal(held.ready, false); assert.equal(held.blocker.code, 'FREE_MODEL_UNAVAILABLE');
+  assert.deepEqual(held.eligibleModels, ['deepai/other-free']);
+  const selected = await nativeReadiness(connect, 'deepai/other-free');
+  assert.equal(selected.ready, true); assert.equal(selected.model, 'deepai/other-free');
+  assert.equal(JSON.stringify(selected).includes('private-secret'), false);
+  assert.equal(calls, 2); assert.equal(closed, 2);
+  changed.providers[0].models.push(...Array.from({ length: 24 }, (_, i) => ({ ...base, slug: 'deepai/free-' + i })));
+  const bounded = await nativeReadiness(connect);
+  assert.equal(bounded.eligibleModels.length, 16); assert.equal(bounded.eligibleModelsTruncated, true);
+  changed.providers.push(structuredClone(changed.providers[0]));
+  const duplicate = await nativeReadiness(connect, 'deepai/other-free');
+  assert.equal(duplicate.ready, false); assert.deepEqual(duplicate.eligibleModels, []);
+});
 test('diagnostics distinguish capacity, native attention, report failure and missing queue without changing jobs', t => {
   const { state, request } = fixture(t);
   const job = state.enqueue(request()).job;

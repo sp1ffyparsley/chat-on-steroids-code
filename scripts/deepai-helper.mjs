@@ -22,16 +22,30 @@ const RECONNECT = new Set(['NATIVE_SOCKET_UNAVAILABLE', 'NATIVE_SOCKET_ERROR', '
 export const requiresNativeReconnect = error => RECONNECT.has(error?.code) || (error?.code === 'NATIVE_HTTP_STATUS' && error.httpStatus === 401);
 
 /** Read-only native preflight: no queue admission, worker start or inference. */
-export async function nativeReadiness(connect = connectNative) {
+export async function nativeReadiness(connect = connectNative, requestedModel = 'deepai/glm-5.3-flash') {
   let connection;
+  const eligibleModels = [];
+  let eligibleModelsTruncated = false;
   try {
     connection = await connect({ websocket: true });
-    const selection = assertFreeModel(await connection.rpc('server.getConfig', {}));
+    const config = await connection.rpc('server.getConfig', {});
+    const providers = Array.isArray(config?.providers) ? config.providers : Object.values(config?.providers ?? {});
+    const models = providers.filter(provider => provider?.instanceId === 'deepai').flatMap(provider => Array.isArray(provider.models) ? provider.models : []);
+    // Expose only catalog IDs that pass the actual dispatch guard. Never return provider
+    // configuration or choose a replacement for the explicitly requested model.
+    for (const model of models) {
+      const slug = model?.slug;
+      if (typeof slug !== 'string' || slug.length > 200 || !/^deepai\/[a-z0-9][a-z0-9.-]+$/.test(slug) || eligibleModels.includes(slug)) continue;
+      try { assertFreeModel(config, slug); } catch { continue; }
+      if (eligibleModels.length === 16) { eligibleModelsTruncated = true; break; }
+      eligibleModels.push(slug);
+    }
+    const selection = assertFreeModel(config, requestedModel);
     return { ready: true, observedAt: new Date().toISOString(), model: selection.model,
       version: connection.descriptor.serverVersion, protocol: connection.descriptor.orchestrationProtocolVersion,
-      maxActive: MAX_ACTIVE, blocker: null };
+      maxActive: MAX_ACTIVE, eligibleModels, eligibleModelsTruncated, blocker: null };
   } catch (error) {
-    return { ready: false, observedAt: new Date().toISOString(), maxActive: MAX_ACTIVE,
+    return { ready: false, observedAt: new Date().toISOString(), maxActive: MAX_ACTIVE, eligibleModels, eligibleModelsTruncated,
       blocker: { code: typeof error?.code === 'string' && /^[A-Z_]+$/.test(error.code) ? error.code : 'NATIVE_PREFLIGHT_FAILED',
         action: 'Open DeepAI Code and check sign-in, local-client permission, supported version and the exact free model. Retry readiness; do not replace an accepted task or bypass approvals.' } };
   } finally { if (connection) await connection.close(); }
@@ -306,16 +320,17 @@ export async function work(state) {
 }
 
 export async function main(args = process.argv.slice(2)) {
-  const { positionals, values } = parseArgs({ args, allowPositionals: true, options: { request: { type: 'string' }, job: { type: 'string' }, owner: { type: 'string' }, 'state-root': { type: 'string' }, 'no-worker': { type: 'boolean' }, offset: { type: 'string' }, limit: { type: 'string' } } });
+  const { positionals, values } = parseArgs({ args, allowPositionals: true, options: { request: { type: 'string' }, model: { type: 'string' }, job: { type: 'string' }, owner: { type: 'string' }, 'state-root': { type: 'string' }, 'no-worker': { type: 'boolean' }, offset: { type: 'string' }, limit: { type: 'string' } } });
   const action = positionals[0];
   if (!action || action === 'help') {
-    console.log('DeepAI helper: submit --request FILE | continue --job ID --request FILE | status/result/cancel/ack --job ID --owner LABEL | inbox --owner LABEL | readiness | health | recover. Use --request - for stdin. Each request JSON needs owner, requestKey, workspace, prompt; title/model/maxRunMinutes are optional. Continue inherits workspace/model. Results are saved in WORKSPACE/.cos-deepai/results/JOB. --no-worker makes status/result/inbox/health/ack passive: they never start or recover a native worker.'); return;
+    console.log('DeepAI helper: submit --request FILE | continue --job ID --request FILE | status/result/cancel/ack --job ID --owner LABEL | inbox --owner LABEL | readiness [--model deepai/ID] | health | recover. Use --request - for stdin. Each request JSON needs owner, requestKey, workspace, prompt; title/model/maxRunMinutes are optional. Continue inherits workspace/model. Results are saved in WORKSPACE/.cos-deepai/results/JOB. --no-worker makes status/result/inbox/health/ack passive: they never start or recover a native worker.'); return;
   }
   if (values['no-worker'] && !['status', 'result', 'inbox', 'health', 'ack', 'readiness'].includes(action)) throw new Error('--no-worker is only supported for passive status/result/inbox/health/ack operations.');
+  if (values.model !== undefined && (action !== 'readiness' || values.model.length > 200 || !/^deepai\/[a-z0-9][a-z0-9.-]+$/.test(values.model))) throw new Error('--model is only supported for readiness with a bounded native DeepAI catalog ID. Submit models belong in request JSON.');
   const state = new HelperState(values['state-root'] || defaultStateRoot());
   try {
     if (action === 'worker') { await work(state); return; }
-    if (action === 'readiness') { console.log(JSON.stringify(await nativeReadiness(), null, 2)); return; }
+    if (action === 'readiness') { console.log(JSON.stringify(await nativeReadiness(connectNative, values.model), null, 2)); return; }
     let response;
     if (action === 'submit' || action === 'continue') {
       if (!values.request || (action === 'continue' && !values.job)) throw new Error('A request JSON file is required; continue also requires --job.');

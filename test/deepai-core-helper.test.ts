@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi, type Mock } from 'vitest';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import {
@@ -77,6 +77,114 @@ function context(parent: HelperParent, publication = { completedAt: null as numb
 function complete(id: unknown, status = 'completed') {
   Object.assign(jobs.get(String(id))!, { status, resultSaved: true, completedAt: new Date(now).toISOString() });
 }
+
+async function nearFullLedger(targetBytes: number) {
+  let retained = await readDurableStrict<any>('deepai-helper-bindings');
+  const base = { key: '0'.repeat(64), sessionId: 'session-filler', sourceConversationId: 'filler', sourceRequestId: 'filler',
+    owner: 'different-parent', requestKey: 'filler-0000', requestHash: 'f'.repeat(64), workspace: 'x'.repeat(3000),
+    model: 'deepai/glm-5.3-flash', jobId: randomUUID(), createdAt: 1 };
+  const bytes = Buffer.byteLength(JSON.stringify(retained));
+  const count = Math.floor((targetBytes - bytes) / (Buffer.byteLength(JSON.stringify(base)) + 1));
+  for (let i = 0; i < count; i++) retained.rows.push({ ...base, key: createHash('sha256').update('filler-' + i).digest('hex'),
+    requestKey: 'filler-' + String(i).padStart(4, '0'), jobId: randomUUID() });
+  let remaining = targetBytes - Buffer.byteLength(JSON.stringify(retained));
+  for (const row of retained.rows.slice(1)) {
+    const added = Math.min(remaining, 4096 - row.workspace.length);
+    row.workspace += 'x'.repeat(added); remaining -= added;
+    if (!remaining) break;
+  }
+  expect(remaining).toBe(0);
+  expect(retained.rows.length).toBeLessThan(4000);
+  deps.read = async () => structuredClone(retained);
+  deps.write = async value => { retained = structuredClone(value); };
+  return () => retained;
+}
+
+it('R90 refuses a saved-report claim without the exact result directory', async () => {
+  const p = await principal(), job = await owner.submit(p, request()); complete(job.id);
+  for (const value of [undefined, '', path.join(directory, 'foreign-result')]) {
+    jobs.get(String(job.id))!.resultDirectory = value;
+    await expect(owner.inspect(p, 'status', String(job.id))).rejects.toThrow('DEEPAI_JOB_MISMATCH');
+  }
+});
+
+it('R90 refuses an unsaved outcome before issuing the mutating native ACK', async () => {
+  const p = await principal(), job = await owner.submit(p, request());
+  Object.assign(jobs.get(String(job.id))!, { status: 'completed', resultSaved: false });
+  await expect(owner.inspect(p, 'ack', String(job.id))).rejects.toThrow('DEEPAI_REPORT_NOT_SAVED');
+  expect(calls.filter(call => call.action === 'ack')).toHaveLength(0);
+});
+
+it('R90 reserves terminal receipt headroom before admitting a new native job', async () => {
+  const p = await principal(); await owner.submit(p, request());
+  await nearFullLedger(8 * 1024 * 1024 - 4000 * 256 + 1000);
+  const before = calls.filter(call => call.action === 'submit').length;
+  await expect(owner.submit(p, request('new-near-capacity'))).rejects.toThrow('DEEPAI_BINDING_CAPACITY');
+  expect(calls.filter(call => call.action === 'submit')).toHaveLength(before);
+});
+
+it('R90 acknowledges a saved outcome near the real ledger limit without deleting custody rows', async () => {
+  const p = await principal(), job = await owner.submit(p, request()); complete(job.id);
+  const publication = { completedAt: null as number | null, failed: false };
+  await owner.offer(context(p, publication), 8000); publication.completedAt = ++now; now++;
+  const retained = await nearFullLedger(8 * 1024 * 1024 - 1), rows = retained().rows.length;
+  const result = await owner.inspect(p, 'ack', String(job.id));
+  expect(result.receipt).toMatchObject({ noticePublishedAt: publication.completedAt, acknowledgedAt: now });
+  expect(retained().rows).toHaveLength(rows);
+  expect(Buffer.byteLength(JSON.stringify(retained()))).toBeLessThanOrEqual(8 * 1024 * 1024);
+  const first = now; now++;
+  expect((await owner.inspect(p, 'ack', String(job.id))).receipt).toMatchObject({ acknowledgedAt: first });
+});
+
+it('R90 refuses native ACK until the publication witness survives a restart', async () => {
+  const p = await principal(), job = await owner.submit(p, request()); complete(job.id);
+  const publication = { completedAt: null as number | null, failed: false };
+  await owner.offer(context(p, publication), 8000); publication.completedAt = ++now; now++;
+  const write = deps.write;
+  deps.write = async () => { throw new Error('pre-ACK disk failure'); };
+  await expect(owner.inspect(p, 'ack', String(job.id))).rejects.toThrow('pre-ACK disk failure');
+  expect(jobs.get(String(job.id))!.acknowledged).not.toBe(true);
+  deps.write = write;
+});
+
+it('R90 never records a local ACK without native confirmation', async () => {
+  const p = await principal(), job = await owner.submit(p, request()); complete(job.id);
+  const native = deps.bridge;
+  deps.bridge = async call => call.action === 'ack' ? { ...jobs.get(String(job.id))!, acknowledged: false } : native(call);
+  await expect(owner.inspect(p, 'ack', String(job.id))).rejects.toThrow('DEEPAI_ACK_UNCONFIRMED');
+  expect((await owner.inspect(p, 'status', String(job.id))).receipt).toMatchObject({ acknowledgedAt: null });
+});
+
+it('R90 preserves publication custody across a native ACK and failed final write with restart', async () => {
+  const p = await principal(), job = await owner.submit(p, request()); complete(job.id);
+  const publication = { completedAt: null as number | null, failed: false };
+  await owner.offer(context(p, publication), 8000); publication.completedAt = ++now; now++;
+  const write = deps.write; let writes = 0;
+  deps.write = async ledger => { if (++writes === 2) throw new Error('post-ACK disk failure'); await write(ledger); };
+  await expect(owner.inspect(p, 'ack', String(job.id))).rejects.toThrow('post-ACK disk failure');
+  expect(jobs.get(String(job.id))!.acknowledged).toBe(true);
+  deps.write = write; owner = createDeepAIHelperOwner(deps);
+  expect((await owner.inspect(p, 'status', String(job.id))).receipt).toMatchObject({ noticePublishedAt: publication.completedAt, acknowledgedAt: null });
+  expect((await owner.inspect(p, 'ack', String(job.id))).receipt).toMatchObject({ noticePublishedAt: publication.completedAt, acknowledgedAt: now });
+  expect(jobs.size).toBe(1);
+});
+
+it.each(['result', 'offer'] as const)('R90 captures %s receipts near the limit and refreshes evicted known jobs without replay', async method => {
+    const p = await principal(), job = await owner.submit(p, request(method)); complete(job.id);
+    const publication = { completedAt: null as number | null, failed: false };
+    await owner.offer(context(p, publication), 8000); publication.completedAt = ++now; now++;
+    const retained = await nearFullLedger(8 * 1024 * 1024 - 1), rows = retained().rows.length;
+    if (method === 'result') expect((await owner.inspect(p, 'result', String(job.id))).assistantText).toContain('model claim');
+    else await owner.offer(context(p), 8000);
+    expect(retained().rows).toHaveLength(rows);
+    expect(retained().rows[0]).toMatchObject({ jobId: job.id, noticePublishedAt: publication.completedAt });
+    expect(Buffer.byteLength(JSON.stringify(retained()))).toBeLessThanOrEqual(8 * 1024 * 1024);
+    Object.assign(jobs.get(String(job.id))!, { status: 'active', resultSaved: false });
+    owner = createDeepAIHelperOwner(deps);
+    const inbox = await owner.inbox(p);
+    expect((inbox.jobs as any[]).find(item => item.id === job.id)?.status).toBe('active');
+    expect(calls.filter(call => call.action === 'submit')).toHaveLength(1);
+});
 
 it('requires all three exact Core identity fields and never infers a parent from session listing', async () => {
   for (const missing of ['requestId', 'sessionId', 'conversationId']) {
@@ -344,6 +452,23 @@ it('readiness retains exact caller custody and never dispatches or silently resu
   await expect(owner.readiness(p)).rejects.toThrow('DEEPAI_PARENT_PAUSED');
   expect(() => deepAIHelperSchema.parse({ action: 'readiness' })).not.toThrow();
   expect(() => deepAIHelperSchema.parse({ action: 'readiness', job: randomUUID() })).toThrow();
+});
+it('readiness checks an explicit model and bounds discovery without accepting a silent fallback', async () => {
+  const p = await principal(), model = 'deepai/other-free';
+  const reply = { ready: true, observedAt: new Date(now).toISOString(), maxActive: 2,
+    version: '0.3.36', protocol: 2, model, eligibleModels: [model], eligibleModelsTruncated: false, blocker: null };
+  bridge.mockResolvedValueOnce(reply);
+  expect(await owner.readiness(p, model)).toMatchObject({ ready: true, model, eligibleModels: [model] });
+  expect(bridge).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'readiness', model, passive: true }));
+  bridge.mockResolvedValueOnce({ ...reply, model: 'deepai/glm-5.3-flash' });
+  await expect(owner.readiness(p, model)).rejects.toThrow('DEEPAI_BRIDGE_INVALID_RESPONSE');
+  bridge.mockResolvedValueOnce({ ...reply, eligibleModels: Array(17).fill(model) });
+  await expect(owner.readiness(p, model)).rejects.toThrow('DEEPAI_BRIDGE_INVALID_RESPONSE');
+  bridge.mockResolvedValueOnce({ ...reply, eligibleModels: ['private-config'] });
+  await expect(owner.readiness(p, model)).rejects.toThrow('DEEPAI_BRIDGE_INVALID_RESPONSE');
+  expect(() => deepAIHelperSchema.parse({ action: 'readiness', model })).not.toThrow();
+  expect(() => deepAIHelperSchema.parse({ action: 'status', job: randomUUID(), model })).toThrow();
+  expect(calls).toHaveLength(0); expect(jobs.size).toBe(0);
 });
 it('links the exact parent, native run, saved report, witnessed publication and explicit acknowledgment', async () => {
   const p = await principal();

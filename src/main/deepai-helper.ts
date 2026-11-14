@@ -21,6 +21,9 @@ import type { OutputPublication } from './codex/unified-exec.js';
 const STATE = 'deepai-helper-bindings';
 const MAX_LEDGER_BYTES = 8 * 1024 * 1024;
 const MAX_ROWS = 4000;
+// A delivered notice adds a fingerprint and two receipt stamps. Reserve 256 bytes per
+// retained registration so new work cannot consume the space needed to close old custody.
+const MAX_ADMISSION_BYTES = MAX_LEDGER_BYTES - MAX_ROWS * 256;
 const MAX_PENDING_PER_PARENT = 50;
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'blocked', 'incomplete']);
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -37,7 +40,7 @@ export interface HelperScope { key: string; token: unknown; deviceId: string; pr
 export interface HelperParent { scope: HelperScope; sessionId: string; conversationId: string; requestId: string; owner: string }
 export interface BridgeRequest {
   action: 'submit' | 'continue' | 'status' | 'result' | 'inbox' | 'ack' | 'cancel' | 'readiness';
-  owner: string; job?: string; request?: Record<string, unknown>; offset?: number; limit?: number; passive?: boolean;
+  owner: string; job?: string; request?: Record<string, unknown>; offset?: number; limit?: number; passive?: boolean; model?: string;
 }
 export type BridgeCall = (request: BridgeRequest) => Promise<unknown>;
 
@@ -163,6 +166,7 @@ export const runDeepAIHelperCLI: BridgeCall = async request => {
   if (request.request) args.push('--request', '-');
   if (request.offset !== undefined) args.push('--offset', String(request.offset));
   if (request.limit !== undefined) args.push('--limit', String(request.limit));
+  if (request.model !== undefined && request.action === 'readiness') args.push('--model', request.model);
   if (request.passive) args.push('--no-worker');
   const raw = await childOutput(runtime.node, args, env, request.request ? JSON.stringify(request.request) : undefined, request.action === 'readiness' ? 45_000 : request.passive ? 5000 : 12_000);
   try { return JSON.parse(raw) as unknown; }
@@ -202,11 +206,21 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
       refuse('DEEPAI_BINDING_STATE_UNVERIFIED', 'Parent-helper custody could not be read safely; no new helper was dispatched.');
     return parsed.data;
   };
-  const save = async (scope: HelperScope, ledger: Ledger): Promise<void> => {
+  const save = async (scope: HelperScope, ledger: Ledger, admission = false): Promise<void> => {
     assertScope(scope);
-    if (Buffer.byteLength(JSON.stringify(ledger)) > MAX_LEDGER_BYTES)
+    // latest is a disposable projection; native IDs/results remain in the native job store,
+    // while this exact binding and all delivery/ACK receipts remain authoritative here.
+    const persisted = { ...ledger, rows: ledger.rows.map(row => ({ ...row })) };
+    for (const row of persisted.rows) if (row.acknowledgedAt !== undefined) delete row.latest;
+    // Keep receipt headroom out of disposable projections too. Retain the live projections
+    // for this response; absent persisted caches are refreshed from exact known job IDs.
+    if (Buffer.byteLength(JSON.stringify(persisted)) > MAX_ADMISSION_BYTES)
+      for (const row of persisted.rows) delete row.latest;
+    if (admission && Buffer.byteLength(JSON.stringify(persisted)) > MAX_ADMISSION_BYTES)
+      refuse('DEEPAI_BINDING_CAPACITY', 'New helper admission is full; terminal receipt space remains reserved. Handle existing outcomes before adding work.');
+    if (Buffer.byteLength(JSON.stringify(persisted)) > MAX_LEDGER_BYTES)
       refuse('DEEPAI_BINDING_CAPACITY', 'The retained helper registration ledger is full; preserve it before maintenance.');
-    await deps.write(ledger);
+    await deps.write(persisted);
     assertScope(scope);
     // Keep publication witnesses retryable until their custody is durably retained.
     for (const row of ledger.rows) {
@@ -227,6 +241,7 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
     const job = parsed.data;
     if (job.owner !== row.owner || job.requestKey !== row.requestKey || row.jobId && row.jobId !== job.id ||
         !samePath(job.workspace, row.workspace) || job.model !== row.model ||
+        job.resultSaved === true && !job.resultDirectory?.trim() ||
         job.resultDirectory && !samePath(job.resultDirectory, path.join(row.workspace, '.cos-deepai', 'results', job.id)))
       refuse('DEEPAI_JOB_MISMATCH', 'The helper response does not match the retained parent, workspace, model and job identity.');
     return job;
@@ -275,7 +290,7 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
         owner: principal.owner, requestKey: request.requestKey, requestHash, workspace, model: request.model,
         jobId: null, ...(prior?.jobId ? { previousJobId: prior.jobId } : {}), createdAt: deps.now() };
       ledger.rows.push(row);
-      await save(principal.scope, ledger); // intent must survive a lost CLI response
+      await save(principal.scope, ledger, true); // intent must survive a lost CLI response
     }
     await assertParent(principal, true);
     if (row.jobId) {
@@ -309,16 +324,29 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
     const row = ownRow(ledger, principal, jobId);
     // Recover uses the CLI's incumbent worker-start check. It does not replace
     // jobs, change control state, answer native requests or steal live leases.
-    const job = checked(await deps.bridge({ action: action === 'recover' ? 'status' : action, owner: row.owner,
+    let job = checked(await deps.bridge({ action: action === 'recover' || action === 'ack' ? 'status' : action, owner: row.owner,
       job: jobId, ...pagination, passive: action !== 'cancel' && action !== 'recover' }), row);
     await assertParent(principal);
-    row.latest = summary(job);
-    retainPublishedNotice(row, principal);
     if (action === 'ack') {
       if (!TERMINAL.has(job.status)) refuse('DEEPAI_OUTCOME_NOT_TERMINAL', 'Only a terminal helper outcome can be acknowledged.');
       if (job.status === 'completed' && !job.resultSaved) refuse('DEEPAI_REPORT_NOT_SAVED', 'Save the completed report before acknowledging this outcome.');
-      row.acknowledgedAt = deps.now();
+      row.latest = summary(job);
+      retainPublishedNotice(row, principal);
+      // Native ACK removes the job from its inbox. Persist confirmed local publication
+      // custody first, so a failed final write/restart can reconcile the same known job.
+      await save(principal.scope, ledger);
+      await assertParent(principal);
+      // Validate exact saved custody before issuing a mutating native operation. The native
+      // owner rechecks its own current terminal/report state; its reply is validated again.
+      job = checked(await deps.bridge({ action: 'ack', owner: row.owner, job: jobId, passive: true }), row);
+      await assertParent(principal);
+      if (job.acknowledged !== true) refuse('DEEPAI_ACK_UNCONFIRMED', 'The native owner did not confirm acknowledgment. Keep the same job identity and reconcile its status.');
+      if (!TERMINAL.has(job.status)) refuse('DEEPAI_OUTCOME_NOT_TERMINAL', 'The native acknowledgment did not retain a terminal outcome.');
+      if (job.status === 'completed' && !job.resultSaved) refuse('DEEPAI_REPORT_NOT_SAVED', 'The native acknowledgment did not retain a saved report.');
+      row.acknowledgedAt ??= deps.now();
     }
+    row.latest = summary(job);
+    retainPublishedNotice(row, principal);
     await save(principal.scope, ledger);
     return { ...view(job, row), ...(action === 'recover' ? { recoveryRequested: true } : {}) };
   });
@@ -339,6 +367,15 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
       const job = checked(candidate, row);
       row.jobId = job.id; row.latest = summary(job); changed = true;
     }
+    // A known running/ACKed job need not appear in the native attention inbox. Cache
+    // eviction must never relabel that durable identity as an uncertain submission.
+    const missing = ledger.rows.filter(row => row.owner === principal.owner && row.sessionId === principal.sessionId &&
+      row.acknowledgedAt === undefined && row.jobId && !row.latest).slice(0, 4);
+    for (const row of missing) {
+      const job = checked(await deps.bridge({ action: 'status', owner: row.owner, job: row.jobId!, passive: true }), row);
+      await assertParent(principal);
+      row.latest = summary(job); changed = true;
+    }
     if (changed) await save(principal.scope, ledger);
     polledAt.set(principal.owner, deps.now());
   }
@@ -351,7 +388,8 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
     if (publicationChanged) await save(principal.scope, ledger);
     if (ledger.rows.some(row => row.owner === principal.owner && !row.acknowledgedAt)) await refresh(principal, ledger);
     return { source: 'deepai-model-report', jobs: ledger.rows.filter(row => row.owner === principal.owner && !row.acknowledgedAt)
-      .map(row => row.latest ? view(row.latest, row) : { requestPending: true, requestKeyHash: row.key, status: 'submission-unconfirmed',
+      .map(row => row.latest ? view(row.latest, row) : row.jobId ? { id: row.jobId, requestKeyHash: row.key, status: 'observation-unavailable',
+        instruction: 'Read this exact known job with action=status/result; do not submit replacement work.' } : { requestPending: true, requestKeyHash: row.key, status: 'submission-unconfirmed',
         instruction: 'Retry the original submission with the same requestKey and body; do not create replacement work.' }) };
   });
 
@@ -412,16 +450,19 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
     }
     return null;
   });
-  const readiness = (principal: HelperParent): Promise<Record<string, unknown>> => locked(async () => {
+  const readiness = (principal: HelperParent, model = 'deepai/glm-5.3-flash'): Promise<Record<string, unknown>> => locked(async () => {
     await assertParent(principal);
+    if (model.length > 200 || !/^deepai\/[a-z0-9][a-z0-9.-]+$/.test(model)) refuse('DEEPAI_MODEL_INVALID', 'Readiness requires a bounded native DeepAI catalog ID.');
     const allowed = deps.automationAllowed(principal.conversationId);
     if (!allowed) return { ready: false, parentSessionId: principal.sessionId, parentConversationId: principal.conversationId,
       blocker: { code: 'parent_control_hold', action: 'Check this account Pause, this chat Off and command capability. Resume deliberately; no work was dispatched.' } };
-    const raw = await deps.bridge({ action: 'readiness', owner: principal.owner, passive: true });
+    const raw = await deps.bridge({ action: 'readiness', owner: principal.owner, passive: true, model });
     const parsed = z.object({ ready: z.boolean(), observedAt: z.string().max(100), maxActive: z.literal(2),
       model: z.string().max(200).optional(), version: z.string().max(100).optional(), protocol: z.number().int().optional(),
+      eligibleModels: z.array(z.string().max(200).regex(/^deepai\/[a-z0-9][a-z0-9.-]+$/)).max(16).optional(),
+      eligibleModelsTruncated: z.boolean().optional(),
       blocker: z.object({ code: z.string().max(100), action: z.string().max(1000) }).nullable() }).safeParse(raw);
-    if (!parsed.success || parsed.data.ready && (parsed.data.blocker !== null || parsed.data.version !== '0.3.36' || parsed.data.protocol !== 2 || parsed.data.model !== 'deepai/glm-5.3-flash'))
+    if (!parsed.success || parsed.data.ready && (parsed.data.blocker !== null || parsed.data.version !== '0.3.36' || parsed.data.protocol !== 2 || parsed.data.model !== model))
       refuse('DEEPAI_BRIDGE_INVALID_RESPONSE', 'Readiness returned an invalid bounded response or an unsupported native/model contract.');
     await assertParent(principal, true);
     return { ...parsed.data, parentSessionId: principal.sessionId, parentConversationId: principal.conversationId,

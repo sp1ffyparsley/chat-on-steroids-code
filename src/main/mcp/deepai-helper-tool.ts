@@ -26,7 +26,8 @@ export const deepAIHelperSchema = z.object({
     if (input.action === 'submit') {
       need('workspace'); allowed.add('workspace'); allowed.add('model');
     } else { need('job'); allowed.add('job'); }
-  } else if (!['inbox', 'readiness'].includes(input.action)) {
+  } else if (input.action === 'readiness') allowed.add('model');
+  else if (input.action !== 'inbox') {
     need('job'); allowed.add('job');
     if (input.action === 'result') { allowed.add('offset'); allowed.add('limit'); }
   }
@@ -36,7 +37,7 @@ export const deepAIHelperSchema = z.object({
 export function registerDeepAIHelperTool(reg: SurfaceRegistrar): void {
   if (!reg.exposedCaps.command) return;
   reg.register('deepai_helper', toolDeclaration('deepai_helper', () => ({
-    description: 'Parent-bound async free-model helpers. submit: requestKey/workspace/prompt; retry uncertain sends with the SAME key/body. continue: completed job/new requestKey/prompt; retains workspace/model. readiness: native/free-model check without dispatch. inbox/readiness need no job; others do. status includes blocker/action and linked receipt. recover checks existing queue; stale live processes need review. result: offset/limit (max16000). ack: handled terminal outcome. Verify saved reports independently. Review approvals in DeepAI Code. Notices join later Core replies; no idle/paused wake.',
+    description: 'Parent-bound async free-model helpers. submit: requestKey/workspace/prompt; retry uncertain sends with the SAME key/body. continue: completed job/new requestKey/prompt; retains workspace/model. readiness: optional model; eligible free IDs, no dispatch. inbox/readiness need no job; others do. status includes blocker/action and linked receipt. recover checks existing queue; stale live processes need review. result: offset/limit (max16000). ack: handled terminal outcome. Verify saved reports independently. Review approvals in DeepAI Code. Notices join later Core replies; no idle/paused wake.',
     inputSchema: deepAIHelperSchema,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   })), input => reg.guarded('command', 'deepai_helper', async () => {
@@ -62,7 +63,7 @@ export function registerDeepAIHelperTool(reg: SurfaceRegistrar): void {
           ...(input.title !== undefined ? { title: input.title } : {}),
           ...(input.maxRunMinutes !== undefined ? { maxRunMinutes: input.maxRunMinutes } : {})
         });
-      } else if (input.action === 'readiness') response = await deepAIHelperOwner.readiness(principal);
+      } else if (input.action === 'readiness') response = await deepAIHelperOwner.readiness(principal, input.model);
       else if (input.action === 'inbox') response = await deepAIHelperOwner.inbox(principal);
       else response = await deepAIHelperOwner.inspect(principal, input.action, input.job!, {
         ...(input.offset !== undefined ? { offset: input.offset } : {}),
