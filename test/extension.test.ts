@@ -10302,7 +10302,8 @@ describe('extension observation journal', () => {
         // These two counts are authored by askFiber after validating turn arrays,
         // rather than accepted from the untrusted MAIN-world diagnostic.
         ...CORE_SHELL_CALL_REJECTION_KEYS.filter(key => key !== 'callInventoryMissing' && key !== 'callInventoryIncomplete')]
-        .map(key => [key, key === 'identityReasonNativeScopeBranchConflict' ? 1 : 0]));
+        .map(key => [key, key === 'nativeExecutionCalls' ? 3 : key === 'nativeExecutionResults' ? 1
+          : key === 'nativeExecutionMissingResults' || key === 'identityReasonNativeScopeBranchConflict' ? 1 : 0]));
       const readStart = contentSource.indexOf('  function readShellScan(raw) {');
       const readEnd = contentSource.indexOf('\n  function unseenAppSightings', readStart);
       const projectionStart = contentSource.indexOf('  function coreBrowserEvidenceProjection(input) {');
