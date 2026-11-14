@@ -2511,7 +2511,9 @@ describe('alternate shell turn/message provenance', () => {
     'multiple final references', 'getter final reference', 'unfinished native final reference',
     'duplicate final pointer source', 'missing final reference preview',
     'duplicate final anchor', 'off-path final anchor', 'nonterminal final anchor', 'different final body anchor',
-    'orphan execution result', 'execution result request mismatch', 'execution child result missing', 'execution child result extra',
+    'orphan execution result', 'execution result request mismatch', 'execution child result missing',
+    'execution child result missing late namespace', 'execution child result missing late parent',
+    'execution child result missing provider contraction', 'execution child result extra',
     'pending canonical group', 'pending direct Core', 'pending direct Core foreign header', 'pending header mismatch', 'missing system header', 'visible system header', 'foreign header scope',
     'missing header working', 'missing header exchange', 'user header scope mismatch', 'header recipient',
     'header unfinished', 'header message type', 'header annotation absent', 'header annotation null',
@@ -2537,6 +2539,7 @@ describe('alternate shell turn/message provenance', () => {
     'recovers folded native execution ownership from an exact provider group: %s', async variant => {
       let getterReads = 0;
       let observedMapping: any;
+      let omittedResult: any;
       const diagnosticLogs: string[] = [];
       const HEADER = 'native-group-header';
       const page = await shellHarness({ withCall: true, withExec: true, nativeCallReceipt: true,
@@ -2718,10 +2721,22 @@ describe('alternate shell turn/message provenance', () => {
           }
           if (variant === 'execution result request mismatch')
             mapping[EXEC_RESULT].message.metadata.request_id = 'PRIVATE_OTHER_EXEC_REQUEST';
-          if (variant === 'execution child result missing') {
+          if (variant.startsWith('execution child result missing')) {
+            omittedResult = JSON.parse(JSON.stringify(mapping[RESULT]));
             delete mapping[RESULT];
             mapping[EXEC_RESULT].parent = CALL;
             mapping[EXEC_RESULT].message.metadata.parent_id = CALL;
+            if (variant.endsWith('provider contraction')) {
+              // Live Nov14 capture: all three selected parent edges survive,
+              // retained metadata parents name absent nodes, outer stdout is empty,
+              // and the typed nested call has no result/source pointer.
+              mapping[EXEC].message.metadata.parent_id = 'retired-native-execution-parent';
+              mapping[CALL].message.metadata.parent_id = 'retired-native-invocation-parent';
+              mapping[EXEC_RESULT].message.metadata.parent_id = 'retired-native-return-parent';
+              mapping[EXEC_RESULT].message.content = { content_type: 'text', parts: [''] };
+            }
+            if (variant.endsWith('late namespace')) mapping[ASSISTANT].message.metadata.working_turn_id = 'foreign';
+            if (variant.endsWith('late parent')) mapping[ASSISTANT].message.metadata.parent_id = USER;
           }
           if (variant === 'execution child result extra' || variant === 'missing receipt duplicate result') {
             const extra = 'PRIVATE_EXTRA_CORE_RESULT';
@@ -2756,7 +2771,8 @@ describe('alternate shell turn/message provenance', () => {
           ['header message type', 'header annotation absent', 'header annotation null', 'header annotation accessor'].includes(variant);
         const identityOnly = variant === 'direct Core missing receipt' || variant.startsWith('core receipt missing') ||
           variant === 'retained commentary missing receipt' || variant === 'retained header missing receipt' ||
-          variant === 'missing terminal exact user' || variant === 'header annotation missing receipt';
+          variant === 'missing terminal exact user' || variant === 'header annotation missing receipt' ||
+          variant === 'execution child result missing' || variant === 'execution child result missing provider contraction';
         expect(page.fiber.turns[0].calls[0]).toMatchObject({
           requestId: accepted || identityOnly || ['pending canonical group', 'pending direct Core', 'pending header annotation'].includes(variant) ? REQUEST : null, answered: accepted });
         if (accepted || identityOnly || ['pending canonical group', 'pending direct Core', 'pending header annotation'].includes(variant))
@@ -2839,6 +2855,12 @@ describe('alternate shell turn/message provenance', () => {
             expect(diagnosticLogs).toHaveLength(before);
           }
           expect(page.fiber.turns[0].requests).not.toContainEqual(expect.objectContaining({ requestId: REQUEST, messageId: CALL }));
+          if (variant === 'execution child result missing') {
+            // A missing native return cannot erase its independently scoped caller.
+            // It still supplies no result witness, completion or terminal authority.
+            expect(page.fiber.turns[0].calls[0]).toMatchObject({ requestId: REQUEST, answered: false });
+            expect(page.fiber.turns[0].calls[0].resultReceiptId).toBeUndefined();
+          }
           expect(page.fiber.turns[0].endMessageId).toBeNull();
           for (const value of [USER, ASSISTANT, CALL, RESULT, REQUEST, EXEC, EXEC_RESULT,
             'PRIVATE_ORPHAN_EXEC_RESULT', 'PRIVATE_OTHER_EXEC_REQUEST', 'PRIVATE_EXTRA_CORE_RESULT'])
@@ -2876,6 +2898,11 @@ describe('alternate shell turn/message provenance', () => {
           // no result witness or terminal may be invented before the real receipt.
           expect(page.fiber.turns[0].endMessageId).toBeNull();
           expect(page.fiber.turns[0].calls[0].resultReceiptId).toBeUndefined();
+          if (variant === 'execution child result missing' || variant === 'execution child result missing provider contraction') {
+            observedMapping[RESULT] = omittedResult;
+            observedMapping[EXEC_RESULT].parent = RESULT;
+            observedMapping[EXEC_RESULT].message.metadata.parent_id = RESULT;
+          }
           observedMapping[RESULT].message.content = { content_type: 'code', language: 'json', text: JSON.stringify({
             content: [],
             structuredContent: { cosResultReceipt: { version: 1, id: 'a'.repeat(48) } } }) };

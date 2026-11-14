@@ -147,6 +147,21 @@ try {
   if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'must-not-exist.png')) { throw 'unrelated window captured before ownership rejection' }
   if ($snapshot.uiUnavailable) { throw ('UIA unavailable: ' + $snapshot.uiUnavailable.message) }
   $rows = @{}; foreach ($row in $snapshot.elements) { if ($row.automationId) { $rows[$row.automationId] = $row } }
+  # Production's time-bounded scan can truthfully stop before the fixture's last
+  # controls. Absence in that partial observation is not a failed native pattern.
+  # Reobserve this owned fixture only, with fresh refs, before any action. A full
+  # observation missing a control, an unavailable provider or exhausted readiness
+  # still fails. Never repeat input or enlarge the production observation budget.
+  $required = @('invoke','toggle','second','expand','scroll','editor','disabled')
+  $initialReady = [System.Diagnostics.Stopwatch]::StartNew()
+  $initialAttempts = 1
+  while ($snapshot.truncated -eq $true -and @($required | Where-Object { -not $rows.ContainsKey($_) }).Count -gt 0 -and
+      $initialAttempts -lt 3 -and $initialReady.ElapsedMilliseconds -lt 2000) {
+    $snapshot = Handle-Request @{ op = 'snapshot'; id = $id; includeScreenshot = $false; includeUi = $true; includeRelated = $true; maxResults = 100 }
+    if ($snapshot.uiUnavailable) { throw ('UIA unavailable: ' + $snapshot.uiUnavailable.message) }
+    $rows = @{}; foreach ($row in $snapshot.elements) { if ($row.automationId) { $rows[$row.automationId] = $row } }
+    $initialAttempts += 1
+  }
   foreach ($key in @('invoke','toggle','second','expand','scroll','editor','disabled')) {
     if (-not $rows.ContainsKey($key)) { throw ('missing fixture element ' + $key + ': ' + ($snapshot | ConvertTo-Json -Depth 8 -Compress)) }
   }

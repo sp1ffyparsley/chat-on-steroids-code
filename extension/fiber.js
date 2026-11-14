@@ -42,7 +42,7 @@
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
   const VERSION = 19;
   /** Private implementation epoch, independent of the stable cross-world wire schema. */
-  const PRODUCER_VERSION = 173;
+  const PRODUCER_VERSION = 174;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -2860,8 +2860,11 @@
               if (str(nativeField(metadata, 'request_id')) !== execution.request)
                 return refuse('nativeScopeBranchConflict', 'execution-result-request');
               if (execution.calls.length !== execution.results.length) {
-                // Diagnose only this first refused group, not whole-chat totals. Counts
-                // remain bounded; unequal groups still grant no scope.
+                // Diagnose this first incomplete group, not whole-chat totals. A
+                // missing return withholds result scope, not independently provable
+                // request ownership. Extra returns are an ambiguous group and veto
+                // even request scope. Every later edge/cache/namespace still has to
+                // pass before the request-only scope may be published below.
                 nativeAnchorExecutionCalls = Math.min(MAX_ROWS, execution.calls.length);
                 nativeAnchorExecutionResults = Math.min(MAX_ROWS, execution.results.length);
                 nativeAnchorExecutionBalance = execution.calls.length > execution.results.length
@@ -2874,7 +2877,10 @@
                   shellDiagnostic(rejects, nativeAnchorExecutionBalance === 'missing-results'
                     ? 'nativeExecutionMissingResults' : 'nativeExecutionExtraResults');
                 }
-                return refuse('nativeScopeBranchConflict', 'execution-result-child-count');
+                if (execution.results.length > execution.calls.length)
+                  return refuse('nativeScopeBranchConflict', 'execution-result-child-count');
+                missingCoreReceipt = true;
+                refuse('nativeScopeBranchConflict', 'execution-result-child-count');
               }
               execution.closed = true; execution = null;
             } else if (role === 'assistant' && recipient === 'api_tool.call_tool') {
