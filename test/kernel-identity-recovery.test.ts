@@ -185,7 +185,11 @@ it('does not invent ownership for a headerless refusal', async () => {
   prove(); expect(notice(await invoke())).toHaveLength(0);
 });
 
-it.each([null, 'unmatched-workflow-request'])('bounds an unowned %s result recorder wait without publishing late proof', async requestId => {
+it.each([
+  { requestId: null, surface: 'core' as const, budgetMs: 2_000 },
+  { requestId: 'unmatched-workflow-request', surface: 'core' as const, budgetMs: 2_000 },
+  { requestId: null, surface: 'plugins' as const, budgetMs: 200 }
+])('bounds an unowned $surface/$requestId recorder wait at $budgetMs ms without late proof', async ({ requestId, surface, budgetMs }) => {
   vi.useFakeTimers();
   let started!: () => void, release: (() => void) | undefined;
   const recordingStarted = new Promise<void>(resolve => { started = resolve; });
@@ -196,14 +200,14 @@ it.each([null, 'unmatched-workflow-request'])('bounds an unowned %s result recor
   });
   const run = vi.fn(async () => ok('result'));
   let returned = false;
-  const pending = dispatch('read', {}, null, requestId, 'core', run)
+  const pending = dispatch('read', {}, null, requestId, surface, run)
     .then(result => { returned = true; return result; });
   try {
     await recordingStarted;
-    // Every unowned Core result now has the same existing 200ms post-commit
-    // witness budget. A transport header is not native ownership; it must not
-    // skip that boundary or wait indefinitely for unavailable page correlation.
-    await vi.advanceTimersByTimeAsync(199);
+    // Eligible Core results get a bounded two-second durable-commit window,
+    // including headerless calls. The generic non-receipt fallback stays 200ms.
+    // Neither a transport header nor elapsed time can substitute for the commit.
+    await vi.advanceTimersByTimeAsync(budgetMs - 1);
     expect(returned).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     expect(returned).toBe(true);
@@ -213,8 +217,11 @@ it.each([null, 'unmatched-workflow-request'])('bounds an unowned %s result recor
     expect(result.structuredContent?.cosResultReceipt).toBeUndefined();
     expect(run).toHaveBeenCalledTimes(1);
     expect(fixture.record).toHaveBeenCalledWith(expect.objectContaining({
-      requestId, conversationId: null, resultReceiptId: expect.stringMatching(/^[a-f0-9]{48}$/)
+      requestId, conversationId: null,
+      ...(surface === 'core' ? { resultReceiptId: expect.stringMatching(/^[a-f0-9]{48}$/) } : {})
     }));
+    expect(JSON.stringify(result).includes('Local recording unverified')).toBe(surface === 'core');
+    if (surface === 'plugins') expect(fixture.record.mock.calls.at(-1)![0].resultReceiptId).toBeUndefined();
     release!();
     await vi.advanceTimersByTimeAsync(0);
     // A later commit cannot mutate the result already returned to the caller
