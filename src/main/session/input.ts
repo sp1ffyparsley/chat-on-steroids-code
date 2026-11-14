@@ -2928,6 +2928,33 @@ export function pendingBrowserInputs(): Promise<Array<{ id: string; conversation
       await commit(current);
       logInfo(`input ${row.id}: superseded unoffered helper continuation retired; saved text and original helper receipt retained`);
     }
+    // A late final can advance the source after an idle revival was filed. Its original
+    // progress-bound permission is then revoked, but keeping the never-sent row at the
+    // browser head also blocks the newer Loop reply. Retire that obsolete row through this
+    // serializer, retaining its entire audit record. This grants no replacement Send.
+    for (const row of current) {
+      const revival = row.recovery?.revival;
+      if (!revival || row.recovery?.episode !== `revival:${revival.progressAt}:${revival.attempt}` ||
+          row.state !== 'queued' || row.owner !== null || row.offeredAt !== undefined ||
+          row.sendAuthorizedAt !== undefined || row.deliveredAt !== undefined || row.messageId !== undefined ||
+          row.requiresAuthorization !== undefined || row.toolReceiptUncertain ||
+          row.companionInputId || companionOf(current, row) ||
+          !row.sessionId || !row.conversationId || getConfig().ui.automationPaused === true ||
+          !goalArmedFor(row.conversationId) || isChatBlocked(row.conversationId)) continue;
+      const source = await getSession(row.sessionId);
+      const question = await readLatestUserMessage(row.sessionId);
+      const rechecked = await getSession(row.sessionId);
+      if (source?.conversationId !== row.conversationId || rechecked?.conversationId !== row.conversationId ||
+          source.events !== rechecked.events || source.updatedAt !== rechecked.updatedAt ||
+          question?.messageId !== row.recovery.questionId || getConfig().ui.automationPaused === true ||
+          !goalArmedFor(row.conversationId) || isChatBlocked(row.conversationId) ||
+          Math.max(source.startedAt, source.lastToolCallAt ?? 0, source.lastAssistantFinalAt ?? 0,
+            source.lastTurnOutcome === 'completed' ? source.lastTurnEndAt ?? 0 : 0) <= revival.progressAt) continue;
+      current = current.map(entry => entry === row ? { ...entry, state: 'cancelled' as const,
+        error: 'Not sent: newer recorded progress superseded this idle revival.' } : entry);
+      await commit(current);
+      logInfo(`input ${row.id}: newer recorded progress retired unsent idle revival; saved text and recovery receipts retained`);
+    }
     // Only untouched, positively unsent recovery text may yield to a later sender. Retaining
     // it at the FIFO head would otherwise block the handoff/Loop reply that superseded it.
     for (const row of current) {

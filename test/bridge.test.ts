@@ -26996,6 +26996,54 @@ describe('unattributed activity recovery', () => {
       .toMatchObject({ text: 'continue', recovery: { revival: { attempt: 1, progressAt: nextProgress } } });
   });
 
+  it.each(['late-final', 'confirmed-pre-send-release', 'unchanged', 'paused', 'owned', 'offered',
+    'authorized', 'authorization-pending', 'delivered', 'native-receipt', 'uncertain-tool', 'rebound'] as const)(
+    'retires only positively superseded idle revival custody: %s', async variant => {
+      await pair();
+      const questionId = 'late-final-revival-' + randomUUID();
+      await events(PRIME, [
+        { kind: 'user_message', time: Date.now(), messageId: questionId, text: 'Continue the same project' },
+        openTurn('late-final-source'), endTurn('late-final-source', 'completed')
+      ]);
+      await setGoalSwitchNow(PRIME, 'loop', true, true);
+      const input = await import('../src/main/session/input.js');
+      const session = (await findSessionByConversation(PRIME))!;
+      const progressAt = Math.max(session.startedAt, session.lastToolCallAt ?? 0,
+        session.lastAssistantFinalAt ?? 0, session.lastTurnEndAt ?? 0);
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(progressAt + input.PROACTIVE_REVIVAL_MS + 100);
+      onTestFinished(() => clock.mockRestore());
+      const saved = (await input.enqueueInterruptedContinue(session.id, PRIME, questionId, { progressAt }))!;
+      expect(saved).not.toBeNull();
+      if (variant !== 'unchanged') {
+        clock.mockReturnValue(Date.now() + 100);
+        await recordFinalForTest(PRIME, 'late-final-source');
+      }
+      const rows = await input.listInputs();
+      const row = rows.find(row => row.id === saved.id)!;
+      if (variant === 'confirmed-pre-send-release') row.recoveryFailure = {
+        phase: 'pre_send_preparation', retrySafe: true, detail: 'Native Send was not attempted.' };
+      if (variant === 'owned') row.owner = 'existing-browser-owner';
+      if (variant === 'offered') row.offeredAt = Date.now();
+      if (variant === 'authorized') row.sendAuthorizedAt = Date.now();
+      if (variant === 'authorization-pending') row.requiresAuthorization = true;
+      if (variant === 'delivered') row.deliveredAt = Date.now();
+      if (variant === 'native-receipt') row.messageId = 'existing-native-receipt';
+      if (variant === 'uncertain-tool') row.toolReceiptUncertain = true;
+      if (variant === 'rebound') row.conversationId = 'different-conversation';
+      await writeDurableNow('session-input', rows);
+      input.resetInputForTests();
+      if (variant === 'paused') await saveConfig({ ...getConfig(), ui: { ...getConfig().ui, automationPaused: true } });
+      await input.pendingBrowserInputs();
+      const retained = (await input.listInputs()).find(row => row.id === saved.id)!;
+      if (variant === 'late-final' || variant === 'confirmed-pre-send-release') {
+        expect(retained).toMatchObject({ state: 'cancelled', text: saved.text, recovery: saved.recovery });
+        expect(retained.error).toContain('newer recorded progress');
+        input.resetInputForTests();
+        expect((await input.listInputs()).find(row => row.id === saved.id)?.state).toBe('cancelled');
+      } else expect(retained).toMatchObject({ ...row, state: 'queued' });
+      expect((await input.listInputs()).filter(row => row.sessionId === session.id)).toHaveLength(1);
+    });
+
   it.each(['active-turn', 'Loop-Off', 'blocked', 'global-pause', 'superseded-question'] as const)(
     'keeps idle revival fenced when %s wins before enqueue', async veto => {
       await pair();
