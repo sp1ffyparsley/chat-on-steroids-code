@@ -658,8 +658,17 @@ async function dispatchTracked(
   // Identity and the finish hold share one ingress deadline; late proof must not
   // add another complete hold interval to an already waiting provider request.
   const finishDeadline = name === 'session_finish' ? sessionFinishDeadline(startedAt) : null;
-  const identityWindow = (requested: number): number => finishDeadline === null
-    ? requested : Math.min(requested, Math.max(0, finishDeadline - Date.now()));
+  const identityStartedAt = performance.now();
+  // These gates await the SAME exact request proof. Retired/dormant/block
+  // checks must not each restart a full evidence window after an earlier
+  // gate already waited. A stronger later policy still gets its full ingress
+  // deadline, and every gate rechecks current proof even when no time remains.
+  // Use elapsed monotonic time so a wall-clock adjustment cannot renew the wait.
+  const identityWindow = (requested: number): number => {
+    const remaining = Math.max(0, requested - (performance.now() - identityStartedAt));
+    return finishDeadline === null
+      ? remaining : Math.min(remaining, Math.max(0, finishDeadline - Date.now()));
+  };
   if (!context.caller.conversationId && (desktopContext || name === 'exec' || name === 'update_plan' || name === 'session_finish' || name === 'session_route' || name === 'deepai_helper' || isFinish || (identitySensitive && swarmRunning())) && requestId) {
     setCallerConversation(
       context,

@@ -636,6 +636,10 @@ export function noteCoreBrowserEvidence(input: CoreBrowserEvidenceInput): boolea
   };
   const previous = snapshots.get(row.conversationId);
   if (previous && previous.observedAt > row.observedAt) return false;
+  // A delayed producer can stamp a later observation time after its document
+  // has already advanced. It cannot replace the current navigation's evidence
+  // or pending completion custody. A genuinely new document may start at zero.
+  if (previous?.documentId === row.documentId && previous.navigationEpoch > row.navigationEpoch) return false;
   const pending = previous?.pendingCompletion ?? null;
   row.retainedObservations = previous?.retainedObservations?.map(value => normalizedNativeCompletionObservation(value)!);
   const finalObservation = row.ordinaryFinal;

@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { noteCoreBrowserEvidence } from '../src/main/core-browser-evidence.js';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { coreBrowserEvidence, noteCoreBrowserEvidence, resetCoreBrowserEvidenceForTests } from '../src/main/core-browser-evidence.js';
 
 const CONV = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const rejects53 = {
@@ -8,6 +8,34 @@ const rejects53 = {
 };
 
 describe('R80.3 noteCoreBrowserEvidence provenance and negative controls', () => {
+  beforeEach(() => resetCoreBrowserEvidenceForTests());
+
+  it('refuses a newer-arriving old navigation epoch without replacing current evidence', () => {
+    const current = {
+      conversationId: CONV, documentId: 'same-document', navigationEpoch: 5,
+      observedAt: 1762780010000, shell: 'classic' as const, shellDiscovery: 'compatible' as const,
+      requestIds: ['current-request'], turnId: 'current-turn',
+    };
+    expect(noteCoreBrowserEvidence(current)).toBe(true);
+    const before = coreBrowserEvidence(CONV);
+    expect(noteCoreBrowserEvidence({ ...current, navigationEpoch: 4,
+      observedAt: current.observedAt + 100, requestIds: ['old-request'], turnId: 'old-turn' })).toBe(false);
+    expect(coreBrowserEvidence(CONV)).toEqual(before);
+  });
+
+  it('accepts increasing same-document epochs and a new document starting at epoch zero', () => {
+    const current = {
+      conversationId: CONV, documentId: 'first-document', navigationEpoch: 5,
+      observedAt: 1762780010000, shell: 'classic' as const, shellDiscovery: 'compatible' as const,
+      requestIds: ['current-request'], turnId: 'current-turn',
+    };
+    expect(noteCoreBrowserEvidence(current)).toBe(true);
+    expect(noteCoreBrowserEvidence({ ...current, navigationEpoch: 6, observedAt: current.observedAt + 1 })).toBe(true);
+    expect(noteCoreBrowserEvidence({ ...current, documentId: 'new-document', navigationEpoch: 0,
+      observedAt: current.observedAt + 2 })).toBe(true);
+    expect(coreBrowserEvidence(CONV)).toMatchObject({ documentId: 'new-document', navigationEpoch: 0 });
+    expect(noteCoreBrowserEvidence({ ...current, observedAt: current.observedAt + 1 })).toBe(false);
+  });
   it('retains shellScan.reader when input.reader is an explicit undefined own property', () => {
     const input = {
       conversationId: CONV,

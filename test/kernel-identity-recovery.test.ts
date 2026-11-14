@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
 import { beforeEach, expect, it, vi } from 'vitest';
-const fixture = vi.hoisted(() => ({ attachment: vi.fn(), record: vi.fn(), blocked: false, lateRoute: false }));
+const fixture = vi.hoisted(() => ({ attachment: vi.fn(), record: vi.fn(), origin: vi.fn(),
+  blocked: false, lateRoute: false, retired: false, dormant: false }));
 vi.mock('../src/main/session/recorder.js', async original => ({
   ...await original<typeof import('../src/main/session/recorder.js')>(),
   freshCallOrigin: (tool: string, _at: number, requestId: string) =>
     fixture.lateRoute && tool === 'session_route' ? null : requestCorrelation(requestId)?.conversationId ?? null,
-  awaitFreshCallOrigin: async (_tool: string, _at: number, _timeout: number, options: { requestId: string }) => requestCorrelation(options.requestId)?.conversationId ?? null,
+  awaitFreshCallOrigin: fixture.origin,
   recordToolCall: fixture.record
 }));
 vi.mock('../src/main/session/store.js', async original => ({
@@ -15,10 +16,16 @@ vi.mock('../src/main/session/input.js', () => ({ offerToolInput: async () => ({ 
 vi.mock('../src/main/session/blocked-chats.js', () => ({
   BLOCKED_CHAT_REFUSAL: 'CHAT_BLOCKED', anyChatBlocked: () => fixture.blocked, isChatBlocked: () => fixture.blocked
 }));
+vi.mock('../src/main/agents.js', async original => ({
+  ...await original<typeof import('../src/main/agents.js')>(),
+  hasRetiredWorkerLeases: () => fixture.retired,
+  hasDormantWorkerLeases: () => fixture.dormant,
+}));
 vi.mock('../src/main/durable.js', async original => ({
   ...await original<typeof import('../src/main/durable.js')>(), writeDurableSnapshotSoon: () => {}
 }));
-import { dispatch, fail, failIdentity, guard, ok, resetToolClock, type ToolResult } from '../src/main/mcp/kernel.js';
+import { dispatch, fail, failIdentity, guard, IDENTITY_EVIDENCE_MS, ok, resetToolClock, type ToolResult } from '../src/main/mcp/kernel.js';
+import { REQUEST_ID_GRACE_MS } from '../src/main/session/recorder.js';
 import { currentCall } from '../src/main/mcp/call-context.js';
 import { withInboundRequestId } from '../src/main/mcp/inbound.js';
 import { IdentityLostError } from '../src/main/agents.js';
@@ -34,6 +41,9 @@ beforeEach(() => {
     attributionMethod: args.conversationId ? 'request_id' : 'unattributed'
   }));
   fixture.blocked = false; fixture.lateRoute = false;
+  fixture.retired = false; fixture.dormant = false;
+  fixture.origin.mockImplementation(async (_tool: string, _at: number, _timeout: number, options: { requestId: string }) =>
+    requestCorrelation(options.requestId)?.conversationId ?? null);
 });
 function prove(requestId = 'request-a', conversationId = 'chat-a', sessionId = 'session-a') {
   return observeRequestCorrelation({ requestId, conversationId, sessionId, messageId: 'message', tool: '', observedAt: Date.now() });
@@ -42,6 +52,55 @@ const invoke = (requestId = 'request-a', run = async () => ok('result')) => disp
 const refused = (requestId = 'request-a') => dispatch('agents', {}, null, requestId, 'core', () =>
   guard('agents', async () => { throw new IdentityLostError(); }));
 const notice = (result: ToolResult) => result.content.filter(part => part.type === 'text' && part.text.includes('--- Identity recovered ---'));
+
+it.each([false, true])('shares one ingress evidence deadline across repeated identity gates (blocked=%s)', async blocked => {
+  vi.useFakeTimers();
+  try {
+    const startedAt = Date.now();
+    fixture.retired = true; fixture.dormant = true; fixture.blocked = blocked;
+    fixture.origin.mockImplementation(async (_tool: string, _at: number, within: number) => {
+      if (within > 0) await new Promise(resolve => setTimeout(resolve, within));
+      return null;
+    });
+    const run = vi.fn(async () => ok('must not run without owner'));
+    const pending = dispatch('exec', {}, null, 'unmatched-exec-deadline', 'core', run);
+    await vi.runAllTimersAsync();
+    const result = await pending;
+    if (blocked) {
+      expect(result.isError).toBe(true);
+      expect(run).not.toHaveBeenCalled();
+    } else {
+      // Explicitly allowed external work stays allowed; a shared deadline is
+      // neither new caller identity nor a change to unattributed admission.
+      expect(result.isError).not.toBe(true);
+      expect(run).toHaveBeenCalledOnce();
+    }
+    expect(Date.now() - startedAt).toBe(blocked ? REQUEST_ID_GRACE_MS : IDENTITY_EVIDENCE_MS);
+    const waits = fixture.origin.mock.calls.map(args => args[2] as number);
+    expect(waits.slice(0, 3)).toEqual([IDENTITY_EVIDENCE_MS, 0, 0]);
+    if (blocked) expect(waits.at(-1)).toBe(Math.max(0, REQUEST_ID_GRACE_MS - IDENTITY_EVIDENCE_MS));
+  } finally { vi.useRealTimers(); }
+});
+
+it('still enforces a block when exact proof arrives at the end of the shared identity window', async () => {
+  vi.useFakeTimers();
+  try {
+    fixture.blocked = true; fixture.retired = true; fixture.dormant = true;
+    fixture.origin.mockImplementation(async (_tool: string, _at: number, within: number) => {
+      if (within > 0) await new Promise(resolve => setTimeout(resolve, within));
+      return requestCorrelation('last-moment-exact')?.conversationId ?? null;
+    });
+    const run = vi.fn(async () => ok('blocked write must never execute'));
+    const pending = dispatch('exec', {}, null, 'last-moment-exact', 'core', run);
+    setTimeout(() => prove('last-moment-exact', 'blocked-chat', 'blocked-session'), IDENTITY_EVIDENCE_MS - 1);
+    await vi.runAllTimersAsync();
+    expect((await pending).isError).toBe(true);
+    expect(run).not.toHaveBeenCalled();
+    expect(fixture.attachment).toHaveBeenCalledWith('blocked-chat', 'blocked-session');
+    expect(fixture.record).toHaveBeenCalledWith(expect.objectContaining({ conversationId: 'blocked-chat' }));
+    expect(fixture.origin).toHaveBeenCalledOnce();
+  } finally { vi.useRealTimers(); }
+});
 
 it('reports an actual agent identity refusal once after exact proof and records the delivered appendix', async () => {
   expect((await refused()).isError).toBe(true);

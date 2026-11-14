@@ -31,6 +31,21 @@ const settled = (at: number, overrides: Record<string, unknown> = {}) =>
   frame(at, { reason: 'associated' as const, openCalls: 0, ...overrides });
 
 describe('retained native-completion request identity', () => {
+  it('does not let a late older epoch replace a retained original-result fence', () => {
+    resetCoreBrowserEvidenceForTests();
+    expect(noteCoreBrowserEvidence(frame(NOW))).toBe(true);
+    const before = coreBrowserEvidence(TARGET);
+    expect(noteCoreBrowserEvidence({ ...settled(NOW + 1000), navigationEpoch: 6 })).toBe(false);
+    expect(coreBrowserEvidence(TARGET)).toEqual(before);
+    expect(coreBrowserEvidence(TARGET)?.pendingCompletion).toMatchObject({ openCalls: 2,
+      allCoreRequestIds: ['workflow-1', 'workflow-2'], coreCallMessageIds: CALLS });
+    // Valid current-epoch observations still enter the incumbent durable-proof
+    // path; rejecting stale input does not mint a completion receipt.
+    expect(noteCoreBrowserEvidence(settled(NOW + 2000))).toBe(true);
+    expect(coreBrowserEvidence(TARGET)?.pendingCompletion).not.toBeNull();
+    expect(nativeCompletionDiagnostic(TARGET)?.reason).toBe('durable-proof-required');
+  });
+
   it('settles a retained fence when a later settled frame omits the request-id half', () => {
     resetCoreBrowserEvidenceForTests();
     expect(noteCoreBrowserEvidence(frame(NOW))).toBe(true);

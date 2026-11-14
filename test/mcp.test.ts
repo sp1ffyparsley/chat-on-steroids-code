@@ -6412,6 +6412,10 @@ describe('exec sessions belong to the chat that opened them', () => {
     expect(textOf(started)).toContain('session_token=' + token);
     const missing = await asChat('wfr-external-cap-missing', 'write_stdin', { session_id: sessionId, chars: '' });
     expect(textOf(missing)).toContain('EXEC_SESSION_TOKEN_REQUIRED');
+    expect(textOf(missing)).toContain('existing exec tool');
+    expect(textOf(missing)).toContain('tools.write_stdin({session_id, session_token, chars, yield_time_ms})');
+    expect(textOf(missing)).toContain('No input was sent and no output was read');
+    expect(textOf(missing)).not.toContain(token);
     const wrong = await asChat('wfr-external-cap-wrong', 'write_stdin', {
       session_id: sessionId, session_token: 'x'.repeat(43), chars: ''
     });
