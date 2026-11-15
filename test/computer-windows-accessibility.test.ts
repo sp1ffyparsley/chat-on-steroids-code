@@ -157,11 +157,13 @@ try {
   $initialAttempts = 1
   # Loaded/layout and control discovery can precede cross-process TextPattern
   # readiness. Retry only absent text, never an observed wrong/empty value. This
-  # is the same owned-fixture readiness phase, before any semantic input.
+  # is the same owned-fixture readiness phase, before any semantic input. Each
+  # production snapshot may spend its full 2s scan budget. Allow that bounded
+  # cost for all three promised observations instead of expiring after only two.
   $initialTextMissing = $null -eq $snapshot.document_text -and $null -eq $snapshot.selected_text
   while ((($snapshot.truncated -eq $true -and @($required | Where-Object { -not $rows.ContainsKey($_) }).Count -gt 0) -or
       ($rows.ContainsKey('editor') -and $initialTextMissing)) -and
-      $initialAttempts -lt 3 -and $initialReady.ElapsedMilliseconds -lt 2000) {
+      $initialAttempts -lt 3 -and $initialReady.ElapsedMilliseconds -lt 6000) {
     Start-Sleep -Milliseconds 25
     $snapshot = Handle-Request @{ op = 'snapshot'; id = $id; includeScreenshot = $false; includeUi = $true; includeRelated = $true; maxResults = 100 }
     if ($snapshot.uiUnavailable) { throw ('UIA unavailable: ' + $snapshot.uiUnavailable.message) }
