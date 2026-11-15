@@ -113,8 +113,12 @@ public static class CosWindowsCapture {
     IntPtr device = IntPtr.Zero, context = IntPtr.Zero, dxgi = IntPtr.Zero, projected = IntPtr.Zero;
     try {
       int level;
-      // BGRA support is required by Windows.Graphics.Capture and SoftwareBitmap.
-      Check(D3D11CreateDevice(IntPtr.Zero, 1, IntPtr.Zero, 0x20, IntPtr.Zero, 0, 7, out device, out level, out context));
+      // This device copies one captured surface; it does not render the target
+      // app. WARP avoids default hardware-adapter frame stalls on hybrid GPU
+      // desktops and leaves production GPU work alone. Keep BGRA support and
+      // the same HWND, dimensions, deadline and frame admission checks.
+      const int D3D_DRIVER_TYPE_WARP = 5;
+      Check(D3D11CreateDevice(IntPtr.Zero, D3D_DRIVER_TYPE_WARP, IntPtr.Zero, 0x20, IntPtr.Zero, 0, 7, out device, out level, out context));
       Guid dxgiId = new Guid("54EC77FA-1377-44E6-8C32-88FD5F44C84C");
       Check(Marshal.QueryInterface(device, ref dxgiId, out dxgi));
       Check(CreateDirect3D11DeviceFromDXGIDevice(dxgi, out projected));
@@ -168,7 +172,7 @@ public static class CosWindowsCapture {
     Console.Error.WriteLine("[cos-capture] item-ready");
     ValidateCaptureSize(window, width, height);
     RECT bounds = CaptureBounds(window, width, height, "item");
-    Console.Error.WriteLine("[cos-capture] device-create");
+    Console.Error.WriteLine("[cos-capture] device-create warp");
     using (var device = CreateDevice()) {
       Console.Error.WriteLine("[cos-capture] pool-create");
       using (var pool = Direct3D11CaptureFramePool.CreateFreeThreaded(device, DirectXPixelFormat.B8G8R8A8UIntNormalized, 1, item.Size)) {
