@@ -155,13 +155,23 @@ try {
   $required = @('invoke','toggle','second','expand','scroll','editor','disabled')
   $initialReady = [System.Diagnostics.Stopwatch]::StartNew()
   $initialAttempts = 1
-  while ($snapshot.truncated -eq $true -and @($required | Where-Object { -not $rows.ContainsKey($_) }).Count -gt 0 -and
+  # Loaded/layout and control discovery can precede cross-process TextPattern
+  # readiness. Retry only absent text, never an observed wrong/empty value. This
+  # is the same owned-fixture readiness phase, before any semantic input.
+  $initialTextMissing = $null -eq $snapshot.document_text -and $null -eq $snapshot.selected_text
+  while ((($snapshot.truncated -eq $true -and @($required | Where-Object { -not $rows.ContainsKey($_) }).Count -gt 0) -or
+      ($rows.ContainsKey('editor') -and $initialTextMissing)) -and
       $initialAttempts -lt 3 -and $initialReady.ElapsedMilliseconds -lt 2000) {
+    Start-Sleep -Milliseconds 25
     $snapshot = Handle-Request @{ op = 'snapshot'; id = $id; includeScreenshot = $false; includeUi = $true; includeRelated = $true; maxResults = 100 }
     if ($snapshot.uiUnavailable) { throw ('UIA unavailable: ' + $snapshot.uiUnavailable.message) }
     $rows = @{}; foreach ($row in $snapshot.elements) { if ($row.automationId) { $rows[$row.automationId] = $row } }
     $initialAttempts += 1
+    $initialTextMissing = $null -eq $snapshot.document_text -and $null -eq $snapshot.selected_text
   }
+  Write-Output ('WINDOWS_ACCESSIBILITY_INITIAL ' + (@{ attempts=$initialAttempts; truncated=$snapshot.truncated;
+    textMissing=$initialTextMissing; documentChars=([string]$snapshot.document_text).Length;
+    selectedChars=([string]$snapshot.selected_text).Length } | ConvertTo-Json -Compress))
   foreach ($key in @('invoke','toggle','second','expand','scroll','editor','disabled')) {
     if (-not $rows.ContainsKey($key)) { throw ('missing fixture element ' + $key + ': ' + ($snapshot | ConvertTo-Json -Depth 8 -Compress)) }
   }
@@ -335,7 +345,7 @@ try {
           child.once('close', resolve);
         });
         for (const line of stdout.split(/\r?\n/).filter(line =>
-          line.startsWith('WINDOWS_ACCESSIBILITY_BROWSER_') || line.startsWith('WINDOWS_ACCESSIBILITY_SELECTION ')))
+          line.startsWith('WINDOWS_ACCESSIBILITY_BROWSER_') || line.startsWith('WINDOWS_ACCESSIBILITY_SELECTION ') || line.startsWith('WINDOWS_ACCESSIBILITY_INITIAL ')))
           console.info(line);
         expect(timedOut, stderr + stdout).toBe(false);
         expect(status, stderr + stdout).toBe(0);
