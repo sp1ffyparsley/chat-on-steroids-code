@@ -214,7 +214,8 @@ describe('extension release metadata', () => {
     expect(resultReader).toContain('Object.keys(value).length !== (valueCarrier ? 2 : 1)');
     expect(resultReader).toContain('JSON.stringify(value) !== payload');
     expect(resultReader).toContain('value.cosResultReceipt?.version !== 2');
-    expect(resultReader.match(/JSON\.stringify/g)).toHaveLength(2);
+    expect(resultReader).toContain('JSON.stringify(value) !== raw');
+    expect(resultReader.match(/JSON\.stringify/g)).toHaveLength(3);
 
     expect(resultReader).toContain("message.author?.role !== 'tool'");
     expect(resultReader).toContain("content.content_type !== 'code' || content.language !== 'json'");
