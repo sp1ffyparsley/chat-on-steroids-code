@@ -1,12 +1,18 @@
 # Chat On Steroids — code research mirror
 
+## R102: align parent readiness with the reviewed DeepAI transport
+
+The native adapter already supported reviewed DeepAI 0.3.37, but the CoS parent readiness validator still admitted only 0.3.36. That caused a healthy helper preflight to fail before production dispatch. Both layers now expose their bounded release contract, and an executable parity regression prevents a transport-only version change from silently leaving Core behind. Only reviewed 0.3.36/0.3.37 with protocol 2 and the exact requested model qualify. Future/prerelease versions, absent or mismatched protocols/models, inconsistent blockers and oversized discovery remain refused; free-model, parent controls, native approvals and result custody are unchanged.
+
+The actual 0.3.37 regression failed before repair. All 89 helper/transport checks and TypeScript/syntax pass, including neighboring refusal cases. Full release qualification is underway; this is source-tested, not installed or production-parent acceptance. Direct model reviews do not substitute for a real parent-bound report roundtrip.
+
 ## R101: recovery-draft release and delayed Resume proof
 
 A cancelled automatic revival left its exact unsent prepared text in the native composer. The result reader could verify every return while the protected draft correctly blocked continuation. The existing Input owner now withdraws its unchanged prepared draft before publishing its confirmed-unsent release. User edits, attachments, changed routes or connector tokens, and attempted or uncertain Sends retain their existing protections. The zero-click proof is rechecked after cleanup.
 
 The existing settled Resume owner can also preserve an exact late-proved historical answer as a **handled** canonical cursor and consume-once WAL receipt. This records identity without authorizing automatic work. A deliberate Resume must still renew that exact cursor/epoch and pass the normal native, physical-work, policy and delivery guards. Original request/result debt stays retained; no scheduler, queue or coordinator was added.
 
-The owned-draft regression and both retired/open-source Resume reproductions failed under the former behavior. Eight focused draft checks, 2,315 content/DOM checks, and 168 committed-Resume checks pass. Generation is 180, wire protocol 19. Full strict qualification and safe activation are pending; this is source-tested behavior, not fleet autonomy or a production helper-acceptance claim.
+The owned-draft regression and both retired/open-source Resume reproductions failed under the former behavior. Eight focused draft checks, 2,315 content/DOM checks, and 168 committed-Resume checks pass. Generation is 180, wire protocol 19. The isolated release passed 14,589 strict checks with 63 conditional skips, independent equality of all 315 installer payload files and 154 post-pin owner checks. Three positively idle instances were deployed through normal lifecycle shutdown, preserving their closed settings/custody state and protected work. This does not certify fleet autonomy or production helper acceptance. A deliberately delivered current continuation made 11 Core calls before a provider stream error; old missing journal observations and native result debt remain explicit.
 
 ## R100: bounded large result receipt recovery
 

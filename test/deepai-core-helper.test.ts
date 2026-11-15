@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import {
-  createDeepAIHelperOwner, resolveDeepAIHelperRuntime, supportsDeepAIHelperNode,
+  createDeepAIHelperOwner, resolveDeepAIHelperRuntime, supportsDeepAIHelperNode, DEEPAI_NATIVE_CONTRACT,
   type BridgeCall, type BridgeRequest, type HelperOwnerDependencies, type HelperParent
 } from '../src/main/deepai-helper.js';
 import { readDurableStrict, writeDurableNow, initDurableStore, resetDurableForTests, flushDurable } from '../src/main/durable.js';
@@ -468,6 +468,29 @@ it('readiness checks an explicit model and bounds discovery without accepting a 
   await expect(owner.readiness(p, model)).rejects.toThrow('DEEPAI_BRIDGE_INVALID_RESPONSE');
   expect(() => deepAIHelperSchema.parse({ action: 'readiness', model })).not.toThrow();
   expect(() => deepAIHelperSchema.parse({ action: 'status', job: randomUUID(), model })).toThrow();
+  expect(calls).toHaveLength(0); expect(jobs.size).toBe(0);
+});
+it('keeps the Core readiness contract identical to the executable native transport', async () => {
+  const native = await import(new URL('../scripts/deepai-native.mjs', import.meta.url).href);
+  expect(DEEPAI_NATIVE_CONTRACT).toEqual(native.DEEPAI_NATIVE_CONTRACT);
+  expect(DEEPAI_NATIVE_CONTRACT).toEqual({ versions: ['0.3.36', '0.3.37'], protocol: 2 });
+});
+it.each(['0.3.36', '0.3.37'])('readiness accepts reviewed native %s without dispatching work', async version => {
+  const p = await principal();
+  bridge.mockResolvedValueOnce({ ready: true, observedAt: new Date(now).toISOString(), maxActive: 2,
+    version, protocol: 2, model: 'deepai/glm-5.3-flash', blocker: null });
+  expect(await owner.readiness(p)).toMatchObject({ ready: true, version, protocol: 2 });
+  expect(calls).toHaveLength(0); expect(jobs.size).toBe(0);
+});
+it.each([
+  { version: '0.3.38' }, { version: '0.3.37-dev' }, { version: undefined },
+  { protocol: 1 }, { protocol: 3 }, { protocol: undefined },
+  { model: 'deepai/other-free' }, { blocker: { code: 'native_hold', action: 'Review in native app.' } }
+])('readiness refuses unsupported or inconsistent native contracts: %j', async change => {
+  const p = await principal();
+  bridge.mockResolvedValueOnce({ ready: true, observedAt: new Date(now).toISOString(), maxActive: 2,
+    version: '0.3.37', protocol: 2, model: 'deepai/glm-5.3-flash', blocker: null, ...change });
+  await expect(owner.readiness(p)).rejects.toThrow('DEEPAI_BRIDGE_INVALID_RESPONSE');
   expect(calls).toHaveLength(0); expect(jobs.size).toBe(0);
 });
 it('links the exact parent, native run, saved report, witnessed publication and explicit acknowledgment', async () => {

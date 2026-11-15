@@ -25,6 +25,9 @@ const MAX_ROWS = 4000;
 // retained registration so new work cannot consume the space needed to close old custody.
 const MAX_ADMISSION_BYTES = MAX_LEDGER_BYTES - MAX_ROWS * 256;
 const MAX_PENDING_PER_PARENT = 50;
+// Deliberate release allowlist, parity-checked against the native transport.
+// Protocol compatibility alone never authorizes an unreviewed server release.
+export const DEEPAI_NATIVE_CONTRACT = Object.freeze({ versions: Object.freeze(['0.3.36', '0.3.37']), protocol: 2 });
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'blocked', 'incomplete']);
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const samePath = (a: string, b: string): boolean => process.platform === 'win32'
@@ -462,7 +465,7 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
       eligibleModels: z.array(z.string().max(200).regex(/^deepai\/[a-z0-9][a-z0-9.-]+$/)).max(16).optional(),
       eligibleModelsTruncated: z.boolean().optional(),
       blocker: z.object({ code: z.string().max(100), action: z.string().max(1000) }).nullable() }).safeParse(raw);
-    if (!parsed.success || parsed.data.ready && (parsed.data.blocker !== null || parsed.data.version !== '0.3.36' || parsed.data.protocol !== 2 || parsed.data.model !== model))
+    if (!parsed.success || parsed.data.ready && (parsed.data.blocker !== null || !DEEPAI_NATIVE_CONTRACT.versions.includes(parsed.data.version ?? '') || parsed.data.protocol !== DEEPAI_NATIVE_CONTRACT.protocol || parsed.data.model !== model))
       refuse('DEEPAI_BRIDGE_INVALID_RESPONSE', 'Readiness returned an invalid bounded response or an unsupported native/model contract.');
     await assertParent(principal, true);
     return { ...parsed.data, parentSessionId: principal.sessionId, parentConversationId: principal.conversationId,

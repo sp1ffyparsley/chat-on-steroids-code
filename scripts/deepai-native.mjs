@@ -12,8 +12,9 @@ const desktop = process.env.COS_DEEPAI_DESKTOP_EXE || path.join(homedir(), 'AppD
 const serverEntry = path.join(path.dirname(desktop), 'resources', 'server.asar', 'apps', 'server', 'dist', 'bin.mjs');
 // Reviewed native releases only: a shared protocol number is not blanket permission
 // to accept future server versions. Keep transport, custody and model checks unchanged.
-const SERVER_VERSIONS = new Set(['0.3.36', '0.3.37']);
-const PROTOCOL_VERSION = 2;
+export const DEEPAI_NATIVE_CONTRACT = Object.freeze({ versions: Object.freeze(['0.3.36', '0.3.37']), protocol: 2 });
+const SERVER_VERSIONS = new Set(DEEPAI_NATIVE_CONTRACT.versions);
+const PROTOCOL_VERSION = DEEPAI_NATIVE_CONTRACT.protocol;
 const SCOPES = ['orchestration:read', 'orchestration:operate'];
 const MAX_BYTES = 8 * 1024 * 1024;
 const READ_RPC = new Set(['server.probe', 'server.getConfig', 'orchestration.getThreadProjection',
