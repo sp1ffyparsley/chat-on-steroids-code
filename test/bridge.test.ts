@@ -11760,18 +11760,22 @@ describe('activity feed', () => {
       { observedAt: Date.now() - 31_000 },
       { documentId: 'foreign-document', observedAt: Date.now() + 1 },
       { navigationEpoch: 4, observedAt: Date.now() + 2 },
-      { ordinaryFinal: { ...final, sourceUserMessageId: randomUUID() }, observedAt: Date.now() + 3 }
+      { navigationEpoch: 4, ordinaryFinal: { ...final, sourceUserMessageId: randomUUID() }, observedAt: Date.now() + 3 }
     ]) {
       expect((await request('POST', route, { body: { coreDiagnostic: { ...diagnostic,
         ordinaryFinal: final, ...patch } } })).status).toBe(200);
       expect(nativeFinalEvidenceWait(coreBrowserEvidence(conversationId))?.reason).toBe('evidence');
       expect(coreBrowserEvidence(conversationId)?.pendingCompletion?.documentId).toBe(original.documentId);
     }
+    expect(coreBrowserEvidence(conversationId)?.navigationEpoch).toBe(4);
     expect((await request('POST', route, { body: { coreDiagnostic: {
-      ...diagnostic, observedAt: Date.now() + 5, ordinaryFinal: { ...final, calls: 201,
+      // Validate the oversized census in the current navigation. Epoch 3 is
+      // intentionally rejected before it can replace the retained epoch-4 row.
+      ...diagnostic, navigationEpoch: 4, observedAt: Date.now() + 5, ordinaryFinal: { ...final, calls: 201,
         coreCallMessageIds: Array.from({ length: 201 }, (_, index) => `call-${index}`),
         allCoreRequestIds: Array.from({ length: 201 }, (_, index) => `request-${index}`) } } } })).status).toBe(200);
     expect(coreBrowserEvidence(conversationId)?.ordinaryFinal?.coreCallMessageIds).toBeUndefined();
+    expect(coreBrowserEvidence(conversationId)?.ordinaryFinal?.allCoreRequestIds).toBeUndefined();
     expect(nativeFinalEvidenceWait(coreBrowserEvidence(conversationId))?.reason).toBe('evidence');
     resetCoreBrowserEvidenceForTests();
   });
