@@ -2518,7 +2518,8 @@ describe('alternate shell turn/message provenance', () => {
     'cached context conflict', 'cached user conflict', 'cached edge conflict', 'active context',
     'assistant final', 'assistant text', 'context accessor', 'missing terminal',
     'declared folded header', 'single folded header', 'folded missing header edge', 'folded missing user edge',
-    'folded foreign scope', 'folded missing receipt', 'folded cached header edge', 'folded header edge accessor'] as const)(
+    'folded foreign scope', 'folded missing receipt', 'folded cached header edge', 'folded header edge accessor',
+    'folded distinct cache', 'folded cached user children', 'folded direct user cache conflict'] as const)(
     'proves only a bounded declared retained context prefix (%s)', async variant => {
       const HEADER = 'prefix-current-header', TOP = 'prefix-context-0';
       const scope = { request_id: REQUEST, working_turn_id: 'prefix-working', turn_exchange_id: 'prefix-exchange' };
@@ -2560,6 +2561,7 @@ describe('alternate shell turn/message provenance', () => {
             // the selected graph contracts that prefix to user -> header.
             mapping[USER].children = [`prefix-context-${count - 1}`];
             mapping[TOP].children = [HEADER];
+            if (variant === 'folded direct user cache conflict') mapping[USER].children.unshift(HEADER);
             if (variant === 'folded missing header edge') mapping[TOP].children = [];
             if (variant === 'folded missing user edge') mapping[USER].children = ['unrelated-context'];
             if (variant === 'folded foreign scope') mapping[TOP].message.metadata.working_turn_id = 'foreign';
@@ -2590,15 +2592,17 @@ describe('alternate shell turn/message provenance', () => {
           if (variant === 'context accessor') Object.defineProperty(context.metadata, 'working_turn_id', {
             get() { getterReads++; throw new Error('PRIVATE_SCOPE_GETTER'); } });
           if (variant === 'missing terminal') { delete mapping[ASSISTANT]; entry.turn.items = entry.turn.items.filter((item: any) => item.messageId !== ASSISTANT); entry.turn.messageIds = [USER, CALL]; }
-        }, nativeCallCacheMutation: variant.startsWith('cached ') || variant === 'folded cached header edge' ? mapping => {
+        }, nativeCallCacheMutation: variant.startsWith('cached ') ||
+          ['folded cached header edge', 'folded distinct cache', 'folded cached user children', 'folded direct user cache conflict'].includes(variant) ? mapping => {
           if (variant === 'cached context conflict') mapping['prefix-context-2'].message.metadata.turn_exchange_id = 'foreign';
           if (variant === 'cached user conflict') mapping[USER].message.metadata.working_turn_id = 'foreign';
           if (variant === 'cached edge conflict') mapping['prefix-context-3'].children = [];
           if (variant === 'folded cached header edge') mapping[TOP].children = [];
+          if (variant === 'folded cached user children' || variant === 'folded direct user cache conflict') mapping[USER].children = [];
         } : undefined });
       try {
         const accepted = ['eight-node prefix', 'private context getter', 'different context request', '400-node prefix',
-          'declared folded header', 'single folded header'].includes(variant);
+          'declared folded header', 'single folded header', 'folded distinct cache'].includes(variant);
         expect(page.fiber.turns[0].calls[0]).toMatchObject({
           requestId: accepted || variant === 'folded missing receipt' ? REQUEST : null, answered: accepted });
         expect(page.fiber.turns[0].calls[0].resultReceiptId).toBe(accepted ? 'a'.repeat(48) : undefined);
