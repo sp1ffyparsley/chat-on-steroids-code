@@ -1,5 +1,11 @@
 # Chat On Steroids — code research mirror
 
+## R104: qualified runtime repair and bounded native readiness
+
+The private Windows release counterpart now passes all 14,602 strict checks, with 63 conditional skips, including 37 native Windows checks. Its installer independently matches all 315 unpacked payload files. The R103 parent-custody repair is included. These results establish package qualification; profile deployment, executing browser generations and a production parent consuming a complete DeepAI report still require separate acceptance. Protected work and the disabled separate schedule remain preserved.
+
+The third earlier qualification failure also exposed a test readiness deadline defect: three observations were allowed, but the total two-second window could expire before all three production snapshots, each permitted its own two-second scan. The existing initial owned-fixture readiness now allows six seconds total and at most three observations, before any semantic input. Production scan limits and all wrong/empty text, unavailable-provider, input, Send and completion guards are unchanged. Earlier failed runs remain failed evidence.
+
 ## R103: preserve parent custody across equivalent runtime refreshes
 
 Real parent readiness exposed a second failure: ordinary settings saves and shared-access preflights rebuilt the active runtime object, so a reference comparison falsely reported an account switch. Configuration now owns an opaque custody token that survives equivalent runtime publications. A profile, route, namespace, root/access change or explicit runtime reset rotates it; returning to an earlier account cannot restore the old token. DeepAI uses that token while retaining exact parent-chat checks, current Pause/access checks and existing job/result ownership.
