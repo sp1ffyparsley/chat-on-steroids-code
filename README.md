@@ -1,5 +1,15 @@
 # Chat On Steroids — code research mirror
 
+## R106: precise ancestry failures and complete helper pages — source tested
+
+The reader now accepts a single declared assistant context only with the same original request namespace, keeps the stricter legacy system-sibling proof, and rejects conflicting cached user edges. Seven fixed structural failure facets survive all four reader/content/worker/Main allowlists. No hidden context or request values are logged; missing native receipts still withhold completion.
+
+CoS now preserves the native DeepAI context measurements and rotation reason instead of stripping them. Missing usage remains unknown; the existing native rollover, approvals, admission and planning workspace stay authoritative. Result pages must match the requested offset, character length and next offset. Inconsistent or shortened pages are refused without ACK. Oversized Unicode reports paginate completely without copying their bodies into the custody ledger or truncating at a prompt budget.
+
+The serialized tab-retirement owner preserves pinned/audible pages and rechecks playback after its durable write, retaining its draft, work, document, journal, final-tab and one-shot gates. Strict packaging checks both pinned offline binary archives before expensive dependency materialization and reports missing/corrupt inputs without downloads or deletion.
+
+Failure-first tests reproduced the defects. All 2,085 affected source tests, 69 native DeepAI checks, TypeScript and syntax checks pass. This mirror independently passed 71 focused tests and TypeScript, including diagnostic transport and archive preflight. Full private qualification is running through the incumbent release owner. These changes are **not yet qualified, installed, loaded or live accepted**. Earlier R105 failures remain failed. Protected work and disabled schedules stay unchanged; no new coordinator, scheduler or forced reload was added.
+
 ## R105: declared hidden-context ancestry — qualification held
 
 A current long answer refused 117 original request identities at `group-retained-parent`, with the first retained header off the selected path and the child-membership proof failing. The reader required the original user node to list the rendered header directly, even when the provider retained a fully declared user-to-hidden-context-to-header chain and contracted that prefix in the selected graph. The existing bounded context proof now also accepts that exact final context-to-selected-header edge. Every retained edge, hidden context shape, user namespace and available cache copy must still agree; an unrelated branch, accessor, missing edge or foreign scope remains refused. A single hidden context qualifies only through that explicit final edge. Context bodies are never interpreted or exported.
