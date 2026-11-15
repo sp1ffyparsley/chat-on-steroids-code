@@ -1,12 +1,20 @@
 # Chat On Steroids — code research mirror
 
+## R101: recovery-draft release and delayed Resume proof
+
+A cancelled automatic revival left its exact unsent prepared text in the native composer. The result reader could verify every return while the protected draft correctly blocked continuation. The existing Input owner now withdraws its unchanged prepared draft before publishing its confirmed-unsent release. User edits, attachments, changed routes or connector tokens, and attempted or uncertain Sends retain their existing protections. The zero-click proof is rechecked after cleanup.
+
+The existing settled Resume owner can also preserve an exact late-proved historical answer as a **handled** canonical cursor and consume-once WAL receipt. This records identity without authorizing automatic work. A deliberate Resume must still renew that exact cursor/epoch and pass the normal native, physical-work, policy and delivery guards. Original request/result debt stays retained; no scheduler, queue or coordinator was added.
+
+The owned-draft regression and both retired/open-source Resume reproductions failed under the former behavior. Eight focused draft checks, 2,315 content/DOM checks, and 168 committed-Resume checks pass. Generation is 180, wire protocol 19. Full strict qualification and safe activation are pending; this is source-tested behavior, not fleet autonomy or a production helper-acceptance claim.
+
 ## R100: bounded large result receipt recovery
 
 A finished native turn contained 102 Core returns, but one canonical server result was 526,975 characters, just above the reader's ordinary 524,288-character limit. Its valid v2 durable witness was withheld and one call remained open, preventing final recognition and continuation. The apparent completed-turn identity issue was disproved by fresh diagnostics: the existing exact-user join already mapped correctly.
 
 The existing receipt reader now accepts only the exact canonical two-field `{output:string,cosResultReceipt:v2}` shape up to 1 Mi UTF-16 code units, with positively finished native transport status, a valid opaque receipt and invocation digest. General envelopes and image carriers retain their existing smaller limits. Nested/legacy/competing/malformed carriers, foreign parents, noncanonical output and the upper-bound overflow remain refused. Result text stays in MAIN; original invocation/resource/parent/cache and durable outcome checks remain mandatory. A receipt proves returned custody, not successful execution, and old unresolved inventory/request fences are not cleared.
 
-Two positive reproductions initially failed; 17 focused positive/negative checks now pass. The independent public reader suites pass 933 checks; TypeScript, syntax and public-history privacy checks also pass. Source generation is 179. Private strict qualification and live activation are pending; this source change alone is not proof of restored automatic continuation or production DeepAI-helper uptake. The separate schedule stays off and protected work remains untouched.
+Two positive reproductions initially failed; 17 focused positive/negative checks now pass. The independent public reader suites pass 933 checks; TypeScript, syntax and public-history privacy checks also pass. Source generation is 179. The isolated release passed 14,585 strict checks with 63 conditional skips and 110 post-pin owner checks; its installer independently matched all 315 payload files. Two actually idle instances were installed through normal lifecycle shutdown, preserving their closed settings/custody state and protected work. A current browser then verified all 102 native Core returns, eliminating the false open call. This is live reader acceptance, not restored automatic continuation or production DeepAI-helper uptake. The separate schedule stays off and protected work remains untouched.
 
 ## R98: exact answer reference beside a native widget — source repair
 

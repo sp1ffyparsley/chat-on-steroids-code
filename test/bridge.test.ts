@@ -5693,6 +5693,46 @@ describe('committed Resume native terminal pickup after restart', () => {
     return { from, chat, userId, finalId, sessionId, token, text, answer, retained, input };
   };
 
+  it.each([true, false])('retains a late-proved Resume final as handled before deliberate renewal (source retired=%s)', async retireSource => {
+    const { chat, userId, finalId, sessionId, answer, token, input } = await setup(retireSource);
+    const goal = await import('../src/main/goal.js');
+    await saveConfig({ ...getConfig(), goal: { ...getConfig().goal, continuationPolicy: 'settled-turn',
+      backend: 'chatgpt', loopBackend: 'chatgpt' } });
+    const requestId = randomUUID();
+    const unassociated = { ...answer, calls: [{ messageId: 'late-proved-core-call',
+      requestId, tool: 'read', answered: false }] } as Record<string, unknown>;
+    delete unassociated.inputSourceUserMessageId;
+    await request('POST', '/events', { body: { conversationId: chat, events: [unassociated] } });
+    // Resume can precede repair of the native receipt reader. That later policy
+    // must not auto-run history, but must not make exact source custody unknowable.
+    await new Promise(resolve => setTimeout(resolve, 5));
+    await goal.setGoalSwitchNow(chat, 'loop', true);
+    await request('POST', '/status', { body: { openConversations: [], inventoryComplete: false, authState: 'signed-in' } });
+    const diagnostic = { documentId: 'late-proved-resume-source', navigationEpoch: 2,
+      observedAt: Date.now(), shell: 'alternate', shellDiscovery: 'compatible', requestIds: [], turnId: null,
+      ordinaryFinal: { reason: 'associated', questions: 1, calls: 1, openCalls: 0,
+        codeCalls: 0, openCodeCalls: 0, activeTurnMapped: false, sourceUserMessageId: userId,
+        settledFinalMessageId: finalId, coreCallMessageIds: ['late-proved-core-call'],
+        allCoreRequestIds: [requestId], codeCallMessageIds: [] } };
+    expect((await request('POST', '/activity?conversationId=' + chat, { body: { coreDiagnostic: diagnostic } })).status).toBe(200);
+    const cursor = snapshotGoalReplies().replies.find(row => row.conversationId === chat);
+    expect(cursor).toMatchObject({ sessionId, replyId: finalId, turnId: 'reply:' + finalId, state: 'handled' });
+    expect(goalPendingReplyFor(chat)).toBeNull();
+    expect(await input.listInputs()).toEqual([]);
+    expect((await readEvents(sessionId, { kinds: ['assistant_message'] })).at(-1)).toMatchObject({
+      messageId: finalId, inputReplyTo: userId, goalEligible: true
+    });
+    expect(snapshotContinuations().entries.find(row => row.token === token)?.acceptedDestinationFinal).toBe(finalId);
+    expect(await setGoalReplyActiveNow(chat, true, () => true, true)).toBe(true);
+    const pending = goalPendingReplyFor(chat)!;
+    expect(pending.replyId).toBe(finalId);
+    const refusals: string[] = [];
+    const proof = await settledForwardBridge.settledTurnContinuationProof(sessionId, chat, pending.turnId,
+      { onRefusal: reason => refusals.push(reason) });
+    expect(proof ? await proof() : false, refusals.join(';')).toBe(true);
+    expect(await input.listInputs()).toEqual([]);
+  });
+
   it.each(['current', 'streamed-final', 'foreign-question', 'foreign-final', 'newer-question',
     'missing-receipt', 'source-view-open', 'wrong-epoch', 'duplicate-input', 'mutated-final-after-proof',
     'changed-receipt-after-proof'] as const)(

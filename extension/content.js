@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 179;
+  const RECORDER_VERSION = 180;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -17238,6 +17238,19 @@
       }
       return false;
     } finally {
+      // Withdraw while this exact Input still owns its preparation lease. Main can
+      // immediately rearm/retire a confirmed-unsent UUID once fail is acknowledged;
+      // awaiting that release first let a remount strand our own draft indefinitely.
+      // The existing draft lease still preserves edits, attachments, changed routes,
+      // changed connector tokens and every attempted/uncertain Send.
+      if (draft) {
+        try {
+          const cleared = !sendAttempted ? await draft.clear() : false;
+          if (!sendAttempted && !cleared && withdrawableRecoveryDraft) draft.withdraw();
+        }
+        catch { /* Unprovable cleanup preserves the draft; never keep the input slot busy. */ }
+        finally { draft.dispose(); }
+      }
       // A user can still press native Send while the app's authorization reply is in flight.
       // Its capture listener replaces this exact receipt, so timeout is positive zero-click
       // proof only while the pre-authorization receipt object is still the current one.
@@ -17266,14 +17279,6 @@
             ['app-refused', 'authorization-timeout', 'lease-lost', 'provider-blocked'].includes(withdrawReason))
             ? { detail: withdrawReason } : {})
         }, null, DESKTOP_INPUT_PRECLICK_REPLY_MS).catch(() => undefined);
-      }
-      if (draft) {
-        try {
-          const cleared = !sendAttempted ? await draft.clear() : false;
-          if (!sendAttempted && !cleared && withdrawableRecoveryDraft) draft.withdraw();
-        }
-        catch { /* Unprovable cleanup preserves the draft; never keep the input slot busy. */ }
-        finally { draft.dispose(); }
       }
       if (!sent && decision && desktopDecision === decision) desktopDecision = null;
       if (desktopSendReceiptOwner?.id === message.id) desktopSendReceiptOwner = null;

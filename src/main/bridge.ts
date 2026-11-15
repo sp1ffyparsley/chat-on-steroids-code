@@ -545,6 +545,7 @@ import {
   setGoalObjectiveNow,
   setGoalSwitchNow,
   snapshotGoalSwitches,
+  snapshotGoalReplies,
   startGoalDraft,
   tagGoalDraftProgressReport
 } from './goal.js';
@@ -15882,8 +15883,14 @@ async function recoverSettledNativeReplyAssociation(id: string): Promise<void> {
         latest.events === session.events && JSON.stringify(latestUser) === sourceRevision &&
         JSON.stringify(latestFinal) === finalRevision;
     } } : undefined);
+  const historicalResume = proof.handled.has(native.finalMessageId);
+  // Late reader repair can prove the exact committed Resume after a deliberate
+  // On changed its policy epoch. Preserve that verified source as HANDLED, never
+  // active work. Otherwise the provisional old reply cannot be renewed through
+  // Resume, even though its current native question/final and Sent WAL all agree.
+  // Already-consumed finals and ordinary Inputs retain their incumbent fence.
   if (!observation.goalEligible || proof.deferred.has(native.finalMessageId) ||
-      proof.handled.has(native.finalMessageId) || !current()) return;
+      (historicalResume && (!resumeReceipt || resumeReceipt.acceptedDestinationFinal)) || !current()) return;
   let candidates: Awaited<ReturnType<typeof recordChatObservations>>['goalCandidates'] = [];
   if (!(final.goalEligible === true && final.inputReplyTo === native.sourceUserMessageId &&
       goalPendingReplyFor(id)?.replyId === native.finalMessageId)) {
@@ -15908,13 +15915,18 @@ async function recoverSettledNativeReplyAssociation(id: string): Promise<void> {
     for (const candidate of candidates) {
       if (candidate.replyId !== native.finalMessageId) continue;
       await acceptGoalReplyNow({ conversationId: id, sessionId: session.id, ...candidate,
-        blocked: false, current });
+        blocked: historicalResume, current });
     }
     // Retry a failed WAL publication even when the Goal cursor was already committed.
     // Conversely the WAL's accepted-final fence prevents a lost/evicted cursor replay.
-    if (goalPendingReplyFor(id)?.replyId === native.finalMessageId && current()) {
+    const cursor = historicalResume
+      ? snapshotGoalReplies().replies.find(row => row.conversationId === id && row.sessionId === session.id && row.state === 'handled')
+      : goalPendingReplyFor(id);
+    if (cursor?.replyId === native.finalMessageId && current()) {
       if (resumeReceipt) await rememberCommittedResumeFinalNow(session.id, id, native.finalMessageId);
-      logInfo('bridge: recovered settled native reply association through exact Sent custody; tool completion remains unverified; sourceOwnership=' +
+      logInfo('bridge: recovered settled native reply association through exact Sent custody; ' +
+        (historicalResume ? 'historical reply remains handled until deliberate Resume; ' : '') +
+        'tool completion remains unverified; sourceOwnership=' +
         (resumeReceipt?.sourceExecutionSuperseded && !resumeReceipt.sourceClosed
           ? 'permanently-superseded-view-open' : resumeReceipt ? 'source-retired' : 'ordinary-input'));
     }

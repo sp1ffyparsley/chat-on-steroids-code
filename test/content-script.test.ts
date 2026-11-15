@@ -3270,6 +3270,33 @@ describe('desktop input delivery and helper ownership', () => {
     }
     if (kind === 'other text') expect(composerText(live.document)).toBe('A sentence I was still writing');
   });
+  it.each(['owned', 'edited'] as const)('withdraws a %s recovery draft before releasing its Input owner', async kind => {
+    let textAtRelease: string | null = null;
+    const recovery = { questionId: 'source-question', pro: false, busyUntil: Date.now() + 60_000, phase: 'ready' };
+    const recoveryInput = claimed({ recovery, silenceBoundary: { turnId: 'source-turn' } });
+    live = await harness(`https://chatgpt.com/c/${chatA}`, {
+      desktop_input: message => {
+        if (message.authorize) {
+          if (kind === 'edited') live!.document.querySelector('#prompt-textarea')!.textContent = 'My unsent personal draft';
+          return { ok: true, data: { ok: false } };
+        }
+        if (message.fail) {
+          // Main may immediately rearm/retire the released UUID; Chrome can then
+          // remount its editor. Cleanup must finish while the original lease exists.
+          textAtRelease = composerText(live!.document);
+          const box = live!.document.querySelector('#prompt-textarea')!;
+          box.replaceWith(box.cloneNode(true));
+        }
+        return { ok: true, data: message.ack || message.fail ? { ok: true } : { input: recoveryInput } };
+      }
+    }, () => undefined, false, true);
+    const sends = watchSend(live.document);
+    expect(await live.runtimeMessage({ type: 'clf-desktop-input', id: inputId, conversationId: chatA })).toEqual({ ok: false });
+    expect(sends()).toBe(0);
+    expect(textAtRelease).toBe(kind === 'owned' ? '' : 'My unsent personal draft');
+    expect(composerText(live.document)).toBe(kind === 'owned' ? '' : 'My unsent personal draft');
+    expect(live.sent.filter(message => message.ack)).toHaveLength(0);
+  });
   it('clears its exact remounted recovery draft when Send authorization is withdrawn', async () => {
     let authorizations = 0;
     const recovery = { questionId: 'source-question', pro: false, busyUntil: Date.now() + 60_000, phase: 'ready' };
