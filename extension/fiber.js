@@ -42,7 +42,7 @@
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
   const VERSION = 19;
   /** Private implementation epoch, independent of the stable cross-world wire schema. */
-  const PRODUCER_VERSION = 180;
+  const PRODUCER_VERSION = 181;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -2856,7 +2856,13 @@
               }
               return true;
             };
-            if (!declaredEdge(typedUserId, currentPath[1])) return false;
+            // A rendered contraction may also remove the user -> header child
+            // declaration. In that shape the original prefix must declare its
+            // exact final edge to this selected header instead. Matching scope
+            // alone or an unrelated hidden branch never supplies that edge.
+            const directHeader = declaredEdge(typedUserId, currentPath[1]);
+            const foldedHeader = declaredEdge(start, currentPath[1]);
+            if (!directHeader && !foldedHeader) return false;
             const userNode = nativeField(mapping, typedUserId), cachedUser = nativeField(cachedMapping, typedUserId);
             if (cachedUser && cachedUser !== userNode) {
               const message = nativeField(cachedUser, 'message'), meta = nativeField(message, 'metadata');
@@ -2898,7 +2904,7 @@
               id = parent;
             }
             // Keep the stricter existing single-sibling proof unchanged.
-            return visited.size >= 2;
+            return visited.size >= 2 || foldedHeader && visited.size === 1;
           };
           const contractedHeader = (id, parent, metadata) => {
             const rejectHeader = facet => { shellDiagnostic(rejects, 'nativeContractedHeader' + facet); return false; };

@@ -1,5 +1,11 @@
 # Chat On Steroids — code research mirror
 
+## R105: declared hidden-context ancestry — qualification pending
+
+A current long answer refused 117 original request identities at `group-retained-parent`, with the first retained header off the selected path and the child-membership proof failing. The reader required the original user node to list the rendered header directly, even when the provider retained a fully declared user-to-hidden-context-to-header chain and contracted that prefix in the selected graph. The existing bounded context proof now also accepts that exact final context-to-selected-header edge. Every retained edge, hidden context shape, user namespace and available cache copy must still agree; an unrelated branch, accessor, missing edge or foreign scope remains refused. A single hidden context qualifies only through that explicit final edge. Context bodies are never interpreted or exported.
+
+Two valid-chain reproductions and a request-only missing-receipt case failed before the fix. All 31 focused context cases and 1,092 reader/diagnostic checks pass, independently repeated in this mirror, with TypeScript and JavaScript syntax checks. Missing result receipts still withhold completion. Producer/content/worker generation is 181, wire 19 unchanged. Full private release qualification is in progress; this is not installed or live-accepted recovery and does not clear historical result debt. The protected personal process and all three paused Codex schedules remain unchanged.
+
 ## Open recordings are not active execution — source repair
 
 The recording search/read tool formerly called every record without an end timestamp `active`. A resumed production chat interpreted its own retained record as a competing file writer and stopped. Search/read now describe recording state as `open` or `ended`, explicitly separate it from execution/file ownership, and identify the caller's own recording only when the attributed request, session and current conversation agree. Foreign sessions, superseded conversations and unattributed requests receive no self marker. This presentation change grants no ownership or continuation authority and clears no completion debt.
