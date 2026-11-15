@@ -475,7 +475,7 @@ for(const name of ['main/index.js','preload/index.js','renderer/index.html','ren
       }));
       const cachedValidation = invoke('--local-update=renderer', '--json');
       rmSync(staleFolder, { recursive: true, force: true });
-      expect(cachedValidation.code).toBe(0);
+      expect(cachedValidation.code, JSON.stringify(cachedValidation.receipt)).toBe(0);
       expect(cachedValidation.receipt).toMatchObject({
         generation: first.receipt.generation,
         buildStrategy: 'reuse-exact-source-private-generation',

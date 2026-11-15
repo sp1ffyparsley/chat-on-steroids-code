@@ -1,10 +1,12 @@
 # Chat On Steroids — code research mirror
 
-## R105: declared hidden-context ancestry — qualification pending
+## R105: declared hidden-context ancestry — qualification held
 
 A current long answer refused 117 original request identities at `group-retained-parent`, with the first retained header off the selected path and the child-membership proof failing. The reader required the original user node to list the rendered header directly, even when the provider retained a fully declared user-to-hidden-context-to-header chain and contracted that prefix in the selected graph. The existing bounded context proof now also accepts that exact final context-to-selected-header edge. Every retained edge, hidden context shape, user namespace and available cache copy must still agree; an unrelated branch, accessor, missing edge or foreign scope remains refused. A single hidden context qualifies only through that explicit final edge. Context bodies are never interpreted or exported.
 
-Two valid-chain reproductions and a request-only missing-receipt case failed before the fix. All 31 focused context cases and 1,092 reader/diagnostic checks pass, independently repeated in this mirror, with TypeScript and JavaScript syntax checks. Missing result receipts still withhold completion. Producer/content/worker generation is 181, wire 19 unchanged. Full private release qualification is in progress; this is not installed or live-accepted recovery and does not clear historical result debt. The protected personal process and all three paused Codex schedules remain unchanged.
+Two valid-chain reproductions and a request-only missing-receipt case failed before the fix. All 31 initial focused context cases and 1,092 reader/diagnostic checks pass, independently repeated in this mirror, with TypeScript and JavaScript syntax checks. A subsequent supplied-code review prompted three distinct-cache/user-child fixtures; all 34 focused cases pass independently in both checkouts. The suggested cache-conflict bypass did not reproduce because the full original prefix walk already vetoes that disagreement. Missing result receipts still withhold completion. Producer/content/worker generation is 181, wire 19 unchanged.
+
+Full private release qualification FAILED at an existing combined local-update fixture's deadline, after two earlier offline-cache failures were retained and the exact pinned archives restored. Unchanged isolation also returned a validation refusal and a later child-launch deadline failure; the cached-validation assertion now includes its actual receipt for diagnosis. No timeout, guard or required check was weakened. This candidate is not qualified, installed or live accepted, and historical result debt is not cleared. The protected personal process and all three paused Codex schedules remain unchanged.
 
 ## Open recordings are not active execution — source repair
 
