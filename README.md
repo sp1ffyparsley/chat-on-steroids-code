@@ -1,5 +1,11 @@
 # Chat On Steroids — code research mirror
 
+## R98: exact answer reference beside a native widget — source repair
+
+Fresh native inspection found a completed answer item with one exact self-pointer and two references: its own DIL answer and an unrelated client-defined widget. The reader required one reference total, so it rejected valid request ancestry even though the canonical final and neighboring Core returns existed.
+
+The same helper now selects exactly one self-owned DIL from a bounded array containing the observed inert widget type. It never evaluates or exports widget payloads. Unknown types, widgets claiming a source or DIL payload, duplicate/foreign DIL sources, accessor entries, oversized arrays, absent previews and unfinished finals remain refused. Exact native final identity, per-call receipts and separate completion gates stay mandatory; an old clipped inventory fence cannot be retrospectively enlarged or cleared. Four positive reproductions initially failed; 23 focused checks and all 1,073 reader/diagnostic checks pass. Source generation is 178. The combined private strict candidate is undergoing qualification; no browser acceptance claim follows.
+
 ## R97: declared hidden context ancestry — source repair
 
 A native retained-parent reproduction found an eight-node hidden context prefix folded out of the selected execution path. The old reader understood only a single sibling header and rejected valid neighboring Core receipts. The existing ancestry owner now validates every declared edge through a bounded, unique context-only chain back to the exact selected native user. Working/exchange identities and cached node/child copies must agree. Only finished hidden system text or inert model-editable-context nodes qualify; no private context body is interpreted or exported. Context request annotations confer no command/result authority. The existing current final, execution groups, per-call resource, digest and receipt checks remain mandatory.

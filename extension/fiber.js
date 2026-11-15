@@ -42,7 +42,7 @@
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
   const VERSION = 19;
   /** Private implementation epoch, independent of the stable cross-world wire schema. */
-  const PRODUCER_VERSION = 177;
+  const PRODUCER_VERSION = 178;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -3832,8 +3832,20 @@
         typeof content !== 'string' || (content.match(/\bsource_message_id\s*=/g) || []).length !== 1 ||
         contentReferenceSourceId({ content: { content_type: 'text', parts: [content] } }) !== id) return null;
     const references = shellPublicItemData(item, 'contentReferences');
-    if (!Array.isArray(references) || shellPublicItemData(references, 'length') !== 1) return null;
-    const reference = shellPublicItemData(references, '0');
+    if (!Array.isArray(references) || references.length < 1 || references.length > MAX_ROWS) return null;
+    let reference = null;
+    for (let at = 0; at < references.length; at++) {
+      const candidate = shellPublicItemData(references, String(at));
+      const type = shellPublicItemData(candidate, 'type');
+      if (type === 'dil') {
+        if (reference) return null;
+        reference = candidate;
+      } else if (type !== 'client_defined_widget' || own.call(candidate, 'source_message_id') ||
+          own.call(candidate, 'model_dil_v2')) return null;
+      // An unrelated native widget carries no answer/source authority. Never
+      // evaluate its payload, even when it exposes a getter or private data.
+    }
+    if (!reference) return null;
     const text = shellPublicItemData(shellPublicItemData(reference, 'model_dil_v2'), 'fallbackMarkdown');
     if (shellPublicItemData(reference, 'type') !== 'dil' || shellPublicItemData(reference, 'source_message_id') !== id ||
         typeof text !== 'string' || !text.trim() || text.length > MAX_RENDERED_TEXT ||

@@ -2752,6 +2752,9 @@ describe('alternate shell turn/message provenance', () => {
 
   it.each(['direct Core', 'direct Core wrong parent', 'direct Core missing receipt', 'direct Core missing receipt wrong parent', 'direct Core missing receipt foreign resource', 'direct Core foreign resource', 'exact canonical group', 'exact final reference', 'foreign final pointer', 'foreign final reference',
     'multiple final references', 'getter final reference', 'unfinished native final reference',
+    'widget before final reference', 'widget after final reference', 'widget getter final reference',
+    'foreign widget final reference', 'disguised widget final reference', 'unknown widget final reference',
+    'array getter final reference', 'bounded widget final reference', 'oversized widget final reference',
     'duplicate final pointer source', 'missing final reference preview',
     'duplicate final anchor', 'off-path final anchor', 'nonterminal final anchor', 'different final body anchor',
     'orphan execution result', 'execution result request mismatch', 'execution child result missing',
@@ -3006,6 +3009,19 @@ describe('alternate shell turn/message provenance', () => {
             final.contentReferences = [{ type: 'dil', source_message_id: variant === 'foreign final reference' ? 'foreign-final' : ASSISTANT,
               model_dil_v2: { fallbackMarkdown: 'Rendered final preview differs from the native authored body.' } }];
             if (variant === 'multiple final references') final.contentReferences.push({ ...final.contentReferences[0] });
+            if (variant.includes('widget') && variant.includes('final reference')) {
+              const widget: any = { type: 'client_defined_widget', data: { text: 'PRIVATE_FINAL_WIDGET' } };
+              if (variant === 'foreign widget final reference') widget.source_message_id = 'foreign-final';
+              if (variant === 'disguised widget final reference') widget.model_dil_v2 = final.contentReferences[0].model_dil_v2;
+              if (variant === 'unknown widget final reference') widget.type = 'unknown-reference';
+              if (variant === 'widget getter final reference') Object.defineProperty(widget, 'data', {
+                get() { getterReads++; throw new Error('PRIVATE_WIDGET_GETTER'); } });
+              const count = variant === 'bounded widget final reference' ? 399 : variant === 'oversized widget final reference' ? 400 : 1;
+              if (variant === 'widget after final reference') final.contentReferences.push(widget);
+              else final.contentReferences.unshift(...Array.from({ length: count }, () => widget));
+            }
+            if (variant === 'array getter final reference') Object.defineProperty(final.contentReferences, '0', {
+              get() { getterReads++; throw new Error('PRIVATE_FINAL_ARRAY_GETTER'); } });
             if (variant === 'duplicate final pointer source') final.content = `::chatgpt-content-reference{source_message_id="${ASSISTANT}" source_message_id="foreign-final"}`;
             if (variant === 'missing final reference preview') delete final.contentReferences[0].model_dil_v2.fallbackMarkdown;
             if (variant === 'getter final reference') Object.defineProperty(final.contentReferences[0], 'source_message_id',
@@ -3015,6 +3031,7 @@ describe('alternate shell turn/message provenance', () => {
         } });
       try {
         const accepted = variant === 'direct Core' || variant === 'exact canonical group' || variant === 'exact final reference' ||
+          ['widget before final reference', 'widget after final reference', 'widget getter final reference', 'bounded widget final reference'].includes(variant) ||
           variant === 'exact retained commentary parent' || variant === 'exact retained execution commentary parent' ||
           variant === 'exact retained commentary image result' || variant === 'exact retained commentary value image result' || variant === 'exact retained header parent' ||
           variant === 'retained header transport annotation' ||
