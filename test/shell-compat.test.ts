@@ -960,7 +960,7 @@ describe('alternate shell turn/message provenance', () => {
     }
   );
 
-  it.each([1200, 1201])('keeps current native ancestry bounded at %s nodes', async nodes => {
+  it.each([2000, 2001])('keeps current native ancestry bounded at %s nodes', async nodes => {
     const page = await shellHarness({ withCall: true, nativeCallReceipt: true, assistantCompleted: false,
       nativeCallMutation(mapping, entry) {
         longNativeCompletionPath(mapping, entry);
@@ -973,8 +973,8 @@ describe('alternate shell turn/message provenance', () => {
         mapping[ASSISTANT].parent = parent;
       } });
     try {
-      expect(page.fiber.turns[0].calls.every((call: any) => call.answered === true)).toBe(nodes === 1200);
-      expect(page.fiber.turns[0].endMessageId).toBe(nodes === 1200 ? ASSISTANT : null);
+      expect(page.fiber.turns[0].calls.every((call: any) => call.answered === true)).toBe(nodes === 2000);
+      expect(page.fiber.turns[0].endMessageId).toBe(nodes === 2000 ? ASSISTANT : null);
     } finally { page.dom.window.close(); }
   });
 
@@ -1002,8 +1002,8 @@ describe('alternate shell turn/message provenance', () => {
           }
           if (reason === 'overflow') {
             let parent = mapping[ASSISTANT].parent;
-            // More than 400 public items + 200 invocation/result pairs of each supported kind.
-            for (let index = 0; index < 1200; index++) {
+            // More than 400 public items + 400 invocation/result pairs of each supported kind.
+            for (let index = 0; index < 2000; index++) {
               const id = `overflow-${index}`;
               mapping[id] = { id, parent, message: { id, author: { role: 'assistant' } } };
               parent = id;
@@ -2507,6 +2507,73 @@ describe('alternate shell turn/message provenance', () => {
       } finally { page.dom.window.close(); }
     });
 
+  it.each(['all receipts', 'second receipt absent', 'second result absent', 'foreign second scope', 'missing terminal'] as const)(
+    'preserves a proved neighboring result while an independent execution lacks its receipt (%s)', async variant => {
+      const EXEC2 = 'second-native-exec', CALL2 = 'second-native-call';
+      const RESULT2 = 'second-native-result', EXEC_RESULT2 = 'second-native-exec-result';
+      const page = await shellHarness({ withCall: true, withExec: true, nativeCallReceipt: true,
+        callCompleted: false, assistantCompleted: false,
+        nativeCurrentNode: variant === 'missing terminal' ? EXEC_RESULT2 : ASSISTANT,
+        nativeCallMutation(mapping, entry) {
+          completeExecBeforeCall(mapping, entry);
+          const call = entry.turn.items.find((item: any) => item.callId === CALL);
+          delete call.widgetStateSource;
+          entry.turn.items = entry.turn.items.filter((item: any) => item.callId !== EXEC);
+          entry.turn.items.splice(2, 0, { ...call, callId: CALL2 });
+          const scope = { request_id: REQUEST, working_turn_id: 'paired-working', turn_exchange_id: 'paired-exchange' };
+          const clone = (source: string, id: string, parent: string) => {
+            const copy = JSON.parse(JSON.stringify(mapping[source]));
+            copy.id = id; copy.parent = parent; copy.message.id = id;
+            copy.message.metadata = { ...copy.message.metadata, ...scope, parent_id: parent };
+            mapping[id] = copy;
+          };
+          mapping[CALL].parent = EXEC; mapping[CALL].message.metadata.parent_id = EXEC;
+          mapping[EXEC_RESULT].parent = RESULT; mapping[EXEC_RESULT].message.metadata.parent_id = RESULT;
+          mapping[RESULT].message.content = { content_type: 'code', language: 'json',
+            text: JSON.stringify({ cosResultReceipt: { version: 2, id: 'a'.repeat(48),
+              invocationSha256: createHash('sha256').update(JSON.stringify(['read', {}])).digest('hex') } }) };
+          clone(EXEC, EXEC2, EXEC_RESULT);
+          clone(CALL, CALL2, EXEC2);
+          clone(RESULT, RESULT2, CALL2);
+          mapping[RESULT2].message.content.text = mapping[RESULT2].message.content.text.replace('a'.repeat(48), 'b'.repeat(48));
+          clone(EXEC_RESULT, EXEC_RESULT2, RESULT2);
+          mapping[ASSISTANT].parent = EXEC_RESULT2; mapping[ASSISTANT].message.metadata.parent_id = EXEC_RESULT2;
+          entry.turn.messageIds = [USER, CALL, CALL2, ASSISTANT];
+          for (const [id, row] of Object.entries(mapping) as [string, any][]) if (id !== USER)
+            Object.assign(row.message.metadata, scope);
+          // The live renderer contracts old metadata parents on a hidden group.
+          const HEADER = 'paired-header';
+          mapping[HEADER] = { id: HEADER, parent: USER, message: { id: HEADER, author: { role: 'system' },
+            recipient: 'all', status: 'finished_successfully', content: { content_type: 'text', parts: ['PRIVATE_HEADER'] },
+            metadata: { ...scope, parent_id: 'retired-header', is_visually_hidden_from_conversation: true,
+              message_type: 'next', rebase_developer_message: false } } };
+          mapping[EXEC].parent = HEADER;
+          mapping[EXEC].message.metadata.parent_id = 'retired-native-parent';
+          if (variant === 'second receipt absent') mapping[RESULT2].message.content.text = '{"content":[]}';
+          if (variant === 'second result absent') {
+            delete mapping[RESULT2];
+            mapping[EXEC_RESULT2].parent = CALL2; mapping[EXEC_RESULT2].message.metadata.parent_id = CALL2;
+          }
+          if (variant === 'foreign second scope') mapping[CALL2].message.metadata.working_turn_id = 'foreign';
+          if (variant === 'missing terminal') {
+            delete mapping[ASSISTANT];
+            entry.turn.items = entry.turn.items.filter((item: any) => item.messageId !== ASSISTANT);
+            entry.turn.messageIds = [USER, CALL, CALL2];
+          }
+        } });
+      try {
+        const calls = page.fiber.turns[0].calls;
+        const firstProved = !['foreign second scope', 'missing terminal'].includes(variant);
+        expect(calls).toHaveLength(2);
+        expect(calls[0]).toMatchObject({ answered: firstProved });
+        expect(calls[0].resultReceiptId).toBe(firstProved ? 'a'.repeat(48) : undefined);
+        expect(calls[1].answered).toBe(variant === 'all receipts');
+        if (variant !== 'all receipts') expect(calls[1].resultReceiptId).toBeUndefined();
+        if (variant !== 'all receipts') expect(page.fiber.turns[0].endMessageId).toBeNull();
+        expect(JSON.stringify(page.fiber)).not.toMatch(/retired-native-parent|paired-working|paired-exchange/);
+      } finally { page.dom.window.close(); }
+    });
+
   it.each(['direct Core', 'direct Core wrong parent', 'direct Core missing receipt', 'direct Core missing receipt wrong parent', 'direct Core missing receipt foreign resource', 'direct Core foreign resource', 'exact canonical group', 'exact final reference', 'foreign final pointer', 'foreign final reference',
     'multiple final references', 'getter final reference', 'unfinished native final reference',
     'duplicate final pointer source', 'missing final reference preview',
@@ -2520,7 +2587,7 @@ describe('alternate shell turn/message provenance', () => {
     'header annotation accessor', 'pending header annotation', 'header annotation foreign scope',
     'header annotation missing receipt', 'header rebase flag', 'header rebase accessor',
     'unfinished execution', 'unfinished execution result', 'foreign retained parent',
-    'exact retained commentary parent', 'exact retained execution commentary parent', 'exact retained commentary image result',
+    'exact retained commentary parent', 'exact retained execution commentary parent', 'exact retained commentary image result', 'exact retained commentary value image result',
     'exact retained header parent', 'retained header transport annotation', 'retained header transport annotation foreign scope',
     'retained header missing children', 'retained header duplicate child',
     'retained header foreign user', 'retained header foreign working', 'retained header foreign exchange',
@@ -2675,7 +2742,7 @@ describe('alternate shell turn/message provenance', () => {
           }
           if (variant === 'later retained parent') mapping[CALL].message.metadata.parent_id = USER;
           if (variant === 'exact retained commentary parent' || variant === 'exact retained execution commentary parent' ||
-              variant === 'exact retained commentary image result' ||
+              variant === 'exact retained commentary image result' || variant === 'exact retained commentary value image result' ||
               variant.startsWith('retained commentary ')) {
             const retained = 'PRIVATE_RETAINED_COMMENTARY';
             const target = variant === 'exact retained execution commentary parent' ? EXEC : CALL;
@@ -2703,6 +2770,13 @@ describe('alternate shell turn/message provenance', () => {
                 version: 2, id: 'a'.repeat(48),
                 invocationSha256: createHash('sha256').update(JSON.stringify(['read', {}])).digest('hex')
               } }), { content_type: 'image_asset_pointer', asset_pointer: 'PRIVATE_IMAGE_ASSET' }] };
+            if (variant === 'exact retained commentary value image result') {
+              const value = { focused: false, screenshots: [{ id: 'PRIVATE_IMAGE_FRAME', width: 1280, height: 853 }] };
+              mapping[RESULT].message.content = { content_type: 'multimodal_text', parts: [JSON.stringify(value),
+                'Structured tool output: ' + JSON.stringify({ value, cosResultReceipt: { version: 2, id: 'a'.repeat(48),
+                  invocationSha256: createHash('sha256').update(JSON.stringify(['read', {}])).digest('hex') } }),
+                { content_type: 'image_asset_pointer', asset_pointer: 'PRIVATE_IMAGE_ASSET' }] };
+            }
           }
           if (variant === 'unselected call') entry.turn.messageIds = [USER, ASSISTANT];
           if (variant === 'system accessor') Object.defineProperty(mapping[HEADER].message.metadata,
@@ -2766,7 +2840,7 @@ describe('alternate shell turn/message provenance', () => {
       try {
         const accepted = variant === 'direct Core' || variant === 'exact canonical group' || variant === 'exact final reference' ||
           variant === 'exact retained commentary parent' || variant === 'exact retained execution commentary parent' ||
-          variant === 'exact retained commentary image result' || variant === 'exact retained header parent' ||
+          variant === 'exact retained commentary image result' || variant === 'exact retained commentary value image result' || variant === 'exact retained header parent' ||
           variant === 'retained header transport annotation' ||
           ['header message type', 'header annotation absent', 'header annotation null', 'header annotation accessor'].includes(variant);
         const identityOnly = variant === 'direct Core missing receipt' || variant.startsWith('core receipt missing') ||
@@ -4286,7 +4360,7 @@ describe('alternate shell turn/message provenance', () => {
         const existing = { type: 'mcp-tool-call', callId: 'overflow-first', completed: true,
           invocation: { server: APP, tool: 'read' } };
         items.splice(1, 0, existing);
-        const steps: any[] = Array.from({ length: 400 }, () => ({ type: 'unknown-fixture-item' }));
+        const steps: any[] = Array.from({ length: 1200 }, () => ({ type: 'unknown-fixture-item' }));
         steps.push(kind === 'pending Code'
           ? { type: 'dynamic-tool-call', tool: 'exec', callId: 'overflow-code', completed: false }
           : { type: 'mcp-tool-call', callId: kind === 'duplicate Core' ? 'overflow-first' : 'overflow-next',
@@ -4305,12 +4379,28 @@ describe('alternate shell turn/message provenance', () => {
       } finally { page.dom.window.close(); }
     });
 
-  it.each(['Core', 'Code'] as const)('marks the 201st %s call as an incomplete bounded inventory', async kind => {
+  it.each([244, 400, 401])('enumerates every Core descriptor across %s interleaved native step pairs', async count => {
     const page = await shellHarness({ shellItemsMutation(items) {
-      const calls = Array.from({ length: 201 }, (_, at) => kind === 'Core'
-        ? { type: 'mcp-tool-call', callId: `many-core-${at}`, completed: at < 200,
+      items.splice(1, 0, { type: 'chatgpt-reasoning-group', items: Array.from({ length: count }, (_, at) => [
+        { type: 'dynamic-tool-call', tool: 'exec', callId: `long-exec-${at}`, completed: false },
+        { type: 'mcp-tool-call', callId: `long-core-${at}`, completed: false,
           invocation: { server: APP, tool: 'read' } }
-        : { type: 'dynamic-tool-call', tool: 'exec', callId: `many-code-${at}`, completed: at < 200 });
+      ]).flat() });
+    } });
+    try {
+      const turn = page.fiber.turns[0];
+      expect(turn.calls).toHaveLength(Math.min(count, 400));
+      expect(turn.callEvidenceComplete === false).toBe(count > 400);
+      expect(turn.calls.every((call: any) => call.answered === false)).toBe(true);
+    } finally { page.dom.window.close(); }
+  });
+
+  it.each(['Core', 'Code'] as const)('marks the 401st %s call as an incomplete bounded inventory', async kind => {
+    const page = await shellHarness({ shellItemsMutation(items) {
+      const calls = Array.from({ length: 401 }, (_, at) => kind === 'Core'
+        ? { type: 'mcp-tool-call', callId: `many-core-${at}`, completed: at < 400,
+          invocation: { server: APP, tool: 'read' } }
+        : { type: 'dynamic-tool-call', tool: 'exec', callId: `many-code-${at}`, completed: at < 400 });
       items.splice(1, 0, { type: 'chatgpt-reasoning-group', items: calls });
     } });
     try {

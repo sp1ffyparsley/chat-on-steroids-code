@@ -815,8 +815,8 @@ describe('the calls a turn says it made', () => {
   });
 
   it.each(['core', 'code'] as const)(
-    'keeps truncated native call sets unknown when the classic provider has 201 %s requests', async kind => {
-      const calls: Message[] = Array.from({ length: 201 }, (_, index) => kind === 'core'
+    'keeps truncated native call sets unknown when the classic provider has 401 %s requests', async kind => {
+      const calls: Message[] = Array.from({ length: 401 }, (_, index) => kind === 'core'
         ? request(`native-core-${index}`, 'read_file')
         : { id: `native-code-${index}`, author: { role: 'assistant' }, recipient: 'functions.exec',
           metadata: { request_id: `wfr_code_${index}` } });
@@ -826,9 +826,9 @@ describe('the calls a turn says it made', () => {
       expect(turns).toHaveLength(1);
       expect(turns[0]!.endMessageId).toBe(final.id);
       // The bounded prefix is useful for attribution; it is NOT an exhaustive
-      // native call census even though the paired reader receives 200 entries.
-      expect(turns[0]!.calls).toHaveLength(kind === 'core' ? 200 : 0);
-      expect(turns[0]!.codeModeCalls).toHaveLength(kind === 'code' ? 200 : 0);
+      // native call census even though the paired reader receives 400 entries.
+      expect(turns[0]!.calls).toHaveLength(kind === 'core' ? 400 : 0);
+      expect(turns[0]!.codeModeCalls).toHaveLength(kind === 'code' ? 400 : 0);
       expect(turns[0]!.callEvidenceComplete).toBe(false);
     }
   );
@@ -1667,6 +1667,44 @@ describe('a payload the page stored truncated', () => {
 });
 
 describe('what may leave the page', () => {
+  // Live Nov14 provider shape: rendered tool text, matching structured value +
+  // server receipt, then image pointers. Preserve the exact carrier boundary.
+  it.each(['exact', 'different value', 'duplicate carrier', 'nested receipt', 'extra root',
+    'noncanonical value', 'noncanonical envelope', 'missing image', 'unfinished', 'foreign parent',
+    'foreign tool', 'legacy receipt', 'receipt getter', 'oversized value'] as const)(
+    'matches the native value-bearing image receipt without reading arbitrary prose (%s)', async variant => {
+      const witness = 'ba'.repeat(24), digest = 'd'.repeat(64);
+      const asked = request('value-image-owner', 'read');
+      const returned = answer('value-image-result', asked.id, 'read');
+      returned.author.name = 'api_tool.call_tool';
+      returned.status = variant === 'unfinished' ? 'in_progress' : 'finished_successfully';
+      const value = { focused: false, screenshots: [{ id: 'PRIVATE_FRAME', width: 1280, height: 853 }] };
+      const receipt: any = { version: 2, id: witness, invocationSha256: digest };
+      if (variant === 'legacy receipt') { receipt.version = 1; delete receipt.invocationSha256; }
+      const envelope: any = { value, cosResultReceipt: receipt };
+      if (variant === 'nested receipt') { delete envelope.cosResultReceipt; envelope.content = { cosResultReceipt: receipt }; }
+      if (variant === 'extra root') envelope.extra = 'PRIVATE_OUTPUT';
+      let text = JSON.stringify(value);
+      if (variant === 'different value') text = JSON.stringify({ focused: true });
+      if (variant === 'noncanonical value') text += ' ';
+      if (variant === 'oversized value') text = 'x'.repeat(512 * 1024 + 1);
+      let carrier = 'Structured tool output: ' + JSON.stringify(envelope);
+      if (variant === 'noncanonical envelope') carrier += ' ';
+      const parts: any[] = [text, carrier, { content_type: 'image_asset_pointer', asset_pointer: 'PRIVATE_IMAGE_ASSET' }];
+      if (variant === 'duplicate carrier') parts.splice(2, 0, carrier);
+      if (variant === 'missing image') parts.pop();
+      if (variant === 'receipt getter') Object.defineProperty(parts, '1', { get() { throw new Error('PRIVATE_GETTER'); } });
+      returned.content = { content_type: 'multimodal_text', parts };
+      if (variant === 'foreign parent') returned.metadata!.parent_id = 'another-parent';
+      if (variant === 'foreign tool')
+        (returned.metadata!.invoked_resource as Record<string, unknown>).resource_uri = `/${ASDK}/${LINK}/exec_command`;
+      const messages = [asked, returned];
+      const { turns } = await scan([rowInTurn(messages, messages)], [{ id: 'value-image-turn', messages }]);
+      const call = turns[0]!.calls[0];
+      if (variant === 'exact') expect(call).toMatchObject({ resultReceiptId: witness, invocationSha256: digest });
+      else expect(call).not.toHaveProperty('resultReceiptId');
+      expect(JSON.stringify(turns)).not.toMatch(/PRIVATE_|Structured tool output/);
+    });
   it.each(['exact', 'wrong prefix', 'text output', 'extra text', 'duplicate carrier', 'nested receipt',
     'legacy receipt', 'missing digest', 'unfinished', 'missing status', 'wrong image type', 'no image',
     'foreign parent', 'foreign tool', 'extra root field'] as const)(

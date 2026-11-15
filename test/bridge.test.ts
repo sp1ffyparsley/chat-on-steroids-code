@@ -11771,9 +11771,9 @@ describe('activity feed', () => {
     expect((await request('POST', route, { body: { coreDiagnostic: {
       // Validate the oversized census in the current navigation. Epoch 3 is
       // intentionally rejected before it can replace the retained epoch-4 row.
-      ...diagnostic, navigationEpoch: 4, observedAt: Date.now() + 5, ordinaryFinal: { ...final, calls: 201,
-        coreCallMessageIds: Array.from({ length: 201 }, (_, index) => `call-${index}`),
-        allCoreRequestIds: Array.from({ length: 201 }, (_, index) => `request-${index}`) } } } })).status).toBe(200);
+      ...diagnostic, navigationEpoch: 4, observedAt: Date.now() + 5, ordinaryFinal: { ...final, calls: 401,
+        coreCallMessageIds: Array.from({ length: 401 }, (_, index) => `call-${index}`),
+        allCoreRequestIds: Array.from({ length: 401 }, (_, index) => `request-${index}`) } } } })).status).toBe(200);
     expect(coreBrowserEvidence(conversationId)?.ordinaryFinal?.coreCallMessageIds).toBeUndefined();
     expect(coreBrowserEvidence(conversationId)?.ordinaryFinal?.allCoreRequestIds).toBeUndefined();
     expect(nativeFinalEvidenceWait(coreBrowserEvidence(conversationId))?.reason).toBe('evidence');

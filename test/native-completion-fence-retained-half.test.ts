@@ -144,9 +144,9 @@ describe('retained request half refuses substituted evidence', () => {
       if (kind === 'missing-native') Object.assign(initial.ordinaryFinal, { coreCallMessageIds: undefined });
       if (kind === 'invalid-native') Object.assign(initial.ordinaryFinal, { coreCallMessageIds: [null, null] });
       if (kind === 'invalid-request') Object.assign(initial.ordinaryFinal, { allCoreRequestIds: [null, null] });
-      if (kind === 'oversized') Object.assign(initial.ordinaryFinal, { calls: 201, openCalls: 201,
-        coreCallMessageIds: Array.from({ length: 201 }, (_, i) => 'native-' + i),
-        allCoreRequestIds: Array.from({ length: 201 }, (_, i) => 'workflow-' + i) });
+      if (kind === 'oversized') Object.assign(initial.ordinaryFinal, { calls: 400, openCalls: 400,
+        coreCallMessageIds: Array.from({ length: 401 }, (_, i) => 'native-' + i),
+        allCoreRequestIds: Array.from({ length: 401 }, (_, i) => 'workflow-' + i) });
       if (kind === 'code-only') Object.assign(initial.ordinaryFinal, { reason: 'open-code',
         calls: 0, openCalls: 0, coreCallMessageIds: [], allCoreRequestIds: null,
         codeCalls: 1, openCodeCalls: 1, codeCallMessageIds: ['code-parent'],

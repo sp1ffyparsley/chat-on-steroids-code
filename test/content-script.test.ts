@@ -27325,7 +27325,7 @@ describe('ordinary input native terminal association', () => {
     }
   );
 
-  it.each([17, 25, 85, 200])('publishes complete ordinary-final proof for %i calls without borrowing historical calls', async count => {
+  it.each([17, 25, 85, 200, 244, 400])('publishes complete ordinary-final proof for %i calls without borrowing historical calls', async count => {
     await setup();
     const calls = Array.from({ length: count }, (_, i) => ({ messageId: `native-capacity-${i}`,
       requestId: `wfr_capacity_${i}`, tool: 'read', answered: true }));
@@ -27346,7 +27346,7 @@ describe('ordinary input native terminal association', () => {
     expect(JSON.stringify(proof)).not.toContain('wfr_old_unanswered');
   });
 
-  it.each([17, 200])('publishes the complete %i-parent Code Mode set for ordinary-final proof', async count => {
+  it.each([17, 200, 244, 400])('publishes the complete %i-parent Code Mode set for ordinary-final proof', async count => {
     await setup();
     const turns = pair();
     const parents = Array.from({ length: count }, (_, i) => ({ messageId: `native-code-capacity-${i}`, answered: true }));
@@ -27359,10 +27359,10 @@ describe('ordinary input native terminal association', () => {
       answeredCodeCallMessageIds: parents.map(call => call.messageId), openCodeCallMessageIds: [] });
   });
 
-  it.each(['calls', 'codeModeCalls'] as const)('refuses a truncated 201-entry %s prefix as complete native proof', async field => {
+  it.each(['calls', 'codeModeCalls'] as const)('refuses a truncated 401-entry %s prefix as complete native proof', async field => {
     await setup();
     const turns = pair();
-    Object.assign(turns[1]!, { [field]: Array.from({ length: 201 }, (_, i) => ({
+    Object.assign(turns[1]!, { [field]: Array.from({ length: 401 }, (_, i) => ({
       messageId: `native-over-capacity-${i}`, requestId: `wfr_over_capacity_${i}`, tool: 'read', answered: true })) });
     await replyFiber([], turns);
     live!.sent.length = 0; await live!.hook.pullActivity();
@@ -27569,8 +27569,8 @@ describe('ordinary input native terminal association', () => {
   });
 
   it.each(['code', 'core'] as const)(
-    'holds an exact native final when the shipped producer truncates a 201-call %s inventory, then accepts a new complete frame', async kind => {
-    const nativeParents = Array.from({ length: 201 }, (_, index) => kind === 'code'
+    'holds an exact native final when the shipped producer truncates a 401-call %s inventory, then accepts a new complete frame', async kind => {
+    const nativeParents = Array.from({ length: 401 }, (_, index) => kind === 'code'
       ? { id: `native-code-cap-${index}`, recipient: 'functions.exec', author: { role: 'assistant' },
           metadata: { request_id: `wfr_code_cap_${index}` } }
       : { id: `native-core-cap-${index}`, recipient: 'api_tool.call_tool', author: { role: 'assistant' },
@@ -27580,8 +27580,8 @@ describe('ordinary input native terminal association', () => {
     const clipped = await producedPair(false, nativeParents);
     expect(clipped[0]).toMatchObject({ endMessageId: finalId, codeModeCalls: expect.any(Array),
       callEvidenceComplete: false });
-    expect(clipped[0]!.calls).toHaveLength(kind === 'core' ? 200 : 0);
-    expect(clipped[0]!.codeModeCalls).toHaveLength(kind === 'code' ? 200 : 0);
+    expect(clipped[0]!.calls).toHaveLength(kind === 'core' ? 400 : 0);
+    expect(clipped[0]!.codeModeCalls).toHaveLength(kind === 'code' ? 400 : 0);
     await setup();
     let sends = 0;
     live!.document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => { sends++; });
@@ -27591,7 +27591,7 @@ describe('ordinary input native terminal association', () => {
     live!.sent.length = 0; await live!.hook.pullActivity();
     const incomplete = live!.sent.filter(message => message.type === 'activity').at(-1)?.coreDiagnostic;
     expect(incomplete?.ordinaryFinal).toMatchObject({ reason: 'turn-invalid',
-      calls: kind === 'core' ? 200 : 0, codeCalls: kind === 'code' ? 200 : 0 });
+      calls: kind === 'core' ? 400 : 0, codeCalls: kind === 'code' ? 400 : 0 });
     expect(incomplete?.ordinaryFinal?.sourceUserMessageId).toBe(userId);
     expect(incomplete?.ordinaryFinal?.settledFinalMessageId).toBeUndefined();
     expect(incomplete?.ordinaryFinal?.callInventoryComplete).toBe(false);
@@ -27601,7 +27601,7 @@ describe('ordinary input native terminal association', () => {
     expect(live!.sent.some(message => ['goal_draft', 'goal_ack', 'goal_prepare', 'desktop_input'].includes(message.type))).toBe(false);
     // A subsequent independently observed, complete and tool-free frame may
     // be recognized on its own merits. It never retroactively validates the
-    // 201-parent prefix or supplies a native MCP receipt for it.
+    // 401-parent prefix or supplies a native MCP receipt for it.
     await replyFiber([], await producedPair(), null, true, null, false, shellScan);
     live!.sent.length = 0; await live!.hook.pullActivity();
     const complete = live!.sent.filter(message => message.type === 'activity').at(-1)?.coreDiagnostic;

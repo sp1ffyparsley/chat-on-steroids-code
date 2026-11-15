@@ -293,7 +293,7 @@ export interface CoreBrowserEvidenceSnapshot {
 const MAX_CONVERSATIONS = 256;
 const SHELL_SCAN_MAX = 400;
 /** Complete identity sets share the existing Fiber/Bridge per-turn call bound, not a sampled trace limit. */
-const NATIVE_COMPLETION_PROOF_MAX_CALLS = 200;
+const NATIVE_COMPLETION_PROOF_MAX_CALLS = 400;
 const snapshots = new Map<string, CoreBrowserEvidenceSnapshot>();
 const conversationId = (value: unknown): value is string =>
   typeof value === 'string' && /^[0-9a-f-]{8,64}$/i.test(value);

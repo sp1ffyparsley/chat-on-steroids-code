@@ -264,11 +264,11 @@ function ordinaryFinalDiagnostic(raw) {
     uuid.test(raw.settledFinalMessageId) && raw.settledFinalMessageId !== sourceUserMessageId
     ? raw.settledFinalMessageId : null;
   const openRequestIds = reason === 'open-call' && Array.isArray(raw.openRequestIds) &&
-    raw.openCalls > 0 && raw.openCalls <= 200 && raw.openRequestIds.length === raw.openCalls &&
+    raw.openCalls > 0 && raw.openCalls <= 400 && raw.openRequestIds.length === raw.openCalls &&
     raw.openRequestIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 100)
     ? raw.openRequestIds : null;
   const codeIds = (field, expected) => Array.isArray(raw[field]) &&
-    expected >= 0 && expected <= 200 && raw[field].length === expected &&
+    expected >= 0 && expected <= 400 && raw[field].length === expected &&
     raw[field].every(id => typeof id === 'string' && id.length > 0 && id.length <= 200) &&
     new Set(raw[field]).size === raw[field].length ? raw[field] : null;
   const coreCallMessageIds = codeIds('coreCallMessageIds', raw.calls);
@@ -277,7 +277,7 @@ function ordinaryFinalDiagnostic(raw) {
   // A request identifies the whole workflow and may be shared by sibling calls.
   // Keep its ordered pairing with the unique native parent IDs; Main still
   // proves each parent's own durable terminal result before releasing a fence.
-  const allCoreRequestIds = Array.isArray(raw.allCoreRequestIds) && raw.calls <= 200 &&
+  const allCoreRequestIds = Array.isArray(raw.allCoreRequestIds) && raw.calls <= 400 &&
     raw.allCoreRequestIds.length === raw.calls &&
     raw.allCoreRequestIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 100)
     ? raw.allCoreRequestIds : null;
@@ -10755,7 +10755,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 174;
+const PAGE_RECORDER_VERSION = 175;
 
 let deferredRecoveryWork = null;
 

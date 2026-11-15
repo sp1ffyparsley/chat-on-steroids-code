@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 174;
+  const RECORDER_VERSION = 175;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -4467,7 +4467,7 @@
   /** Assistant turns whose per-call evidence is accepted from one scan. */
   const FIBER_MAX_TURNS = 6;
   /** Connector requests accepted for one turn. */
-  const FIBER_MAX_CALLS = 200;
+  const FIBER_MAX_CALLS = 400;
   const FIBER_MAX_MESSAGES = 200;
   const FIBER_MAX_ACTIVITIES = 200;
   const TOOL_NAME = /^[a-z0-9_.-]{1,64}$/i;

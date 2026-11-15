@@ -211,10 +211,10 @@ describe('extension release metadata', () => {
     expect(resultReader).toContain('parts.length < 2 || parts.length > 17');
     expect(resultReader).toContain("imageType.value !== 'image_asset_pointer'");
     expect(resultReader).toContain('JSON.parse(payload)');
-    expect(resultReader).toContain('Object.keys(value).length !== 1');
+    expect(resultReader).toContain('Object.keys(value).length !== (valueCarrier ? 2 : 1)');
     expect(resultReader).toContain('JSON.stringify(value) !== payload');
     expect(resultReader).toContain('value.cosResultReceipt?.version !== 2');
-    expect(resultReader.match(/JSON\.stringify/g)).toHaveLength(1);
+    expect(resultReader.match(/JSON\.stringify/g)).toHaveLength(2);
 
     expect(resultReader).toContain("message.author?.role !== 'tool'");
     expect(resultReader).toContain("content.content_type !== 'code' || content.language !== 'json'");
@@ -10463,7 +10463,7 @@ describe('extension observation journal', () => {
       expect(JSON.stringify(stamped)).not.toContain('PRIVATE_READER');
     });
 
-  it('posts a complete 85-call native proof without overflowing activity URLs or losing document custody', async () => {
+  it.each([85, 244, 400])('posts a complete %s-call native proof without overflowing activity URLs or losing document custody', async calls => {
     const conversationId = '22222222-3333-4444-5555-666666666666';
     const documentId = 'document-73-large-native-proof';
     let packet: { url: URL; init: RequestInit; diagnostic: any } | null = null;
@@ -10483,13 +10483,13 @@ describe('extension observation journal', () => {
     });
     await worker.registerTab(73, documentId);
     await worker.send({ type: 'bind', conversationId }, 73, documentId);
-    const coreCallMessageIds = Array.from({ length: 85 }, (_, index) => `native-call-${index}-${'a'.repeat(70)}`);
-    const allCoreRequestIds = Array.from({ length: 85 }, (_, index) => `wfr_request_${index}_${'b'.repeat(60)}`);
+    const coreCallMessageIds = Array.from({ length: calls }, (_, index) => `native-call-${index}-${'a'.repeat(70)}`);
+    const allCoreRequestIds = Array.from({ length: calls }, (_, index) => `wfr_request_${index}_${'b'.repeat(60)}`);
     const identityRefusals = coreCallMessageIds.map((messageId, index) =>
       ({ messageId, reasons: index === 0 ? ['workingTurnMismatch'] : [] }));
     await worker.send({ type: 'activity', conversationId, since: 7, approval: true,
       coreDiagnostic: { shell: 'alternate', shellDiscovery: 'compatible', documentId: 'forged', navigationEpoch: 999,
-        ordinaryFinal: { reason: 'open-call', questions: 1, calls: 85, openCalls: 85, codeCalls: 1,
+        ordinaryFinal: { reason: 'open-call', questions: 1, calls, openCalls: calls, codeCalls: 1,
           openCodeCalls: 1, activeTurnMapped: false, sourceUserMessageId: 'abababab-1111-4111-8111-111111111111',
           coreCallMessageIds, allCoreRequestIds, openRequestIds: allCoreRequestIds, identityRefusals,
           codeCallMessageIds: ['native-code-parent'], openCodeCallMessageIds: ['native-code-parent'],
@@ -10503,7 +10503,7 @@ describe('extension observation journal', () => {
     expect(sent.url.searchParams.get('goalClient')).toBe('73');
     expect(sent.url.searchParams.get('approval')).toBe('1');
     expect(sent.diagnostic).toMatchObject({ documentId, navigationEpoch: 0,
-      ordinaryFinal: { calls: 85, coreCallMessageIds, allCoreRequestIds, openRequestIds: allCoreRequestIds, identityRefusals } });
+      ordinaryFinal: { calls, coreCallMessageIds, allCoreRequestIds, openRequestIds: allCoreRequestIds, identityRefusals } });
     expect(JSON.stringify(sent.diagnostic)).not.toContain('never transmit');
   });
 

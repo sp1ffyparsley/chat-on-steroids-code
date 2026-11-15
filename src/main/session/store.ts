@@ -499,7 +499,7 @@ function normalizedNativeFence(value: unknown): SessionNativeCompletionFence | n
       !(row.sourceUserMessageId === null || (typeof row.sourceUserMessageId === 'string' &&
         /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(row.sourceUserMessageId)))) return null;
   const ids = (values: unknown, length: number, max: number, unique: boolean): values is string[] | null =>
-    values === null || (Array.isArray(values) && length <= 200 && values.length === length &&
+    values === null || (Array.isArray(values) && length <= 400 && values.length === length &&
       values.every(id => nativeFenceIdentity(id, max)) && (!unique || new Set(values).size === values.length));
   if (!ids(row.openRequestIds, row.openCalls, 100, false) ||
       !ids(row.coreCallMessageIds, row.calls, 200, true) ||

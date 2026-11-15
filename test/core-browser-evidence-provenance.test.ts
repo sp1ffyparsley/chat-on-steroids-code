@@ -10,6 +10,22 @@ const rejects53 = {
 describe('R80.3 noteCoreBrowserEvidence provenance and negative controls', () => {
   beforeEach(() => resetCoreBrowserEvidenceForTests());
 
+  it.each([244, 400, 401])('retains the complete %s-call native request census only within the shared bound', count => {
+    const parents = Array.from({ length: count }, (_, at) => `native-${at}`);
+    const requests = Array.from({ length: count }, (_, at) => `request-${at}`);
+    expect(noteCoreBrowserEvidence({ conversationId: CONV, documentId: 'long-turn-document', navigationEpoch: 0,
+      observedAt: Date.now(), shell: 'alternate', shellDiscovery: 'compatible', requestIds: [], turnId: 'long-turn', ordinaryFinal: {
+        reason: 'open-call', questions: 1, calls: count, openCalls: count, codeCalls: 0, openCodeCalls: 0,
+        activeTurnMapped: false, sourceUserMessageId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+        coreCallMessageIds: parents, allCoreRequestIds: requests, openRequestIds: requests,
+        codeCallMessageIds: [], openCodeCallMessageIds: [], answeredCodeCallMessageIds: []
+      } })).toBe(true);
+    const snapshot = coreBrowserEvidence(CONV)!;
+    if (count <= 400) expect(snapshot.pendingCompletion).toMatchObject({ calls: count,
+      coreCallMessageIds: parents, allCoreRequestIds: requests });
+    else expect(snapshot.ordinaryFinal).toBeNull();
+  });
+
   it('refuses a newer-arriving old navigation epoch without replacing current evidence', () => {
     const current = {
       conversationId: CONV, documentId: 'same-document', navigationEpoch: 5,

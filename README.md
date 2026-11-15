@@ -1,5 +1,15 @@
 # Chat On Steroids — code research mirror
 
+## R95: native image receipts and long-turn result isolation — source repair
+
+Read-only inspection of current provider-rendered data reproduced two separate failures. Image results may contain ordinary JSON value text, then a structured `{value,cosResultReceipt}` envelope, then image pointers; the reader previously accepted only the receipt-first image carrier. The repair accepts that exact additional shape with canonical value equality, adjacency, v2 invocation digest, finished status and the existing parent/resource/namespace checks. It never searches arbitrary prose for receipts or exports the image payload.
+
+A terminally anchored branch also preserves independently verified neighboring call results when another execution group lacks a result or receipt. Missing results remain unanswered, and whole-turn completion stays withheld. Absent terminals, conflicting groups, foreign scope and cache/parent contradictions retain their vetoes. This avoids turning one missing result into an all-calls-unverified failure while retaining the actual uncertainty.
+
+The shared bounded census now supports 400 Core and 400 Code Mode parents, including their interleaved native steps, across producer, content reader, worker, desktop validation and durable checkpoints. A 401st parent or incomplete/duplicate inventory remains unknown. This addresses an observed 244-call turn; it does not retroactively clear a previously truncated retained inventory or certify an absent native return. Implementation generation is 175 with wire 19 unchanged; older components remain fail-closed at their own bounds.
+
+Failure-first carrier, neighboring-result and capacity regressions were reproduced before repair. Source tests and release qualification are distinct: the installed accepted release remains R94 until an independently qualified lifecycle deployment and fresh executing-component proof supersede it. Active work, saved Pause, original result debt and the disabled hourly schedule are preserved. This mirror excludes private host pins, accounts, prompts and live receipts.
+
 ## R94: qualified Windows fixes and live acceptance — November 14, 2026
 
 The existing Core identity gates now share one monotonic pre-handler wait budget, same-document observations cannot regress the accepted navigation epoch, and a missing terminal capability explains the existing fresh `exec -> tools.write_stdin` collection route. Exact caller/request/result custody, stronger late guards and original completion debt remain enforced.

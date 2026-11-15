@@ -42,7 +42,7 @@
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
   const VERSION = 19;
   /** Private implementation epoch, independent of the stable cross-world wire schema. */
-  const PRODUCER_VERSION = 174;
+  const PRODUCER_VERSION = 175;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -80,7 +80,7 @@
   const nativeReferenceTraceKeys = new Set();
   /** Connector requests reported for one turn. Far above most turns' call count, but a long working
    * turn can pass it (#2157). The limit bounds what is reported, never the turn's public messages. */
-  const MAX_CALLS = 200;
+  const MAX_CALLS = 400;
   // Fixed internal refusal sites only; no provider values or identifiers.
   const NATIVE_FAILURE_DIAGNOSTICS = new Set([
     'nativeBranchCoreInvocation', 'nativeBranchCoreResult', 'nativeBranchDuplicateReceipt',
@@ -1444,11 +1444,20 @@
           Object.keys(content).length !== 2 || !Array.isArray(parts) || parts.length < 2 || parts.length > 17)
         return decline('parts');
       const first = Object.getOwnPropertyDescriptor(parts, '0');
-      const carrier = first && own.call(first, 'value') ? first.value : null;
+      const firstText = first && own.call(first, 'value') ? first.value : null;
       const prefix = 'Structured tool output: ';
-      if (typeof carrier !== 'string' || !carrier.startsWith(prefix) || carrier.length > 512 * 1024)
+      // Native image results retain ordinary tool text when structuredContent
+      // also contains its value. Only this exact adjacent carrier is eligible:
+      // [canonical value text, canonical {value, cosResultReceipt}, image...].
+      // Never scan prose for receipts, accept a second carrier or evaluate getters.
+      const valueCarrier = typeof firstText === 'string' && !firstText.startsWith(prefix);
+      const carrierField = valueCarrier ? Object.getOwnPropertyDescriptor(parts, '1') : first;
+      const carrier = carrierField && own.call(carrierField, 'value') ? carrierField.value : null;
+      const imageStart = valueCarrier ? 2 : 1;
+      if (typeof carrier !== 'string' || !carrier.startsWith(prefix) || carrier.length > 512 * 1024 ||
+          (valueCarrier && (firstText.length > 512 * 1024 || parts.length < 3)))
         return decline('parts');
-      for (let at = 1; at < parts.length; at++) {
+      for (let at = imageStart; at < parts.length; at++) {
         const field = Object.getOwnPropertyDescriptor(parts, String(at));
         const image = field && own.call(field, 'value') ? field.value : null;
         const imageType = image && typeof image === 'object'
@@ -1458,7 +1467,9 @@
       }
       try {
         const payload = carrier.slice(prefix.length), value = JSON.parse(payload);
-        if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 1 ||
+        if (!value || typeof value !== 'object' || Array.isArray(value) ||
+            Object.keys(value).length !== (valueCarrier ? 2 : 1) ||
+            (valueCarrier && (!own.call(value, 'value') || JSON.stringify(value.value) !== firstText)) ||
             !own.call(value, 'cosResultReceipt') || JSON.stringify(value) !== payload ||
             value.cosResultReceipt?.version !== 2 || !validReceipt(value.cosResultReceipt)) return decline('receipt');
         if (shapes) shapes.valid++;
@@ -2503,7 +2514,8 @@
             (appIdOf(path) && appIdOf(path) !== appIdOf(resource.resource)) ||
             !['request_id', 'working_turn_id', 'turn_exchange_id'].every(key =>
               str(nativeField(askedMeta, key)) && nativeField(askedMeta, key) === nativeField(returnedMeta, key)) ||
-            nativeField(content, 'content_type') !== 'code' || nativeField(content, 'language') !== 'json') continue;
+            !((nativeField(content, 'content_type') === 'code' && nativeField(content, 'language') === 'json') ||
+              (nativeField(content, 'content_type') === 'multimodal_text' && coreResultReceipt(returned)))) continue;
         stagedRequestResultMembers.add(children[0]);
         if (coreResultReceipt(returned)) stagedResultMembers.add(children[0]);
       } catch { /* An unsupported native shape cannot add selected-path membership. */ }
@@ -2944,9 +2956,11 @@
             return refuse('nativeScopeFinalReceiptUnproved');
           }
           if (missingCoreReceipt || pendingDirectCalls.size) {
-            // An exact pending direct invocation can establish its request owner.
-            // Only its later real result may satisfy completion.
-            mountedNativeRequestScope = { working, exchange, canonicalParents, executionIds };
+            // A terminally anchored, fully checked branch can still carry an
+            // independently proved neighboring result. Keep its groups for the
+            // per-call receipt conjunction; absent receipts remain unanswered
+            // and this branch still cannot supply whole-turn completion scope.
+            mountedNativeRequestScope = { working, exchange, canonicalParents, executionIds, executionGroups };
             return refuse('nativeScopeBranchConflict', 'core-result');
           }
           return { working, exchange, canonicalParents, executionIds, executionGroups };
@@ -3011,6 +3025,10 @@
       } catch { return refuse('nativeScopeUnsupported'); }
     })();
     const mountedRequestScope = mountedNativeScope || mountedNativeRequestScope;
+    // Only the missing-result branch above has a validated terminal AND groups.
+    // A request-only interrupted turn never acquires result authority here.
+    const mountedCallResultScope = mountedNativeScope ||
+      (mountedNativeRequestScope?.executionGroups ? mountedNativeRequestScope : null);
     const expectedWorkingTurn = mountedRequestScope?.working || shell.turnId;
     const expectedTurnExchange = mountedRequestScope?.exchange || typedUserId;
     const typedExecIds = new Set([...shell.executionIds, ...(mountedRequestScope?.executionIds ?? [])]);
@@ -3227,7 +3245,7 @@
     // Only the exact terminally anchored mounted branch may carry narration
     // between Code Mode parents. The receipt still checks the full owner scope.
     const codeReceipts = codeModeReceipts(currentPath.map(messageAt),
-      mountedNativeScope ? nativeNarration : null, null, mountedNativeScope?.canonicalParents ?? null);
+      mountedCallResultScope ? nativeNarration : null, null, mountedCallResultScope?.canonicalParents ?? null);
     const conflictingResultParents = conflictingCoreResultParents(currentPath.map(messageAt));
     const codeContexts = new Map(), openExecutions = [];
     let codeParentsCoherent = true;
@@ -3236,8 +3254,8 @@
       const asked = message?.author?.role === 'assistant' && message.recipient === 'functions.exec';
       const returned = message?.author?.role === 'tool' && message.author.name === 'functions.exec' && message.recipient === 'all';
       if (asked || returned) codeParentsCoherent = codeParentsCoherent &&
-        !!str(node.parent) && (mountedNativeScope?.canonicalParents
-          ? mountedNativeScope.canonicalParents.get(id) === node.parent : str(message.metadata?.parent_id) === node.parent);
+        !!str(node.parent) && (mountedCallResultScope?.canonicalParents
+          ? mountedCallResultScope.canonicalParents.get(id) === node.parent : str(message.metadata?.parent_id) === node.parent);
       if (asked) openExecutions.push(id);
       // Only a concretely received enclosing result before the child can close this
       // structural context. Unknown intermediates or conflicting scopes do not make
@@ -3338,8 +3356,8 @@
     };
     // A folded widget can omit its result pointer after the provider committed the result.
     const fingerprintedPairs = new Map();
-    if (mountedNativeScope?.executionGroups) for (const call of shell.calls) {
-      const group = mountedNativeScope.executionGroups.get(call.messageId);
+    if (mountedCallResultScope?.executionGroups) for (const call of shell.calls) {
+      const group = mountedCallResultScope.executionGroups.get(call.messageId);
       const digest = group && nativeInvocationDigest(messageAt(call.messageId), call.tool);
       if (!group?.closed || !digest || group.calls.filter(id => {
         const member = shell.calls.find(call => call.messageId === id);
@@ -3368,7 +3386,7 @@
       const reference = shell.callSources.get(call.messageId);
       const children = resultChildrenByParent.get(call.messageId);
       // A serialized multi-call batch's first result parent is chronology only.
-      if ((mountedNativeScope?.executionGroups?.get(call.messageId)?.calls.length ?? 0) > 1) continue;
+      if ((mountedCallResultScope?.executionGroups?.get(call.messageId)?.calls.length ?? 0) > 1) continue;
       if (!reference || reference.id || children?.length !== 1 || sourceCounts.has(children[0])) continue;
       // An absent widget is a stronger uncertainty than an omitted completion flag. Require
       // the existing post-commit opaque witness too; Main still owns its durable validation.
@@ -3419,10 +3437,10 @@
         serverName(resource.app) === server && toolName(resource.resource) === call.tool &&
         linkIdOf(path) && linkIdOf(path) === linkIdOf(resource.resource) &&
         (fingerprintedPairs.get(call.messageId)?.resultId === reference.id ||
-          (mountedNativeScope?.executionGroups?.get(call.messageId)?.calls.length ?? 0) <= 1 &&
+          (mountedCallResultScope?.executionGroups?.get(call.messageId)?.calls.length ?? 0) <= 1 &&
           resultNode.parent === call.messageId && str(result.metadata?.parent_id) === call.messageId) &&
-        invocationNode.parent && (mountedNativeScope?.canonicalParents
-          ? mountedNativeScope.canonicalParents.get(call.messageId) === invocationNode.parent
+        invocationNode.parent && (mountedCallResultScope?.canonicalParents
+          ? mountedCallResultScope.canonicalParents.get(call.messageId) === invocationNode.parent
           : str(invocation.metadata?.parent_id) === invocationNode.parent) &&
         ['request_id', 'working_turn_id', 'turn_exchange_id'].every(key =>
           str(invocation.metadata?.[key]) && invocation.metadata[key] === result.metadata?.[key]) &&
@@ -3823,7 +3841,7 @@
         // Keep public output readable on long turns without presenting an omitted
         // tool prefix as a complete census. The existing incomplete-inventory flag
         // retains result debt; the independent Loop fallback remains available.
-        if (++work > MAX_ROWS) {
+        if (++work > MAX_ROWS + 2 * MAX_CALLS) {
           if (work > MAX_TURN_ITEMS) return null;
           const counted = step?.type === 'dynamic-tool-call' ? step.tool === 'exec'
             : step?.type === 'mcp-tool-call' && ourApp(step.invocation?.server);

@@ -154,6 +154,17 @@ describe('private native completion fence checkpoints', () => {
     openCodeCallMessageIds: [label + '-code'], answeredCodeCallMessageIds: []
   });
 
+  it.each([244, 400, 401])('persists a complete %s-parent fence only within the reader contract', async count => {
+    const session = await createSession({ conversationId: conversation });
+    const original = { ...fence(session.id), calls: count, openCalls: count,
+      openRequestIds: Array.from({ length: count }, (_, at) => `request-${at}`),
+      coreCallMessageIds: Array.from({ length: count }, (_, at) => `native-${at}`),
+      allCoreRequestIds: Array.from({ length: count }, (_, at) => `request-${at}`) };
+    expect(await compareAndSetSessionNativeCompletionFence(session.id, conversation, profile, null, original)).toBe(count <= 400);
+    if (count <= 400) expect(await readSessionNativeCompletionFence(session.id, conversation, profile)).toEqual(original);
+    else expect(await readSessionNativeCompletionFence(session.id, conversation, profile)).toBeNull();
+  });
+
   it('uses the same private metadata CAS to retain independent scopes without replacing the original across reconstruction', async () => {
     const session = await createSession({ conversationId: conversation });
     const original = fence(session.id);
