@@ -54,7 +54,7 @@ beforeEach(async () => {
     if (request.action === 'cancel') job.cancelRequested = true;
     if (request.action === 'ack') job.acknowledged = true;
     if (request.action === 'result') return { ...structuredClone(job), assistantText: 'A model claim, not proof.',
-      offset: 0, totalCharacters: 24, nextOffset: null, verification: 'required' };
+      offset: 0, totalCharacters: 'A model claim, not proof.'.length, nextOffset: null, verification: 'required' };
     return structuredClone(job);
   });
   deps = {
@@ -107,6 +107,69 @@ it('R90 refuses a saved-report claim without the exact result directory', async 
     jobs.get(String(job.id))!.resultDirectory = value;
     await expect(owner.inspect(p, 'status', String(job.id))).rejects.toThrow('DEEPAI_JOB_MISMATCH');
   }
+});
+
+it('preserves exact native context usage and rotation in parent status, results and durable summaries', async () => {
+  const p = await principal(), job = await owner.submit(p, request()); complete(job.id);
+  const context = { status: 'near-limit', usedTokens: 292000, maxTokens: 320000,
+    percentUsed: 91.25, observedAt: '2026-11-15T12:00:00.000Z' };
+  Object.assign(jobs.get(String(job.id))!, { context, contextRotation: 'native-context-near-limit' });
+  for (const action of ['status', 'result'] as const) {
+    expect(await owner.inspect(p, action, String(job.id))).toMatchObject({ context,
+      contextRotation: 'native-context-near-limit' });
+  }
+  const ledger = await readDurableStrict<any>('deepai-helper-bindings');
+  expect(ledger.rows[0].latest.context).toEqual(context);
+  expect(ledger.rows[0].latest.assistantText).toBeUndefined();
+});
+
+it.each([undefined, { status: 'unknown' }])('keeps unavailable native context unknown without estimating usage (%j)', async context => {
+  const p = await principal(), job = await owner.submit(p, request());
+  if (context) jobs.get(String(job.id))!.context = context;
+  expect(await owner.inspect(p, 'status', String(job.id))).toMatchObject({ context: { status: 'unknown' } });
+});
+
+it.each([{ status: 'near-limit', usedTokens: '292000', maxTokens: 320000, percentUsed: 91.25 },
+  { status: 'observed', usedTokens: -1, maxTokens: 320000, percentUsed: 0 },
+  { status: 'exhausted', usedTokens: 320000, maxTokens: 0, percentUsed: 100 }])(
+  'refuses malformed native context rather than relabeling it as a healthy helper (%j)', async context => {
+    const p = await principal(), job = await owner.submit(p, request());
+    jobs.get(String(job.id))!.context = context;
+    await expect(owner.inspect(p, 'status', String(job.id))).rejects.toThrow('DEEPAI_BRIDGE_INVALID_RESPONSE');
+  });
+
+it.each([{ offset: 1 }, { totalCharacters: 26 }, { nextOffset: 0 }, { nextOffset: undefined },
+  { assistantText: 'silently shortened preview' }])('refuses inconsistent helper result pagination before persisting it (%j)', async mutation => {
+    const p = await principal(), job = await owner.submit(p, request()); complete(job.id);
+    const native = deps.bridge;
+    deps.bridge = async call => call.action === 'result' ? { ...await native(call) as object, ...mutation } : native(call);
+    await expect(owner.inspect(p, 'result', String(job.id))).rejects.toThrow('DEEPAI_RESULT_PAGE_MISMATCH');
+    expect(calls.some(call => call.action === 'ack')).toBe(false);
+    expect((await readDurableStrict<any>('deepai-helper-bindings')).rows[0].acknowledgedAt).toBeUndefined();
+  });
+
+it('returns every oversized Unicode report page without treating the prompt budget or preview as completion', async () => {
+  const p = await principal(), job = await owner.submit(p, request()); complete(job.id);
+  const body = 'Verified finding: 漢字 🎬\n'.repeat(700) + 'REPORT_COMPLETE';
+  const native = deps.bridge;
+  deps.bridge = async call => {
+    const raw = await native(call) as object;
+    if (call.action !== 'result') return raw;
+    const offset = call.offset ?? 0, limit = call.limit ?? 8000;
+    return { ...raw, assistantText: body.slice(offset, offset + limit), offset, totalCharacters: body.length,
+      nextOffset: offset + limit < body.length ? offset + limit : null };
+  };
+  let offset: number | null = 0;
+  let readback = '';
+  let pages = 0;
+  while (offset !== null) {
+    const page = await owner.inspect(p, 'result', String(job.id), { offset, limit: 8000 });
+    readback += String(page.assistantText); offset = page.nextOffset as number | null; pages++;
+  }
+  expect(pages).toBeGreaterThan(1);
+  expect(Buffer.from(readback, 'utf8').equals(Buffer.from(body, 'utf8'))).toBe(true);
+  expect(calls.some(call => call.action === 'ack')).toBe(false);
+  expect((await readDurableStrict<any>('deepai-helper-bindings')).rows[0].latest.assistantText).toBeUndefined();
 });
 
 it('R90 refuses an unsaved outcome before issuing the mutating native ACK', async () => {

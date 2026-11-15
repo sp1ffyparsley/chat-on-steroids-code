@@ -15766,7 +15766,7 @@ it('keeps a stopped worker tab when its one-shot close claim is revoked before c
   expect(remove).not.toHaveBeenCalled();
 });
 
-it.each(['selected', 'pinned', 'navigation', 'document', 'core-work', 'storage-failure', 'restored', 'pending-work',
+it.each(['selected', 'pinned', 'audible', 'navigation', 'document', 'core-work', 'storage-failure', 'restored', 'pending-work',
   'restored-during-final-inventory', 'pending-work-during-final-inventory',
   'missing-tab', 'unchanged'] as const)(
   'rechecks the actual retired tab after its durable retirement receipt write: %s', async change => {
@@ -15777,7 +15777,7 @@ it.each(['selected', 'pinned', 'navigation', 'document', 'core-work', 'storage-f
     const end = backgroundSource.indexOf('\n/**\n * Tabs created by this extension', start);
     const body = backgroundSource.slice(start, end);
     const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
-    const tab = { id: 71, url: `https://chatgpt.com/c/${conversationId}`, active: false, pinned: false,
+    const tab = { id: 71, url: `https://chatgpt.com/c/${conversationId}`, active: false, pinned: false, audible: false,
       pendingUrl: undefined as string | undefined };
     const documents: Record<string, string> = { '71': 'original-document' };
     const epochs: Record<string, number> = { '71': 4 };
@@ -15816,6 +15816,7 @@ it.each(['selected', 'pinned', 'navigation', 'document', 'core-work', 'storage-f
     await writeEntered;
     if (change === 'selected') tab.active = true;
     if (change === 'pinned') tab.pinned = true;
+    if (change === 'audible') tab.audible = true;
     if (change === 'navigation') tab.pendingUrl = 'https://chatgpt.com/';
     if (change === 'document') documents['71'] = 'replacement-document';
     if (change === 'core-work') coreWorking = true;

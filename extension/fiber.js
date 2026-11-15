@@ -42,7 +42,7 @@
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
   const VERSION = 19;
   /** Private implementation epoch, independent of the stable cross-world wire schema. */
-  const PRODUCER_VERSION = 181;
+  const PRODUCER_VERSION = 182;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -99,6 +99,8 @@
     'nativeHeaderValueNull', 'nativeHeaderValueString', 'nativeHeaderValueTrue',
     'nativeHeaderValueFalse', 'nativeHeaderValueOther',
     'nativeRetainedParentMissing', 'nativeRetainedParentConflict', 'nativeRetainedPositionHeader', 'nativeRetainedPositionFirstMember', 'nativeRetainedPositionLaterMember', 'nativeRetainedLocationNone', 'nativeRetainedLocationOnPath', 'nativeRetainedLocationOffPath', 'nativeRetainedMemberHeader', 'nativeRetainedMemberCodeCall', 'nativeRetainedMemberCoreCall', 'nativeRetainedMemberAssistantOther', 'nativeRetainedMemberCodeResult', 'nativeRetainedMemberCoreResult', 'nativeRetainedMemberOtherToolResult', 'nativeRetainedMemberUser', 'nativeRetainedMemberOther', 'nativeContractedHeaderPending', 'nativeContractedHeaderMissingTerminal', 'nativeContractedHeaderUserAnchor', 'nativeContractedHeaderParent', 'nativeContractedHeaderSelected', 'nativeContractedHeaderChildren', 'nativeContractedHeaderChildIdentity', 'nativeContractedHeaderChildMembership', 'nativeContractedHeaderIdentity', 'nativeContractedHeaderCache',
+    'nativeContractedHeaderPrefixEdge', 'nativeContractedHeaderPrefixUserCache', 'nativeContractedHeaderPrefixBounds',
+    'nativeContractedHeaderPrefixShape', 'nativeContractedHeaderPrefixParent', 'nativeContractedHeaderPrefixCache', 'nativeContractedHeaderPrefixSingle',
   ]);
   /** Items one turn may hold before it is not read at all; a bound against a runaway tree, far above real turns. */
   const MAX_TURN_ITEMS = 5000;
@@ -2833,43 +2835,45 @@
           // the selected path. Prove every declared edge back to this exact user,
           // including retained cache copies. Context bodies are never interpreted
           // or emitted, and their request annotations confer no request authority.
+          const cachedMapping = nativeField(data, 'mapping');
+          const childrenOf = node => {
+            const children = nativeField(node, 'children');
+            if (!Array.isArray(children) || children.length > MAX_ROWS) return null;
+            const ids = new Set();
+            for (let at = 0; at < children.length; at++) {
+              const id = str(nativeField(children, String(at)));
+              if (!id || ids.has(id)) return null;
+              ids.add(id);
+            }
+            return ids;
+          };
+          const declaredEdge = (parent, child) => {
+            const node = nativeField(mapping, parent), children = childrenOf(node);
+            if (!children?.has(child)) return false;
+            const cached = nativeField(cachedMapping, parent);
+            if (cached && cached !== node) {
+              const prior = childrenOf(cached);
+              if (!prior || prior.size !== children.size || [...children].some(id => !prior.has(id))) return false;
+            }
+            return true;
+          };
+          let prefixFacet = null;
+          const failPrefix = facet => { prefixFacet = facet; return false; };
           const contractedContextPrefix = start => {
-            const cachedMapping = nativeField(data, 'mapping');
-            const childrenOf = node => {
-              const children = nativeField(node, 'children');
-              if (!Array.isArray(children) || children.length > MAX_ROWS) return null;
-              const ids = new Set();
-              for (let at = 0; at < children.length; at++) {
-                const id = str(nativeField(children, String(at)));
-                if (!id || ids.has(id)) return null;
-                ids.add(id);
-              }
-              return ids;
-            };
-            const declaredEdge = (parent, child) => {
-              const node = nativeField(mapping, parent), children = childrenOf(node);
-              if (!children?.has(child)) return false;
-              const cached = nativeField(cachedMapping, parent);
-              if (cached && cached !== node) {
-                const prior = childrenOf(cached);
-                if (!prior || prior.size !== children.size || [...children].some(id => !prior.has(id))) return false;
-              }
-              return true;
-            };
             // A rendered contraction may also remove the user -> header child
             // declaration. In that shape the original prefix must declare its
             // exact final edge to this selected header instead. Matching scope
             // alone or an unrelated hidden branch never supplies that edge.
             const directHeader = declaredEdge(typedUserId, currentPath[1]);
             const foldedHeader = declaredEdge(start, currentPath[1]);
-            if (!directHeader && !foldedHeader) return false;
+            if (!directHeader && !foldedHeader) return failPrefix('PrefixEdge');
             const userNode = nativeField(mapping, typedUserId), cachedUser = nativeField(cachedMapping, typedUserId);
             if (cachedUser && cachedUser !== userNode) {
               const message = nativeField(cachedUser, 'message'), meta = nativeField(message, 'metadata');
               if (nativeField(cachedUser, 'id') !== typedUserId || nativeField(message, 'id') !== typedUserId ||
                   nativeField(cachedUser, 'parent') !== nativeField(userNode, 'parent') ||
                   nativeField(nativeField(message, 'author'), 'role') !== 'user' ||
-                  ['request_id', 'working_turn_id', 'turn_exchange_id'].some(key => nativeField(meta, key) !== nativeField(userMeta, key))) return false;
+                  ['request_id', 'working_turn_id', 'turn_exchange_id'].some(key => nativeField(meta, key) !== nativeField(userMeta, key))) return failPrefix('PrefixUserCache');
             }
             const contextShape = (node, id) => {
               const message = nativeField(node, 'message'), meta = nativeField(message, 'metadata');
@@ -2887,11 +2891,13 @@
             const visited = new Set();
             let id = start;
             while (id !== typedUserId) {
-              if (visited.size >= MAX_ROWS || visited.has(id) || currentIds.has(id) || selected.has(id)) return false;
+              if (visited.size >= MAX_ROWS || visited.has(id) || currentIds.has(id) || selected.has(id)) return failPrefix('PrefixBounds');
               visited.add(id);
               const node = nativeField(mapping, id), message = nativeField(node, 'message'), meta = nativeField(message, 'metadata');
               const parent = str(nativeField(node, 'parent'));
-              if (!contextShape(node, id) || !parent || nativeField(meta, 'parent_id') !== parent || !declaredEdge(parent, id)) return false;
+              if (!contextShape(node, id)) return failPrefix('PrefixShape');
+              if (!parent || nativeField(meta, 'parent_id') !== parent) return failPrefix('PrefixParent');
+              if (!declaredEdge(parent, id)) return failPrefix('PrefixEdge');
               const cached = nativeField(cachedMapping, id);
               if (cached && cached !== node) {
                 const prior = nativeField(cached, 'message'), priorMeta = nativeField(prior, 'metadata');
@@ -2899,21 +2905,34 @@
                     nativeField(nativeField(prior, 'author'), 'role') !== nativeField(nativeField(message, 'author'), 'role') ||
                     ['recipient', 'status', 'channel', 'end_turn'].some(key => nativeField(prior, key) !== nativeField(message, key)) ||
                     nativeField(nativeField(prior, 'content'), 'content_type') !== nativeField(nativeField(message, 'content'), 'content_type') ||
-                    ['parent_id', 'request_id', 'working_turn_id', 'turn_exchange_id', 'is_visually_hidden_from_conversation'].some(key => nativeField(priorMeta, key) !== nativeField(meta, key))) return false;
+                    ['parent_id', 'request_id', 'working_turn_id', 'turn_exchange_id', 'is_visually_hidden_from_conversation'].some(key => nativeField(priorMeta, key) !== nativeField(meta, key))) return failPrefix('PrefixCache');
               }
               id = parent;
             }
-            // Keep the stricter existing single-sibling proof unchanged.
-            return visited.size >= 2 || foldedHeader && visited.size === 1;
+            // A single direct assistant context has no system rebase fields. Its exact
+            // request must still match this user; system siblings keep the stricter fallback.
+            const startMessage = nativeField(nativeField(mapping, start), 'message');
+            const request = str(nativeField(nativeField(startMessage, 'metadata'), 'request_id'));
+            const singleDirectAssistant = directHeader && visited.size === 1 &&
+              nativeField(nativeField(startMessage, 'author'), 'role') === 'assistant' &&
+              request && request === nativeField(userMeta, 'request_id');
+            if (visited.size >= 2 || foldedHeader && visited.size === 1 || singleDirectAssistant) return true;
+            return failPrefix('PrefixSingle');
           };
           const contractedHeader = (id, parent, metadata) => {
-            const rejectHeader = facet => { shellDiagnostic(rejects, 'nativeContractedHeader' + facet); return false; };
+            prefixFacet = null;
+            const rejectHeader = facet => {
+              if (prefixFacet) shellDiagnostic(rejects, 'nativeContractedHeader' + prefixFacet);
+              shellDiagnostic(rejects, 'nativeContractedHeader' + facet); return false;
+            };
             if (pending) return rejectHeader('Pending');
             if (missingTerminal) return rejectHeader('MissingTerminal');
             if (!userAnchorsHeader) return rejectHeader('UserAnchor');
             if (parent !== typedUserId) return rejectHeader('Parent');
             if (currentIds.has(id) || selected.has(id)) return rejectHeader('Selected');
             if (contractedContextPrefix(id)) return true;
+            // Legacy sibling proof must not override an observed conflict in this user.
+            if (prefixFacet === 'PrefixUserCache') return rejectHeader('Cache');
             const userNode = nativeField(mapping, typedUserId), children = nativeField(userNode, 'children');
             if (!Array.isArray(children) || children.length < 2 || children.length > MAX_ROWS) return rejectHeader('Children');
             const declared = new Set();
@@ -2922,7 +2941,8 @@
               if (!child || declared.has(child)) return rejectHeader('ChildIdentity');
               declared.add(child);
             }
-            if (!declared.has(id) || !declared.has(currentPath[1])) return rejectHeader('ChildMembership');
+            if (!declared.has(id) || !declared.has(currentPath[1]) ||
+                !declaredEdge(typedUserId, id) || !declaredEdge(typedUserId, currentPath[1])) return rejectHeader('ChildMembership');
             const node = nativeField(mapping, id), message = nativeField(node, 'message');
             const meta = nativeField(message, 'metadata');
             if (nativeField(node, 'id') !== id || nativeField(message, 'id') !== id ||

@@ -60,6 +60,14 @@ const attentionSchema = z.object({
     questionCount: z.number().int().nonnegative().optional()
   })).max(32).optional(), truncated: z.boolean().optional(), observedAt: z.string().max(100).optional()
 });
+// Native attempt measurements only. An older bridge may omit them; never estimate
+// context usage from a prompt/report character count or turn an omission into zero.
+const contextSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('unknown') }),
+  z.object({ status: z.enum(['observed', 'near-limit', 'exhausted']),
+    usedTokens: z.number().int().nonnegative(), maxTokens: z.number().int().positive().max(10_000_000),
+    percentUsed: z.number().finite().nonnegative(), observedAt: z.string().max(100) })
+]);
 const publicJobSchema = z.object({
   id: z.string().uuid(), owner: z.string().min(1).max(200), requestKey: z.string().min(1).max(200),
   status: z.enum(['queued', 'submitting', 'active', 'waiting', 'stopping', 'completed', 'failed', 'cancelled', 'blocked', 'incomplete']),
@@ -68,6 +76,8 @@ const publicJobSchema = z.object({
   commandId: z.string().max(256).optional(), resultSavedAt: z.string().max(100).nullable().optional(),
   runId: z.string().max(256).nullable().optional(),
   nativeStatus: z.string().max(100).nullable().optional(), waitingFor: z.string().max(100).nullable().optional(),
+  context: contextSchema.optional(),
+  contextRotation: z.enum(['native-context-near-limit', 'native-context-exhausted']).nullable().optional(),
   createdAt: z.string().max(100).optional(), completedAt: z.string().max(100).nullable().optional(),
   cancelRequested: z.boolean().optional(), lastError: z.string().max(1000).nullable().optional(),
   resultDirectory: z.string().max(4096).optional(), resultSaved: z.boolean().optional(),
@@ -251,7 +261,7 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
   };
   const view = (job: PublicJob, row?: Binding): Record<string, unknown> => {
     const { owner: _owner, requestKey: _requestKey, ...safe } = job;
-    return { ...safe, ...(row ? { receipt: { parentSessionId: row.sessionId, parentConversationId: row.sourceConversationId,
+    return { ...safe, context: job.context ?? { status: 'unknown' }, ...(row ? { receipt: { parentSessionId: row.sessionId, parentConversationId: row.sourceConversationId,
       sourceRequestId: row.sourceRequestId, requestKeyHash: row.key, jobId: job.id, previousJobId: row.previousJobId ?? null,
       nativeThreadId: job.threadId ?? null, nativeRunId: job.runId ?? null, nativeCommandId: job.commandId ?? null, reportSavedAt: job.resultSavedAt ?? null,
       reportPath: job.resultSaved ? path.join(row.workspace, '.cos-deepai', 'results', job.id, 'report.md') : null,
@@ -330,6 +340,17 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
     let job = checked(await deps.bridge({ action: action === 'recover' || action === 'ack' ? 'status' : action, owner: row.owner,
       job: jobId, ...pagination, passive: action !== 'cancel' && action !== 'recover' }), row);
     await assertParent(principal);
+    if (action === 'result' && job.assistantText !== undefined) {
+      // The native CLI slices UTF-16 character offsets, not UTF-8 byte offsets. Verify
+      // each complete slice before returning it; never ACK or truncate to a prompt budget.
+      const offset = pagination.offset ?? 0, limit = pagination.limit ?? 8000;
+      const total = job.totalCharacters;
+      if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 16000 ||
+          total === undefined || !Number.isSafeInteger(total) || job.offset !== offset ||
+          job.assistantText.length !== Math.min(limit, Math.max(0, total - offset)) ||
+          job.nextOffset !== (offset + limit < total ? offset + limit : null))
+        refuse('DEEPAI_RESULT_PAGE_MISMATCH', 'The saved helper result page has inconsistent offset, length or nextOffset. Keep this job and read the same page again; no outcome was acknowledged.');
+    }
     if (action === 'ack') {
       if (!TERMINAL.has(job.status)) refuse('DEEPAI_OUTCOME_NOT_TERMINAL', 'Only a terminal helper outcome can be acknowledged.');
       if (job.status === 'completed' && !job.resultSaved) refuse('DEEPAI_REPORT_NOT_SAVED', 'Save the completed report before acknowledging this outcome.');

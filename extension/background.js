@@ -127,6 +127,8 @@ function shellScanDiagnostic(raw) {
     'nativeHeaderValueNull', 'nativeHeaderValueString', 'nativeHeaderValueTrue',
     'nativeHeaderValueFalse', 'nativeHeaderValueOther',
     'nativeRetainedParentMissing', 'nativeRetainedParentConflict', 'nativeRetainedPositionHeader', 'nativeRetainedPositionFirstMember', 'nativeRetainedPositionLaterMember', 'nativeRetainedLocationNone', 'nativeRetainedLocationOnPath', 'nativeRetainedLocationOffPath', 'nativeRetainedMemberHeader', 'nativeRetainedMemberCodeCall', 'nativeRetainedMemberCoreCall', 'nativeRetainedMemberAssistantOther', 'nativeRetainedMemberCodeResult', 'nativeRetainedMemberCoreResult', 'nativeRetainedMemberOtherToolResult', 'nativeRetainedMemberUser', 'nativeRetainedMemberOther', 'nativeContractedHeaderPending', 'nativeContractedHeaderMissingTerminal', 'nativeContractedHeaderUserAnchor', 'nativeContractedHeaderParent', 'nativeContractedHeaderSelected', 'nativeContractedHeaderChildren', 'nativeContractedHeaderChildIdentity', 'nativeContractedHeaderChildMembership', 'nativeContractedHeaderIdentity', 'nativeContractedHeaderCache',
+    'nativeContractedHeaderPrefixEdge', 'nativeContractedHeaderPrefixUserCache', 'nativeContractedHeaderPrefixBounds',
+    'nativeContractedHeaderPrefixShape', 'nativeContractedHeaderPrefixParent', 'nativeContractedHeaderPrefixCache', 'nativeContractedHeaderPrefixSingle',
     'identityReasonCurrentQuestionMissing',
     'identityReasonCurrentQuestionUnselected',
     'identityReasonCurrentQuestionConflict',
@@ -2859,6 +2861,8 @@ function retireAutomaticTab(tabId, finalGuard = null, kind = null, afterPersiste
     // reference; a later activation must not rewrite what the first inventory observed.
     const originalTab = foundTab ? { ...foundTab } : null;
     if (!originalTab) return true;
+    // Terminal app state does not authorize interrupting browser media playback.
+    if (originalTab.pinned || originalTab.audible) return false;
     if (tabs.length <= 1) return false;
     if (browserControlsTab(tabId)) return false;
     if (typeof finalGuard === 'function') {
@@ -2895,7 +2899,7 @@ function retireAutomaticTab(tabId, finalGuard = null, kind = null, afterPersiste
       // incarnation before the deleted-only final authority check. Ordinary worker/finite
       // claims were consumed inside finalGuard and MUST NOT be consumed again.
       const latest = await chrome.tabs.get(tabId);
-      const stillOwned = latest && !latest.pinned && !latest.pendingUrl &&
+      const stillOwned = latest && !latest.pinned && !latest.audible && !latest.pendingUrl &&
         latest.url === originalTab.url && latest.windowId === originalTab.windowId &&
         !(latest.active === true && originalTab.active !== true) &&
         !browserControlsTab(tabId) &&
@@ -10755,7 +10759,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 181;
+const PAGE_RECORDER_VERSION = 182;
 
 let deferredRecoveryWork = null;
 

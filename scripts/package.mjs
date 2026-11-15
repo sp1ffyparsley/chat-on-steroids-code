@@ -20,6 +20,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { normalizeArch, normalizePlatform, PLATFORM_INFO } from './packaging-targets.mjs';
+import { RIPGREP, TUNNEL_CLIENT } from './packaging-versions.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -616,6 +617,29 @@ function strictSharedCache(commonRoot) {
   return path.join(commonRoot, 'node_modules', '.cache');
 }
 
+/** Refuse known missing/corrupt binary inputs before npm, extraction or compilation consumes resources. */
+export function assertStrictBinaryArchiveCache(commonRoot, platform, arch) {
+  const tunnel = TUNNEL_CLIENT.targets[platform]?.[arch], rg = RIPGREP.targets[platform]?.[arch];
+  if (!tunnel || !rg || !PLATFORM_INFO[platform]) throw new Error(`Unsupported strict binary cache target: ${platform}-${arch}`);
+  const archives = [
+    { directory: 'tunnel-client', name: `tunnel-client-${TUNNEL_CLIENT.version}-${PLATFORM_INFO[platform].upstreamOs}-${tunnel.upstreamArch}.zip`, sha256: tunnel.sha256 },
+    { directory: 'ripgrep', name: `ripgrep-${RIPGREP.version}-${rg.upstreamArch}-${rg.triple}.${rg.extension}`, sha256: rg.sha256 }
+  ];
+  const failures = [];
+  for (const archive of archives) {
+    const file = path.join(strictSharedCache(commonRoot), archive.directory, archive.name);
+    try {
+      const stat = lstatSync(file);
+      if (!stat.isFile() || stat.isSymbolicLink()) failures.push(`${archive.name}: not a regular unlinked file`);
+      else if (sha256File(file) !== archive.sha256) failures.push(`${archive.name}: checksum mismatch`);
+    } catch (error) {
+      failures.push(`${archive.name}: ${error.code === 'ENOENT' ? 'missing' : 'unreadable (' + (error.code || 'unknown') + ')'}`);
+    }
+  }
+  if (failures.length) throw new Error(`Strict offline binary cache is not ready; dependency materialization was not started.\n${failures.join('\n')}\nRestore the exact pinned archives in ${strictSharedCache(commonRoot)} before retrying; no download or cache deletion was attempted.`);
+  return archives;
+}
+
 function readLockfile(repoRoot) {
   const file = packageFile(repoRoot, 'package-lock.json');
   const json = JSON.parse(readFileSync(file, 'utf8'));
@@ -1000,6 +1024,8 @@ async function main() {
     const snapshot = strictSnapshotInfo(root);
     source = snapshot.source;
     commonRoot = snapshot.commonRoot;
+    const binaryInputs = assertStrictBinaryArchiveCache(commonRoot, platform, arches[0]);
+    process.stdout.write(`[strict-cache] verified ${binaryInputs.length} pinned binary archives before dependency materialization\n`);
     const materialized = await materializeStrictDependencies(root, platform, arches[0], commonRoot);
     npmCli = materialized.npmCli;
     childEnv = materialized.env;

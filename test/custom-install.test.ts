@@ -2613,3 +2613,40 @@ if(@(Get-ChildItem -LiteralPath $destinationRelease -Force | Where-Object {$_.Na
     }
   }, 1_500_000);
 });
+
+const packageProvenance = await import(new URL('../scripts/package.mjs', import.meta.url).href);
+describe('strict binary archive cache admission', () => {
+  it('reports both missing pinned archives before dependency materialization and leaves the cache untouched', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'cos-archive-cache-'));
+    try {
+      expect(() => packageProvenance.assertStrictBinaryArchiveCache(root, 'win32', 'x64'))
+        .toThrow(/tunnel-client.*missing[\s\S]*ripgrep.*missing/);
+      expect(existsSync(path.join(root, 'node_modules'))).toBe(false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('rejects corrupt archives together without deleting them or attempting a download', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'cos-archive-cache-'));
+    const cache = path.join(root, 'node_modules', '.cache');
+    const tunnel = path.join(cache, 'tunnel-client', 'tunnel-client-v0.0.19-windows-amd64.zip');
+    const rg = path.join(cache, 'ripgrep', 'ripgrep-15.2.0-x86_64-pc-windows-msvc.zip');
+    try {
+      for (const file of [tunnel, rg]) { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, 'corrupt'); }
+      expect(() => packageProvenance.assertStrictBinaryArchiveCache(root, 'win32', 'x64'))
+        .toThrow(/tunnel-client.*checksum mismatch[\s\S]*ripgrep.*checksum mismatch/);
+      expect(readFileSync(tunnel, 'utf8')).toBe('corrupt');
+      expect(readFileSync(rg, 'utf8')).toBe('corrupt');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('refuses a directory masquerading as an archive without changing its contents', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'cos-archive-cache-'));
+    const fake = path.join(root, 'node_modules', '.cache', 'tunnel-client', 'tunnel-client-v0.0.19-windows-amd64.zip');
+    try {
+      mkdirSync(fake, { recursive: true }); writeFileSync(path.join(fake, 'keep.txt'), 'preserve');
+      expect(() => packageProvenance.assertStrictBinaryArchiveCache(root, 'win32', 'x64'))
+        .toThrow(/not a regular unlinked file/);
+      expect(readFileSync(path.join(fake, 'keep.txt'), 'utf8')).toBe('preserve');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
