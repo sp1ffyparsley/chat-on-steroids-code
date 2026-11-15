@@ -2512,6 +2512,83 @@ describe('alternate shell turn/message provenance', () => {
       } finally { page.dom.window.close(); }
     });
 
+  it.each(['eight-node prefix', 'private context getter', 'different context request', '400-node prefix',
+    '401-node prefix', 'foreign working', 'foreign exchange', 'visible context', 'tool recipient',
+    'invocation metadata', 'foreign user', 'missing child', 'duplicate child', 'cycle', 'parent conflict',
+    'cached context conflict', 'cached user conflict', 'cached edge conflict', 'active context',
+    'assistant final', 'assistant text', 'context accessor', 'missing terminal'] as const)(
+    'proves only a bounded declared retained context prefix (%s)', async variant => {
+      const HEADER = 'prefix-current-header', TOP = 'prefix-context-0';
+      const scope = { request_id: REQUEST, working_turn_id: 'prefix-working', turn_exchange_id: 'prefix-exchange' };
+      let getterReads = 0;
+      const page = await shellHarness({ withCall: true, withExec: true, nativeCallReceipt: true,
+        callCompleted: false, assistantCompleted: false,
+        nativeCurrentNode: variant === 'missing terminal' ? EXEC_RESULT : ASSISTANT,
+        nativeCallMutation(mapping, entry) {
+          completeExecBeforeCall(mapping, entry);
+          entry.turn.items = entry.turn.items.filter((item: any) => item.callId !== EXEC);
+          delete entry.turn.items.find((item: any) => item.callId === CALL).widgetStateSource;
+          entry.turn.messageIds = [USER, CALL, ASSISTANT];
+          Object.assign(mapping[USER].message.metadata, scope);
+          for (const row of Object.values(mapping) as any[]) Object.assign(row.message.metadata, scope);
+          mapping[HEADER] = { id: HEADER, parent: USER, message: { id: HEADER, author: { role: 'system' },
+            recipient: 'all', status: 'finished_successfully', content: { content_type: 'text', parts: ['PRIVATE_PREFIX'] },
+            metadata: { ...scope, parent_id: TOP, is_visually_hidden_from_conversation: true, rebase_developer_message: false } } };
+          mapping[EXEC].parent = HEADER; mapping[EXEC].message.metadata.parent_id = HEADER;
+          mapping[CALL].parent = EXEC; mapping[CALL].message.metadata.parent_id = EXEC;
+          mapping[EXEC_RESULT].parent = RESULT; mapping[EXEC_RESULT].message.metadata.parent_id = RESULT;
+          mapping[ASSISTANT].parent = EXEC_RESULT; mapping[ASSISTANT].message.metadata.parent_id = EXEC_RESULT;
+          mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: JSON.stringify({
+            cosResultReceipt: { version: 2, id: 'a'.repeat(48),
+              invocationSha256: createHash('sha256').update(JSON.stringify(['read', {}])).digest('hex') } }) };
+          const count = variant === '400-node prefix' ? 400 : variant === '401-node prefix' ? 401 : 8;
+          for (let i = 0; i < count; i++) {
+            const id = `prefix-context-${i}`, parent = i === count - 1 ? USER : `prefix-context-${i + 1}`;
+            mapping[id] = { id, parent, children: i === 0 ? [] : [`prefix-context-${i - 1}`], message: { id,
+              author: { role: i === 2 ? 'assistant' : 'system' }, channel: null, end_turn: i > 3 ? true : null,
+              recipient: 'all', status: 'finished_successfully',
+              content: i === 2 ? { content_type: 'model_editable_context', model_set_context: 'PRIVATE_MODEL_CONTEXT' }
+                : { content_type: 'text', parts: ['PRIVATE_PREFIX'] },
+              metadata: { ...scope, parent_id: parent, is_visually_hidden_from_conversation: true,
+                ...(i === 5 ? { rebase_developer_message: true } : {}) } } };
+          }
+          mapping[USER].children = [HEADER, `prefix-context-${count - 1}`];
+          const context = mapping['prefix-context-2'].message;
+          if (variant === 'private context getter') Object.defineProperty(context.content, 'model_set_context', {
+            get() { getterReads++; throw new Error('PRIVATE_MODEL_GETTER'); } });
+          if (variant === 'different context request' || variant === 'eight-node prefix')
+            mapping[`prefix-context-${count - 1}`].message.metadata.request_id = 'context-annotation-request';
+          if (variant === 'foreign working') context.metadata.working_turn_id = 'foreign';
+          if (variant === 'foreign exchange') context.metadata.turn_exchange_id = 'foreign';
+          if (variant === 'visible context') context.metadata.is_visually_hidden_from_conversation = false;
+          if (variant === 'tool recipient') context.recipient = 'functions.exec';
+          if (variant === 'invocation metadata') context.metadata.invoked_resource = { app_name: APP };
+          if (variant === 'foreign user') { mapping['foreign-user'] = structuredClone(mapping[USER]);
+            mapping['prefix-context-7'].parent = 'foreign-user'; mapping['prefix-context-7'].message.metadata.parent_id = 'foreign-user'; }
+          if (variant === 'missing child') mapping['prefix-context-3'].children = [];
+          if (variant === 'duplicate child') mapping['prefix-context-3'].children.push('prefix-context-2');
+          if (variant === 'cycle') { mapping['prefix-context-7'].parent = TOP; mapping['prefix-context-7'].message.metadata.parent_id = TOP; }
+          if (variant === 'parent conflict') context.metadata.parent_id = USER;
+          if (variant === 'active context') context.status = 'in_progress';
+          if (variant === 'assistant final') context.end_turn = true;
+          if (variant === 'assistant text') context.content = { content_type: 'text', parts: ['PRIVATE_FINAL'] };
+          if (variant === 'context accessor') Object.defineProperty(context.metadata, 'working_turn_id', {
+            get() { getterReads++; throw new Error('PRIVATE_SCOPE_GETTER'); } });
+          if (variant === 'missing terminal') { delete mapping[ASSISTANT]; entry.turn.items = entry.turn.items.filter((item: any) => item.messageId !== ASSISTANT); entry.turn.messageIds = [USER, CALL]; }
+        }, nativeCallCacheMutation: variant.startsWith('cached ') ? mapping => {
+          if (variant === 'cached context conflict') mapping['prefix-context-2'].message.metadata.turn_exchange_id = 'foreign';
+          if (variant === 'cached user conflict') mapping[USER].message.metadata.working_turn_id = 'foreign';
+          if (variant === 'cached edge conflict') mapping['prefix-context-3'].children = [];
+        } : undefined });
+      try {
+        const accepted = ['eight-node prefix', 'private context getter', 'different context request', '400-node prefix'].includes(variant);
+        expect(page.fiber.turns[0].calls[0]).toMatchObject({ requestId: accepted ? REQUEST : null, answered: accepted });
+        expect(page.fiber.turns[0].calls[0].resultReceiptId).toBe(accepted ? 'a'.repeat(48) : undefined);
+        expect(getterReads).toBe(0);
+        expect(JSON.stringify(page.fiber)).not.toMatch(/PRIVATE_PREFIX|PRIVATE_MODEL_CONTEXT|PRIVATE_MODEL_GETTER|PRIVATE_SCOPE_GETTER|prefix-working|prefix-exchange/);
+      } finally { page.dom.window.close(); }
+    });
+
   it.each(['headerless', 'headerless empty execution', 'approval transition', 'denied annotation',
     'malformed target', 'foreign working', 'unannounced exchange', 'wrong next request', 'wrong next exchange',
     'annotation extra field', 'annotation body', 'annotation resource', 'annotation pending',

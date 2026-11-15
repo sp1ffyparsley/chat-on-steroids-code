@@ -42,7 +42,7 @@
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
   const VERSION = 19;
   /** Private implementation epoch, independent of the stable cross-world wire schema. */
-  const PRODUCER_VERSION = 176;
+  const PRODUCER_VERSION = 177;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -2813,6 +2813,77 @@
           // and cache copy; an arbitrary off-path system node is not ancestry.
           // This supplies request ancestry only. All group/result/final receipts
           // below remain mandatory, including an opaque Core witness per call.
+          // Context compaction can fold several hidden context-only nodes out of
+          // the selected path. Prove every declared edge back to this exact user,
+          // including retained cache copies. Context bodies are never interpreted
+          // or emitted, and their request annotations confer no request authority.
+          const contractedContextPrefix = start => {
+            const cachedMapping = nativeField(data, 'mapping');
+            const childrenOf = node => {
+              const children = nativeField(node, 'children');
+              if (!Array.isArray(children) || children.length > MAX_ROWS) return null;
+              const ids = new Set();
+              for (let at = 0; at < children.length; at++) {
+                const id = str(nativeField(children, String(at)));
+                if (!id || ids.has(id)) return null;
+                ids.add(id);
+              }
+              return ids;
+            };
+            const declaredEdge = (parent, child) => {
+              const node = nativeField(mapping, parent), children = childrenOf(node);
+              if (!children?.has(child)) return false;
+              const cached = nativeField(cachedMapping, parent);
+              if (cached && cached !== node) {
+                const prior = childrenOf(cached);
+                if (!prior || prior.size !== children.size || [...children].some(id => !prior.has(id))) return false;
+              }
+              return true;
+            };
+            if (!declaredEdge(typedUserId, currentPath[1])) return false;
+            const userNode = nativeField(mapping, typedUserId), cachedUser = nativeField(cachedMapping, typedUserId);
+            if (cachedUser && cachedUser !== userNode) {
+              const message = nativeField(cachedUser, 'message'), meta = nativeField(message, 'metadata');
+              if (nativeField(cachedUser, 'id') !== typedUserId || nativeField(message, 'id') !== typedUserId ||
+                  nativeField(cachedUser, 'parent') !== nativeField(userNode, 'parent') ||
+                  nativeField(nativeField(message, 'author'), 'role') !== 'user' ||
+                  ['request_id', 'working_turn_id', 'turn_exchange_id'].some(key => nativeField(meta, key) !== nativeField(userMeta, key))) return false;
+            }
+            const contextShape = (node, id) => {
+              const message = nativeField(node, 'message'), meta = nativeField(message, 'metadata');
+              const content = nativeField(message, 'content'), role = nativeField(nativeField(message, 'author'), 'role');
+              if (nativeField(node, 'id') !== id || nativeField(message, 'id') !== id ||
+                  nativeField(message, 'recipient') !== 'all' || nativeField(message, 'status') !== 'finished_successfully' ||
+                  nativeField(message, 'channel') != null || nativeField(meta, 'is_visually_hidden_from_conversation') !== true ||
+                  !['working_turn_id', 'turn_exchange_id'].every(key => str(nativeField(meta, key)) && nativeField(meta, key) === nativeField(userMeta, key)) ||
+                  ['invoked_resource', 'connector_tool_payload', 'tool_invoking_message', 'tool_invoked_message', 'jit_plugin_data'].some(key => own.call(meta, key))) return false;
+              if (role === 'assistant') return nativeField(content, 'content_type') === 'model_editable_context' && nativeField(message, 'end_turn') == null;
+              const parts = nativeField(content, 'parts');
+              return role === 'system' && nativeField(content, 'content_type') === 'text' &&
+                Array.isArray(parts) && parts.length === 1 && typeof nativeField(parts, '0') === 'string';
+            };
+            const visited = new Set();
+            let id = start;
+            while (id !== typedUserId) {
+              if (visited.size >= MAX_ROWS || visited.has(id) || currentIds.has(id) || selected.has(id)) return false;
+              visited.add(id);
+              const node = nativeField(mapping, id), message = nativeField(node, 'message'), meta = nativeField(message, 'metadata');
+              const parent = str(nativeField(node, 'parent'));
+              if (!contextShape(node, id) || !parent || nativeField(meta, 'parent_id') !== parent || !declaredEdge(parent, id)) return false;
+              const cached = nativeField(cachedMapping, id);
+              if (cached && cached !== node) {
+                const prior = nativeField(cached, 'message'), priorMeta = nativeField(prior, 'metadata');
+                if (!contextShape(cached, id) || nativeField(cached, 'parent') !== parent ||
+                    nativeField(nativeField(prior, 'author'), 'role') !== nativeField(nativeField(message, 'author'), 'role') ||
+                    ['recipient', 'status', 'channel', 'end_turn'].some(key => nativeField(prior, key) !== nativeField(message, key)) ||
+                    nativeField(nativeField(prior, 'content'), 'content_type') !== nativeField(nativeField(message, 'content'), 'content_type') ||
+                    ['parent_id', 'request_id', 'working_turn_id', 'turn_exchange_id', 'is_visually_hidden_from_conversation'].some(key => nativeField(priorMeta, key) !== nativeField(meta, key))) return false;
+              }
+              id = parent;
+            }
+            // Keep the stricter existing single-sibling proof unchanged.
+            return visited.size >= 2;
+          };
           const contractedHeader = (id, parent, metadata) => {
             const rejectHeader = facet => { shellDiagnostic(rejects, 'nativeContractedHeader' + facet); return false; };
             if (pending) return rejectHeader('Pending');
@@ -2820,6 +2891,7 @@
             if (!userAnchorsHeader) return rejectHeader('UserAnchor');
             if (parent !== typedUserId) return rejectHeader('Parent');
             if (currentIds.has(id) || selected.has(id)) return rejectHeader('Selected');
+            if (contractedContextPrefix(id)) return true;
             const userNode = nativeField(mapping, typedUserId), children = nativeField(userNode, 'children');
             if (!Array.isArray(children) || children.length < 2 || children.length > MAX_ROWS) return rejectHeader('Children');
             const declared = new Set();

@@ -1,5 +1,13 @@
 # Chat On Steroids — code research mirror
 
+## R97: declared hidden context ancestry — source repair
+
+A native retained-parent reproduction found an eight-node hidden context prefix folded out of the selected execution path. The old reader understood only a single sibling header and rejected valid neighboring Core receipts. The existing ancestry owner now validates every declared edge through a bounded, unique context-only chain back to the exact selected native user. Working/exchange identities and cached node/child copies must agree. Only finished hidden system text or inert model-editable-context nodes qualify; no private context body is interpreted or exported. Context request annotations confer no command/result authority. The existing current final, execution groups, per-call resource, digest and receipt checks remain mandatory.
+
+Four positive reproductions initially failed. All 23 new positive/negative controls and the existing sibling/headerless controls pass, including refusal of foreign users/scopes, cycles, absent/duplicate edges, conflicting caches, active/assistant-final/tool/invocation rows, missing terminal and a 401st context node. A private-context getter is never evaluated. The complete reader/diagnostic owner run passed 1,064 checks; source generation is 177. Full private qualification and browser activation are separate gates.
+
+R96 passed 14,542 strict private qualification checks with 63 conditional skips, independent installer/payload equality and 98 post-pin installer/routing/update checks. One genuinely idle isolated instance was updated through the existing lifecycle owner; the protected personal instance and other productive owners stayed running. The installed desktop does not prove Chrome activation: older executing browser generations remain observed, and pending original-result debt is preserved. The separate hourly schedule stays paused. No private account data, host pins, prompts or receipts are published here.
+
 ## R96: headerless execution and observed approval exchanges — source repair
 
 A second live structural reproduction found valid Core results in the native conversation while the local task counter stayed at zero. The provider had folded every execution item without a system header, and an already-recorded native approval annotation changed the exchange identity within the same working turn. The former whole-turn namespace rule rejected that branch.
