@@ -42,7 +42,7 @@
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
   const VERSION = 19;
   /** Private implementation epoch, independent of the stable cross-world wire schema. */
-  const PRODUCER_VERSION = 178;
+  const PRODUCER_VERSION = 179;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -1480,9 +1480,25 @@
       const parts = content && typeof content === 'object' ? Object.getOwnPropertyDescriptor(content, 'parts') : null;
       return decline(parts && own.call(parts, 'value') && Array.isArray(parts.value) ? 'parts' : 'content');
     }
-    if (raw.length > 512 * 1024) return decline('oversized');
+    const largeOutput = raw.length > 512 * 1024;
+    if (raw.length > 1024 * 1024) return decline('oversized');
     try {
       const value = JSON.parse(raw);
+      if (largeOutput) {
+        // The native structured projection can retain a bounded read/Code Mode
+        // output just over the ordinary envelope limit (observed 526975 chars).
+        // Admit only the exact canonical server output + v2 committed witness,
+        // never a larger arbitrary wrapper, nested/legacy receipt or prose scan.
+        // Nothing from output leaves this context; exact parent, invocation hash
+        // and durable recorder matching still own acceptance downstream.
+        if (!status || status.value !== 'finished_successfully' || !value ||
+            typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 2 ||
+            typeof value.output !== 'string' || !own.call(value, 'cosResultReceipt') ||
+            value.cosResultReceipt?.version !== 2 || !validReceipt(value.cosResultReceipt) ||
+            JSON.stringify(value) !== raw) return decline('oversized');
+        if (shapes) shapes.valid++;
+        return remember(value.cosResultReceipt);
+      }
       if (!value || typeof value !== 'object' || Array.isArray(value) ||
           (value.isError !== undefined && typeof value.isError !== 'boolean')) return decline('envelope');
       // ChatGPT also serializes structuredContent directly into the native JSON
@@ -1536,7 +1552,7 @@
       if (structuredReceipt) remember(structuredReceipt);
       return receiptId;
     } catch {
-      return decline('json');
+      return decline(largeOutput ? 'oversized' : 'json');
     }
   }
   // The native batch graph orders messages, not individual repeated-tool results.

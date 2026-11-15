@@ -3841,6 +3841,46 @@ describe('alternate shell turn/message provenance', () => {
     } finally { page.dom.window.close(); }
   });
 
+  it.each(['observed', 'upper boundary', 'over boundary', 'v1', 'pending', 'extra field',
+    'nested receipt', 'competing wrapper', 'noncanonical', 'malformed digest', 'foreign parent'] as const)(
+    'verifies a bounded large server output without publishing its body: %s', async variant => {
+      const accepted = variant === 'observed' || variant === 'upper boundary';
+      const witness = 'b'.repeat(48);
+      const digest = createHash('sha256').update(JSON.stringify(['read', {}])).digest('hex');
+      const page = await shellHarness({ withCall: true, nativeCallReceipt: true, callCompleted: false,
+        nativeCallMutation(mapping, entry) {
+          delete entry.turn.items[1].widgetStateSource;
+          const message = mapping[RESULT].message;
+          const receipt: any = variant === 'v1' ? { version: 1, id: witness }
+            : { version: 2, id: witness, invocationSha256: variant === 'malformed digest' ? 'bad' : digest };
+          const value: any = { output: 'PRIVATE_LARGE_RESULT', cosResultReceipt: receipt };
+          const limit = variant === 'upper boundary' ? 1024 * 1024
+            : variant === 'over boundary' ? 1024 * 1024 + 1 : 526975;
+          value.output += 'x'.repeat(limit - JSON.stringify(value).length);
+          if (variant === 'extra field') value.extra = true;
+          if (variant === 'nested receipt') { value.nested = { cosResultReceipt: receipt }; delete value.cosResultReceipt; }
+          if (variant === 'competing wrapper') value.content = [];
+          message.content = { content_type: 'code', language: 'json', text:
+            JSON.stringify(value, null, variant === 'noncanonical' ? 1 : undefined) };
+          if (variant === 'pending') message.status = 'in_progress';
+          if (variant === 'foreign parent') { mapping[RESULT].parent = USER; message.metadata.parent_id = USER; }
+        } });
+      try {
+        for (const view of [page.fiber, await shellRescan(page, 'large-result-reobserve')]) {
+          const call = view.turns[0]?.calls[0];
+          if (accepted) {
+            expect(call).toMatchObject({ messageId: CALL, requestId: REQUEST, answered: true,
+              resultReceiptId: witness, invocationSha256: digest });
+            expect(view.turns[0].endMessageId).toBe(ASSISTANT);
+          } else {
+            expect(call?.resultReceiptId).toBeUndefined();
+            expect(call?.answered).not.toBe(true);
+          }
+          expect(JSON.stringify(view)).not.toContain('PRIVATE_LARGE_RESULT');
+        }
+      } finally { page.dom.window.close(); }
+    });
+
   it.each(['parts', 'status', 'structured', 'envelope', 'receipt', 'oversized'] as const)(
     'classifies the exact native result witness refusal without exporting content: %s', async variant => {
       const diagnosticLogs: string[] = [];
