@@ -958,8 +958,8 @@ describe('Core tool-surface incident diagnostics', () => {
     });
 
   it('does not adopt missing original proof or a truncated oversized proof from a later large final', () => {
-    const messages = Array.from({ length: 201 }, (_, i) => `native-large-${i}`);
-    const requests = Array.from({ length: 201 }, (_, i) => `wfr_large_${i}`);
+    const messages = Array.from({ length: 401 }, (_, i) => `native-large-${i}`);
+    const requests = Array.from({ length: 401 }, (_, i) => `wfr_large_${i}`);
     const initial = { conversationId: TARGET, documentId: 'unproved-original-capacity', navigationEpoch: 1,
       observedAt: NOW, shell: 'alternate' as const, shellDiscovery: 'compatible' as const,
       requestIds: [], turnId: null, ordinaryFinal: {
@@ -975,15 +975,15 @@ describe('Core tool-surface incident diagnostics', () => {
     expect(nativeCompletionCandidate(TARGET)).toBeNull();
     for (const truncated of [false, true]) {
       resetCoreBrowserEvidenceForTests();
-      const large = { ...initial, ordinaryFinal: { ...initial.ordinaryFinal, calls: 201, openCalls: 201,
-        coreCallMessageIds: truncated ? messages.slice(0, 200) : messages,
-        allCoreRequestIds: truncated ? requests.slice(0, 200) : requests } };
+      const large = { ...initial, ordinaryFinal: { ...initial.ordinaryFinal, calls: 400, openCalls: 400,
+        coreCallMessageIds: truncated ? messages.slice(0, 399) : messages,
+        allCoreRequestIds: truncated ? requests.slice(0, 399) : requests } };
       noteCoreBrowserEvidence(large);
       expect(coreBrowserEvidence(TARGET)?.pendingCompletion?.coreCallMessageIds).toBeNull();
       noteCoreBrowserEvidence({ ...large, observedAt: NOW + 1, ordinaryFinal: {
         ...large.ordinaryFinal, reason: 'associated', openCalls: 0 } });
       expect(nativeCompletionCandidate(TARGET)).toBeNull();
-      expect(acknowledgeNativeCompletion(TARGET, NOW + 1, NOW, requests.slice(0, 200))).toBe(false);
+      expect(acknowledgeNativeCompletion(TARGET, NOW + 1, NOW, requests.slice(0, 399))).toBe(false);
     }
     resetCoreBrowserEvidenceForTests();
   });

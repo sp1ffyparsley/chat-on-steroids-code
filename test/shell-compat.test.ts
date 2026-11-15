@@ -90,6 +90,7 @@ interface ShellOptions {
   nativeCallLiveConflict?: boolean;
   nativeCurrentNode?: string;
   nativeCallCacheConflict?: boolean;
+  nativeCallCacheMutation?: (mapping: Record<string, any>) => void;
   nativeAssistantCacheConflict?: boolean;
   nativeCallMutation?: (mapping: Record<string, any>, entry: any) => void;
   nativeDigestSettled?: () => void;
@@ -420,6 +421,10 @@ function installFiber(section: Element, options: ShellOptions, entry = shellEntr
       message: { ...mapping[ASSISTANT].message,
         content: { content_type: 'text', parts: ['conflicting cached answer'] } }
     };
+  }
+  if (options.nativeCallCacheMutation) {
+    cachedMapping = structuredClone(cachedMapping);
+    options.nativeCallCacheMutation(cachedMapping);
   }
   const owner: any = {
     memoizedProps: {
@@ -2504,6 +2509,100 @@ describe('alternate shell turn/message provenance', () => {
         expect(JSON.stringify(frame)).not.toContain('PRIVATE_RETRY');
         for (const value of [USER, REQUEST, PRIOR, HEADER, 'prior-working', 'retry-working', 'PRIVATE_RETRY'])
           expect(diagnosticLogs.join('\n')).not.toContain(value);
+      } finally { page.dom.window.close(); }
+    });
+
+  it.each(['headerless', 'headerless empty execution', 'approval transition', 'denied annotation',
+    'malformed target', 'foreign working', 'unannounced exchange', 'wrong next request', 'wrong next exchange',
+    'annotation extra field', 'annotation body', 'annotation resource', 'annotation pending',
+    'annotation parent conflict', 'annotation accessor', 'cached annotation conflict',
+    'missing user scope', 'missing final', 'foreign final', 'cached user conflict',
+    'annotation extra root', 'annotation remember string', 'annotation channel', 'reused exchange', 'foreign target'] as const)(
+    'anchors headerless groups and observes only an exact native approval exchange boundary (%s)', async variant => {
+      const X2 = 'scope-exec-two', C2 = 'scope-call-two', R2 = 'scope-result-two', E2 = 'scope-end-two';
+      const ALLOW = 'scope-native-allow';
+      const oldScope = { request_id: REQUEST, working_turn_id: 'scope-working', turn_exchange_id: 'scope-old' };
+      const newScope = { request_id: 'wfr_scope_next', working_turn_id: 'scope-working', turn_exchange_id: variant === 'reused exchange' ? 'scope-old' : 'scope-new' };
+      const transitioning = !variant.startsWith('headerless') && variant !== 'missing user scope' && variant !== 'missing final' && variant !== 'foreign final';
+      let getterReads = 0;
+      const page = await shellHarness({ withCall: true, withExec: true, nativeCallReceipt: true,
+        callCompleted: false, assistantCompleted: false,
+        nativeCurrentNode: variant === 'missing final' ? E2 : ASSISTANT,
+        nativeCallMutation(mapping, entry) {
+          completeExecBeforeCall(mapping, entry);
+          const call = entry.turn.items.find((item: any) => item.callId === CALL);
+          delete call.widgetStateSource;
+          entry.turn.items = entry.turn.items.filter((item: any) => item.callId !== EXEC);
+          entry.turn.items.splice(2, 0, { ...call, callId: C2 });
+          Object.assign(mapping[USER].message.metadata, oldScope);
+          mapping[CALL].parent = EXEC; mapping[CALL].message.metadata.parent_id = EXEC;
+          mapping[EXEC_RESULT].parent = RESULT; mapping[EXEC_RESULT].message.metadata.parent_id = RESULT;
+          mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: JSON.stringify({
+            cosResultReceipt: { version: 2, id: 'a'.repeat(48),
+              invocationSha256: createHash('sha256').update(JSON.stringify(['read', {}])).digest('hex') } }) };
+          for (const [id, row] of Object.entries(mapping) as [string, any][]) if (id !== USER)
+            Object.assign(row.message.metadata, oldScope);
+          const clone = (source: string, id: string, parent: string) => {
+            const copy = JSON.parse(JSON.stringify(mapping[source])); copy.id = id; copy.parent = parent; copy.message.id = id;
+            copy.message.metadata = { ...copy.message.metadata, ...(transitioning ? newScope : oldScope), parent_id: parent };
+            mapping[id] = copy;
+          };
+          clone(EXEC, X2, transitioning ? ALLOW : EXEC_RESULT); clone(CALL, C2, X2);
+          clone(RESULT, R2, C2); clone(EXEC_RESULT, E2, R2);
+          mapping[R2].message.content.text = mapping[R2].message.content.text.replace('a'.repeat(48), 'b'.repeat(48));
+          mapping[ASSISTANT].parent = E2;
+          Object.assign(mapping[ASSISTANT].message.metadata, transitioning ? newScope : oldScope, { parent_id: E2 });
+          // Real completed native groups retain metadata parents no longer in the live graph.
+          mapping[EXEC].message.metadata.parent_id = 'retired-source-parent';
+          entry.turn.messageIds = [USER, CALL, C2, ASSISTANT];
+          if (transitioning) {
+            mapping[ALLOW] = { id: ALLOW, parent: EXEC_RESULT, message: { id: ALLOW,
+              author: { role: 'tool', name: 'api_tool.call_tool' }, recipient: 'all',
+              status: 'finished_successfully', content: { content_type: 'text', parts: [''] },
+              metadata: { ...newScope, jit_plugin_data: { from_client: {
+                remember_answer: false, target_message_id: 'abababab-1111-4111-8111-111111111111', type: 'allow'
+              } }, message_source: null } } };
+            const marker = mapping[ALLOW].message, client = marker.metadata.jit_plugin_data.from_client;
+            if (variant === 'annotation extra root') marker.metadata.jit_plugin_data.extra = true;
+            if (variant === 'annotation remember string') client.remember_answer = 'false';
+            if (variant === 'annotation channel') marker.channel = 'analysis';
+            if (variant === 'foreign target') mapping[client.target_message_id] = { id: client.target_message_id,
+              message: { id: client.target_message_id, author: { role: 'user' }, metadata: {} } };
+            if (variant === 'denied annotation') client.type = 'deny';
+            if (variant === 'malformed target') client.target_message_id = 'not-a-native-occurrence';
+            if (variant === 'foreign working') marker.metadata.working_turn_id = 'foreign';
+            if (variant === 'unannounced exchange') { delete mapping[ALLOW]; mapping[X2].parent = EXEC_RESULT; mapping[X2].message.metadata.parent_id = EXEC_RESULT; }
+            if (variant === 'wrong next request') mapping[X2].message.metadata.request_id = 'foreign-request';
+            if (variant === 'wrong next exchange') mapping[X2].message.metadata.turn_exchange_id = 'foreign-exchange';
+            if (variant === 'annotation extra field') client.extra = true;
+            if (variant === 'annotation body') marker.content.parts = ['PRIVATE_NONEMPTY_ANNOTATION'];
+            if (variant === 'annotation resource') marker.metadata.invoked_resource = { app_name: APP, resource_uri: `/${ASDK}/${LINK}/read` };
+            if (variant === 'annotation pending') marker.status = 'in_progress';
+            if (variant === 'annotation parent conflict') marker.metadata.parent_id = USER;
+            if (variant === 'annotation accessor') Object.defineProperty(client, 'type', { get() { getterReads++; throw new Error('PRIVATE_APPROVAL_GETTER'); } });
+          }
+          if (variant === 'headerless empty execution') {
+            const empty = 'scope-empty-exec', ended = 'scope-empty-end';
+            clone(EXEC, empty, USER); clone(EXEC_RESULT, ended, empty);
+            mapping[EXEC].parent = ended;
+          }
+          if (variant === 'missing user scope') delete mapping[USER].message.metadata.turn_exchange_id;
+          if (variant === 'missing final') { delete mapping[ASSISTANT]; entry.turn.items = entry.turn.items.filter((item: any) => item.messageId !== ASSISTANT); entry.turn.messageIds = [USER, CALL, C2]; }
+          if (variant === 'foreign final') mapping[ASSISTANT].message.metadata.turn_exchange_id = 'foreign-final';
+        }, nativeCallCacheMutation: ['cached annotation conflict', 'cached user conflict'].includes(variant) ? mapping => {
+          if (variant === 'cached annotation conflict') mapping[ALLOW].message.metadata.jit_plugin_data.from_client.remember_answer = true;
+          else mapping[USER].message.metadata.turn_exchange_id = 'foreign-cached-user';
+        } : undefined });
+      try {
+        const accepted = ['headerless', 'headerless empty execution', 'approval transition'].includes(variant);
+        const calls = page.fiber.turns[0].calls;
+        expect(calls.map((call: any) => call.answered)).toEqual(accepted ? [true, true] : [false, false]);
+        expect(calls.map((call: any) => call.requestId)).toEqual(accepted || variant === 'missing final'
+          ? [REQUEST, transitioning ? newScope.request_id : REQUEST] : [null, null]);
+        if (accepted) expect(calls.map((call: any) => call.resultReceiptId)).toEqual(['a'.repeat(48), 'b'.repeat(48)]);
+        else expect(calls.every((call: any) => call.resultReceiptId === undefined)).toBe(true);
+        expect(getterReads).toBe(0);
+        expect(JSON.stringify(page.fiber)).not.toMatch(/PRIVATE_NONEMPTY_ANNOTATION|PRIVATE_APPROVAL_GETTER|remember_answer|target_message_id|scope-working|scope-old|scope-new/);
       } finally { page.dom.window.close(); }
     });
 

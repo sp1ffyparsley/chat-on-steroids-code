@@ -1,5 +1,13 @@
 # Chat On Steroids — code research mirror
 
+## R96: headerless execution and observed approval exchanges — source repair
+
+A second live structural reproduction found valid Core results in the native conversation while the local task counter stayed at zero. The provider had folded every execution item without a system header, and an already-recorded native approval annotation changed the exchange identity within the same working turn. The former whole-turn namespace rule rejected that branch.
+
+The existing group owner now anchors completed headerless groups to their exact scoped native user and independently corroborated final. Only the exact empty client-allow annotation may delimit a forward exchange change between a closed execution and its matching next execution. Working identity remains fixed; targets/exchanges cannot repeat, cache copies must agree, and the usual per-call resource, digest, parent and durable-result checks remain. This observes existing provider history; it never grants, clicks, synthesizes or replays an approval and creates no command permission or result receipt. Denials, conflicting scopes, unknown targets, nonempty bodies, malformed fields and unannounced transitions remain held.
+
+The complete reader/diagnostic source suites passed 1,041 checks, including failure-first reproductions and neighboring refusals. The previous candidate's full release gate exposed one remaining diagnostic fixture tied to the former 200-call limit; its no-late-adoption/ACK-refusal assertions now exercise the new bound. That failed artifact was not qualified or installed. Generation 176 is undergoing fresh release qualification; the last accepted installed release remains R94. Current useful work continues, the hourly schedule stays disabled, and protected chats are preserved.
+
 ## R95: native image receipts and long-turn result isolation — source repair
 
 Read-only inspection of current provider-rendered data reproduced two separate failures. Image results may contain ordinary JSON value text, then a structured `{value,cosResultReceipt}` envelope, then image pointers; the reader previously accepted only the receipt-first image carrier. The repair accepts that exact additional shape with canonical value equality, adjacency, v2 invocation digest, finished status and the existing parent/resource/namespace checks. It never searches arbitrary prose for receipts or exports the image payload.
