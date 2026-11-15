@@ -703,6 +703,25 @@ const LEGACY_CONFIG_RECOVERY_COPY = 'config.pre-instance-profile-recovery.json';
 let current: Config = defaultConfig();
 let localDevice: DeviceIdentity | null = null;
 let activeInstance: ActiveInstanceRuntime | null = null;
+// Settings preflights rebuild runtime snapshots. Object identity is not account
+// identity: retain custody across equal publications, but rotate on any owner/root
+// change or explicit runtime reset (including A -> B -> A).
+let activeInstanceIdentityToken: object = {};
+let activeInstanceIdentity = '';
+function publishActiveInstance(runtime: ActiveInstanceRuntime | null): void {
+  const identity = runtime ? JSON.stringify([runtime.profile, runtime.stateRoot,
+    runtime.electronPartition, [...runtime.approvedFolders.entries()]]) : '';
+  if (!runtime || identity !== activeInstanceIdentity) {
+    activeInstanceIdentityToken = {};
+    if (runtime) logInfo('instance runtime custody identity advanced');
+  }
+  activeInstanceIdentity = identity;
+  activeInstance = runtime;
+}
+export function getActiveInstanceIdentityToken(): object {
+  getActiveInstanceRuntime();
+  return activeInstanceIdentityToken;
+}
 // Every UI mutation ultimately lands in the same tiny JSON file. Keep those
 // read-modify-write transactions strictly ordered so two fast checkbox/root changes
 // cannot race on config.json.tmp or overwrite each other's newer state.
@@ -747,7 +766,7 @@ export function initConfigPath(userDataDir: string, canonicalUserDataRoot = user
   // a second profile-secret path. The main bootstrap may call it again with the same root.
   initSecretsPath(userDataDir);
   localDevice = null;
-  activeInstance = null;
+  publishActiveInstance(null);
 }
 
 /**
@@ -1069,7 +1088,7 @@ async function refreshSharedFolderAccessNow(): Promise<Config> {
   const changed = rootsChanged ||
     current.instances?.sharedFolderAccess?.revision !== reconciled.config.instances?.sharedFolderAccess?.revision;
   current = reconciled.config;
-  activeInstance = reconciled.active;
+  publishActiveInstance(reconciled.active);
   if (previousKeepAwake !== (current.ui.keepAwake !== false)) refreshKeepAwake();
   if (changed) logInfo(`shared folder access refreshed revision=${current.instances?.sharedFolderAccess?.revision ?? 0} roots=${current.roots.length}`);
   if (rootsChanged) notifyApprovedRootPublicationRefresh(previousRootCount, current.roots.length);
@@ -1391,7 +1410,7 @@ export async function loadConfig(): Promise<Config> {
   const loaded = canonical.config;
   if (persistMigration || canonical.changed) await writeConfigFile(loaded);
   current = loaded;
-  activeInstance = canonical.active;
+  publishActiveInstance(canonical.active);
   return current;
 }
 
@@ -2177,7 +2196,7 @@ async function persistConfig(next: Config): Promise<Config> {
   // Only publish the new in-memory state after the durable write succeeded. A disk
   // error must not leave the UI believing settings were saved when they were not.
   current = canonical.config;
-  activeInstance = canonical.active;
+  publishActiveInstance(canonical.active);
   if (externalEnrollmentChanged) logInfo('external route settings saved: automation held until exact native connector verification and explicit Resume');
   return current;
 }

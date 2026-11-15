@@ -10,6 +10,7 @@ import { readDurableStrict, writeDurableNow, initDurableStore, resetDurableForTe
 import { emptyEvidence, type CallContext } from '../src/main/mcp/call-context.js';
 import { deepAIHelperSchema } from '../src/main/mcp/deepai-helper-tool.js';
 import { makeTempDir, removeTempDir } from './helpers.js';
+import { getActiveInstanceIdentityToken, initConfigPath, loadConfig, updateConfig } from '../src/main/config.js';
 
 let directory: string;
 let now: number;
@@ -308,6 +309,19 @@ it('does not adopt manual CLI jobs or another profile even when they use similar
   expect(JSON.stringify(inbox)).not.toContain(foreign);
   scope = { ...scope, key: 'account-b', token: {}, profileId: 'profile-b' };
   await expect(owner.inspect(parent, 'status', String(job.id))).rejects.toThrow('DEEPAI_PARENT_CHANGED');
+});
+it('keeps a real parent binding when an awaited bridge read overlaps an ordinary settings save', async () => {
+  initConfigPath(path.join(directory, 'config')); await loadConfig();
+  deps.scope = () => ({ ...scope, token: getActiveInstanceIdentityToken() });
+  const parent = await principal();
+  const job = await owner.submit(parent, request());
+  const ordinary = bridge.getMockImplementation()!;
+  bridge.mockImplementationOnce(async input => {
+    const result = await ordinary(input);
+    await updateConfig(config => ({ ...config, ui: { ...config.ui, theme: config.ui.theme === 'dark' ? 'light' : 'dark' } }));
+    return result;
+  });
+  await expect(owner.inspect(parent, 'status', String(job.id))).resolves.toMatchObject({ id: job.id });
 });
 it('rejects account round trips and missing parents across awaited bridge reads', async () => {
   const parent = await principal();

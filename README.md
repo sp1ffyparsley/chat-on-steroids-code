@@ -1,5 +1,11 @@
 # Chat On Steroids — code research mirror
 
+## R103: preserve parent custody across equivalent runtime refreshes
+
+Real parent readiness exposed a second failure: ordinary settings saves and shared-access preflights rebuilt the active runtime object, so a reference comparison falsely reported an account switch. Configuration now owns an opaque custody token that survives equivalent runtime publications. A profile, route, namespace, root/access change or explicit runtime reset rotates it; returning to an earlier account cannot restore the old token. DeepAI uses that token while retaining exact parent-chat checks, current Pause/access checks and existing job/result ownership.
+
+The former reference behavior was reproduced with an ordinary settings save. All 167 configuration/helper checks and TypeScript pass independently in this mirror, including a real settings save during an awaited parent bridge read, unchanged refresh/reload, changed roots, reset and account-roundtrip refusals. Two pre-existing sanitized test hostnames were also corrected to lowercase to match URL normalization. The first private package qualification failed native screenshot/accessibility checks; those same unchanged native owners subsequently passed all 21 focused checks. A complete strict qualification rerun is pending. These are source-tested changes, not an installed or live-accepted production helper fix.
+
 ## R102: align parent readiness with the reviewed DeepAI transport
 
 The native adapter already supported reviewed DeepAI 0.3.37, but the CoS parent readiness validator still admitted only 0.3.36. That caused a healthy helper preflight to fail before production dispatch. Both layers now expose their bounded release contract, and an executable parity regression prevents a transport-only version change from silently leaving Core behind. Only reviewed 0.3.36/0.3.37 with protocol 2 and the exact requested model qualify. Future/prerelease versions, absent or mismatched protocols/models, inconsistent blockers and oversized discovery remain refused; free-model, parent controls, native approvals and result custody are unchanged.

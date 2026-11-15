@@ -8,7 +8,7 @@ import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
-import { effectiveCapabilities, getActiveInstanceOwnerPaths, getActiveInstanceRuntime, getConfig } from './config.js';
+import { effectiveCapabilities, getActiveInstanceOwnerPaths, getActiveInstanceRuntime, getActiveInstanceIdentityToken, getConfig } from './config.js';
 import { durableStoreReady, readDurableStrict, writeDurableNow } from './durable.js';
 import { childEnv } from './exec.js';
 import { pathEntries } from './env.js';
@@ -477,7 +477,7 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
 function currentScope(): HelperScope {
   const runtime = getActiveInstanceRuntime();
   const paths = getActiveInstanceOwnerPaths();
-  return { key: digest([runtime.profile.deviceId, runtime.profile.id, runtime.stateRoot]), token: runtime,
+  return { key: digest([runtime.profile.deviceId, runtime.profile.id, runtime.stateRoot]), token: getActiveInstanceIdentityToken(),
     deviceId: runtime.profile.deviceId, profileId: runtime.profile.id,
     control: { configRoot: runtime.profile.state.mode === 'isolated' ? path.join(paths.stateRoot, 'runtime') : paths.stateRoot,
       durableRoot: paths.durableStoreRoot } };

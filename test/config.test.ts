@@ -13,6 +13,7 @@ import {
   configureSharedAccountSettings,
   defaultConfig,
   getActiveInstanceRuntime,
+  getActiveInstanceIdentityToken,
   getActiveInstanceOwnerPaths,
   developmentBrowserBridgeInstanceId,
   getConfig,
@@ -51,6 +52,28 @@ afterAll(async () => {
 });
 
 describe('settings migration', () => {
+  it('preserves helper account custody across unchanged settings and invalidates runtime round trips', async () => {
+    const root = await makeTempDir('clf-helper-scope-');
+    const originalRoot = dir;
+    try {
+      initConfigPath(root); await loadConfig();
+      const token = getActiveInstanceIdentityToken();
+      const runtime = getActiveInstanceRuntime();
+      await updateConfig(config => ({ ...config, ui: { ...config.ui, theme: config.ui.theme === 'dark' ? 'light' : 'dark' } }));
+      expect(getActiveInstanceRuntime()).not.toBe(runtime);
+      expect(getActiveInstanceIdentityToken()).toBe(token);
+      await refreshSharedFolderAccess();
+      expect(getActiveInstanceIdentityToken()).toBe(token);
+      await loadConfig();
+      expect(getActiveInstanceIdentityToken()).toBe(token);
+      initConfigPath(root); await loadConfig();
+      expect(getActiveInstanceIdentityToken()).not.toBe(token);
+      const beforeRoots = getActiveInstanceIdentityToken();
+      await updateConfig(config => ({ ...config, roots: [{ name: 'workspace', path: root }] }));
+      expect(getActiveInstanceIdentityToken()).not.toBe(beforeRoots);
+    } finally { initConfigPath(originalRoot); await loadConfig(); await removeTempDir(root); }
+  });
+
   it('defaults fresh ordinary turns to 30 minutes and preserves an explicit Off', async () => {
     expect(defaultConfig().ui.rotateTurnMinutes).toBe(30);
     const before = getConfig();
@@ -2086,9 +2109,9 @@ it.each(REASONING_EFFORTS)('retains canonical worker/helper effort %s across set
 it('persists external origin/port through the normal config owner and holds new external enrollment', async () => {
   const original = getConfig();
   try {
-    await saveConfig({ ...original, tunnel: { ...original.tunnel, kind: 'manual', manualPublicOrigin: 'https://Delta.example.com/', manualPort: 9770 } });
+    await saveConfig({ ...original, tunnel: { ...original.tunnel, kind: 'manual', manualPublicOrigin: 'https://delta.example.com/', manualPort: 9770 } });
     const loaded = await loadConfig();
-    expect(loaded.tunnel).toMatchObject({ kind: 'manual', manualPublicOrigin: 'https://Delta.example.com', manualPort: 9770 });
+    expect(loaded.tunnel).toMatchObject({ kind: 'manual', manualPublicOrigin: 'https://delta.example.com', manualPort: 9770 });
     expect(loaded.ui.automationPaused).toBe(true);
     expect(loaded.tunnel.manualEndpointRevision).toBeGreaterThan(0);
     expect(loaded.instances).toEqual(original.instances);
@@ -2099,7 +2122,7 @@ it('keeps same-origin restart continuity and retires authority on explicit repla
   const original = getConfig();
   try {
     await saveConfig({ ...original, ui: { ...original.ui, automationPaused: false },
-      tunnel: { ...original.tunnel, kind: 'manual', manualPublicOrigin: 'https://Delta.example.com' } });
+      tunnel: { ...original.tunnel, kind: 'manual', manualPublicOrigin: 'https://delta.example.com' } });
     const revision = getConfig().tunnel.manualEndpointRevision!;
     expect(getConfig().ui.automationPaused).toBe(true);
     await updateConfig(config => ({ ...config, ui: { ...config.ui, automationPaused: false } }));
@@ -2126,19 +2149,19 @@ it('does not inherit another profile’s external hostname or fixed port and pre
   try {
     initConfigPath(profileDir);
     const baseline = await loadConfig();
-    await saveConfig({ ...baseline, tunnel: { ...baseline.tunnel, kind: 'manual', manualPublicOrigin: 'https://Delta.example.com', manualPort: 9770 } });
+    await saveConfig({ ...baseline, tunnel: { ...baseline.tunnel, kind: 'manual', manualPublicOrigin: 'https://delta.example.com', manualPort: 9770 } });
     const target = await createLocalInstanceProfile('External Target', 'Profile 31');
     const snapshot = await snapshotConfigForInstance(target.id);
     expect(snapshot.tunnel.manualPublicOrigin).toBeUndefined();
     expect(snapshot.tunnel.manualPort).toBeUndefined();
     expect(snapshot.tunnel.manualEndpointRevision).toBeUndefined();
-    expect(getConfig().tunnel).toMatchObject({ manualPublicOrigin: 'https://Delta.example.com', manualPort: 9770 });
+    expect(getConfig().tunnel).toMatchObject({ manualPublicOrigin: 'https://delta.example.com', manualPort: 9770 });
     const runtime = await prepareIsolatedInstanceRuntimeConfig(target.id);
     const file = path.join(runtime, 'config.json');
     const prepared = JSON.parse(await fs.readFile(file, 'utf8'));
-    prepared.tunnel.manualPublicOrigin = 'https://Epsilon.example.com'; prepared.tunnel.manualPort = 9771; prepared.tunnel.manualEndpointRevision = 7;
+    prepared.tunnel.manualPublicOrigin = 'https://epsilon.example.com'; prepared.tunnel.manualPort = 9771; prepared.tunnel.manualEndpointRevision = 7;
     await fs.writeFile(file, JSON.stringify(prepared));
     await prepareIsolatedInstanceRuntimeConfig(target.id);
-    expect(JSON.parse(await fs.readFile(file, 'utf8')).tunnel).toMatchObject({ manualPublicOrigin: 'https://Epsilon.example.com', manualPort: 9771, manualEndpointRevision: 7 });
+    expect(JSON.parse(await fs.readFile(file, 'utf8')).tunnel).toMatchObject({ manualPublicOrigin: 'https://epsilon.example.com', manualPort: 9771, manualEndpointRevision: 7 });
   } finally { initConfigPath(dir); await loadConfig(); await removeTempDir(profileDir); }
 });
