@@ -7,9 +7,9 @@
  * Cross-chat mutation is a separate session_route tool so the read surface remains truthfully
  * read-only and cached clients never have to infer per-action side effects.
  *
- * Search/read never guess the calling ChatGPT conversation. That is deliberate: cross-chat
- * recovery and concurrent-worker observation stay cheap and read-only. session_route is the
- * separate exception because it mutates another chat and therefore requires exact caller proof.
+ * Search/read never guess the calling ChatGPT conversation. An exact attributed caller pair
+ * may label its own recording, without granting execution or file ownership. Cross-chat recovery
+ * stays read-only. session_route mutates another chat and therefore requires exact caller proof.
  */
 
 import { createHash } from 'node:crypto';
@@ -401,7 +401,7 @@ async function searchSessions(queryInput?: string, cursorInput?: string): Promis
     .join('\n');
   noteCount(rows.length);
   noteDetail(complete ? 'complete' : 'more');
-  return ok(boundResult(`${heading}\n\n${body}\n\n${footer}`, SEARCH_RESULT_CHARS));
+  return ok(boundResult(`${heading}\nRecording state is not execution or file-ownership proof.\n\n${body}\n\n${footer}`, SEARCH_RESULT_CHARS));
 }
 
 async function searchOneSession(summary: SessionSummary, query: string): Promise<SearchMatch | null> {
@@ -443,10 +443,18 @@ function formatFailureCounts(summary: SessionSummary): string {
   return parts.join(' · ');
 }
 
+/** An open recording may be idle. Only an attributed exact caller pair identifies its own history. */
+function recordingState(summary: SessionSummary): string {
+  const caller = currentCaller();
+  const self = Boolean(caller?.requestId && caller.sessionId && caller.conversationId &&
+    caller.sessionId === summary.id && caller.conversationId === summary.conversationId);
+  return `${summary.endedAt === null ? 'open' : 'ended'}${self ? ' [caller=current-recording]' : ''}`;
+}
+
 function formatSessionRow(summary: SessionSummary): string {
   const failures = formatFailureCounts(summary);
   return (
-    `${summary.id}  ${formatDate(summary.updatedAt)}  ${summary.endedAt === null ? 'active' : 'ended'}\n` +
+    `${summary.id}  ${formatDate(summary.updatedAt)}  recording:${recordingState(summary)}\n` +
     `  ${flat(summary.title, 180)}\n` +
     `  ${summary.userMessages} user · ${summary.toolCalls} tools · ${summary.events} events${failures ? ` · ${failures}` : ''}`
   );
@@ -1125,7 +1133,7 @@ function sessionHeader(summary: SessionSummary): string {
   return (
     `Session: ${summary.id}\nTitle: ${summary.title}\n` +
     `Started: ${formatDate(summary.startedAt)}\nUpdated: ${formatDate(summary.updatedAt)}\n` +
-    `State: ${summary.endedAt === null ? 'active' : 'ended'}\n` +
+    `Recording: ${recordingState(summary)} (not execution or file-ownership proof)\n` +
     `Recorded: ${summary.userMessages} user · ${summary.toolCalls} tools · ${summary.events} events${failures ? ` · ${failures}` : ''}\n` +
     observedPicker
   );

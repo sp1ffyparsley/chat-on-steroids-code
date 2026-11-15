@@ -248,6 +248,40 @@ function caller(source: { id: string; conversationId: string | null }, requestId
   };
 }
 
+it('distinguishes the caller recording from execution or competing ownership in search and read', async () => {
+  const own = await createSession({ conversationId: 'current-recording-chat', title: 'Resumed owner' });
+  await createSession({ conversationId: 'other-recording-chat', title: 'Other open history' });
+  const reg = registrar();
+  const context = caller(own);
+  const listed = textOf(await runInCallContext(context, () => reg.call('session', { action: 'search' })));
+  const read = textOf(await runInCallContext(context, () => reg.call('session', {
+    action: 'read', session_id: own.id
+  })));
+  expect(listed.match(/caller=current-recording/g)).toHaveLength(1);
+  expect(read).toContain('caller=current-recording');
+  expect(read).not.toContain('State: active');
+  expect(read).toContain('not execution or file-ownership proof');
+  expect(routed.send).not.toHaveBeenCalled();
+});
+
+it.each(['foreign-session', 'superseded-conversation', 'missing-request'] as const)(
+  'does not identify an open recording as the current caller for %s', async mismatch => {
+    const own = await createSession({ conversationId: 'current-recording-chat', title: 'Resumed owner' });
+    const context = caller(own);
+    if (mismatch === 'foreign-session') context.caller.sessionId = 'other-recording-session';
+    if (mismatch === 'superseded-conversation') context.caller.conversationId = 'historical-source-chat';
+    if (mismatch === 'missing-request') context.caller.requestId = null;
+    const reg = registrar();
+    const listed = textOf(await runInCallContext(context, () => reg.call('session', { action: 'search' })));
+    const read = textOf(await runInCallContext(context, () => reg.call('session', {
+      action: 'read', session_id: own.id
+    })));
+    expect(listed).not.toContain('caller=current-recording');
+    expect(read).not.toContain('caller=current-recording');
+    expect(routed.send).not.toHaveBeenCalled();
+  }
+);
+
 it('keeps discovery on authored user text instead of hidden transport framing', async () => {
   const target = await createSession({ conversationId: 'route-target-authored', title: 'Parser workstream' });
   await addUser(
