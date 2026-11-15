@@ -1,6 +1,6 @@
 # Chat On Steroids — code research mirror
 
-## R106: precise ancestry failures and complete helper pages — source tested
+## R106: qualified desktop repair — Chrome activation remains separate
 
 The reader now accepts a single declared assistant context only with the same original request namespace, keeps the stricter legacy system-sibling proof, and rejects conflicting cached user edges. Seven fixed structural failure facets survive all four reader/content/worker/Main allowlists. No hidden context or request values are logged; missing native receipts still withhold completion.
 
@@ -8,7 +8,7 @@ CoS now preserves the native DeepAI context measurements and rotation reason ins
 
 The serialized tab-retirement owner preserves pinned/audible pages and rechecks playback after its durable write, retaining its draft, work, document, journal, final-tab and one-shot gates. Strict packaging checks both pinned offline binary archives before expensive dependency materialization and reports missing/corrupt inputs without downloads or deletion.
 
-Failure-first tests reproduced the defects. All 2,085 affected source tests, 69 native DeepAI checks, TypeScript and syntax checks pass. This mirror independently passed 71 focused tests and TypeScript, including diagnostic transport and archive preflight. Full private qualification is running through the incumbent release owner. These changes are **not yet qualified, installed, loaded or live accepted**. Earlier R105 failures remain failed. Protected work and disabled schedules stay unchanged; no new coordinator, scheduler or forced reload was added.
+Failure-first tests reproduced the defects. All 2,085 affected source tests, 69 native DeepAI checks, TypeScript and syntax checks pass. This mirror independently passed 71 focused tests and TypeScript, including diagnostic transport and archive preflight. Full private qualification then passed **14,638 checks with 63 conditional skips**, followed by **118 post-pin installer/routing checks**. All 315 packaged files independently matched the installer and the installed immutable program. Four isolated desktop/Main owners drained normally, updated through the existing lifecycle owner and reopened on the qualified program; 117 closed nonbinding state files remained byte-exact across publication. The protected personal program/process and disabled schedules stayed unchanged. **Desktop installation is verified; executing Chrome scripts and sustained fleet autonomy remain unverified.** Other productive owners were preserved on their prior accepted programs. Earlier R105 failed runs remain failed; no timeout inflation, forced reload or new coordinator was introduced.
 
 ## R105: declared hidden-context ancestry — qualification held
 
