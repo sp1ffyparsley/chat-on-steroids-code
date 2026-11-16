@@ -249,10 +249,12 @@ try {
     selectedPresent=($null -ne $selected); selected=($null -ne $selected -and $selected.selected -eq $true) }
   # A truthful first partial snapshot can spend the entire production 2s budget.
   # Like the Document fixture below, start this owned fixture's bounded readiness
-  # phase after that first observation. Never repeat input or retry observed false.
+  # phase after that first observation. Allow the same three full 2s observations
+  # promised by the initial readiness phase; a 2s deadline permits only one more.
+  # Never repeat input or retry observed false; exhausted/missing still fails.
   $selectionReady = [System.Diagnostics.Stopwatch]::StartNew()
   while ($null -eq $selected -and $fresh.truncated -eq $true -and
-      $selectionAttempts -lt 3 -and $selectionReady.ElapsedMilliseconds -lt 2000) {
+      $selectionAttempts -lt 3 -and $selectionReady.ElapsedMilliseconds -lt 6000) {
     Start-Sleep -Milliseconds 25
     $fresh = Read-Selection
     $selected = @($fresh.elements | Where-Object { $_.automationId -eq 'second' })[0]

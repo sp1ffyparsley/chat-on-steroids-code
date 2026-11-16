@@ -94,6 +94,10 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
       } catch (error) {
         if (!/CAPTURE_FAILED:.*HRESULT 0x80070057/.test(error instanceof Error ? error.message : String(error))) throw error;
         captureFailure = error;
+        // Yield for one native composition interval before the next of the same
+        // three exact-HWND readiness probes. Immediate retries can all outrun DWM.
+        // This never changes production capture, switches target or accepts no frame.
+        if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 50));
       }
     }
     if (captureFailure) throw new Error(`Owned native fixture surface never became ready: ${String(captureFailure)}`);
