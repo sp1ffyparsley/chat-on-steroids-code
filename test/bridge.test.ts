@@ -387,7 +387,7 @@ function wake(items: ReadonlyArray<{ to: string; text: string }>): void {
 }
 
 async function waitForOpened(count = 1): Promise<void> {
-  await vi.waitFor(() => expect(opened).toHaveLength(count));
+  await vi.waitFor(() => expect(opened).toHaveLength(count), { timeout: 5_000 });
 }
 
 async function waitForRevival(): Promise<{ id: string; conversationId: string }> {
@@ -409,7 +409,10 @@ async function waitForRevival(): Promise<{ id: string; conversationId: string }>
 async function redeem(id?: string, client = 'tab-1', tabLease?: string): Promise<any> {
   if (!id) {
     const index = anonymousRedeemIndex++;
-    await vi.waitFor(() => expect(opened.length).toBeGreaterThan(index));
+    // The durable opening owner runs asynchronously; a loaded Windows qualification may
+    // need more than Vitest's default one second. Still require the actual owned URL before
+    // redeeming anything. This is a fixture observation bound, never a product timeout.
+    await vi.waitFor(() => expect(opened.length).toBeGreaterThan(index), { timeout: 5_000 });
     id = new URL(opened[index]!).searchParams.get('clf')!;
   }
   const reply = await request('POST', '/commands/redeem', { body: { id, client, ...(tabLease ? { tabLease } : {}) } });
