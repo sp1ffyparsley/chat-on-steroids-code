@@ -99,6 +99,118 @@ it('checks full stable bytes rather than trusting an unchanged fingerprint marke
   expect((await fs.stat(path.join(stable, 'background.js'))).mtimeMs).toBe(before);
 });
 
+it('does not replace a coherent newer recorder with an older same-version package', async () => {
+  base = await makeTempDir('clf-extension-generation-');
+  const resources = path.join(base, 'resources'), bundled = path.join(resources, 'extension');
+  const userData = path.join(base, 'user-data');
+  await fs.mkdir(bundled, { recursive: true });
+  await fs.writeFile(path.join(bundled, 'manifest.json'), JSON.stringify({ version: '2.1.39' }));
+  const revision = async (value: number) => {
+    await fs.writeFile(path.join(bundled, 'background.js'), `const PAGE_RECORDER_VERSION = ${value};\n`);
+    await fs.writeFile(path.join(bundled, 'content.js'), `  const RECORDER_VERSION = ${value};\n`);
+    await fs.writeFile(path.join(bundled, 'fiber.js'), `  const PRODUCER_VERSION = ${value};\n`);
+  };
+  await revision(184);
+  Object.defineProperty(process, 'resourcesPath', { configurable: true, writable: true, value: resources });
+  vi.doMock('electron', () => ({ app: { isPackaged: true, getPath: () => userData } }));
+  const { extensionDir, companionMaterializedFingerprint } = await import('../src/main/extension-path.js');
+  const stable = extensionDir()!;
+  const before = companionMaterializedFingerprint(stable);
+  await revision(183);
+  expect(extensionDir()).toBe(stable);
+  expect(await fs.readFile(path.join(stable, 'background.js'), 'utf8')).toContain('184');
+  expect(companionMaterializedFingerprint(stable)).toBe(before);
+  await revision(185);
+  expect(extensionDir()).toBe(stable);
+  expect(await fs.readFile(path.join(stable, 'background.js'), 'utf8')).toContain('185');
+});
+
+it.runIf(process.platform === 'win32')('prepares the shared companion offline with exact source/prior custody and supports explicit rollback', async () => {
+  base = await makeTempDir('clf-extension-offline-');
+  const bundled = path.join(base, 'resources', 'extension'), roaming = path.join(base, 'roaming');
+  const stable = path.join(roaming, 'chat-on-steroids', 'extension');
+  await fs.mkdir(bundled, { recursive: true });
+  await fs.writeFile(path.join(bundled, 'manifest.json'), JSON.stringify({ version: '2.1.39' }));
+  const revision = async (value: number) => {
+    for (const [file, key] of [['background.js', 'PAGE_RECORDER_VERSION'], ['content.js', 'RECORDER_VERSION'], ['fiber.js', 'PRODUCER_VERSION']])
+      await fs.writeFile(path.join(bundled, file!), `const ${key} = ${value};\n`);
+  };
+  const moduleAlias = path.join(base, 'module-alias');
+  await fs.symlink(path.resolve('extension'), moduleAlias, 'junction');
+  const moduleFile = path.join(moduleAlias, 'materialize.mjs');
+  // @ts-expect-error Shared executable JavaScript publication owner.
+  const { extensionFingerprint } = await import('../extension/materialize.mjs');
+  const run = (source: string, prior: string, extra: string[] = []) => spawnSync(process.execPath,
+    [moduleFile, '--source', bundled, '--expected-source', source, '--expected-current', prior, ...extra],
+    { encoding: 'utf8', windowsHide: true, timeout: 5000, env: { ...process.env, APPDATA: roaming } });
+  await revision(185);
+  const newest = extensionFingerprint(bundled);
+  const first = run(newest, 'missing');
+  expect(first.status, first.stderr).toBe(0);
+  expect(JSON.parse(first.stdout)).toMatchObject({ prepared: true, fingerprint: newest, chromeLaunched: false,
+    reloadRequested: false, nativeSend: false, loadedGenerationVerified: false });
+  await revision(184);
+  const old = extensionFingerprint(bundled);
+  const wrongSource = run('f'.repeat(64), newest);
+  expect(wrongSource.status).toBe(1);
+  expect(extensionFingerprint(stable)).toBe(newest);
+  const stale = run(old, 'a'.repeat(64), ['--allow-downgrade']);
+  expect(stale.status).toBe(1);
+  expect(extensionFingerprint(stable)).toBe(newest);
+  const unrequested = run(old, newest);
+  expect(unrequested.status).toBe(1);
+  expect(JSON.parse(unrequested.stdout).prepared).toBe(false);
+  expect(extensionFingerprint(stable)).toBe(newest);
+  const rollback = run(old, newest, ['--allow-downgrade']);
+  expect(rollback.status, rollback.stderr).toBe(0);
+  expect(extensionFingerprint(stable)).toBe(old);
+  const foreign = run(old, old, ['--stable', base]);
+  expect(foreign.status).toBe(1);
+  expect(extensionFingerprint(stable)).toBe(old);
+});
+
+it('withholds a published fingerprint when actual shared bytes no longer match its marker', async () => {
+  const { primary, stable } = await sharedFixture();
+  const { extensionDir, companionMaterializedFingerprint, usePrimaryStableExtensionRoot } = await import('../src/main/extension-path.js');
+  usePrimaryStableExtensionRoot(primary);
+  expect(extensionDir()).toBe(stable);
+  expect(companionMaterializedFingerprint(stable)).toMatch(/^[a-f0-9]{64}$/);
+  await fs.appendFile(path.join(stable, 'background.js'), '\nforeign publisher bytes');
+  expect(companionMaterializedFingerprint(stable)).toBeNull();
+});
+
+it('retains an external publication that changes while this publisher is staging', async () => {
+  const { primary, stable } = await sharedFixture();
+  vi.doMock('node:fs', async original => {
+    const real = await original<typeof import('node:fs')>();
+    return { ...real, cpSync: (...args: Parameters<typeof real.cpSync>) => {
+      real.cpSync(...args);
+      real.writeFileSync(path.join(stable, 'background.js'), 'external publication retained');
+    } };
+  });
+  const { extensionDir, companionMaterializedFingerprint, usePrimaryStableExtensionRoot } = await import('../src/main/extension-path.js');
+  usePrimaryStableExtensionRoot(primary);
+  expect(extensionDir()).toBe(stable);
+  expect(await fs.readFile(path.join(stable, 'background.js'), 'utf8')).toBe('external publication retained');
+  expect(companionMaterializedFingerprint(stable)).toBeNull();
+});
+
+it('does not promote a first-install stage with a forged or stale fingerprint', async () => {
+  const { primary, stable, resources } = await sharedFixture();
+  await fs.rm(stable, { recursive: true });
+  await fs.rm(path.join(resources, 'extension', 'manifest.json'));
+  const stage = `${stable}.new`;
+  await fs.mkdir(stage);
+  await fs.writeFile(path.join(stage, 'manifest.json'), '{}');
+  await fs.writeFile(path.join(stage, 'background.js'), 'incomplete stage');
+  await fs.writeFile(path.join(stage, '.chat-on-steroids-source'), 'f'.repeat(64));
+  const { extensionDir, usePrimaryStableExtensionRoot } = await import('../src/main/extension-path.js');
+  usePrimaryStableExtensionRoot(primary);
+  expect(extensionDir()).toBeNull();
+  expect(existsSync(stable)).toBe(false);
+  expect(await fs.readFile(path.join(stage, 'background.js'), 'utf8')).toBe('incomplete stage');
+});
+
 async function sharedFixture() {
   base = await makeTempDir('clf-extension-shared-lock-');
   const primary = path.join(base, 'primary'), child = path.join(base, 'child');
@@ -153,6 +265,7 @@ it('keeps the previous shared tree when copying the newer child package fails an
 async function processFixture() {
   const fixture = await sharedFixture();
   const source = (await fs.readFile(path.join(process.cwd(), 'src/main/extension-path.ts'), 'utf8'))
+    .replaceAll('../../extension/materialize.mjs', new URL('../extension/materialize.mjs', import.meta.url).href)
     .replace("import { app } from 'electron';", 'const app = (globalThis as any).__extensionApp;')
     .replace("import { logInfo, logWarn } from './logger.js';", 'const logInfo = (_text: string) => {}; const logWarn = (_text: string) => {};');
   const compiled = path.join(base!, 'extension-path.mjs');
