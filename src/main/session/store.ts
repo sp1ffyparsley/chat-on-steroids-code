@@ -434,6 +434,9 @@ const META_HISTORY_SEQ = '__historySeq';
 // Alias shards remain forensic history, so the watermark alone cannot tell whether
 // their duplicate token/event contributions have already been removed from metadata.
 const META_CANONICAL_PROJECTION = '__canonicalProjection';
+// Version 1 could renew the final-progress clock during a metadata-only replay.
+// Rebuild that derived checkpoint from retained canonical history once, preserving custody.
+const CANONICAL_PROJECTION_VERSION = 2;
 const META_TOKEN_ESTIMATE = '__tokenEstimate';
 const META_NATIVE_COMPLETION_FENCES = '__nativeCompletionFences';
 const NATIVE_FENCE_MAX_SLOTS = 32;
@@ -757,7 +760,7 @@ async function writeSummary(summary: SessionSummary, historySeq: number, private
   const fences = privateFences ?? expectedFences ?? diskFences;
   stillOwned();
   if (fences.invalid) throw new Error('Session native completion checkpoint is unreadable; original metadata retained');
-  const persisted: PersistedSummary = { ...summary, [META_HISTORY_SEQ]: historySeq, [META_CANONICAL_PROJECTION]: 1, [META_TOKEN_ESTIMATE]: 1,
+  const persisted: PersistedSummary = { ...summary, [META_HISTORY_SEQ]: historySeq, [META_CANONICAL_PROJECTION]: CANONICAL_PROJECTION_VERSION, [META_TOKEN_ESTIMATE]: 1,
     ...(fences.checkpoint ? { [META_NATIVE_COMPLETION_FENCES]: fences.checkpoint } : {}) };
   // Creation owns directory creation. A delayed metadata write must fail if deletion
   // already moved this directory, not resurrect a metadata-only active session.
@@ -1467,8 +1470,7 @@ async function readDurableSnapshot(id: string): Promise<DurableSessionSnapshot |
   const existing = reconciling.get(id);
   if (existing) return existing;
   const work = (async () => {
-    let aliasesCollapsed = false;
-    const messages = await readCanonicalMessages(id, () => { aliasesCollapsed = true; });
+    const messages = await readCanonicalMessages(id);
     let messageSeq = 0;
     for (const event of messages.values()) messageSeq = Math.max(messageSeq, event.seq);
     const journalSeq = await lastSeqOnDisk(id);
@@ -1480,16 +1482,14 @@ async function readDurableSnapshot(id: string): Promise<DurableSessionSnapshot |
     if (
       checkpoint?.historySeq === historySeq &&
       checkpoint.tokenEstimateCurrent &&
-      (!aliasesCollapsed || checkpoint.canonicalProjectionCurrent) &&
+      checkpoint.canonicalProjectionCurrent &&
       !checkpoint.outcomeCountersMissing &&
       !checkpoint.activityBoundaryMissing &&
       !checkpoint.fileChangeProjectionMissing &&
       !checkpoint.activeWorkProjectionMissing &&
       checkpoint.summary.finishTurn !== undefined
     ) {
-      // A successful no-op migration is still a completed migration. Without this stamp,
-      // every launch rereads all old transcripts that happened to contain no aliases.
-      const migrated = !checkpoint.canonicalProjectionCurrent || titleRepaired;
+      const migrated = titleRepaired;
       if (migrated) await writeSummary(checkpoint.summary, historySeq);
       return { summary: checkpoint.summary, messages, historySeq, reconciled: migrated };
     }
@@ -2218,9 +2218,14 @@ export function upsertMessageEvent(
         entry.summary.estimatedTokens = Math.max(0, entry.summary.estimatedTokens + delta);
         entry.summary.contextTokens = Math.max(0, entry.summary.contextTokens + delta);
         entry.summary.updatedAt = Math.max(entry.summary.updatedAt, nextEvent.time);
-        entry.summary.lastMessageAt = Math.max(entry.summary.lastMessageAt ?? 0, nextEvent.time);
+        if (semanticTextChanged || assistantBecameFinal)
+          entry.summary.lastMessageAt = Math.max(entry.summary.lastMessageAt ?? 0, nextEvent.time);
         noteFinishWork(entry.summary, full);
-        if (full.kind === 'assistant_message' && (full.final === true || full.state === 'final')) {
+        // Rendering, identity and timestamp corrections are observations of the same final,
+        // not new work. Advancing this clock would revoke an unsent idle revival and reset
+        // the Loop inactivity budget even though the semantic content never changed.
+        if (full.kind === 'assistant_message' && (full.final === true || full.state === 'final') &&
+            (semanticTextChanged || assistantBecameFinal)) {
           entry.summary.lastAssistantFinalAt = Math.max(
             entry.summary.lastAssistantFinalAt ?? 0,
             nextEvent.time
@@ -3018,7 +3023,7 @@ function normalizeSummary(id: string, raw: string): MetaCheckpoint | null {
     return {
       historySeq,
       nativeCompletionFences: normalizedNativeCompletionState(privateFences, id),
-      canonicalProjectionCurrent: canonicalProjection === 1,
+      canonicalProjectionCurrent: canonicalProjection === CANONICAL_PROJECTION_VERSION,
       tokenEstimateCurrent: tokenEstimate === 1,
       outcomeCountersMissing,
       activityBoundaryMissing,

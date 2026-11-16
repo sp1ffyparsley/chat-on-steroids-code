@@ -2243,7 +2243,7 @@ describe('session store', () => {
     const seed = await createSession({ title: 'catalog seed', conversationId: null });
     const seedFile = path.join(sessionsRoot(), seed.id, 'meta.json');
     const seedSummary = JSON.parse(await fs.readFile(seedFile, 'utf8'));
-    expect(seedSummary).toMatchObject({ __historySeq: 0, __canonicalProjection: 1, __tokenEstimate: 1 });
+    expect(seedSummary).toMatchObject({ __historySeq: 0, __canonicalProjection: 2, __tokenEstimate: 1 });
     const statSpy = mockCatalogCheckpointStats('catalog-', await fs.stat(seedFile));
     // Force the next lookup to rebuild from the durable catalog rather than the live seed.
     resetSessionStoreForTests();
@@ -2528,6 +2528,50 @@ describe('session store', () => {
       expect.objectContaining({ messageId: 'native-superseded-new-provider', textOrigin: 'provider',
         message: expect.objectContaining({ text: 'A different native user' }) })
     ]));
+  });
+
+  it('rebuilds a legacy inflated final-progress checkpoint from retained canonical history', async () => {
+    const summary = await createSession({ title: 'legacy final replay clock' });
+    await upsertMessageEvent(summary.id, { kind: 'assistant_message', source: 'extension', time: 100,
+      messageId: 'legacy-replayed-final', message: { text: 'Retained answer', chars: 15, truncated: false },
+      final: true, state: 'final' });
+    await flushSessions();
+    const metaPath = path.join(sessionsRoot(), summary.id, 'meta.json');
+    const legacy = JSON.parse(await fs.readFile(metaPath, 'utf8'));
+    legacy.__canonicalProjection = 1;
+    legacy.lastAssistantFinalAt = 900;
+    legacy.lastMessageAt = 900;
+    await fs.writeFile(metaPath, JSON.stringify(legacy));
+    resetSessionStoreForTests();
+    expect((await getSession(summary.id))?.lastAssistantFinalAt).toBe(100);
+    expect((await getSession(summary.id))?.lastMessageAt).toBe(100);
+    expect(await readEvents(summary.id, { kinds: ['assistant_message'] })).toEqual([
+      expect.objectContaining({ messageId: 'legacy-replayed-final', time: 100,
+        message: expect.objectContaining({ text: 'Retained answer' }) })
+    ]);
+    await flushSessions();
+    expect(JSON.parse(await fs.readFile(metaPath, 'utf8')).__canonicalProjection).toBe(2);
+  });
+
+  it('does not renew final progress from a rendering-only replay, including after restart', async () => {
+    const summary = await createSession({ title: 'final replay progress' });
+    const row = { kind: 'assistant_message' as const, source: 'extension' as const, time: 100,
+      messageId: 'assistant-final-replay', message: { text: 'Saved result', chars: 12, truncated: false },
+      final: true, state: 'final' as const };
+    const first = await upsertMessageEvent(summary.id, row);
+    expect((await getSession(summary.id))?.lastAssistantFinalAt).toBe(100);
+    const replay = await upsertMessageEvent(summary.id,
+      { ...row, time: 900, renderedHtml: { text: '<p>Saved result</p>', chars: 19, truncated: false } });
+    expect(replay).toMatchObject({ changed: true, contentChanged: false });
+    expect(replay.event.time).toBe(100);
+    expect(replay.event.semanticUpdatedAt).toBe(first.event.semanticUpdatedAt);
+    expect((await getSession(summary.id))?.lastAssistantFinalAt).toBe(100);
+    expect((await getSession(summary.id))?.lastMessageAt).toBe(100);
+    await flushSessions(); resetSessionStoreForTests();
+    expect((await getSession(summary.id))?.lastAssistantFinalAt).toBe(100);
+    await upsertMessageEvent(summary.id, { ...row, time: 1200,
+      message: { text: 'Saved result with new work', chars: 26, truncated: false } });
+    expect((await getSession(summary.id))?.lastAssistantFinalAt).toBe(1200);
   });
 
   it('keeps the original anchor when provider creation time changes on reload, without merging sibling messages', async () => {
@@ -4388,7 +4432,7 @@ describe('handoff storage', () => {
     const seed = await createSession({ title: 'handoff catalog seed' });
     const seedFile = path.join(sessionsRoot(), seed.id, 'meta.json');
     const seedSummary = JSON.parse(await fs.readFile(seedFile, 'utf8'));
-    expect(seedSummary).toMatchObject({ __historySeq: 0, __canonicalProjection: 1, __tokenEstimate: 1 });
+    expect(seedSummary).toMatchObject({ __historySeq: 0, __canonicalProjection: 2, __tokenEstimate: 1 });
     const statSpy = mockCatalogCheckpointStats('handoff-', await fs.stat(seedFile));
     resetSessionStoreForTests();
 
@@ -4653,7 +4697,7 @@ describe('handoff storage', () => {
     const seed = await createSession({ title: 'retention catalog seed' });
     const seedFile = path.join(sessionsRoot(), seed.id, 'meta.json');
     const seedSummary = JSON.parse(await fs.readFile(seedFile, 'utf8'));
-    expect(seedSummary).toMatchObject({ __historySeq: 0, __canonicalProjection: 1, __tokenEstimate: 1 });
+    expect(seedSummary).toMatchObject({ __historySeq: 0, __canonicalProjection: 2, __tokenEstimate: 1 });
     const statSpy = mockCatalogCheckpointStats('prune-', await fs.stat(seedFile));
     resetSessionStoreForTests();
 

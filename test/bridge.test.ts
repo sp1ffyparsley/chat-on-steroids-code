@@ -27122,7 +27122,7 @@ describe('unattributed activity recovery', () => {
       .toMatchObject({ text: 'continue', recovery: { revival: { attempt: 1, progressAt: nextProgress } } });
   });
 
-  it.each(['late-final', 'confirmed-pre-send-release', 'unchanged', 'paused', 'owned', 'offered',
+  it.each(['late-final', 'confirmed-pre-send-release', 'unchanged', 'rendering-only-replay', 'paused', 'owned', 'offered',
     'authorized', 'authorization-pending', 'delivered', 'native-receipt', 'uncertain-tool', 'rebound'] as const)(
     'retires only positively superseded idle revival custody: %s', async variant => {
       await pair();
@@ -27131,6 +27131,13 @@ describe('unattributed activity recovery', () => {
         { kind: 'user_message', time: Date.now(), messageId: questionId, text: 'Continue the same project' },
         openTurn('late-final-source'), endTurn('late-final-source', 'completed')
       ]);
+      const replayedFinal = { kind: 'assistant_message' as const, source: 'extension' as const,
+        time: Date.now(), messageId: 'revival-rendering-only-final', turnId: 'late-final-source',
+        message: { text: 'Existing final', chars: 14, truncated: false }, final: true, state: 'final' as const };
+      if (variant === 'rendering-only-replay') {
+        const original = (await findSessionByConversation(PRIME))!;
+        await sessionStoreModule.upsertMessageEvent(original.id, replayedFinal);
+      }
       await setGoalSwitchNow(PRIME, 'loop', true, true);
       const input = await import('../src/main/session/input.js');
       const session = (await findSessionByConversation(PRIME))!;
@@ -27140,7 +27147,10 @@ describe('unattributed activity recovery', () => {
       onTestFinished(() => clock.mockRestore());
       const saved = (await input.enqueueInterruptedContinue(session.id, PRIME, questionId, { progressAt }))!;
       expect(saved).not.toBeNull();
-      if (variant !== 'unchanged') {
+      if (variant === 'rendering-only-replay') {
+        await sessionStoreModule.upsertMessageEvent(session.id,
+          { ...replayedFinal, time: Date.now(), renderedHtml: { text: '<p>Existing final</p>', chars: 21, truncated: false } });
+      } else if (variant !== 'unchanged') {
         clock.mockReturnValue(Date.now() + 100);
         await recordFinalForTest(PRIME, 'late-final-source');
       }

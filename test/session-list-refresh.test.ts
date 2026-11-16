@@ -52,7 +52,7 @@ describe('session summary pages', () => {
 
     const first = await listSessionPage({ limit: 1 });
     expect(first.sessions[0]).toMatchObject({ id: session.id, events: legacy.events, estimatedTokens: legacy.estimatedTokens });
-    expect(JSON.parse(await fs.readFile(metaFile, 'utf8')).__canonicalProjection).toBe(1);
+    expect(JSON.parse(await fs.readFile(metaFile, 'utf8')).__canonicalProjection).toBe(2);
     // A later cold launch must use the completed migration without rereading the transcript.
     await fs.utimes(metaFile, new Date(), new Date(Date.now() + 1000));
     resetSessionStoreForTests();
