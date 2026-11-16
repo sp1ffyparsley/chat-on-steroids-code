@@ -43,7 +43,7 @@ export function registerCodeMode(
   reg.register('exec', codeModeDeclaration(options), codeModeHandler(() => reg.descriptions(true), invoke, options));
 }
 
-export const CODE_MODE_INSTRUCTIONS = `Code mode: use exec with a code string for bounded tool composition and filtering. Filter ALL_TOOLS by name and inspect that inputSchema, rather than emitting the whole catalog. Inside JavaScript, call tools by their existing names and arguments. Results are normal MCP objects; inspect content, structuredContent and isError. Only text(...) and image(...) emit data to the model. Given requests you define using this connector's listed tool schemas:
+export const CODE_MODE_INSTRUCTIONS = `Code mode: use exec for bounded tool composition. Filter ALL_TOOLS by name; inspect its inputSchema. Inside JavaScript, call tools by their existing names and arguments. Results are normal MCP objects; inspect content, structuredContent and isError. Only text(...) and image(...) emit data to the model. Given requests you define using this connector's listed tool schemas:
 const results = await Promise.all(requests.map(({name, args}) => tools[name](args)));
 text(results.map((result, index) => ({index, isError: result.isError ?? false, content: result.content})));
 Keep emitted text within 40,000 UTF-8 bytes total. For large read batches, request smaller max_bytes or line ranges, filter the returned content, or use read directly. Forward images with image(...), not text(result); base64 serialized as text consumes the text limit. An oversized text emission returns an explicitly truncated preview and stops the script; inspect already dispatched calls before retrying.
