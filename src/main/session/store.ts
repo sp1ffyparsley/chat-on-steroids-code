@@ -580,6 +580,8 @@ interface MetaCheckpoint {
   /** Null means metadata written by a version that did not yet persist a history watermark. */
   historySeq: number | null;
   canonicalProjectionCurrent: boolean;
+  /** Recognized clock-only predecessor; its other exact control state stays authoritative. */
+  canonicalProjectionLegacy: boolean;
   tokenEstimateCurrent: boolean;
   /** Derived migration signal; never persisted. */
   outcomeCountersMissing: boolean;
@@ -1335,7 +1337,8 @@ async function rebuildSummaryFromHistory(
   checkpoint: SessionSummary | null,
   historySeq: number,
   preserveAttachmentTurn = false,
-  migrateTokenEstimate = false
+  migrateTokenEstimate = false,
+  messageProgressOnly = false
 ): Promise<{ summary: SessionSummary; activeWorkIntervals: ActiveWorkInterval[] }> {
   const rebuilt = emptySummary(id, 'Recovered session', null);
   const activeWorkIntervals: ActiveWorkInterval[] = [];
@@ -1411,11 +1414,13 @@ async function rebuildSummaryFromHistory(
     applyToSummary(rebuilt, message, activeWorkIntervals);
     sawProjected = true;
   }
-  if (!sawProjected) {
+  if (!sawProjected && !(messageProgressOnly && checkpoint && historySeq === 0)) {
     throw new Error(`Session ${id} has no recoverable metadata or history`);
   }
 
-  const summary = checkpoint
+  const summary = checkpoint && messageProgressOnly
+    ? { ...checkpoint, lastMessageAt: rebuilt.lastMessageAt, lastAssistantFinalAt: rebuilt.lastAssistantFinalAt }
+    : checkpoint
     ? {
         ...checkpoint,
         updatedAt: Math.max(checkpoint.updatedAt, rebuilt.updatedAt),
@@ -1451,7 +1456,7 @@ async function rebuildSummaryFromHistory(
         agents: [...new Set([...checkpoint.agents, ...rebuilt.agents])]
       }
     : rebuilt;
-  logWarn(`session ${id}: rebuilt metadata from durable event/message history`);
+  logWarn(`session ${id}: rebuilt ${messageProgressOnly ? 'message-progress clocks' : 'metadata'} from durable event/message history`);
   await writeSummary(summary, historySeq);
   return { summary, activeWorkIntervals };
 }
@@ -1482,13 +1487,18 @@ async function readDurableSnapshot(id: string): Promise<DurableSessionSnapshot |
     if (
       checkpoint?.historySeq === historySeq &&
       checkpoint.tokenEstimateCurrent &&
-      checkpoint.canonicalProjectionCurrent &&
+      (checkpoint.canonicalProjectionCurrent || checkpoint.canonicalProjectionLegacy) &&
       !checkpoint.outcomeCountersMissing &&
       !checkpoint.activityBoundaryMissing &&
       !checkpoint.fileChangeProjectionMissing &&
       !checkpoint.activeWorkProjectionMissing &&
       checkpoint.summary.finishTurn !== undefined
     ) {
+      if (checkpoint.canonicalProjectionLegacy) {
+        const repaired = await rebuildSummaryFromHistory(id, messages, checkpoint.summary,
+          historySeq, true, false, true);
+        return { ...repaired, messages, historySeq, reconciled: true };
+      }
       const migrated = titleRepaired;
       if (migrated) await writeSummary(checkpoint.summary, historySeq);
       return { summary: checkpoint.summary, messages, historySeq, reconciled: migrated };
@@ -1606,6 +1616,9 @@ function noteFinishWork(summary: SessionSummary, event: SessionEvent): void {
 }
 
 function applyToSummary(summary: SessionSummary, event: SessionEvent, activeWorkIntervals: ActiveWorkInterval[]): void {
+  const progressAt = (event.kind === 'user_message' || event.kind === 'assistant_message') &&
+    typeof event.semanticProgressAt === 'number' && Number.isFinite(event.semanticProgressAt) && event.semanticProgressAt >= 0
+      ? event.semanticProgressAt : event.time;
   summary.events += 1;
   // Never backwards. A tool call is written once the app knows which chat it belongs to,
   // which can be after the page has already reported the end of the turn it ran in, and
@@ -1618,7 +1631,7 @@ function applyToSummary(summary: SessionSummary, event: SessionEvent, activeWork
   summary.contextTokens += tokens;
   if (event.kind === 'user_message') summary.userMessages += 1;
   if (event.kind === 'user_message' || event.kind === 'assistant_message') {
-    summary.lastMessageAt = Math.max(summary.lastMessageAt ?? 0, event.time);
+    summary.lastMessageAt = Math.max(summary.lastMessageAt ?? 0, progressAt);
   }
   if (event.kind === 'tool_call') {
     summary.toolCalls += 1;
@@ -1650,7 +1663,7 @@ function applyToSummary(summary: SessionSummary, event: SessionEvent, activeWork
     }
   }
   if (event.kind === 'assistant_message' && (event.final === true || event.state === 'final')) {
-    summary.lastAssistantFinalAt = Math.max(summary.lastAssistantFinalAt ?? 0, event.time);
+    summary.lastAssistantFinalAt = Math.max(summary.lastAssistantFinalAt ?? 0, progressAt);
   }
   if (event.kind === 'chat_error') summary.errors += 1;
   if (event.kind === 'turn_end') {
@@ -2154,6 +2167,11 @@ export function upsertMessageEvent(
       const semanticUpdatedAt = semanticTextChanged || assistantBecameFinal
         ? Math.max(nextEvent.time, Date.now())
         : previous?.semanticUpdatedAt ?? previous?.time ?? nextEvent.time;
+      const previousProgress = previous && typeof previous.semanticProgressAt === 'number' &&
+        Number.isFinite(previous.semanticProgressAt) && previous.semanticProgressAt >= 0
+          ? previous.semanticProgressAt : previous?.time ?? nextEvent.time;
+      const semanticProgressAt = semanticTextChanged || assistantBecameFinal
+        ? Math.max(previousProgress, nextEvent.time) : previousProgress;
       if (
         previous &&
         previous.kind === nextEvent.kind &&
@@ -2182,6 +2200,7 @@ export function upsertMessageEvent(
       const full = {
         ...nextEvent,
         semanticUpdatedAt,
+        semanticProgressAt,
         ...(nextEvent.kind === 'assistant_message' && nextEvent.final
           ? { finalContentSeq: sameMessage && previous?.kind === 'assistant_message' &&
                 (previous.final === true || previous.state === 'final')
@@ -2219,7 +2238,7 @@ export function upsertMessageEvent(
         entry.summary.contextTokens = Math.max(0, entry.summary.contextTokens + delta);
         entry.summary.updatedAt = Math.max(entry.summary.updatedAt, nextEvent.time);
         if (semanticTextChanged || assistantBecameFinal)
-          entry.summary.lastMessageAt = Math.max(entry.summary.lastMessageAt ?? 0, nextEvent.time);
+          entry.summary.lastMessageAt = Math.max(entry.summary.lastMessageAt ?? 0, semanticProgressAt);
         noteFinishWork(entry.summary, full);
         // Rendering, identity and timestamp corrections are observations of the same final,
         // not new work. Advancing this clock would revoke an unsent idle revival and reset
@@ -2228,7 +2247,7 @@ export function upsertMessageEvent(
             (semanticTextChanged || assistantBecameFinal)) {
           entry.summary.lastAssistantFinalAt = Math.max(
             entry.summary.lastAssistantFinalAt ?? 0,
-            nextEvent.time
+            semanticProgressAt
           );
         }
         if (full.agent && !entry.summary.agents.includes(full.agent)) entry.summary.agents.push(full.agent);
@@ -3024,6 +3043,7 @@ function normalizeSummary(id: string, raw: string): MetaCheckpoint | null {
       historySeq,
       nativeCompletionFences: normalizedNativeCompletionState(privateFences, id),
       canonicalProjectionCurrent: canonicalProjection === CANONICAL_PROJECTION_VERSION,
+      canonicalProjectionLegacy: canonicalProjection === 1,
       tokenEstimateCurrent: tokenEstimate === 1,
       outcomeCountersMissing,
       activityBoundaryMissing,

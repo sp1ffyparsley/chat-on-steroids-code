@@ -319,6 +319,8 @@ export type SessionEvent =
       unverifiedAuthorshipClaim?: true;
       /** Store-owned time of the newest authored-text change; metadata-only revisions preserve it. */
       semanticUpdatedAt?: number;
+      /** Store-owned exact progress time, separate from chronology and semantic commit observation. */
+      semanticProgressAt?: number;
       /** Native badge on this exact user message. Missing means unobserved; null means absent. */
       reaction?: string | null;
       attachments?: import('./input.js').InputAttachment[];
@@ -359,6 +361,8 @@ export type SessionEvent =
       finalContentSeq?: number;
       /** Store-owned time of the newest model-text change or streaming-to-final transition. */
       semanticUpdatedAt?: number;
+      /** Store-owned exact progress time; history rebuilds reuse it without observing new work. */
+      semanticProgressAt?: number;
       /** First sequence assigned to this logical message; later revisions keep this anchor. */
       origin?: number;
     })

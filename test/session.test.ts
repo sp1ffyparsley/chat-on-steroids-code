@@ -2530,6 +2530,22 @@ describe('session store', () => {
     ]));
   });
 
+  it('migrates an empty legacy progress checkpoint without discarding retained control state', async () => {
+    const summary = await createSession({ title: 'empty legacy progress' });
+    await flushSessions();
+    const metaPath = path.join(sessionsRoot(), summary.id, 'meta.json');
+    const legacy = JSON.parse(await fs.readFile(metaPath, 'utf8'));
+    legacy.__canonicalProjection = 1;
+    legacy.lastMessageAt = legacy.lastAssistantFinalAt = 900;
+    await fs.writeFile(metaPath, JSON.stringify(legacy));
+    resetSessionStoreForTests();
+    const repaired = await getSession(summary.id);
+    expect(repaired).toMatchObject({ id: summary.id, events: 0, userMessages: 0,
+      lastMessageAt: null, lastAssistantFinalAt: null, finishTurn: summary.finishTurn });
+    await flushSessions();
+    expect(JSON.parse(await fs.readFile(metaPath, 'utf8')).__canonicalProjection).toBe(2);
+  });
+
   it('rebuilds a legacy inflated final-progress checkpoint from retained canonical history', async () => {
     const summary = await createSession({ title: 'legacy final replay clock' });
     await upsertMessageEvent(summary.id, { kind: 'assistant_message', source: 'extension', time: 100,
@@ -2537,14 +2553,27 @@ describe('session store', () => {
       final: true, state: 'final' });
     await flushSessions();
     const metaPath = path.join(sessionsRoot(), summary.id, 'meta.json');
+    const messageDir = path.join(sessionsRoot(), summary.id, 'messages');
+    for (const name of await fs.readdir(messageDir)) {
+      if (!name.endsWith('.json')) continue;
+      const messagePath = path.join(messageDir, name);
+      const message = JSON.parse(await fs.readFile(messagePath, 'utf8'));
+      delete message.semanticProgressAt;
+      await fs.writeFile(messagePath, JSON.stringify(message));
+    }
     const legacy = JSON.parse(await fs.readFile(metaPath, 'utf8'));
     legacy.__canonicalProjection = 1;
     legacy.lastAssistantFinalAt = 900;
     legacy.lastMessageAt = 900;
+    const retainedFinish = { turnId: 'retained-finish-decision', conversationId: summary.conversationId,
+      startedAt: 50, notified: true, released: true, decisionRevision: 'a'.repeat(64),
+      workSeq: 1, decisionSeq: 1, decisionInputRevision: 'b'.repeat(64) };
+    legacy.finishTurn = retainedFinish;
     await fs.writeFile(metaPath, JSON.stringify(legacy));
     resetSessionStoreForTests();
     expect((await getSession(summary.id))?.lastAssistantFinalAt).toBe(100);
     expect((await getSession(summary.id))?.lastMessageAt).toBe(100);
+    expect((await getSession(summary.id))?.finishTurn).toEqual(retainedFinish);
     expect(await readEvents(summary.id, { kinds: ['assistant_message'] })).toEqual([
       expect.objectContaining({ messageId: 'legacy-replayed-final', time: 100,
         message: expect.objectContaining({ text: 'Retained answer' }) })
@@ -2565,12 +2594,27 @@ describe('session store', () => {
     expect(replay).toMatchObject({ changed: true, contentChanged: false });
     expect(replay.event.time).toBe(100);
     expect(replay.event.semanticUpdatedAt).toBe(first.event.semanticUpdatedAt);
+    expect(replay.event.semanticProgressAt).toBe(100);
     expect((await getSession(summary.id))?.lastAssistantFinalAt).toBe(100);
     expect((await getSession(summary.id))?.lastMessageAt).toBe(100);
     await flushSessions(); resetSessionStoreForTests();
     expect((await getSession(summary.id))?.lastAssistantFinalAt).toBe(100);
     await upsertMessageEvent(summary.id, { ...row, time: 1200,
       message: { text: 'Saved result with new work', chars: 26, truncated: false } });
+    expect((await getSession(summary.id))?.lastAssistantFinalAt).toBe(1200);
+    await flushSessions();
+    const metaPath = path.join(sessionsRoot(), summary.id, 'meta.json');
+    const checkpoint = JSON.parse(await fs.readFile(metaPath, 'utf8'));
+    checkpoint.__canonicalProjection = 1;
+    checkpoint.lastAssistantFinalAt = 9000;
+    checkpoint.lastMessageAt = 9000;
+    await fs.writeFile(metaPath, JSON.stringify(checkpoint));
+    resetSessionStoreForTests();
+    expect((await getSession(summary.id))?.lastAssistantFinalAt).toBe(1200);
+    expect((await getSession(summary.id))?.lastMessageAt).toBe(1200);
+    await upsertMessageEvent(summary.id, { ...row, time: 1500,
+      message: { text: 'Saved result with new work', chars: 26, truncated: false },
+      renderedHtml: { text: '<p>Saved result with new work</p>', chars: 33, truncated: false } });
     expect((await getSession(summary.id))?.lastAssistantFinalAt).toBe(1200);
   });
 
