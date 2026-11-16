@@ -1025,6 +1025,53 @@ describe('custody-preserving companion reload', () => {
     desktopInputBusy: false, composerOccupied: false, queued: 0, queueBytes: 0 });
   const request = (worker: WorkerHarness) => worker.send({ type: 'reloadCompanion' }, 99, 'popup', popupUrl);
 
+  it('automatically carries content-free retained reload counts through the existing status owner', async () => {
+    const id = 'a1111111-2222-4333-8444-555555555555';
+    const opening = { tab: null, stage: 'retired', retiredAt: Date.now() - 3600_000,
+      owner: 'private-document-owner', privateText: 'never publish this prompt' };
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token', instanceId: 'profile-reload',
+      inputOpenings: { [id]: opening } });
+    const published: any[] = [];
+    const worker = loadWorker({ local, session: new FakeStorageArea(), tabsQuery: async () => [],
+      fetch: async (input, init = {}) => {
+        const route = new URL(input).pathname;
+        if (route === '/hello') return response(200, { app: 'chat-on-steroids', paired: true, instanceId: 'profile-reload' });
+        if (route === '/status') published.push(JSON.parse(String(init.body)));
+        return response(200, { ok: true, inputOpeningIds: [id], inputs: [], automationPaused: true });
+      } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(await request(worker)).toMatchObject({ ok: false, error: 'reload_deferred', pendingWork: { inputOpenings: 1 } });
+    await worker.fireAlarm();
+    const diagnostic = published.find(body => body.companionReloadDiagnostic)?.companionReloadDiagnostic;
+    expect(diagnostic).toMatchObject({ observedAt: expect.any(Number), pendingWork: { inputOpenings: 1, retiredHelperElections: 1 },
+      openings: { total: 1, retired: 1, tabless: 1, ageUnknown: 0, gracePending: 0, absent: 0, present: 0 }, inventoryComplete: true });
+    expect(JSON.stringify(diagnostic)).not.toMatch(/private-document-owner|never publish|a1111111/);
+    expect(local.data.inputOpenings).toEqual({ [id]: expect.objectContaining(opening) });
+    expect(worker.runtimeReload).not.toHaveBeenCalled();
+    expect(worker.tabsCreate).not.toHaveBeenCalled();
+  });
+
+  it.each(['exact-terminal', 'foreign-owner', 'malformed-owner', 'owner-tab-present'])(
+    'settles a retired tabless helper only from the exact Main terminal owner and absent native tab: %s', async state => {
+      const id = 'a1111111-2222-4333-8444-555555555555', owner = '41:original-document:0';
+      const opening = { tab: null, stage: 'retired', retiredAt: Date.now() - 3600_000, temporary: true, owner };
+      const terminalOwner = state === 'foreign-owner' ? '42:foreign-document:0' : state === 'malformed-owner' ? 'unproved-owner' : owner;
+      const local = new FakeStorageArea({ port: 8765, token: 'paired-token', instanceId: 'profile-reload', inputOpenings: { [id]: opening } });
+      const worker = loadWorker({ local, session: new FakeStorageArea(),
+        tabsQuery: async () => state === 'owner-tab-present' ? [{ id: 41, url: 'https://example.com/' }] : [],
+        fetch: async input => new URL(input).pathname === '/hello'
+          ? response(200, { app: 'chat-on-steroids', paired: true, instanceId: 'profile-reload' })
+          : response(200, { ok: true, automationPaused: true, inputOpeningIds: [], inputs: [
+            { id, owner: terminalOwner, lifetime: 'temporary-planner', close: true, conversationId: null, decisionOutput: false }
+          ] }) });
+      await worker.fireAlarm();
+      if (state === 'exact-terminal') expect(local.data.inputOpenings).toEqual({});
+      else expect(local.data.inputOpenings).toHaveProperty(id);
+      expect(worker.tabsCreate).not.toHaveBeenCalled();
+      expect(worker.tabsRemove).not.toHaveBeenCalled();
+      expect(worker.runtimeReload).not.toHaveBeenCalled();
+    });
+
   it('publishes all three existing outboxes to Main before reloading, without changing their identities', async () => {
     const receipt = { kind: 'input', id: 'original-input', owner: 'original-document',
       conversationId, messageId: 'original-native-message', queuedAt: Date.now() };
@@ -2283,6 +2330,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     const held = new Promise<void>(resolve => { release = resolve; });
     const context: Record<string, unknown> = {
       token: 'paired', latestBrowserAttentionCommandIds: [], discardProtectedTabs: {},
+      lastCompanionReloadDiagnosticEpoch: null, lastCompanionReloadDiagnostic: null, connectionEpoch: 0,
       MAX_AUTOMATION_CHATGPT_TABS: 48, recoveryMonitoring: false,
       call: async () => ({ ok: true, data: { inputs: [helper] } }),
       openConversationInventory: async () => Array.from({ length: 52 }, (_, id) => ({ id })), browserAuthenticationState: async () => 'signed-in',
@@ -2332,6 +2380,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     const held = new Promise<void>(resolve => { release = resolve; });
     const context: Record<string, unknown> = {
       token: 'paired', latestBrowserAttentionCommandIds: [], discardProtectedTabs: {},
+      lastCompanionReloadDiagnosticEpoch: null, lastCompanionReloadDiagnostic: null, connectionEpoch: 0,
       MAX_AUTOMATION_CHATGPT_TABS: 48, recoveryMonitoring: false,
       call: async () => ({ ok: true, data: { inputs: [input], userRequestedInputIds: [input.id],
         repairs: [{ conversationId: relation === 'same-conversation' ? conversationId : 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff', token: 'exact-repair', requiresClaim: true }] } }),
@@ -2393,7 +2442,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     const maintainEnd = backgroundSource.indexOf('\nasync function performBrowserRepairs(', maintainStart);
     const maintain = backgroundSource.slice(maintainStart, maintainEnd);
     expect(maintain).toContain('const authState = inventoryComplete ? await browserAuthenticationState(observedTabs)');
-    expect(maintain).toContain('JSON.stringify({ openConversations, inventoryComplete, authState, freshTurnProtocol })');
+    expect(maintain).toContain('JSON.stringify({ openConversations, inventoryComplete, authState, freshTurnProtocol,');
   });
 
   it('publishes fresh-turn capability through the actual maintenance status transport', async () => {
@@ -2402,6 +2451,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
     const context = {
       token: 'paired', hydrateBrowserControlLeases: async () => true,
+      lastCompanionReloadDiagnosticEpoch: null, lastCompanionReloadDiagnostic: null, connectionEpoch: 0,
       conversationForTab: () => null,
       freshTurnInventoryProtocol: async () => 1,
       openConversationInventory: async () => [], adoptMarkedAppOwnedTabs: async () => undefined,
@@ -2431,6 +2481,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     const maintainEnd = backgroundSource.indexOf('\n/**', maintainStart);
     const context = {
       token: 'paired', PAGE_RECORDER_VERSION: 71, setTimeout, clearTimeout,
+      lastCompanionReloadDiagnosticEpoch: null, lastCompanionReloadDiagnostic: null, connectionEpoch: 0,
       chrome: { tabs: { get: async () => tab } },
       tabDocuments: { '73': 'doc-73' }, tabEpochs: { '73': 0 },
       ownsDocument: () => true, conversationForTab: () => chat,
@@ -10326,7 +10377,7 @@ describe('extension observation journal', () => {
             coreCallMessageIds: parents, codeCallMessageIds: [],
             identityRefusals: parents.map(messageId => ({ messageId, reasons: ['nativeScopeBranchConflict'] })) } }
       });
-      let method: string | undefined, published = false;
+      let method: string | undefined, published = false, expectedPost = false;
       const worker = loadWorker({
         local: new FakeStorageArea({ port: 8765, token: 'paired-token', instanceId: 'multihop-profile' }),
         session: new FakeStorageArea(),
@@ -10337,6 +10388,9 @@ describe('extension observation journal', () => {
           method = init?.method;
           const body = init?.body ? JSON.parse(String(init.body)) : null;
           const native = body?.coreDiagnostic ?? JSON.parse(url.searchParams.get('coreDiagnostic') || 'null');
+          const query = url.search.split('&coreDiagnostic=')[0]!;
+          expectedPost = mode === 'observation-only' ||
+            query.length + '&coreDiagnostic='.length + encodeURIComponent(JSON.stringify(native)).length > 8_000;
           published = noteCoreBrowserEvidence({ ...native, conversationId });
           return response(200, mode === 'observation-only'
             ? { observationOnly: true, observationAccepted: published, completionVerified: false }
@@ -10348,7 +10402,7 @@ describe('extension observation journal', () => {
       const result = await worker.send({ type: 'activity', conversationId, since: 0,
         ...(mode === 'observation-only' ? { observationOnly: true } : {}), coreDiagnostic: diagnostic }, 73, documentId);
       expect(result).toMatchObject({ ok: true }); expect(published).toBe(true);
-      expect(method).toBe(mode === 'small' ? undefined : 'POST');
+      expect(method).toBe(expectedPost ? 'POST' : undefined);
       const native = coreBrowserEvidence(conversationId)!;
       expect(native.shellScan?.reader).toEqual({ fiberWire: 19, fiberProducer: 172, fiberKeys: Object.keys(rejects).length,
         contentRecorder: currentRecorderVersion, contentKeys: Object.keys(rejects).length,

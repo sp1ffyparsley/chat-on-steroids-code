@@ -126,7 +126,7 @@ function shellScanDiagnostic(raw) {
     'nativeHeaderValueAbsent', 'nativeHeaderValueAccessor', 'nativeHeaderValueUndefined',
     'nativeHeaderValueNull', 'nativeHeaderValueString', 'nativeHeaderValueTrue',
     'nativeHeaderValueFalse', 'nativeHeaderValueOther',
-    'nativeRetainedParentMissing', 'nativeRetainedParentConflict', 'nativeRetainedPositionHeader', 'nativeRetainedPositionFirstMember', 'nativeRetainedPositionLaterMember', 'nativeRetainedLocationNone', 'nativeRetainedLocationOnPath', 'nativeRetainedLocationOffPath', 'nativeRetainedMemberHeader', 'nativeRetainedMemberCodeCall', 'nativeRetainedMemberCoreCall', 'nativeRetainedMemberAssistantOther', 'nativeRetainedMemberCodeResult', 'nativeRetainedMemberCoreResult', 'nativeRetainedMemberOtherToolResult', 'nativeRetainedMemberUser', 'nativeRetainedMemberOther', 'nativeContractedHeaderPending', 'nativeContractedHeaderMissingTerminal', 'nativeContractedHeaderUserAnchor', 'nativeContractedHeaderParent', 'nativeContractedHeaderSelected', 'nativeContractedHeaderChildren', 'nativeContractedHeaderChildIdentity', 'nativeContractedHeaderChildMembership', 'nativeContractedHeaderIdentity', 'nativeContractedHeaderCache',
+    'nativeRetainedFacetOnPath', 'nativeRetainedFacetIdentity', 'nativeRetainedFacetToolParent', 'nativeRetainedFacetOtherRole', 'nativeRetainedFacetRecipient', 'nativeRetainedFacetChannel', 'nativeRetainedFacetEdge', 'nativeRetainedFacetTerminal', 'nativeRetainedFacetRequest', 'nativeRetainedFacetWorkingTurn', 'nativeRetainedFacetExchange', 'nativeRetainedFacetCache', 'nativeRetainedFacetExecution', 'nativeRetainedParentMissing', 'nativeRetainedParentConflict', 'nativeRetainedPositionHeader', 'nativeRetainedPositionFirstMember', 'nativeRetainedPositionLaterMember', 'nativeRetainedLocationNone', 'nativeRetainedLocationOnPath', 'nativeRetainedLocationOffPath', 'nativeRetainedMemberHeader', 'nativeRetainedMemberCodeCall', 'nativeRetainedMemberCoreCall', 'nativeRetainedMemberAssistantOther', 'nativeRetainedMemberCodeResult', 'nativeRetainedMemberCoreResult', 'nativeRetainedMemberOtherToolResult', 'nativeRetainedMemberUser', 'nativeRetainedMemberOther', 'nativeContractedHeaderPending', 'nativeContractedHeaderMissingTerminal', 'nativeContractedHeaderUserAnchor', 'nativeContractedHeaderParent', 'nativeContractedHeaderSelected', 'nativeContractedHeaderChildren', 'nativeContractedHeaderChildIdentity', 'nativeContractedHeaderChildMembership', 'nativeContractedHeaderIdentity', 'nativeContractedHeaderCache',
     'nativeContractedHeaderPrefixEdge', 'nativeContractedHeaderPrefixUserCache', 'nativeContractedHeaderPrefixBounds',
     'nativeContractedHeaderPrefixShape', 'nativeContractedHeaderPrefixParent', 'nativeContractedHeaderPrefixCache', 'nativeContractedHeaderPrefixSingle',
     'identityReasonCurrentQuestionMissing',
@@ -4635,8 +4635,18 @@ async function deliverDesktopInputs(inputs, background, reusableConversations = 
     .map(input => [input.id, input]));
   for (const [id, terminal] of terminalTemporary) {
     const row = inputOpenings[id];
-    if (row && Number.isInteger(row.tab)) inputOpenings[id] = {
-      ...row, stage: 'retired', retiredAt: Number.isFinite(row.retiredAt) ? row.retiredAt : Date.now(),
+    // A legacy retired reservation may have lost its tab field while retaining
+    // the exact acknowledged owner. Main's current terminal projection can
+    // restore that SAME tab identity, not invent an absent-tab proof. The normal
+    // complete native inventory/grace/CAS/durability cleanup still owns release.
+    const terminalOwner = typeof terminal.owner === 'string'
+      ? /^([1-9][0-9]{0,9}):([a-z0-9_-]{1,200}):([0-9]{1,10})$/i.exec(terminal.owner) : null;
+    const recoveredTab = row?.tab === null && row.stage === 'retired' && row.temporary === true &&
+      row.owner === terminal.owner && terminalOwner && Number(terminalOwner[1]) <= 0x7fffffff
+      ? Number(terminalOwner[1]) : null;
+    if (row && (Number.isInteger(row.tab) || recoveredTab !== null)) inputOpenings[id] = {
+      ...row, tab: recoveredTab ?? row.tab,
+      stage: 'retired', retiredAt: Number.isFinite(row.retiredAt) ? row.retiredAt : Date.now(),
       temporary: true, owner: terminal.owner || row.owner, conversationId: terminal.conversationId || row.conversationId,
       // An expired helper (goal_browser_answer_expired) never collects an answer, so
       // temporaryHelperOutputSaved always returns false and its tab can never pass the
@@ -7000,7 +7010,10 @@ async function maintainOnce() {
   // otherwise detach every active chat at once.
   const reply = await call('/status', {
     method: 'POST',
-    body: JSON.stringify({ openConversations, inventoryComplete, authState, freshTurnProtocol })
+    body: JSON.stringify({ openConversations, inventoryComplete, authState, freshTurnProtocol,
+      ...(lastCompanionReloadDiagnosticEpoch === connectionEpoch && lastCompanionReloadDiagnostic &&
+        Date.now() - lastCompanionReloadDiagnostic.observedAt <= 15 * 60_000
+        ? { companionReloadDiagnostic: lastCompanionReloadDiagnostic } : {}) })
   });
   if (!reply.ok || !reply.data) {
     if (browserLeasesReady) await maintainBareRootHygiene();
@@ -10235,6 +10248,8 @@ async function accountPairingBusy(firstEnrollment = false, stagedSelection = nul
 }
 
 let companionReloadFlight = null;
+let lastCompanionReloadDiagnostic = null;
+let lastCompanionReloadDiagnosticEpoch = null;
 
 function reloadLeasesCurrent(snapshot) {
   return snapshot && snapshot.generation === commandLeaseGeneration &&
@@ -10289,6 +10304,21 @@ async function reloadCompanionSafely() {
         .filter(row => row?.stage === 'retired').length;
       if (retiredHelperElections > 0) reported.retiredHelperElections = Math.min(4000, retiredHelperElections);
     }
+    const rows = Object.values(inputOpenings), retired = rows.filter(row => row?.stage === 'retired');
+    const inventory = absentInputProof?.tabs;
+    const present = Array.isArray(inventory) ? new Set(inventory.map(tab => tab.id)) : null;
+    const now = Date.now();
+    lastCompanionReloadDiagnostic = { observedAt: now, pendingWork: reported,
+      openings: { total: rows.length, retired: retired.length,
+        tabless: rows.filter(row => !Number.isInteger(row?.tab)).length,
+        ageUnknown: retired.filter(row => !Number.isFinite(row.retiredAt)).length,
+        gracePending: retired.filter(row => Number.isFinite(row.retiredAt) && now - row.retiredAt < RETIRED_INPUT_TAB_GRACE_MS).length,
+        absent: present ? retired.filter(row => Number.isInteger(row.tab) && !present.has(row.tab)).length : null,
+        present: present ? retired.filter(row => Number.isInteger(row.tab) && present.has(row.tab)).length : null },
+      inventoryComplete: present !== null };
+    lastCompanionReloadDiagnosticEpoch = connectionEpoch;
+    // The next existing maintenance/status heartbeat persists this observation.
+    // Do not create another wake, reload retry, election or action authority.
     console.info('[Chat On Steroids] companion reload deferred; retained custody', reported);
     return { ok: false, error: 'reload_deferred', pendingWork: reported };
   };
@@ -10759,7 +10789,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 183;
+const PAGE_RECORDER_VERSION = 184;
 
 let deferredRecoveryWork = null;
 

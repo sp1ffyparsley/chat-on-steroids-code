@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 183;
+  const RECORDER_VERSION = 184;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -117,6 +117,23 @@
       incumbentHealthy = false;
     }
     if (incumbentHealthy && (incumbent.version || 0) >= RECORDER_VERSION) return;
+    if (incumbentHealthy) {
+      // A healthy predecessor may own an acknowledged helper, native Send or
+      // unflushed observations. Stopping it loses that in-memory custodian even
+      // though Main correctly retains its durable receipt. Version age is not
+      // permission to orphan it. Legacy handles without this proof defer until
+      // the normal lossless companion/document lifecycle replaces their world.
+      let settled = false;
+      try { settled = typeof incumbent.replacementReady === 'function' && incumbent.replacementReady() === true; }
+      catch { /* Unknown retained work is not quiescence. */ }
+      if (!settled) {
+        if (incumbent.deferredReplacementVersion !== RECORDER_VERSION) {
+          console.info(`[Chat On Steroids] recorder upgrade deferred: retained or unknown page custody; current=${incumbent.version || 0} requested=${RECORDER_VERSION}`);
+          try { incumbent.deferredReplacementVersion = RECORDER_VERSION; } catch { /* Optional log coalescing. */ }
+        }
+        return;
+      }
+    }
     if (incumbent && typeof incumbent.stop === 'function') {
       try {
         incumbent.stop();
@@ -4677,7 +4694,7 @@
     'nativeHeaderValueAbsent', 'nativeHeaderValueAccessor', 'nativeHeaderValueUndefined',
     'nativeHeaderValueNull', 'nativeHeaderValueString', 'nativeHeaderValueTrue',
     'nativeHeaderValueFalse', 'nativeHeaderValueOther',
-    'nativeRetainedParentMissing', 'nativeRetainedParentConflict', 'nativeRetainedPositionHeader', 'nativeRetainedPositionFirstMember', 'nativeRetainedPositionLaterMember', 'nativeRetainedLocationNone', 'nativeRetainedLocationOnPath', 'nativeRetainedLocationOffPath', 'nativeRetainedMemberHeader', 'nativeRetainedMemberCodeCall', 'nativeRetainedMemberCoreCall', 'nativeRetainedMemberAssistantOther', 'nativeRetainedMemberCodeResult', 'nativeRetainedMemberCoreResult', 'nativeRetainedMemberOtherToolResult', 'nativeRetainedMemberUser', 'nativeRetainedMemberOther', 'nativeContractedHeaderPending', 'nativeContractedHeaderMissingTerminal', 'nativeContractedHeaderUserAnchor', 'nativeContractedHeaderParent', 'nativeContractedHeaderSelected', 'nativeContractedHeaderChildren', 'nativeContractedHeaderChildIdentity', 'nativeContractedHeaderChildMembership', 'nativeContractedHeaderIdentity', 'nativeContractedHeaderCache',
+    'nativeRetainedFacetOnPath', 'nativeRetainedFacetIdentity', 'nativeRetainedFacetToolParent', 'nativeRetainedFacetOtherRole', 'nativeRetainedFacetRecipient', 'nativeRetainedFacetChannel', 'nativeRetainedFacetEdge', 'nativeRetainedFacetTerminal', 'nativeRetainedFacetRequest', 'nativeRetainedFacetWorkingTurn', 'nativeRetainedFacetExchange', 'nativeRetainedFacetCache', 'nativeRetainedFacetExecution', 'nativeRetainedParentMissing', 'nativeRetainedParentConflict', 'nativeRetainedPositionHeader', 'nativeRetainedPositionFirstMember', 'nativeRetainedPositionLaterMember', 'nativeRetainedLocationNone', 'nativeRetainedLocationOnPath', 'nativeRetainedLocationOffPath', 'nativeRetainedMemberHeader', 'nativeRetainedMemberCodeCall', 'nativeRetainedMemberCoreCall', 'nativeRetainedMemberAssistantOther', 'nativeRetainedMemberCodeResult', 'nativeRetainedMemberCoreResult', 'nativeRetainedMemberOtherToolResult', 'nativeRetainedMemberUser', 'nativeRetainedMemberOther', 'nativeContractedHeaderPending', 'nativeContractedHeaderMissingTerminal', 'nativeContractedHeaderUserAnchor', 'nativeContractedHeaderParent', 'nativeContractedHeaderSelected', 'nativeContractedHeaderChildren', 'nativeContractedHeaderChildIdentity', 'nativeContractedHeaderChildMembership', 'nativeContractedHeaderIdentity', 'nativeContractedHeaderCache',
     'nativeContractedHeaderPrefixEdge', 'nativeContractedHeaderPrefixUserCache', 'nativeContractedHeaderPrefixBounds',
     'nativeContractedHeaderPrefixShape', 'nativeContractedHeaderPrefixParent', 'nativeContractedHeaderPrefixCache', 'nativeContractedHeaderPrefixSingle',
       'identityReasonCurrentQuestionMissing',
@@ -18074,6 +18091,10 @@
     recorderHandle.stop();
     return false;
   };
+  recorderHandle.replacementReady = () => alive && !generating && !CLF_DOM.generating() &&
+    !CLF_DOM.approvalWaiting() && pendingTools === 0 && !desktopDecision && !desktopInputBusy &&
+    !goalBusy && !nativeBusy && !job?.busy && !modelCatalogBusy && !pluginRefreshBusy &&
+    !projectCreateBusy && !voiceSendArm && !commandAttempt && !commandJournalGate && queue.length === 0 && !flushWork;
   recorderHandle.stop = () => {
     // `alive` gates sendToWorker(), so this is what actually silences the old recorder:
     // no observation, evidence or command of its can reach the app afterwards. Its

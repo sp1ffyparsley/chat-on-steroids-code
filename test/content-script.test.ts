@@ -4516,7 +4516,7 @@ describe('desktop input delivery and helper ownership', () => {
       expect(nativeSend).toHaveBeenCalledOnce();
     });
 
-  it.each(['plain', 'fenced', 'code-controls', 'new-renderer', 'dil-response'])('recovers one stable strict Temporary Chat decision when provider terminal metadata is absent (%s)', async (shape) => {
+  it.each(['plain', 'fenced', 'code-controls', 'new-renderer', 'dil-response', 'in-flight-upgrade'])('recovers one stable strict Temporary Chat decision when provider terminal metadata is absent (%s)', async (shape) => {
     const json = '{"action":"continue","reply":"Continue the exact accepted task."}';
     const canonical = shape === 'fenced' ? '```json\n' + json + '\n```' : json;
     live = await harness(`https://chatgpt.com/?temporary-chat=true&cos-input=${inputId}`, {
@@ -4536,6 +4536,14 @@ describe('desktop input delivery and helper ownership', () => {
       live!.document.querySelector('[data-testid="composer-trailing-actions"]')!.append(stop);
     });
     expect(await live.runtimeMessage({ type: 'clf-desktop-input', id: inputId, conversationId: null })).toEqual({ ok: true });
+    if (shape === 'in-flight-upgrade') {
+      const incumbent = (live.window as any).__CLF_CONTENT_RECORDER__;
+      incumbent.version = currentRecorderVersion - 1;
+      const stop = vi.spyOn(incumbent, 'stop');
+      (live.window as any).eval(contentSource);
+      expect(stop).not.toHaveBeenCalled();
+      expect((live.window as any).__CLF_CONTENT_RECORDER__).toBe(incumbent);
+    }
     const section = assistantTurn(live.document, 'dom-recovery-final', []);
     prose(live.document, section, 'dom-recovery-message', canonical);
     if (shape === 'code-controls' || shape === 'new-renderer' || shape === 'dil-response') {
@@ -26295,6 +26303,22 @@ describe('one live isolated-world recorder per document', () => {
     await settle();
 
     expect(successor).toBeNull();
+  });
+
+  it.each(['missing', 'throws', 'busy', 'malformed'])('retains a healthy legacy recorder when replacement custody is %s', async state => {
+    live = await harness();
+    const window = live.window as any, incumbent = window.__CLF_CONTENT_RECORDER__;
+    incumbent.version = currentRecorderVersion - 1;
+    if (state === 'missing') delete incumbent.replacementReady;
+    else incumbent.replacementReady = () => {
+      if (state === 'throws') throw new Error('private retained helper detail');
+      return state === 'malformed' ? 1 : false;
+    };
+    const stop = vi.spyOn(incumbent, 'stop');
+    window.eval(contentSource);
+    expect(window.__CLF_CONTENT_RECORDER__).toBe(incumbent);
+    expect(stop).not.toHaveBeenCalled();
+    expect(live.sent.some(message => message.response || message.authorize)).toBe(false);
   });
 
   it.each([undefined, null])('preserves the incumbent and draft when the DOM adapter is absent (%s)', async absent => {

@@ -571,6 +571,15 @@ export interface ReaderHealth {
   observed: { main: number[]; content: number[]; worker: number[] };
 }
 
+/** Content-free worker refusal; never an instruction to release custody or reload. */
+export interface CompanionReloadDiagnostic {
+  observedAt: number;
+  pendingWork: Record<string, number>;
+  openings: { total: number; retired: number; tabless: number; ageUnknown: number; gracePending: number;
+    absent: number | null; present: number | null };
+  inventoryComplete: boolean;
+}
+
 export interface BridgeStatus {
   running: boolean;
   port: number | null;
@@ -588,6 +597,8 @@ export interface BridgeStatus {
    */
   extensionVersion: string | null;
   readerHealth?: ReaderHealth;
+  /** Fresh optional worker facts. Persistent copies use the existing bounded Activity log. */
+  companionReloadDiagnostic?: CompanionReloadDiagnostic | null;
   /** Last positive ChatGPT auth proof from this paired browser profile. Unknown never grants dispatch. */
   authState: 'signed-in' | 'signed-out' | 'unknown';
 }

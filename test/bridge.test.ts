@@ -429,6 +429,46 @@ async function pair(): Promise<string> {
 }
 
 describe('opt-in settled-turn Loop forward-readiness', () => {
+  it('retains bounded authenticated companion reload diagnostics without changing automation or opening work', async () => {
+    await pair();
+    const logger = await import('../src/main/logger.js');
+    const messages = () => logger.getLog().filter(row => row.message.startsWith('companion reload deferred:'));
+    const loggedBefore = messages().length;
+    const before = getConfig().ui.automationPaused;
+    const diagnostic = { observedAt: Date.now(), pendingWork: { inputOpenings: 11, retiredHelperElections: 10 },
+      openings: { total: 11, retired: 10, tabless: 1, ageUnknown: 0, gracePending: 0, absent: 10, present: 0 },
+      inventoryComplete: true };
+    const reply = await request('POST', '/status', { body: { openConversations: [], inventoryComplete: false,
+      companionReloadDiagnostic: diagnostic } });
+    expect(reply.status).toBe(200);
+    expect(await bridgeStatus()).toMatchObject({ companionReloadDiagnostic: diagnostic });
+    expect(messages()).toHaveLength(loggedBefore + 1);
+    await request('POST', '/status', { body: { openConversations: [],
+      companionReloadDiagnostic: { ...diagnostic, observedAt: diagnostic.observedAt + 1 } } });
+    expect(messages()).toHaveLength(loggedBefore + 1);
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(diagnostic.observedAt + 16 * 60_000);
+    try { expect((await bridgeStatus()).companionReloadDiagnostic).toBeNull(); }
+    finally { clock.mockRestore(); }
+    expect(getConfig().ui.automationPaused).toBe(before);
+    expect(opened).toEqual([]);
+  });
+
+  it.each(['private-field', 'negative-count', 'future', 'stale', 'unknown-work'])(
+    'ignores an invalid optional companion reload diagnostic without accepting it as work: %s', async invalid => {
+      await pair();
+      const diagnostic: any = { observedAt: Date.now(), pendingWork: { inputOpenings: 1 },
+        openings: { total: 1, retired: 1, tabless: 0, ageUnknown: 0, gracePending: 0, absent: null, present: null },
+        inventoryComplete: false };
+      if (invalid === 'private-field') diagnostic.privateText = 'private transcript must not survive';
+      if (invalid === 'negative-count') diagnostic.openings.total = -1;
+      if (invalid === 'future') diagnostic.observedAt += 60_000;
+      if (invalid === 'stale') diagnostic.observedAt -= 16 * 60_000;
+      if (invalid === 'unknown-work') diagnostic.pendingWork['private account text'] = 1;
+      expect((await request('POST', '/status', { body: { openConversations: [], companionReloadDiagnostic: diagnostic } })).status).toBe(200);
+      expect((await bridgeStatus()).companionReloadDiagnostic).toBeNull();
+      expect(opened).toEqual([]);
+    });
+
   async function stoppedResumeFixture(activate = true, failed = false, reobserveUser = false, completed = false) {
     await pair();
     await request('POST', '/status', { body: { openConversations: [], inventoryComplete: false, authState: 'signed-in' } });

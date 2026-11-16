@@ -42,7 +42,7 @@
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
   const VERSION = 19;
   /** Private implementation epoch, independent of the stable cross-world wire schema. */
-  const PRODUCER_VERSION = 183;
+  const PRODUCER_VERSION = 184;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -98,7 +98,7 @@
     'nativeHeaderValueAbsent', 'nativeHeaderValueAccessor', 'nativeHeaderValueUndefined',
     'nativeHeaderValueNull', 'nativeHeaderValueString', 'nativeHeaderValueTrue',
     'nativeHeaderValueFalse', 'nativeHeaderValueOther',
-    'nativeRetainedParentMissing', 'nativeRetainedParentConflict', 'nativeRetainedPositionHeader', 'nativeRetainedPositionFirstMember', 'nativeRetainedPositionLaterMember', 'nativeRetainedLocationNone', 'nativeRetainedLocationOnPath', 'nativeRetainedLocationOffPath', 'nativeRetainedMemberHeader', 'nativeRetainedMemberCodeCall', 'nativeRetainedMemberCoreCall', 'nativeRetainedMemberAssistantOther', 'nativeRetainedMemberCodeResult', 'nativeRetainedMemberCoreResult', 'nativeRetainedMemberOtherToolResult', 'nativeRetainedMemberUser', 'nativeRetainedMemberOther', 'nativeContractedHeaderPending', 'nativeContractedHeaderMissingTerminal', 'nativeContractedHeaderUserAnchor', 'nativeContractedHeaderParent', 'nativeContractedHeaderSelected', 'nativeContractedHeaderChildren', 'nativeContractedHeaderChildIdentity', 'nativeContractedHeaderChildMembership', 'nativeContractedHeaderIdentity', 'nativeContractedHeaderCache',
+    'nativeRetainedFacetOnPath', 'nativeRetainedFacetIdentity', 'nativeRetainedFacetToolParent', 'nativeRetainedFacetOtherRole', 'nativeRetainedFacetRecipient', 'nativeRetainedFacetChannel', 'nativeRetainedFacetEdge', 'nativeRetainedFacetTerminal', 'nativeRetainedFacetRequest', 'nativeRetainedFacetWorkingTurn', 'nativeRetainedFacetExchange', 'nativeRetainedFacetCache', 'nativeRetainedFacetExecution', 'nativeRetainedParentMissing', 'nativeRetainedParentConflict', 'nativeRetainedPositionHeader', 'nativeRetainedPositionFirstMember', 'nativeRetainedPositionLaterMember', 'nativeRetainedLocationNone', 'nativeRetainedLocationOnPath', 'nativeRetainedLocationOffPath', 'nativeRetainedMemberHeader', 'nativeRetainedMemberCodeCall', 'nativeRetainedMemberCoreCall', 'nativeRetainedMemberAssistantOther', 'nativeRetainedMemberCodeResult', 'nativeRetainedMemberCoreResult', 'nativeRetainedMemberOtherToolResult', 'nativeRetainedMemberUser', 'nativeRetainedMemberOther', 'nativeContractedHeaderPending', 'nativeContractedHeaderMissingTerminal', 'nativeContractedHeaderUserAnchor', 'nativeContractedHeaderParent', 'nativeContractedHeaderSelected', 'nativeContractedHeaderChildren', 'nativeContractedHeaderChildIdentity', 'nativeContractedHeaderChildMembership', 'nativeContractedHeaderIdentity', 'nativeContractedHeaderCache',
     'nativeContractedHeaderPrefixEdge', 'nativeContractedHeaderPrefixUserCache', 'nativeContractedHeaderPrefixBounds',
     'nativeContractedHeaderPrefixShape', 'nativeContractedHeaderPrefixParent', 'nativeContractedHeaderPrefixCache', 'nativeContractedHeaderPrefixSingle',
   ]);
@@ -2573,6 +2573,7 @@
     let nativeAnchorBranch = 'none';
     let nativeAnchorRetainedParent = 'none', nativeAnchorRetainedMember = 'none';
     let nativeAnchorRetainedPosition = 'none', nativeAnchorRetainedLocation = 'none';
+    let nativeAnchorRetainedFacet = 'none';
     let nativeAnchorExecutionCalls = null, nativeAnchorExecutionResults = null;
     let nativeAnchorExecutionBalance = 'none';
     let nativeAnchorFinalFacet = 'none', nativeAnchorCoreResultFacet = 'none', nativeAnchorHeaderFacet = 'none';
@@ -2802,15 +2803,22 @@
           // must still agree. A retained tool, final, foreign edge or getter is
           // never an interchangeable parent.
           const contractedNarration = (id, parent, metadata) => {
-            if (currentIds.has(id) || selected.has(id) || !nativeNarration(id)) return false;
+            nativeAnchorRetainedFacet = 'none';
+            const failed = facet => { nativeAnchorRetainedFacet = facet; return false; };
+            if (currentIds.has(id) || selected.has(id)) return failed('on-path');
             const node = nativeField(mapping, id), message = nativeField(node, 'message');
             const meta = nativeField(message, 'metadata');
-            if (nativeField(node, 'parent') !== parent || nativeField(meta, 'parent_id') !== parent ||
-                nativeField(message, 'status') !== 'finished_successfully' || nativeField(message, 'end_turn') !== false ||
-                nativeField(message, 'recipient') !== 'all' ||
-                nativeField(nativeField(message, 'content'), 'content_type') !== 'text' ||
-                !['request_id', 'working_turn_id', 'turn_exchange_id'].every(key =>
-                  str(nativeField(meta, key)) && nativeField(meta, key) === nativeField(metadata, key))) return false;
+            if (nativeField(node, 'id') !== id || nativeField(message, 'id') !== id) return failed('identity');
+            const role = nativeField(nativeField(message, 'author'), 'role');
+            if (role !== 'assistant') return failed(role === 'tool' ? 'tool-parent' : 'other-role');
+            if (nativeField(message, 'recipient') !== 'all') return failed('recipient');
+            if (!['analysis', 'commentary'].includes(nativeField(message, 'channel'))) return failed('channel');
+            if (nativeField(node, 'parent') !== parent || nativeField(meta, 'parent_id') !== parent) return failed('edge');
+            if (nativeField(message, 'status') !== 'finished_successfully' || nativeField(message, 'end_turn') !== false ||
+                nativeField(nativeField(message, 'content'), 'content_type') !== 'text') return failed('terminal');
+            for (const [key, facet] of [['request_id', 'request'], ['working_turn_id', 'working-turn'], ['turn_exchange_id', 'exchange']]) {
+              if (!str(nativeField(meta, key)) || nativeField(meta, key) !== nativeField(metadata, key)) return failed(facet);
+            }
             const cached = nativeField(nativeField(data, 'mapping'), id);
             if (cached && cached !== node) {
               const cachedMessage = nativeField(cached, 'message'), cachedMeta = nativeField(cachedMessage, 'metadata');
@@ -2822,7 +2830,7 @@
                   nativeField(cachedMessage, 'end_turn') !== false ||
                   nativeField(cachedMessage, 'channel') !== nativeField(message, 'channel') ||
                   nativeField(cachedMessage, 'recipient') !== 'all' ||
-                  nativeField(nativeField(cachedMessage, 'author'), 'role') !== 'assistant') return false;
+                  nativeField(nativeField(cachedMessage, 'author'), 'role') !== 'assistant') return failed('cache');
             }
             return true;
           };
@@ -3019,6 +3027,10 @@
                 nativeAnchorRetainedParent = retainedParent ? 'conflict' : 'missing';
                 nativeAnchorRetainedPosition = at === 1 ? 'header' : at === 2 ? 'first-member' : 'later-member';
                 nativeAnchorRetainedLocation = !retainedParent ? 'none' : currentIds.has(retainedParent) ? 'on-path' : 'off-path';
+                if (nativeAnchorRetainedFacet === 'none' && role === 'tool' && name === 'functions.exec')
+                  nativeAnchorRetainedFacet = 'execution';
+                if (nativeAnchorRetainedFacet !== 'none') shellDiagnostic(rejects,
+                  'nativeRetainedFacet' + nativeAnchorRetainedFacet.split('-').map(part => part[0].toUpperCase() + part.slice(1)).join(''));
                 nativeAnchorRetainedMember = at === 1 ? 'header' : role === 'assistant'
                   ? recipient === 'functions.exec' ? 'code-call' : recipient === 'api_tool.call_tool' ? 'core-call' : 'assistant-other'
                   : role === 'tool'
@@ -3515,7 +3527,7 @@
             shape.selectedMissingCalls, shape.nativeMissingCalls, shape.typedUserPresent, shape.typedUserSelected,
             selectedRequestIdsPresent, selectedRequestIdsMissing, identityRefusalCalls,
             nativeAnchorReason, nativeAnchorBranch, nativeAnchorRetainedParent, nativeAnchorRetainedMember,
-            nativeAnchorRetainedPosition, nativeAnchorRetainedLocation, nativeAnchorFinalFacet, nativeAnchorCoreResultFacet, nativeAnchorHeaderFacet, nativeAnchorMember, nativeAnchorMemberTerminal, nativeAnchorMemberTyped, ...Object.values(identityRefusalReasons), selectedToolResults, witnessedToolResults,
+            nativeAnchorRetainedPosition, nativeAnchorRetainedLocation, nativeAnchorRetainedFacet, nativeAnchorFinalFacet, nativeAnchorCoreResultFacet, nativeAnchorHeaderFacet, nativeAnchorMember, nativeAnchorMemberTerminal, nativeAnchorMemberTyped, ...Object.values(identityRefusalReasons), selectedToolResults, witnessedToolResults,
             nativeAnchorExecutionCalls, nativeAnchorExecutionResults, nativeAnchorExecutionBalance, nativeAnchorRetryScope,
             missingWithChild, missingWithWitness, ...Object.values(resultShapes)].join(':');
           if (!nativeReferenceTraceKeys.has(key) && nativeReferenceTraceKeys.size < MAX_TURNS) {
@@ -3533,6 +3545,7 @@
               ` anchorRetryScope=${nativeAnchorRetryScope}` +
               ` anchorRetainedParent=${nativeAnchorRetainedParent} anchorRetainedMember=${nativeAnchorRetainedMember}` +
               ` anchorRetainedPosition=${nativeAnchorRetainedPosition} anchorRetainedLocation=${nativeAnchorRetainedLocation}` +
+              ` anchorRetainedFacet=${nativeAnchorRetainedFacet}` +
               ` anchorExecutionCalls=${nativeAnchorExecutionCalls} anchorExecutionResults=${nativeAnchorExecutionResults}` +
               ` anchorExecutionBalance=${nativeAnchorExecutionBalance}` +
               ` anchorMemberTerminal=${nativeAnchorMemberTerminal} anchorMemberTyped=${nativeAnchorMemberTyped}` +

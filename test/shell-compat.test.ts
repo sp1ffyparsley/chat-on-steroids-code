@@ -2809,6 +2809,7 @@ describe('alternate shell turn/message provenance', () => {
     'retained result commentary foreign working', 'retained result commentary foreign exchange',
     'retained result commentary wrong parent', 'retained result commentary terminal',
     'retained result commentary tool', 'retained result commentary missing receipt',
+    'retained result commentary tool parent',
     'exact retained commentary parent', 'exact retained execution commentary parent', 'exact retained commentary image result', 'exact retained commentary value image result',
     'exact retained header parent', 'retained header transport annotation', 'retained header transport annotation foreign scope',
     'retained header missing children', 'retained header duplicate child',
@@ -3017,6 +3018,7 @@ describe('alternate shell turn/message provenance', () => {
             if (variant === 'retained result commentary wrong parent') mapping[retained].parent = USER;
             if (variant === 'retained result commentary terminal') mapping[retained].message.end_turn = true;
             if (variant === 'retained result commentary tool') mapping[retained].message.recipient = 'functions.exec';
+            if (variant === 'retained result commentary tool parent') mapping[retained].message.author = { role: 'tool', name: 'functions.exec' };
             if (variant === 'retained result commentary missing receipt')
               mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: '{"content":[]}' };
           }
@@ -3105,6 +3107,23 @@ describe('alternate shell turn/message provenance', () => {
           variant === 'retained commentary missing receipt' || variant === 'retained header missing receipt' ||
           variant === 'missing terminal exact user' || variant === 'header annotation missing receipt' ||
           variant === 'execution child result missing' || variant === 'execution child result missing provider contraction';
+        const retainedFacet = ({
+          'retained result commentary foreign request': 'request',
+          'retained result commentary foreign working': 'working-turn',
+          'retained result commentary foreign exchange': 'exchange',
+          'retained result commentary wrong parent': 'edge',
+          'retained result commentary terminal': 'terminal',
+          'retained result commentary tool': 'recipient',
+          'retained result commentary tool parent': 'tool-parent'
+        } as Record<string, string>)[variant];
+        if (retainedFacet) {
+          const trace = diagnosticLogs.find(line => line.includes('native result-reference recovery diagnostic'))!;
+          expect(trace).toContain(`anchorRetainedFacet=${retainedFacet}`);
+          const key = 'nativeRetainedFacet' + retainedFacet.split('-').map(part => part[0]!.toUpperCase() + part.slice(1)).join('');
+          expect(page.fiber.shellScan.rejects[key]).toBe(1);
+          for (const secret of [REQUEST, USER, EXEC_RESULT, 'PRIVATE_RETAINED_RESULT_COMMENTARY', 'PRIVATE_RESULT_COMMENTARY'])
+            expect(trace).not.toContain(secret);
+        }
         expect(page.fiber.turns[0].calls[0]).toMatchObject({
           requestId: accepted || identityOnly || ['pending canonical group', 'pending direct Core', 'pending header annotation'].includes(variant) ? REQUEST : null, answered: accepted });
         if (accepted || identityOnly || ['pending canonical group', 'pending direct Core', 'pending header annotation'].includes(variant))

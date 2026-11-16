@@ -479,7 +479,7 @@ import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from 
 import { handoffMatchesContinuation } from './session/handoff.js';
 import http from 'node:http';
 import { browserHelperQuotaRejected } from './session/input.js';
-import type { BridgeStatus, ConnectionState } from '../shared/types.js';
+import type { BridgeStatus, CompanionReloadDiagnostic, ConnectionState } from '../shared/types.js';
 import type { InputImage } from '../shared/input.js';
 import { positionOf } from '../shared/chronology.js';
 import { CHAT_SILENCE_MS, continuationMarker, isReasoningEffort, isReturnedToolOutcome, toolCallSummary, workSequence, type ReasoningEffort, type SessionEvent, type SessionOrigin } from '../shared/session.js';
@@ -1419,6 +1419,57 @@ let extensionVersion: string | null = null;
 /** Bounded pre-auth discovery telemetry; these probes are not accepted browser presence. */
 const extensionProbeVersions = new Set<string>();
 let browserAuthState: BridgeStatus['authState'] = 'unknown';
+const COMPANION_DIAGNOSTIC_AGE_MS = 15 * 60_000;
+let lastCompanionReloadDiagnostic: CompanionReloadDiagnostic | null = null;
+let lastCompanionReloadSignature = '';
+const COMPANION_RELOAD_WORK = new Set(['journal', 'journalWorkers', 'closeOutbox', 'commandAckOutbox',
+  'deferredRevivals', 'inputOpenings', 'retiredHelperElections', 'stopOpenings', 'commandTabLeases',
+  'maintenanceFlight', 'modelCatalogFlight', 'pluginRefreshFlight', 'projectCreateFlight', 'deferredRecoveryWork',
+  'projectCreateOwner', 'pluginRefreshOwner', 'modelCatalogOwner', 'ownerReadTimedOut', 'ownerReadFailed',
+  'streaming', 'generating', 'pendingTools', 'jobBusy', 'goalBusy', 'queued', 'projectCreateBusy',
+  'pluginRefreshBusy', 'modelCatalogBusy', 'desktopInputBusy', 'tabOperations', 'pendingInputReceipts',
+  'pairing', 'commandDelivery', 'closeDelivery', 'journalInFlight', 'browserCapture', 'backgroundWindow',
+  'tabRetirement', 'openConversation', 'browserControl', 'browserControlFlight', 'urgentOpen',
+  'tabCloseReceipts', 'receiverRepair', 'stopOffers', 'inventoryUnverified', 'connectionChanged',
+  'openChatgptTabs', 'leaseDurabilityUnverified', 'custodyChanged', 'custodyCheckFailed', 'unverified', 'reload']);
+/** Optional diagnostics cannot weaken normal status validation or become action authority. */
+function recordCompanionReloadDiagnostic(raw: unknown): void {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+  const value = raw as Record<string, unknown>;
+  if (Object.keys(value).length !== 4 ||
+      Object.keys(value).some(key => !['observedAt', 'pendingWork', 'openings', 'inventoryComplete'].includes(key)) ||
+      typeof value.observedAt !== 'number' || !Number.isSafeInteger(value.observedAt) ||
+      value.observedAt > Date.now() + 30_000 || Date.now() - value.observedAt > COMPANION_DIAGNOSTIC_AGE_MS ||
+      typeof value.inventoryComplete !== 'boolean') return;
+  const work = value.pendingWork, openings = value.openings;
+  if (!work || typeof work !== 'object' || Array.isArray(work) ||
+      !openings || typeof openings !== 'object' || Array.isArray(openings)) return;
+  const counts = openings as Record<string, unknown>;
+  const keys = ['total', 'retired', 'tabless', 'ageUnknown', 'gracePending', 'absent', 'present'];
+  const count = (n: unknown): n is number => Number.isSafeInteger(n) && Number(n) >= 0 && Number(n) <= 4000;
+  if (Object.keys(counts).length !== keys.length || keys.some(key => !Object.hasOwn(counts, key)) ||
+      keys.slice(0, 5).some(key => !count(counts[key])) ||
+      ['absent', 'present'].some(key => value.inventoryComplete ? !count(counts[key]) : counts[key] !== null) ||
+      ['retired', 'tabless', 'ageUnknown', 'gracePending'].some(key => Number(counts[key]) > Number(counts.total)) ||
+      value.inventoryComplete && Number(counts.absent) + Number(counts.present) > Number(counts.retired)) return;
+  const workEntries = Object.entries(work);
+  if (!workEntries.length || workEntries.length > COMPANION_RELOAD_WORK.size ||
+      workEntries.some(([key, n]) => !COMPANION_RELOAD_WORK.has(key) || !count(n) || n === 0)) return;
+  if (lastCompanionReloadDiagnostic && value.observedAt <= lastCompanionReloadDiagnostic.observedAt) return;
+  const diagnostic: CompanionReloadDiagnostic = { observedAt: value.observedAt,
+    pendingWork: Object.fromEntries(workEntries.sort(([a], [b]) => a.localeCompare(b))) as Record<string, number>,
+    openings: Object.fromEntries(keys.map(key => [key, counts[key]])) as CompanionReloadDiagnostic['openings'],
+    inventoryComplete: value.inventoryComplete };
+  lastCompanionReloadDiagnostic = diagnostic;
+  const signature = JSON.stringify({ ...diagnostic, observedAt: 0 });
+  if (signature === lastCompanionReloadSignature) return;
+  lastCompanionReloadSignature = signature;
+  // The existing logger owns the 500-line memory ring and two rotating 4 MiB files.
+  // No transcript, Chrome storage, new database, timer or cleanup authority is added.
+  logWarn(`companion reload deferred: ${JSON.stringify(diagnostic)}`);
+  void noteLocalIncident({ source: 'worker', reason: 'companion_reload_deferred', status: 'unresolved',
+    capture: 'not_requested' });
+}
 function browserSignedOut(): boolean { return browserAuthState === 'signed-out'; }
 let versionWarned = false;
 
@@ -1455,6 +1506,9 @@ export async function bridgeStatus(): Promise<BridgeStatus> {
     lastSeenAt,
     extensionVersion,
     readerHealth: coreReaderHealth(),
+    companionReloadDiagnostic: lastCompanionReloadDiagnostic &&
+      Date.now() - lastCompanionReloadDiagnostic.observedAt <= COMPANION_DIAGNOSTIC_AGE_MS
+      ? lastCompanionReloadDiagnostic : null,
     authState: browserAuthState
   };
 }
@@ -5706,7 +5760,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     let inventoryComplete = false;
     let freshTurnCapable = false;
     if (req.method === 'POST') {
-      const body = await readBody(req) as { openConversations?: unknown; inventoryComplete?: unknown; authState?: unknown; freshTurnProtocol?: unknown };
+      const body = await readBody(req) as { openConversations?: unknown; inventoryComplete?: unknown; authState?: unknown;
+        freshTurnProtocol?: unknown; companionReloadDiagnostic?: unknown };
       if (!Array.isArray(body?.openConversations) || body.openConversations.length > 10_000 || body.openConversations.some(id => !conversationId(id))) {
         return json(res, 400, { error: 'invalid_open_conversations' }, origin);
       }
@@ -5716,6 +5771,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       if (body.authState !== undefined && body.authState !== 'signed-in' && body.authState !== 'signed-out' && body.authState !== 'unknown') {
         return json(res, 400, { error: 'invalid_browser_auth_state' }, origin);
       }
+      recordCompanionReloadDiagnostic(body.companionReloadDiagnostic);
       // Missing/unknown DOM evidence can never clear a proven logout. Only another positive
       // provider-owned control moves this gate back to signed-in.
       if ((body.authState === 'signed-in' || body.authState === 'signed-out') && browserAuthState !== body.authState) {
@@ -10369,6 +10425,8 @@ export async function stopBridge(): Promise<void> {
     // A stopped listener cannot currently see the extension. Require one fresh authenticated
     // request after the next start rather than carrying a recent sighting across bridge lifetimes.
     lastSeenAt = null;
+    lastCompanionReloadDiagnostic = null;
+    lastCompanionReloadSignature = '';
     browserAuthState = 'unknown';
     browserInventoryReconcileNeeded = false;
     browserInventoryDispatchGate = false;
@@ -20806,6 +20864,8 @@ export function resetBridgeForTests(): void {
   lastSeenAt = null;
   extensionVersion = null;
   extensionProbeVersions.clear();
+  lastCompanionReloadDiagnostic = null;
+  lastCompanionReloadSignature = '';
   browserAuthState = 'unknown';
   versionWarned = false;
   browserSeenAt.clear();
