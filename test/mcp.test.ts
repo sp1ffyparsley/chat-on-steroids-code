@@ -2155,7 +2155,7 @@ describe('endpoint hardening', () => {
 // ---------------------------------------------------------------------------
 
 describe('surface boundaries', () => {
-  const coreOnly = ['agents', 'apply_patch', 'deepai_helper', 'download_artifact', 'exec', 'exec_command', 'read', 'session', 'session_route', 'settings_read', 'settings_update', 'update_plan', 'view_image', 'write_stdin'];
+  const coreOnly = ['agents', 'apply_patch', 'deepai_helper', 'download_artifact', 'exec', 'exec_command', 'read', 'session', 'session_route', 'settings_read', 'settings_update', 'update_plan', 'view_image', 'write_stdin', 'terminal_sessions'];
   /** Turns everything on, so each surface advertises the most it ever can. */
   const everything = (): void => {
     ctx.caps = allCaps();
@@ -2403,7 +2403,7 @@ describe('surface boundaries', () => {
     const desktopTools = toolList(await desktop('tools/list'));
 
     // Each populated surface includes code mode; find and the shell exec pair remain exclusive.
-    expect(coreTools).toHaveLength(IS_WINDOWS ? 37 : coreOnly.length);
+    expect(coreTools).toHaveLength(IS_WINDOWS ? 38 : coreOnly.length);
     expect(desktopTools).toHaveLength(IS_WINDOWS ? 24 : process.platform === 'darwin' ? 11 : 9);
 
     // And the size, which is what a discovery pull actually costs the model on every
@@ -2416,13 +2416,20 @@ describe('surface boundaries', () => {
     // The prior Windows catalog measured 40,719 bytes, only 31 below its existing cap.
     // Adding one intentional tool has an explicit 1,800-byte allowance; it must not
     // relax the prior catalog's budget or hide growth in another tool or surface.
-    const priorCoreBytes = Buffer.byteLength(JSON.stringify(coreTools.filter(tool => tool.name !== 'deepai_helper')), 'utf8');
+    // Budget the intentional terminal lifecycle metadata separately, preserving the old catalog cap.
+    const priorTools=coreTools.filter(tool=>!['deepai_helper','terminal_sessions'].includes(tool.name)).map(tool=>{
+      const prior=JSON.parse(JSON.stringify(tool));
+      if (['exec_command','write_stdin'].includes(tool.name)) delete prior.outputSchema?.properties?.terminal_result;
+      return prior;
+    });
+    const priorCoreBytes = Buffer.byteLength(JSON.stringify(priorTools), 'utf8');
     const helperBytes = Buffer.byteLength(JSON.stringify(coreTools.find(tool => tool.name === 'deepai_helper')), 'utf8');
     const priorCoreBudget = IS_WINDOWS ? 40_750 : 21_250;
-    const helperBudget = 1_800;
+    const helperBudget = 1_800, terminalBudget = 1_600;
+    expect(coreBytes-priorCoreBytes-helperBytes).toBeLessThan(terminalBudget);
     expect(priorCoreBytes, `prior Core catalog is ${priorCoreBytes} bytes`).toBeLessThan(priorCoreBudget);
     expect(helperBytes, `deepai_helper metadata is ${helperBytes} bytes`).toBeLessThan(helperBudget);
-    expect(coreBytes, `core tools/list is ${coreBytes} bytes (${helperBytes} from deepai_helper)`).toBeLessThan(priorCoreBudget + helperBudget);
+    expect(coreBytes, `core tools/list is ${coreBytes} bytes (${helperBytes} from deepai_helper)`).toBeLessThan(priorCoreBudget + helperBudget + terminalBudget);
     expect(desktopBytes, `desktop tools/list is ${desktopBytes} bytes`).toBeLessThan(
       process.platform === 'linux' ? 10_000 : 19_000
     );
@@ -6380,7 +6387,7 @@ describe('exec sessions belong to the chat that opened them', () => {
 
   it('reports terminal capacity without starting another command or discarding retained sessions', async () => {
     const held: number[] = [];
-    const original = unifiedExecManager.terminalCapacity().retained;
+    const original = unifiedExecManager.terminalCapacity().activeUsed;
     try {
       for (let index = original; index < 64; index++) held.push(unifiedExecManager.allocateProcessId());
       const denied = await asChat('wfr-external-full-capacity', 'exec_command', {
@@ -6390,10 +6397,10 @@ describe('exec sessions belong to the chat that opened them', () => {
       expect(textOf(denied)).toContain('EXEC_TERMINAL_CAPACITY');
       expect(textOf(denied)).toContain('limit 64');
       expect(textOf(denied)).toContain('No command was started');
-      expect(unifiedExecManager.terminalCapacity().retained).toBe(64);
+      expect(unifiedExecManager.terminalCapacity().activeUsed).toBe(64);
       await expect(fs.stat(path.join(approved, 'capacity-must-not-start.txt'))).rejects.toThrow();
     } finally { for (const id of held) unifiedExecManager.releaseProcessId(id); }
-    expect(unifiedExecManager.terminalCapacity().retained).toBe(original);
+    expect(unifiedExecManager.terminalCapacity().activeUsed).toBe(original);
   });
 
   it('returns and accepts only the exact permitted external terminal capability across request ids', async () => {
@@ -6428,7 +6435,7 @@ describe('exec sessions belong to the chat that opened them', () => {
     expect(finished.body.result!.structuredContent).not.toHaveProperty('session_token');
     expect(textOf(await asChat('wfr-external-cap-reused', 'write_stdin', {
       session_id: sessionId, session_token: token, chars: ''
-    }))).toContain('EXEC_SESSION_UNAVAILABLE');
+    }))).toContain('external-terminal-complete');
     } finally { config.multiAgent.allowUnattributedCalls = previous; }
   });
 

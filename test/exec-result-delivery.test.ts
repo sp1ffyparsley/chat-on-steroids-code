@@ -45,12 +45,12 @@ it('retains a failed publication, rejects concurrent receipts, and retires only 
 
 it('reports finished unread capacity separately from live work and frees it only after collection', async () => {
   const { manager, id } = await child('finished-but-retained', 0);
-  expect(manager.terminalCapacity()).toEqual({ limit: 64, retained: 1, running: 0, exitedRetained: 1, starting: 0 });
+  expect(manager.terminalCapacity()).toMatchObject({ limit: 64, retained: 1, running: 0, exitedRetained: 1, starting: 0 });
   const output = await manager.writeStdin({ processId: id, input: '', yieldTimeMs: 1,
     maxOutputTokens: undefined, truncationPolicy: policy });
   expect(output.rawOutput.toString('utf8')).toBe('finished-but-retained');
   expect(output.exitCode).toBe(0);
-  expect(manager.terminalCapacity()).toEqual({ limit: 64, retained: 0, running: 0, exitedRetained: 0, starting: 0 });
+  expect(manager.terminalCapacity()).toMatchObject({ limit: 64, retained: 0, running: 0, exitedRetained: 0, starting: 0 });
 });
 
 it('rechecks revoked custody under the output lock without consuming any finished output', async () => {
@@ -130,4 +130,14 @@ it('does not let an early poll steal output from the initial command response', 
       maxOutputTokens: undefined, truncationPolicy: policy });
     expect(finished.exitCode).toBe(0);
   }
+});
+
+it('restores only the unacknowledged remainder of a paged background result', async () => {
+  const {manager,id,owned}=await child('acknowledged-prefix-unread-tail',0);
+  const pub=publication();const page=await manager.offerCompletedOutput(owned,pub,12);expect(page?.output).toBe('acknowledged');
+  pub.completedAt=Date.now()-10;expect(await manager.acknowledgeCompletedOutput(owned,Date.now())).toEqual([]);
+  const saved=manager.snapshotCompleted(),target=new UnifiedExecProcessManager(60000);managers.push(target);
+  target.configureCustody({restore:()=>true});expect(target.restoreCompleted(saved)).toBe(1);
+  const remaining=await target.writeStdin({processId:id,input:'',yieldTimeMs:1,maxOutputTokens:undefined,truncationPolicy:policy});
+  expect(remaining.rawOutput.toString()).toBe('-prefix-unread-tail');expect(remaining.exitCode).toBe(0);
 });

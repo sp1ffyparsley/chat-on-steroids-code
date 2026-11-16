@@ -1,5 +1,17 @@
 # Chat On Steroids — code research mirror
 
+## Terminal session lifecycle repair
+
+Finished commands no longer consume the 64 active-command slots. Each client may hold at most eight active commands. Scheduling hints select a bounded fairness bucket; they never grant chat identity or access to another client's output.
+
+Completed results have a separate cache: at most 128 sessions, 16 MiB including truncation markers, and 16 sessions per client. Unclaimed output expires after one hour; a successfully published final result remains replayable for two minutes. Capacity pressure evicts delivered results first, then the oldest unclaimed completed results. Running commands, open output streams and in-flight readers are excluded. Retention is bounded, so callers must collect completed output promptly.
+
+Failed response publication retains the exact offered chunk for retry without rerunning the command. The existing durable store saves bounded completed results and token digests, allowing recovery after reconnect or application restart with the original session ID and token. Running processes are never recreated from a cache. Malformed or conflicting caches fail closed; cache-write failures remain visible alongside the real command result.
+
+The Core `terminal_sessions` tool exposes aggregate status and completed-only cleanup. Expired and delivered cleanup are supported; explicit output disposal requires `discard_output: true` and every selected session's original owner/token. Invalid selections fail the whole operation. Cleanup does not interrupt a process or disclose another client's command, token or output. `write_stdin` still requires the original token when the command was unattributed.
+
+Validation includes 200 real HTTP commands across four concurrent clients beside three long-running commands, plus 200 manager-level commands across ten clients. Checks cover Unicode/stdout/stderr, nonzero exit codes, token mismatch, live-session protection, aborted response recovery, durable reconnect, cache pressure, expiry and disk-write failure. The strict Windows candidate passed 14,701 checks with 64 conditional skips; independent installer/unpacked payload comparison matched all 316 files. Local deployment and readable live acceptance are separate from source and package qualification. No scheduler or new service was added.
+
 ## R106: qualified desktop repair — Chrome activation remains separate
 
 The reader now accepts a single declared assistant context only with the same original request namespace, keeps the stricter legacy system-sibling proof, and rejects conflicting cached user edges. Seven fixed structural failure facets survive all four reader/content/worker/Main allowlists. No hidden context or request values are logged; missing native receipts still withhold completion.

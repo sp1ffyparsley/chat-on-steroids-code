@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { createHash } from 'node:crypto';
 import type { OutputPublication } from '../codex/unified-exec.js';
 
 /**
@@ -27,7 +28,7 @@ export interface InboundTiming {
   coreResultReceipts: Record<CoreResultReceiptOutcome, number>;
 }
 export interface InboundInvocationProof { tool: string; digest: string | null }
-const store = new AsyncLocalStorage<{ requestId: string | null; timing?: InboundTiming; publication?: OutputPublication; invocation?: InboundInvocationProof }>();
+const store = new AsyncLocalStorage<{ requestId: string | null; timing?: InboundTiming; publication?: OutputPublication; invocation?: InboundInvocationProof; clientBudgetKey?: string }>();
 
 /** Fixed-size, process-local numbers only: no payload, credential, path or chat identity. */
 export function createInboundTiming(): InboundTiming {
@@ -77,8 +78,20 @@ export function formatInboundTiming(timing: InboundTiming): string {
 }
 
 /** Runs `body` with the request id of the HTTP request currently being served. */
-export function withInboundRequestId<T>(requestId: string | null, body: () => T, timing?: InboundTiming, publication?: OutputPublication, invocation?: InboundInvocationProof): T {
-  return store.run({ requestId, timing, publication, invocation }, body);
+export function withInboundRequestId<T>(requestId: string | null, body: () => T, timing?: InboundTiming, publication?: OutputPublication, invocation?: InboundInvocationProof, clientBudgetKey?: string): T {
+  return store.run({ requestId, timing, publication, invocation, clientBudgetKey }, body);
+}
+
+/** Scheduling hint only. This digest never grants chat identity, terminal access or native receipt authority. */
+export function inboundTerminalBudgetKey(): string | undefined { return store.getStore()?.clientBudgetKey; }
+export function terminalBudgetKeyFromBody(body: unknown): string | undefined {
+  try {
+    if (inboundClientSessionShape(body) !== 'present') return undefined;
+    const params = Object.getOwnPropertyDescriptor(body, 'params')!.value;
+    const meta = Object.getOwnPropertyDescriptor(params, '_meta')!.value;
+    const value = Object.getOwnPropertyDescriptor(meta, 'openai/session')!.value as string;
+    return createHash('sha256').update(value).digest('hex');
+  } catch { return undefined; }
 }
 
 /** Original wire arguments, before SDK defaults/transforms. This is NOT a
@@ -105,9 +118,10 @@ export type IdentityHeaderShapes = Record<'x-request-id' | 'x-openai-request-id'
 export type ClientSessionShape = 'missing' | 'present' | 'invalid' | 'batch';
 
 /** ChatGPT documents params._meta['openai/session'] as an anonymized conversation
- * hint, not a native request/turn identity. Retain only its fixed presence shape
- * so headerless ingress can be diagnosed without storing the value or guessing
- * ownership. Do not inspect arguments, envelope metadata or inherited/getter fields.
+ * hint, not a native request/turn identity. Identity diagnostics retain only its
+ * fixed presence shape. Terminal admission may separately hash it for a budget;
+ * that digest never grants ownership. Raw values are not retained or logged.
+ * Do not inspect arguments, envelope metadata or inherited/getter fields.
  * Reference: https://developers.openai.com/plugins/reference#_meta-fields-the-client-provides
  */
 export function inboundClientSessionShape(body: unknown): ClientSessionShape {

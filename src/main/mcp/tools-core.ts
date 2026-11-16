@@ -20,6 +20,8 @@ import { agentSettingsUpdateSchema, readRemoteAgentSettings, SettingsControlErro
 import { rawPromises as fs } from '../rawfs.js';
 import nodeFs from 'node:fs';
 import nodePath from 'node:path';
+import { createHash } from 'node:crypto';
+import { inboundTerminalBudgetKey } from './inbound.js';
 import { z } from 'zod';
 import { DEFAULT_READ_BYTES, MAX_READ_BYTES, formatBytes } from '../fsops.js';
 import { BinaryReadError, listDirectoryLevel, readTextFile, statInfo, walkFiles } from '../codex/read-backend.js';
@@ -50,7 +52,7 @@ import { DEFAULT_APPLY_PATCH_FILE_UPDATE_MODE } from '../codex/apply-patch/mode.
 import { maybeParseApplyPatchForExec } from '../codex/apply-patch/invocation.js';
 import { composeCommandBatch, parseCommandBatchSections } from '../codex/command-batch.js';
 import { formatExecOutputForModel, newStreamOutput } from '../codex/exec-output.js';
-import { DEFAULT_TRUNCATION_POLICY, EXEC_OUTPUT_CEILING_POLICY, unifiedExecManager } from '../codex/manager.js';
+import { DEFAULT_TRUNCATION_POLICY, EXEC_OUTPUT_CEILING_POLICY, unifiedExecManager, flushTerminalResults, TERMINAL_CACHE_WARNING } from '../codex/manager.js';
 import {
   backgroundExecObligations,
   execOwner,
@@ -205,6 +207,9 @@ const unifiedExecOutputSchema = z
       .optional()
       .describe('Use with write_stdin while the process is running.'),
     session_token: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(),
+    terminal_result: z.object({ session_id: int32Number,
+      session_token: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional() }).optional()
+      .describe('Completed result recovery handle, not a running session. Poll with the same ID/token during retention.'),
     original_token_count: z.number().optional().describe('Estimated tokens before truncation.'),
     output: z.string().describe('Command output; may be truncated.'),
     supplemental_context: z.string().optional().describe('App context, not process output.'),
@@ -251,7 +256,7 @@ function execChildEnvironment(): NodeJS.ProcessEnv {
 }
 
 /** Resolve the stable local session once so exec admission and later ownership cannot disagree. */
-async function execSession(tool: 'exec_command' | 'write_stdin'): Promise<string | null> {
+async function execSession(tool: 'exec_command' | 'write_stdin' | 'terminal_sessions'): Promise<string | null> {
   let conversationId = provenConversation(currentCaller().requestId, currentCaller().conversationId);
   const call = currentCall();
   if (!conversationId && call?.caller.requestId) {
@@ -849,7 +854,11 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
               );
             }
 
-            const processId = unifiedExecManager.allocateProcessId();
+            // Scheduling only: this hint cannot grant ownership or replace the terminal token.
+            const clientKey = createHash('sha256').update(owner ? 'session:' + owner :
+              inboundTerminalBudgetKey() ? 'client:' + inboundTerminalBudgetKey() :
+              currentCaller().transportKey ? 'transport:' + currentCaller().transportKey : 'unattributed').digest('hex');
+            const processId = unifiedExecManager.allocateProcessId(clientKey);
             // Process ids are deliberately small/reusable, while chat ownership lives in a
             // separate registry. Clear any stale row at the allocation boundary so a recycled
             // id cannot briefly authorize its previous chat before this call publishes the new owner.
@@ -858,6 +867,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
             let custody: (() => boolean) | undefined;
             let managerCalled = false;
             let output: ExecCommandToolOutput;
+            let cacheSaved = true;
             try {
               // Register while the ID is exclusively reserved, before yielding to
               // process creation. A recycled ID can never briefly expose a new
@@ -870,6 +880,8 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
                 withPosixPathPrefix(boundCommand, shell.shellType, ripgrep ? nodePath.dirname(ripgrep) : null), useLoginShell);
               managerCalled = true;
               output = await unifiedExecManager.execCommand({
+                clientKey,
+                publication: currentCall()?.publication,
                 batchMarker: batch?.marker,
                 command: executionCommand,
                 shellType: shell.shellType,
@@ -891,8 +903,10 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
             // Which durable local session may later write to this process id. The frontend
             // conversation is replaceable during Compact & Resume; the local session is not.
             if (output.processId === null) {
-              forgetExecOwner(processId, custody);
-              sessionToken = null;
+              if (!unifiedExecManager.hasRetainedResult(processId)) {
+                forgetExecOwner(processId, custody); sessionToken = null;
+              }
+              cacheSaved = await flushTerminalResults();
             } else {
               if (execOwner(output.processId) !== null) sessionToken = null;
               if (sessionToken) logInfo(`exec_command: unassigned terminal capability issued for session ${output.processId}; chat identity remains unverified`);
@@ -948,7 +962,8 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
                   ]
                 : [];
             const notes = [
-              ...(sessionToken ? [`This unassigned terminal requires session_token=${sessionToken} with the same session_id in write_stdin. Keep this capability with the original command; it grants no chat identity.`] : []),
+              ...(!cacheSaved ? [TERMINAL_CACHE_WARNING] : []),
+              ...(sessionToken && output.processId !== null ? [`This unassigned terminal requires session_token=${sessionToken} with the same session_id in write_stdin. Keep this capability with the original command; it grants no chat identity.`] : []),
               ...commandNotes,
               ...mixedBatch,
               ...(benign
@@ -982,21 +997,50 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
               content: [{ type: 'text' as const, text: withExecNotes(responseText, notes) }],
               structuredContent: {
                 ...execCommandStructuredOutput(output),
-                ...(sessionToken ? { session_token: sessionToken } : {}),
+                ...(sessionToken && output.processId !== null ? { session_token: sessionToken } : {}),
+                ...(output.processId === null && unifiedExecManager.hasRetainedResult(processId)
+                  ? { terminal_result: { session_id: processId, ...(sessionToken ? { session_token: sessionToken } : {}) } } : {}),
                 ...(notes.length > 0 ? { supplemental_context: execNotesText(notes) } : {})
               }
             };
           } catch (error) {
             const detail = error instanceof UnifiedExecError ? error.debug() : friendlyError(error);
-            if (error instanceof UnifiedExecError && detail.includes('too many retained terminal sessions')) {
+            if (error instanceof UnifiedExecError && /too many (?:active|retained) terminal sessions|terminal client active limit/.test(detail)) {
               const capacity = unifiedExecManager.terminalCapacity();
               logWarn(`exec_command: terminal capacity exhausted; running=${capacity.running} exitedRetained=${capacity.exitedRetained} starting=${capacity.starting} limit=${capacity.limit}`);
-              return fail(`EXEC_TERMINAL_CAPACITY: ${detail}. Running=${capacity.running}, finished-but-retained=${capacity.exitedRetained}, starting=${capacity.starting}. Collect your original session_id/session_token with write_stdin; settings_read also reports aggregate terminalSessions. No command was started; do not replay an uncertain earlier command.`);
+              return fail(`EXEC_TERMINAL_CAPACITY: ${detail}. Active=${capacity.activeUsed}, running=${capacity.running}, draining=${capacity.draining}, completed-cache=${capacity.exitedRetained}, starting=${capacity.starting}. Completed output does not consume active capacity. Poll your existing session_id/session_token; terminal_sessions reports safe diagnostics. No command was started; do not replay an uncertain earlier command.`);
             }
             return fail(`exec_command failed for \`${shlexJoin(command)}\`: ${detail}`);
           }
         })
     );
+
+    reg.register('terminal_sessions', toolDeclaration('terminal_sessions', () => ({
+      description: 'Inspect aggregate terminal capacity or clean completed output only. Never kills a process. Expired/delivered cleanup is safe globally; selected unclaimed cleanup requires exact owner/token and discard_output=true. No foreign output or tokens are exposed.',
+      inputSchema: z.object({ action: z.enum(['status', 'cleanup']), scope: z.enum(['expired', 'delivered', 'selected']).optional(),
+        discard_output: z.boolean().optional(), sessions: z.array(z.object({ session_id: int32Number,
+          session_token: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional() }).strict()).max(128).optional() }).strict()
+    })), async input => reg.guarded('command', 'terminal_sessions', async () => {
+      const before = unifiedExecManager.terminalCapacity();
+      if (input.action === 'status') return ok(JSON.stringify(before));
+      const scope = input.scope ?? 'expired';
+      let ids: Set<number> | undefined, allowed = (_id: number) => true;
+      if (scope === 'selected') {
+        if (!input.discard_output || !input.sessions?.length)
+          return fail('TERMINAL_CLEANUP_CONFIRMATION_REQUIRED: selected completed output requires sessions and discard_output=true. No session was removed.');
+        const owner = await execSession('terminal_sessions');
+        const tokens = new Map(input.sessions.map(row => [row.session_id, row.session_token]));
+        ids = new Set(tokens.keys());
+        allowed = id => execOwnershipFailure(id, owner, { sessionToken: tokens.get(id),
+          allowUnattributed: getConfig().multiAgent.allowUnattributedCalls }) === null;
+        if ([...ids].some(id => !allowed(id))) return fail('TERMINAL_CLEANUP_OWNER_MISMATCH: every selected result requires its original owner/token. No session was removed.');
+      } else if (input.sessions?.length || input.discard_output)
+        return fail('TERMINAL_CLEANUP_SCOPE_INVALID: session selection belongs to selected scope. No session was removed.');
+      const result = unifiedExecManager.cleanupCompleted(scope, ids, allowed);
+      const cacheSaved = await flushTerminalResults();
+      logInfo(`terminal cleanup: mode=${scope} removed=${result.removed} skippedRunning=${result.skippedRunning} skippedBusy=${result.skippedBusy}`);
+      return ok(JSON.stringify({ ...result, capacity: unifiedExecManager.terminalCapacity(), processesKilled: 0, ...(cacheSaved ? {} : { warning: TERMINAL_CACHE_WARNING }) }));
+    }));
 
     reg.register(
       'write_stdin',
@@ -1038,6 +1082,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
           const custody = execOwnershipLease(input.session_id);
           try {
             const output = await unifiedExecManager.writeStdin({
+              publication: currentCall()?.publication,
               processId: input.session_id,
               input: input.chars ?? '',
               yieldTimeMs: input.yield_time_ms ?? DEFAULT_WRITE_STDIN_YIELD_TIME_MS,
@@ -1046,8 +1091,11 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
               current: () => custody() && execOwnershipFailure(input.session_id, asking,
                 { sessionToken: input.session_token, allowUnattributed: getConfig().multiAgent.allowUnattributedCalls }) === null
             });
-            if (output.processId === null) forgetExecOwner(input.session_id, custody);
-            else noteExecAttended(input.session_id);
+            let cacheSaved = true;
+            if (output.processId === null) {
+              if (!unifiedExecManager.hasRetainedResult(input.session_id)) forgetExecOwner(input.session_id, custody);
+              cacheSaved = await flushTerminalResults();
+            } else noteExecAttended(input.session_id);
             noteExec({
               ...(output.processId === null ? {} : { id: String(output.processId) }),
               running: output.processId !== null,
@@ -1060,8 +1108,11 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
             });
             logInfo(`tool write_stdin ${input.session_id} (${(input.chars ?? '').length} chars)`);
             return {
-              content: [{ type: 'text' as const, text: execCommandResponseText(output) }],
+              content: [{ type: 'text' as const, text: withExecNotes(execCommandResponseText(output), cacheSaved ? [] : [TERMINAL_CACHE_WARNING]) }],
               structuredContent: { ...execCommandStructuredOutput(output),
+                ...(!cacheSaved ? { supplemental_context: TERMINAL_CACHE_WARNING } : {}),
+                ...(output.processId === null && unifiedExecManager.hasRetainedResult(input.session_id)
+                  ? { terminal_result: { session_id: input.session_id, ...(input.session_token ? { session_token: input.session_token } : {}) } } : {}),
                 ...(output.processId !== null && execOwner(output.processId) === null && input.session_token
                   ? { session_token: input.session_token } : {}) }
             };

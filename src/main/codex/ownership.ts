@@ -15,7 +15,7 @@
  */
 
 import { requestCorrelation } from '../session/correlation.js';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { unifiedExecManager } from './manager.js';
 import type { BackgroundExecState, OutputPublication } from './unified-exec.js';
 import { truncateText } from './truncate.js';
@@ -44,7 +44,7 @@ export const UNATTENDED_EXEC_NOTICE_MS = 120_000;
 const NOTICES_PER_KIND = 3;
 
 /** The admitted launch's request retains custody until its exact page/session proof arrives. */
-interface ExecOwner { sessionId: string | null; requestId: string | null; sessionToken?: string }
+interface ExecOwner { sessionId: string | null; requestId: string | null; sessionTokenHash?: string }
 interface ExternalTerminalAccess { allowUnattributed?: boolean; sessionToken?: string }
 /** Owners, keyed by the process id `exec_command` handed back as `session_id`. */
 const owners = new Map<number, ExecOwner>();
@@ -108,7 +108,8 @@ export function noteExecOwner(processId: number | null, sessionId: string | null
   // an invented chat/session identity or access to another terminal.
   const sessionToken = resolved === null && requestId && options.allowUnattributed === true
     ? randomBytes(32).toString('base64url') : undefined;
-  owners.set(processId, { sessionId: resolved, requestId, ...(sessionToken ? { sessionToken } : {}) });
+  owners.set(processId, { sessionId: resolved, requestId,
+    ...(sessionToken ? { sessionTokenHash: createHash('sha256').update(sessionToken).digest('hex') } : {}) });
   attendedAt.set(processId, Date.now());
   return sessionToken ?? null;
 }
@@ -253,13 +254,13 @@ export function execOwnershipFailure(processId: number, sessionId: string | null
   const held = owners.get(processId)!;
   const owner = resolveExecOwner(held);
   if (owner === null) {
-    if (held.sessionToken) {
+    if (held.sessionTokenHash) {
       if (sessionId !== null) return 'unidentified';
       if (options.allowUnattributed !== true) return 'unidentified';
       if (!options.sessionToken) return 'token-required';
       const token = options.sessionToken;
-      return /^[A-Za-z0-9_-]{43}$/.test(token) && token.length === held.sessionToken.length &&
-        timingSafeEqual(Buffer.from(token), Buffer.from(held.sessionToken)) ? null : 'token-mismatch';
+      return /^[A-Za-z0-9_-]{43}$/.test(token) &&
+        timingSafeEqual(createHash('sha256').update(token).digest(), Buffer.from(held.sessionTokenHash, 'hex')) ? null : 'token-mismatch';
     }
     return held.requestId ? 'unidentified' : sessionId === null ? null : 'anonymous';
   }
@@ -279,3 +280,18 @@ export function backdateExecAttendanceForTests(processId: number, byMs: number):
   const since = attendedAt.get(processId);
   if (since !== undefined) attendedAt.set(processId, since - byMs);
 }
+
+// Same bounded durable result cache as the process manager. Bearer tokens are never persisted.
+unifiedExecManager.configureCustody({
+  released: id => forgetExecOwner(id),
+  snapshot: id => owners.get(id) ?? null,
+  restore: (id, value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const row = value as ExecOwner;
+    if (Object.keys(row).some(k => !['sessionId', 'requestId', 'sessionTokenHash'].includes(k)) ||
+        row.sessionId !== null && (typeof row.sessionId !== 'string' || !row.sessionId || row.sessionId.length > 256) ||
+        row.requestId !== null && (typeof row.requestId !== 'string' || !row.requestId || row.requestId.length > 1024) ||
+        row.sessionTokenHash !== undefined && (typeof row.sessionTokenHash !== 'string' || !/^[a-f0-9]{64}$/.test(row.sessionTokenHash))) return false;
+    owners.set(id, { ...row }); attendedAt.set(id, Date.now()); return true;
+  }
+});

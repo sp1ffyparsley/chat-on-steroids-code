@@ -261,6 +261,7 @@ function quoteWindowsArgument(argument: string): string {
  * never see the same bytes twice and never silently drop them either.
  */
 class UnifiedExecProcess {
+  private stateObserver?: () => void;
   private readonly startedAt = Date.now();
   private resolveCompletion!: (value: ProcessCompletion) => void;
   readonly completion = new Promise<ProcessCompletion>(resolve => { this.resolveCompletion = resolve; });
@@ -438,6 +439,7 @@ class UnifiedExecProcess {
     if (this.batchDisplay) this.displayBuffer!.pushChunk(this.batchDisplay.push(Buffer.alloc(0), true));
     this.outputClosed = true;
     this.outputClosedNotify.notifyWaiters();
+    this.stateObserver?.();
   }
 
   private signalExit(exitCode: number | null): void {
@@ -446,6 +448,7 @@ class UnifiedExecProcess {
       this.exit = exitCode;
       const completedAt = Date.now();
       this.resolveCompletion({ exitCode, completedAt, durationMs: Math.max(0, completedAt - this.startedAt) });
+      this.stateObserver?.();
     }
     if (!this.cancelled) {
       this.cancelled = true;
@@ -465,6 +468,24 @@ class UnifiedExecProcess {
   completedOutput(): Buffer | null {
     return this.hasExited() && this.outputClosed
       ? (this.displayBuffer ?? this.buffer).toBytesWithOmissionMarker() : null;
+  }
+
+  completedBufferBytes(): number {
+    const encodedBytes = (buffer: HeadTailBuffer) => buffer.retainedBytes() +
+      (buffer.omittedBytes() ? 2 + Buffer.byteLength(formatOutputOmissionMarker(buffer.omittedBytes()), 'utf8') : 0);
+    return encodedBytes(this.buffer) + (this.displayBuffer ? encodedBytes(this.displayBuffer) : 0);
+  }
+
+  observeState(observer: () => void): void { this.stateObserver = observer; }
+
+  static restoreCompleted(output: Buffer, exitCode: number | null): UnifiedExecProcess {
+    const process = new UnifiedExecProcess(false, 0);
+    // The saved bytes may already include the bounded omission marker; do not truncate it twice.
+    process.buffer = new HeadTailBuffer(Math.max(output.length, 1024 * 1024));
+    process.buffer.pushChunk(output);
+    process.signalExit(exitCode);
+    process.closeOutput();
+    return process;
   }
 
   hasExited(): boolean {
@@ -554,6 +575,8 @@ export interface ProcessCompletion {
 }
 
 export interface ExecCommandToolOutput {
+  /** Retained result handle; unlike processId, this does not imply a running child. */
+  resultProcessId?: number;
   /** Exact process lifetime for recording; never serialized into the MCP response. */
   completion?: Promise<ProcessCompletion>;
   chunkId: string;
@@ -625,6 +648,8 @@ export function execCommandStructuredOutput(output: ExecCommandToolOutput): Reco
 // --------------------------------------------------------------------------- manager
 
 export interface ExecCommandRequest {
+  clientKey?: string;
+  publication?: OutputPublication;
   batchMarker?: string;
   command: string[];
   shellType: ShellType;
@@ -641,6 +666,7 @@ export interface ExecCommandRequest {
 }
 
 export interface WriteStdinRequest {
+  publication?: OutputPublication;
   /** Recheck the caller's existing custody after waiting for the draining lock. */
   current?: () => boolean;
   processId: number;
@@ -666,6 +692,11 @@ interface ProcessEntry {
   hookCommand: string;
   tty: boolean;
   initialExecCommandActive: boolean;
+  clientKey?: string;
+  completedAt?: number;
+  deliveredAt?: number;
+  pendingReply?: { publication: OutputPublication; output: ExecCommandToolOutput };
+  finalReply?: ExecCommandToolOutput;
   /** Cursor into this process's own completed buffer; offers never consume bytes. */
   delivery?: { offset: number; offer?: { end: number; publication: OutputPublication } };
 }
@@ -691,28 +722,262 @@ export interface BackgroundExecState {
   exitedUnread: Array<{ processId: number; exitCode: number | null }>;
 }
 
+export const TERMINAL_RETENTION = Object.freeze({ unclaimedMs: 60 * 60_000, deliveredMs: 120_000,
+  maxEntries: 128, maxBytes: 16 * 1024 * 1024, maxPerClient: 16, maxActivePerClient: 8 });
+export interface TerminalRetentionOptions {
+  now?: () => number;
+  retention?: Partial<{ [K in keyof typeof TERMINAL_RETENTION]: number }>;
+}
+interface TerminalCustodyHooks {
+  released?: (id: number) => void;
+  snapshot?: (id: number) => unknown;
+  restore?: (id: number, value: unknown) => boolean;
+  changed?: () => void;
+}
+export interface TerminalCacheSnapshot {
+  version: 1;
+  savedAt: number;
+  results: Array<{ id: number; clientKey?: string; completedAt: number; deliveredAt?: number;
+    remaining: string; exitCode: number | null; reply?: { text: string; display?: string; chunkId: string; wallTimeMs: number;
+      originalTokenCount: number | null; outputOmittedBytes: number | null; finished: boolean }; custody: unknown }>;
+}
+
 export class UnifiedExecProcessManager {
   private readonly processes = new Map<number, ProcessEntry>();
   private readonly reservedProcessIds = new Set<number>();
+  private readonly reservationClients = new Map<number, string>();
+  private readonly now: () => number;
+  private readonly retention: { [K in keyof typeof TERMINAL_RETENTION]: number };
+  private custody: TerminalCustodyHooks = {};
+  private expirationTimer?: ReturnType<typeof setInterval>;
+  private sweeping = false;
+  private expiredCompleted = 0;
+  private evictedCompleted = 0;
+  private reclaimedDelivered = 0;
+  private recoveredCompleted = 0;
   private readonly maxWriteStdinYieldTimeMs: number;
 
-  constructor(maxWriteStdinYieldTimeMs: number) {
+  constructor(maxWriteStdinYieldTimeMs: number, options: TerminalRetentionOptions = {}) {
     this.maxWriteStdinYieldTimeMs = Math.max(maxWriteStdinYieldTimeMs, MIN_EMPTY_YIELD_TIME_MS);
+    this.now = options.now ?? Date.now;
+    this.retention = { ...TERMINAL_RETENTION, ...options.retention };
+    if (Object.values(this.retention).some(n => !Number.isSafeInteger(n) || n < 1)) throw new Error('Invalid terminal retention bounds');
+  }
+
+  configureCustody(hooks: TerminalCustodyHooks): void { this.custody = { ...this.custody, ...hooks }; }
+  hasRetainedResult(id: number): boolean { return this.processes.has(id); }
+
+  private retainedBytes(entry: ProcessEntry): number {
+    const bytes = (output?: ExecCommandToolOutput) => output ? output.rawOutput.length +
+      (output.displayOutput && output.displayOutput !== output.rawOutput ? output.displayOutput.length : 0) : 0;
+    return entry.process.completedBufferBytes() + bytes(entry.pendingReply?.output) +
+      (entry.finalReply !== entry.pendingReply?.output ? bytes(entry.finalReply) : 0);
+  }
+
+  /** Completed cache admission is separate from live process capacity. Never waits on an active reader. */
+  cleanupCompleted(mode: 'expired' | 'delivered' | 'selected' = 'expired', ids?: ReadonlySet<number>,
+    stillAllowed: (id: number) => boolean = () => true): { removed: number; skippedRunning: number; skippedBusy: number } {
+    let removed = 0, skippedRunning = 0, skippedBusy = 0;
+    const now = this.now();
+    for (const [id, entry] of this.processes) {
+      if (ids && !ids.has(id)) continue;
+      if (!entry.process.hasExited() || !entry.process.outputClosed || entry.initialExecCommandActive) { skippedRunning++; continue; }
+      const unlock = entry.process.interactionLock.tryLock();
+      if (!unlock) { skippedBusy++; continue; }
+      try {
+        if (this.processes.get(id) !== entry || !stillAllowed(id)) continue;
+        entry.completedAt ??= now;
+        // A draining reader and an initial response retain their slots until this exact check.
+        this.reservedProcessIds.delete(id); this.reservationClients.delete(id);
+        const pub = entry.pendingReply?.publication;
+        if (pub?.completedAt !== null && pub?.completedAt !== undefined && !pub.failed) {
+          if (entry.pendingReply?.output.processId === null) entry.deliveredAt ??= pub.completedAt;
+          entry.pendingReply = undefined;
+        }
+        const expired = now - (entry.deliveredAt ?? entry.completedAt) >=
+          (entry.deliveredAt === undefined ? this.retention.unclaimedMs : this.retention.deliveredMs);
+        if (mode === 'selected' || expired || mode === 'delivered' && entry.deliveredAt !== undefined) {
+          if (entry.deliveredAt !== undefined) this.reclaimedDelivered++;
+          else if (expired) this.expiredCompleted++;
+          this.releaseProcessId(id); removed++;
+        }
+      } finally { unlock(); }
+    }
+    return { removed, skippedRunning, skippedBusy };
+  }
+
+  private sweepCompleted(): void {
+    if (this.sweeping) return;
+    this.sweeping = true;
+    try {
+      this.cleanupCompleted();
+      const rows = [...this.processes.values()].filter(e => e.completedAt !== undefined);
+      // Delivered output is disposable first. Within each class the oldest completed result goes first.
+      rows.sort((a, b) => Number(b.deliveredAt !== undefined) - Number(a.deliveredAt !== undefined) || a.completedAt! - b.completedAt!);
+      let bytes = rows.reduce((n, e) => n + this.retainedBytes(e), 0), count = rows.length;
+      const perClient = new Map<string, number>();
+      for (const e of rows) if (e.clientKey) perClient.set(e.clientKey, (perClient.get(e.clientKey) ?? 0) + 1);
+      for (const entry of rows) {
+        const overClient = !!entry.clientKey && perClient.get(entry.clientKey)! > this.retention.maxPerClient;
+        if (count <= this.retention.maxEntries && bytes <= this.retention.maxBytes && !overClient) continue;
+        const size = this.retainedBytes(entry);
+        const result = this.cleanupCompleted('selected', new Set([entry.processId]));
+        if (result.removed) {
+          this.evictedCompleted++; count--; bytes -= size;
+          if (entry.clientKey) perClient.set(entry.clientKey, perClient.get(entry.clientKey)! - 1);
+        }
+      }
+      if (count && !this.expirationTimer) {
+        this.expirationTimer = setInterval(() => { this.sweepCompleted(); this.custody.changed?.(); }, 60_000);
+        this.expirationTimer.unref();
+      } else if (!count && this.expirationTimer) {
+        clearInterval(this.expirationTimer); this.expirationTimer = undefined;
+      }
+    } finally { this.sweeping = false; }
+  }
+
+  private publishReply(entry: ProcessEntry, output: ExecCommandToolOutput, pub?: OutputPublication): ExecCommandToolOutput {
+    if (!pub) {
+      if (output.processId === null) this.releaseProcessId(entry.processId);
+      return output;
+    }
+    let retained = output;
+    if (entry.pendingReply?.publication === pub) {
+      const previous = entry.pendingReply.output, combined = new HeadTailBuffer();
+      combined.pushChunk(previous.rawOutput); combined.pushChunk(output.rawOutput);
+      let display: HeadTailBuffer | undefined;
+      if (previous.displayOutput || output.displayOutput) {
+        display = new HeadTailBuffer();
+        display.pushChunk(previous.displayOutput ?? previous.rawOutput); display.pushChunk(output.displayOutput ?? output.rawOutput);
+      }
+      retained = { ...output, rawOutput: combined.toBytesWithOmissionMarker(),
+        displayOutput: display?.toBytesWithOmissionMarker(),
+        originalTokenCount: approxTokensFromByteCount((display ?? combined).totalBytes()),
+        outputOmittedBytes: (display ?? combined).omittedBytes() || output.outputOmittedBytes };
+    }
+    entry.pendingReply = { publication: pub, output: retained };
+    if (output.processId === null) entry.finalReply = retained;
+    this.custody.changed?.();
+    return output;
+  }
+
+  private replayReply(entry: ProcessEntry, pub?: OutputPublication): ExecCommandToolOutput | null {
+    const pending = entry.pendingReply;
+    if (pending && pending.publication.completedAt !== null && !pending.publication.failed) {
+      if (entry.completedAt !== undefined && pending.output.processId === null) entry.deliveredAt ??= pending.publication.completedAt;
+      entry.pendingReply = undefined;
+    } else if (pending && pending.publication !== pub) {
+      if (pub) entry.pendingReply = { ...pending, publication: pub };
+      return pending.output;
+    }
+    if (entry.finalReply) {
+      if (pub) entry.pendingReply = { publication: pub, output: entry.finalReply };
+      return entry.finalReply;
+    }
+    return null;
+  }
+
+  snapshotCompleted(): TerminalCacheSnapshot {
+    this.sweepCompleted();
+    return { version: 1, savedAt: this.now(), results: [...this.processes.values()]
+      .filter(e => e.completedAt !== undefined && !e.initialExecCommandActive && e.process.outputClosed)
+      .map(e => {
+        const reply = e.pendingReply?.output ?? e.finalReply;
+        return { id: e.processId, clientKey: e.clientKey, completedAt: e.completedAt!, deliveredAt: e.deliveredAt,
+          remaining: e.process.completedOutput()!.subarray(e.delivery?.offset ?? 0).toString('base64'), exitCode: e.process.exitCode(),
+          ...(reply ? { reply: { text: reply.rawOutput.toString('base64'),
+            ...(reply.displayOutput ? { display: reply.displayOutput.toString('base64') } : {}),
+            chunkId: reply.chunkId, wallTimeMs: reply.wallTimeMs, originalTokenCount: reply.originalTokenCount,
+            outputOmittedBytes: reply.outputOmittedBytes, finished: reply.processId === null } } : {}), custody: this.custody.snapshot?.(e.processId) ?? null };
+      }) };
+  }
+
+  /** Restore completed output only. This never recreates a process or replays a command. */
+  restoreCompleted(snapshot: unknown): number {
+    if (!snapshot || typeof snapshot !== 'object') throw new Error('Invalid terminal result snapshot');
+    const value = snapshot as TerminalCacheSnapshot;
+    if (value.version !== 1 || !Number.isSafeInteger(value.savedAt) || value.savedAt > this.now() + 300_000 ||
+        !Array.isArray(value.results) || value.results.length > this.retention.maxEntries)
+      throw new Error('Invalid terminal result snapshot bounds');
+    const decode = (text: unknown): Buffer => {
+      if (typeof text !== 'string' || text.length > 3_000_000 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(text))
+        throw new Error('Invalid retained terminal output');
+      return Buffer.from(text, 'base64');
+    };
+    const prepared: Array<[number, ProcessEntry, unknown]> = [];
+    const ids = new Set<number>(); let bytes = 0;
+    for (const row of value.results) {
+      if (!row || !Number.isInteger(row.id) || row.id < 1000 || row.id >= 100000 || ids.has(row.id) ||
+          this.processes.has(row.id) || this.reservedProcessIds.has(row.id) ||
+          !Number.isSafeInteger(row.completedAt) || row.completedAt < 1 || row.completedAt > value.savedAt ||
+          (row.deliveredAt !== undefined && (!Number.isSafeInteger(row.deliveredAt) || row.deliveredAt < 1 || row.deliveredAt > value.savedAt)) ||
+          (row.clientKey !== undefined && (typeof row.clientKey !== 'string' || row.clientKey.length > 256)) ||
+          (row.exitCode !== null && !Number.isInteger(row.exitCode))) throw new Error('Invalid terminal result identity');
+      ids.add(row.id);
+      const output = decode(row.remaining), replyBytes = row.reply ? decode(row.reply.text) : null;
+      const displayBytes = row.reply?.display === undefined ? null : decode(row.reply.display);
+      bytes += output.length + (replyBytes?.length ?? 0) + (displayBytes?.length ?? 0);
+      if (bytes > this.retention.maxBytes) throw new Error('Terminal snapshot exceeds retained byte limit');
+      const expiry = row.deliveredAt === undefined ? this.retention.unclaimedMs : this.retention.deliveredMs;
+      if (this.now() - (row.deliveredAt ?? row.completedAt) >= expiry) continue;
+      const entry: ProcessEntry = { processId: row.id, process: UnifiedExecProcess.restoreCompleted(output, row.exitCode),
+        initialExecCommandActive: false, tty: false, cwd: '', hookCommand: 'recovered completed terminal',
+        clientKey: row.clientKey, completedAt: row.completedAt, deliveredAt: row.deliveredAt };
+      if (row.reply && replyBytes) {
+        if (typeof row.reply.finished !== 'boolean' || typeof row.reply.chunkId !== 'string' || row.reply.chunkId.length > 64 ||
+            !Number.isFinite(row.reply.wallTimeMs) || row.reply.wallTimeMs < 0 ||
+            (row.reply.originalTokenCount !== null && (!Number.isSafeInteger(row.reply.originalTokenCount) || row.reply.originalTokenCount < 0)) ||
+            (row.reply.outputOmittedBytes !== null && (!Number.isSafeInteger(row.reply.outputOmittedBytes) || row.reply.outputOmittedBytes < 0)))
+          throw new Error('Invalid terminal replay metadata');
+        const reply: ExecCommandToolOutput = { resultProcessId: row.id, processId: row.reply.finished ? null : row.id,
+          exitCode: row.reply.finished ? row.exitCode : null,
+          chunkId: row.reply.chunkId, wallTimeMs: row.reply.wallTimeMs, rawOutput: replyBytes,
+          ...(displayBytes ? { displayOutput: displayBytes } : {}),
+          originalTokenCount: row.reply.originalTokenCount, outputOmittedBytes: row.reply.outputOmittedBytes,
+          maxOutputTokens: undefined, truncationPolicy: { kind: 'tokens', tokens: 262144 } };
+        if (row.reply.finished) {
+          entry.finalReply = reply;
+          entry.pendingReply = { publication: { completedAt: null, failed: true }, output: reply };
+        } else {
+          // A lost running reply and its completed tail become one completed recovery
+          // buffer. The exact owner can poll OR receive ordinary background pages;
+          // neither path may retire the tail while a separate prefix stays stranded.
+          entry.process = UnifiedExecProcess.restoreCompleted(Buffer.concat([displayBytes ?? replyBytes, output]), row.exitCode);
+        }
+      }
+      prepared.push([row.id, entry, row.custody]);
+    }
+    let restored = 0;
+    for (const [id, entry, custody] of prepared) {
+      if (!this.custody.restore?.(id, custody)) continue;
+      this.processes.set(id, entry); restored++;
+    }
+    this.recoveredCompleted += restored; this.sweepCompleted();
+    return restored;
   }
 
   /** `rand::rng().random_range(1_000..100_000)`, retried against the reservations. */
-  allocateProcessId(): number {
+  allocateProcessId(clientKey?: string): number {
+    this.sweepCompleted();
+    if (this.reservedProcessIds.size >= MAX_UNIFIED_EXEC_PROCESSES)
+      throw UnifiedExecError.createProcess(`too many active terminal sessions (limit ${MAX_UNIFIED_EXEC_PROCESSES}); finished output does not consume active capacity`);
+    if (clientKey && [...this.reservationClients.values()].filter(key => key === clientKey).length >= this.retention.maxActivePerClient)
+      throw UnifiedExecError.createProcess(`terminal client active limit ${this.retention.maxActivePerClient} reached; other clients retain their capacity`);
     for (;;) {
       const processId = 1_000 + Math.floor(Math.random() * (100_000 - 1_000));
-      if (this.reservedProcessIds.has(processId)) continue;
+      if (this.reservedProcessIds.has(processId) || this.processes.has(processId)) continue;
       this.reservedProcessIds.add(processId);
+      if (clientKey) this.reservationClients.set(processId, clientKey);
       return processId;
     }
   }
 
   releaseProcessId(processId: number): void {
     this.reservedProcessIds.delete(processId);
+    this.reservationClients.delete(processId);
     this.processes.delete(processId);
+    this.custody.released?.(processId);
+    this.custody.changed?.();
   }
 
   async execCommand(request: ExecCommandRequest): Promise<ExecCommandToolOutput> {
@@ -747,16 +1012,19 @@ export class UnifiedExecProcessManager {
     const wallStart = performance.now();
     // Stored before the yield wait, so interrupting the call cannot drop the session.
     const processStartedAlive = !process.hasExited() && process.exitCode() === null;
-    if (processStartedAlive) {
-      this.processes.set(request.processId, {
+    const entry: ProcessEntry = {
         process,
         processId: request.processId,
         cwd: request.displayCwd,
         hookCommand: request.hookCommand,
         tty: request.tty,
-        initialExecCommandActive: true
-      });
-    }
+        initialExecCommandActive: true,
+        clientKey: request.clientKey ?? this.reservationClients.get(request.processId)
+    };
+    this.processes.set(request.processId, entry);
+    process.observeState(() => queueMicrotask(() => {
+      this.sweepCompleted(); this.custody.changed?.();
+    }));
 
     const deadline = start + clampYieldTime(request.yieldTimeMs);
     const collected = await collectOutputUntilDeadline(process, deadline);
@@ -776,7 +1044,7 @@ export class UnifiedExecProcessManager {
 
     let responseProcessId: number | null;
     let exitCode: number | null;
-    if (processStartedAlive) {
+    if (processStartedAlive || !process.outputClosed) {
       const status = this.refreshProcessState(request.processId);
       if (status.kind === 'alive') {
         responseProcessId = status.processId;
@@ -788,12 +1056,12 @@ export class UnifiedExecProcessManager {
         throw UnifiedExecError.unknownProcessId(request.processId);
       }
     } else {
-      this.releaseProcessId(request.processId);
       responseProcessId = null;
       exitCode = process.exitCode();
     }
 
     const response = {
+      resultProcessId: request.processId,
       ...(responseProcessId === null ? {} : { completion: process.completion }),
       chunkId,
       wallTimeMs,
@@ -806,14 +1074,14 @@ export class UnifiedExecProcessManager {
       originalTokenCount,
       outputOmittedBytes
     };
-    if (responseProcessId !== null) {
-      const entry = this.processes.get(request.processId);
-      if (entry?.process === process) entry.initialExecCommandActive = false;
-    }
+    entry.initialExecCommandActive = false;
+    this.publishReply(entry, response, request.publication);
+    this.sweepCompleted();
     return response;
   }
 
   async writeStdin(request: WriteStdinRequest): Promise<ExecCommandToolOutput> {
+    this.sweepCompleted();
     const entry = this.processes.get(request.processId);
     if (!entry) throw UnifiedExecError.unknownProcessId(request.processId);
     const locked = entry.process;
@@ -828,6 +1096,16 @@ export class UnifiedExecProcessManager {
       if (current.initialExecCommandActive && request.input !== INTERRUPT)
         throw new Error('EXEC_SESSION_STARTING: the original exec_command is still collecting its initial response; wait for that response before polling. Nothing was read or written.');
       const { process, tty } = { process: current.process, tty: current.tty };
+
+      if (process.hasExited() && request.input !== '')
+        throw new Error('Terminal process is completed; no input was written. Poll its retained result with empty chars.');
+      if (request.input === '') {
+        const replay = this.replayReply(current, request.publication);
+        if (replay) return replay;
+      } else if (current.pendingReply && current.pendingReply.publication !== request.publication &&
+          (current.pendingReply.publication.failed || current.pendingReply.publication.completedAt === null)) {
+        throw new Error('EXEC_RESULT_PENDING: collect the prior terminal response with an empty poll before sending more input.');
+      }
 
       let statusAfterWrite: ProcessStatus | null = null;
       if (request.input !== '') {
@@ -909,7 +1187,8 @@ export class UnifiedExecProcessManager {
         throw UnifiedExecError.unknownProcessId(request.processId);
       }
 
-      return {
+      const response = {
+        resultProcessId: request.processId,
         chunkId,
         wallTimeMs,
         rawOutput,
@@ -921,25 +1200,48 @@ export class UnifiedExecProcessManager {
         originalTokenCount,
         outputOmittedBytes
       };
+      return this.publishReply(current, response, request.publication);
     } finally {
       release();
+      this.sweepCompleted();
     }
   }
 
   /** Aggregate admission pressure; no command, output, process ID or ownership is exposed. */
-  terminalCapacity(): { limit: number; retained: number; running: number; exitedRetained: number; starting: number } {
-    let running = 0, exitedRetained = 0;
+  terminalCapacity() {
+    this.sweepCompleted();
+    let running = 0, exitedRetained = 0, draining = 0, completedBytes = 0;
     for (const entry of this.processes.values()) {
-      if (entry.process.hasExited()) exitedRetained++; else running++;
+      if (entry.completedAt !== undefined) { exitedRetained++; completedBytes += this.retainedBytes(entry); }
+      else if (entry.process.hasExited() && !entry.process.outputClosed) draining++;
+      else running++;
     }
-    return { limit: MAX_UNIFIED_EXEC_PROCESSES, retained: this.reservedProcessIds.size,
-      running, exitedRetained, starting: Math.max(0, this.reservedProcessIds.size - this.processes.size) };
+    return { limit: MAX_UNIFIED_EXEC_PROCESSES, retained: this.processes.size +
+      [...this.reservedProcessIds].filter(id => !this.processes.has(id)).length,
+      activeUsed: this.reservedProcessIds.size, running, draining, exitedRetained,
+      admissionUsed: this.reservedProcessIds.size,
+      admissionAvailable: Math.max(0, MAX_UNIFIED_EXEC_PROCESSES - this.reservedProcessIds.size),
+      starting: [...this.reservedProcessIds].filter(id => !this.processes.has(id)).length,
+      completedBytes, completedLimit: this.retention.maxEntries, completedBytesLimit: this.retention.maxBytes,
+      maxActivePerClient: this.retention.maxActivePerClient, maxCompletedPerClient: this.retention.maxPerClient,
+      unclaimedRetentionMs: this.retention.unclaimedMs, deliveredRetentionMs: this.retention.deliveredMs,
+      expiredCompleted: this.expiredCompleted, evictedCompleted: this.evictedCompleted,
+      reclaimedDelivered: this.reclaimedDelivered, recoveredCompleted: this.recoveredCompleted };
+  }
+
+  /** Compatibility projection for the incumbent capacity diagnostics. Same admission owner. */
+  capacitySnapshot() {
+    const capacity = this.terminalCapacity();
+    return { limit: capacity.limit, retained: capacity.retained, running: capacity.running,
+      completedUnread: capacity.exitedRetained, launchingOrUninserted: capacity.starting,
+      initialCallsActive: [...this.processes.values()].filter(entry => entry.initialExecCommandActive).length,
+      admissionUsed: capacity.activeUsed, admissionAvailable: capacity.admissionAvailable };
   }
 
   /** Live sessions, oldest id first. */
   listProcesses(): BackgroundTerminalInfo[] {
     return [...this.processes.values()]
-      .filter((entry) => !entry.process.hasExited())
+      .filter((entry) => !entry.process.hasExited() || !entry.process.outputClosed)
       .sort((left, right) => left.processId - right.processId)
       .map((entry) => ({
         processId: entry.processId,
@@ -957,7 +1259,11 @@ export class UnifiedExecProcessManager {
     for (const entry of this.processes.values()) {
       if (entry.initialExecCommandActive) continue;
       if (!processIds.has(entry.processId)) continue;
-      if (entry.process.hasExited()) {
+      if (entry.process.hasExited() && entry.process.outputClosed) {
+        // An explicit response owns these bytes. A background empty-page ACK must not
+        // delete an uncertain poll's replay or charge its delivered cache as unread work.
+        if (entry.finalReply || entry.pendingReply &&
+            (entry.pendingReply.publication.failed || entry.pendingReply.publication.completedAt === null)) continue;
         exitedUnread.push({ processId: entry.processId, exitCode: entry.process.exitCode() });
       } else {
         running.push(entry.processId);
@@ -981,7 +1287,8 @@ export class UnifiedExecProcessManager {
       if (id === except) continue; // Explicit polling still owns its normal result path.
       const entry = this.processes.get(id);
       if (!entry?.delivery?.offer) continue;
-      const release = await entry.process.interactionLock.lock();
+      const release = entry.process.interactionLock.tryLock();
+      if (!release) continue;
       try {
         if (this.processes.get(id) !== entry) continue;
         const offered = entry.delivery?.offer;
@@ -1010,7 +1317,8 @@ export class UnifiedExecProcessManager {
     for (const { processId } of this.backgroundState(processIds).exitedUnread) {
       const entry = this.processes.get(processId);
       if (!entry) continue;
-      const release = await entry.process.interactionLock.lock();
+      const release = entry.process.interactionLock.tryLock();
+      if (!release) continue;
       try {
         if (this.processes.get(processId) !== entry || entry.initialExecCommandActive) continue;
         const output = entry.process.completedOutput();
@@ -1083,10 +1391,8 @@ export class UnifiedExecProcessManager {
     return terminated;
   }
 
-  async terminateAllProcesses(): Promise<void> {
+  async terminateAllProcesses(preserveCompleted = false): Promise<void> {
     const entries = [...this.processes.values()];
-    this.processes.clear();
-    this.reservedProcessIds.clear();
     // App shutdown is the caller that matters, so this has to behave like `terminateProcess`
     // does for one id: skip the sessions that are already gone rather than spending a taskkill
     // on each. Awaiting them one after another also made a quit cost the *sum* of every
@@ -1094,31 +1400,41 @@ export class UnifiedExecProcessManager {
     await Promise.allSettled(
       entries.filter((entry) => !entry.process.hasExited()).map((entry) => entry.process.terminate())
     );
+    if (preserveCompleted) {
+      this.sweepCompleted(); this.custody.changed?.();
+    } else {
+      for (const id of [...this.processes.keys(), ...this.reservedProcessIds]) this.releaseProcessId(id);
+      if (this.expirationTimer) clearInterval(this.expirationTimer);
+      this.expirationTimer = undefined;
+    }
   }
 
   private refreshProcessState(processId: number): ProcessStatus {
     const entry = this.processes.get(processId);
     if (!entry) return { kind: 'unknown' };
     const exitCode = entry.process.exitCode();
-    if (entry.process.hasExited()) {
-      this.releaseProcessId(processId);
+    if (entry.process.hasExited() && entry.process.outputClosed) {
       return { kind: 'exited', exitCode };
     }
-    return { kind: 'alive', exitCode, processId: entry.processId };
+    return { kind: 'alive', exitCode: entry.process.hasExited() ? null : exitCode, processId: entry.processId };
   }
 
   /** Capacity is admission, never garbage collection: every retained row still owes output. */
   private ensureProcessCapacity(requestProcessId: number): void {
+    this.sweepCompleted();
     // Reservations participate in the hard cap, so concurrent exec_command calls cannot
     // each observe one free slot and collectively insert a 65th live process.
     if (this.reservedProcessIds.size > MAX_UNIFIED_EXEC_PROCESSES) {
       throw UnifiedExecError.createProcess(
-        `too many retained terminal sessions (limit ${MAX_UNIFIED_EXEC_PROCESSES}); drain a returned session with write_stdin before starting another`
+        `too many active terminal sessions (limit ${MAX_UNIFIED_EXEC_PROCESSES}); finished output does not consume active capacity`
       );
     }
     if (!this.reservedProcessIds.has(requestProcessId)) {
       throw UnifiedExecError.createProcess('terminal session reservation was lost before launch');
     }
+    const client = this.reservationClients.get(requestProcessId);
+    if (client && [...this.reservationClients.values()].filter(key => key === client).length > this.retention.maxActivePerClient)
+      throw UnifiedExecError.createProcess(`terminal client active limit ${this.retention.maxActivePerClient} reached; other clients retain their capacity`);
   }
 }
 

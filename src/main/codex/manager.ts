@@ -14,8 +14,35 @@ import {
   UNIFIED_EXEC_OUTPUT_MAX_TOKENS
 } from './unified-exec-constants.js';
 import { UnifiedExecProcessManager } from './unified-exec.js';
+import { durableStoreReady, readDurableStrict, writeDurableNow, writeDurableSnapshotSoon } from '../durable.js';
+import { logInfo, logWarn } from '../logger.js';
 
 export const unifiedExecManager = new UnifiedExecProcessManager(DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS);
+const TERMINAL_RESULTS_STATE = 'terminal-results';
+unifiedExecManager.configureCustody({ changed: () => {
+  if (durableStoreReady()) writeDurableSnapshotSoon(TERMINAL_RESULTS_STATE, () => unifiedExecManager.snapshotCompleted());
+} });
+
+export async function restoreTerminalResults(): Promise<void> {
+  const limits = unifiedExecManager.terminalCapacity();
+  logInfo(`terminal lifecycle: activeLimit=${limits.limit} perClient=${limits.maxActivePerClient} completedLimit=${limits.completedLimit} completedBytes=${limits.completedBytesLimit} unclaimedMs=${limits.unclaimedRetentionMs} deliveredMs=${limits.deliveredRetentionMs}; cache=account state/terminal-results.json`);
+  try {
+    const snapshot = await readDurableStrict(TERMINAL_RESULTS_STATE, 24 * 1024 * 1024);
+    if (snapshot) logInfo(`terminal results: restored ${unifiedExecManager.restoreCompleted(snapshot)} completed sessions; no command replayed`);
+  } catch {
+    logWarn('terminal results: bounded saved cache could not be verified; file retained, no command replayed. Check terminal-results state and disk access.');
+  }
+}
+export const TERMINAL_CACHE_WARNING = 'Terminal result remains in memory but its recovery file could not be saved. Keep this response and original session handle; do not rerun the command. Check disk space and terminal-results state access before restarting.';
+export async function flushTerminalResults(): Promise<boolean> {
+  try {
+    if (durableStoreReady()) await writeDurableNow(TERMINAL_RESULTS_STATE, unifiedExecManager.snapshotCompleted());
+    return true;
+  } catch {
+    logWarn(TERMINAL_CACHE_WARNING);
+    return false;
+  }
+}
 
 /**
  * The budget for output the model was given no way to ask about.

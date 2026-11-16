@@ -111,11 +111,9 @@ it('refuses new capacity without evicting a completed unread result', async () =
       { processId: unreadId, exitCode: 7 }
     ]);
 
-    while (fillerIds.length < MAX_UNIFIED_EXEC_PROCESSES - 1) fillerIds.push(manager.allocateProcessId());
-    const refusedId = manager.allocateProcessId();
-    await expect(manager.execCommand(request(refusedId, "console.log('must-not-run')", 100))).rejects.toThrow(
-      `too many retained terminal sessions (limit ${MAX_UNIFIED_EXEC_PROCESSES})`
-    );
+    expect(manager.terminalCapacity().activeUsed).toBe(0);
+    while (fillerIds.length < MAX_UNIFIED_EXEC_PROCESSES) fillerIds.push(manager.allocateProcessId());
+    expect(() => manager.allocateProcessId()).toThrow(`too many active terminal sessions (limit ${MAX_UNIFIED_EXEC_PROCESSES})`);
 
     expect(manager.backgroundState(new Set([unreadId])).exitedUnread).toEqual([
       { processId: unreadId, exitCode: 7 }
@@ -134,3 +132,43 @@ it('refuses new capacity without evicting a completed unread result', async () =
     await manager.terminateAllProcesses();
   }
 });
+
+it('bounds completed manager output after 200 concurrent short commands without consuming active capacity', async () => {
+  const manager = new UnifiedExecProcessManager(DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS);
+  const retained = new Set<number>();
+  try {
+    for (let batch = 0; batch < 20; batch++) {
+      const ids = Array.from({ length: 10 }, () => manager.allocateProcessId());
+      const results = await Promise.all(ids.map((processId) => manager.execCommand({
+        command: [process.execPath, '-e', `setTimeout(() => { console.log('batch-${batch}'); process.exit(0); }, 800)`],
+        shellType: process.platform === 'win32' ? 'powershell' : 'bash',
+        hookCommand: `shared agent ${batch % 5} command ${batch}`,
+        processId,
+        yieldTimeMs: 250,
+        maxOutputTokens: undefined,
+        truncationPolicy,
+        cwd: process.cwd(),
+        displayCwd: process.cwd(),
+        env: applyUnifiedExecEnv(process.env),
+        tty: false
+      })));
+      for (let i = 0; i < results.length; i++) {
+        if (results[i]?.processId !== null) retained.add(ids[i]!);
+      }
+      await expect.poll(() => manager.backgroundState(retained).running.length, { timeout: 15_000 }).toBe(0);
+      const snap = manager.capacitySnapshot();
+      expect(snap.running).toBe(0);
+      expect(snap.admissionUsed).toBe(0);
+      expect(snap.admissionAvailable).toBe(MAX_UNIFIED_EXEC_PROCESSES);
+    }
+    expect(retained.size).toBeGreaterThan(MAX_UNIFIED_EXEC_PROCESSES);
+    expect(manager.backgroundState(retained).exitedUnread).toHaveLength(128);
+    expect(manager.terminalCapacity().evictedCompleted).toBeGreaterThan(0);
+
+    // Pressure expiration is bounded and observable; it never consumes a live process slot.
+    const oldest = retained.values().next().value as number;
+    await expect(manager.writeStdin({processId:oldest,input:'',yieldTimeMs:250,maxOutputTokens:undefined,truncationPolicy})).rejects.toThrow('Unknown process id');
+  } finally {
+    await manager.terminateAllProcesses();
+  }
+}, 120_000);

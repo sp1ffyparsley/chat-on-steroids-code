@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { inboundClientSessionShape, inboundIdentityFromHeaders, inboundRequestId, requestIdFromHeader, withInboundRequestId } from '../src/main/mcp/inbound.js';
+import { terminalBudgetKeyFromBody, inboundTerminalBudgetKey, inboundClientSessionShape, inboundIdentityFromHeaders, inboundRequestId, requestIdFromHeader, withInboundRequestId } from '../src/main/mcp/inbound.js';
 
 describe('MCP inbound request id boundary', () => {
   it('bounds conversation metadata inspection without reading getters or promoting hints', () => {
@@ -69,4 +69,19 @@ describe('MCP inbound request id boundary', () => {
     expect(seen).toEqual(['wfr_a', 'wfr_b']);
     expect(inboundRequestId()).toBeNull();
   });
+});
+
+
+it('uses only a bounded digest for scheduling hints and never promotes it to request identity', () => {
+  const wrap=(value:unknown)=>({params:{_meta:{'openai/session':value}}});
+  const key=terminalBudgetKeyFromBody(wrap('private-client-id'));
+  expect(key).toMatch(/^[a-f0-9]{64}$/);expect(key).not.toContain('private-client-id');
+  expect(terminalBudgetKeyFromBody(wrap('private-client-id'))).toBe(key);
+  expect(terminalBudgetKeyFromBody(wrap('different'))).not.toBe(key);
+  expect(terminalBudgetKeyFromBody(wrap('x'.repeat(1025)))).toBeUndefined();
+  const getter=Object.defineProperty({},'openai/session',{get(){throw new Error('must not run');}});
+  expect(terminalBudgetKeyFromBody({params:{_meta:getter}})).toBeUndefined();
+  const hostile=new Proxy({}, {getOwnPropertyDescriptor(){throw new Error('no');}});
+  expect(terminalBudgetKeyFromBody(hostile)).toBeUndefined();
+  withInboundRequestId(null,()=>{expect(inboundTerminalBudgetKey()).toBe(key);expect(inboundRequestId()).toBeNull();},undefined,undefined,undefined,key);
 });

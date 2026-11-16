@@ -35,7 +35,7 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
       "$ErrorActionPreference='Stop'",
       'Add-Type -AssemblyName System.Windows.Forms,System.Drawing',
       'Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition ' + psQuote(
-        'public sealed class CosContractForm : System.Windows.Forms.Form { protected override bool ShowWithoutActivation { get { return true; } } }'),
+        'public sealed class CosContractForm : System.Windows.Forms.Form { [System.Runtime.InteropServices.DllImport("dwmapi.dll")] public static extern int DwmFlush(); protected override bool ShowWithoutActivation { get { return true; } } }'),
       '$form=New-Object CosContractForm', '$form.Text=' + psQuote(title),
       '$form.ShowInTaskbar=$false', "$form.StartPosition='Manual'",
       // Keep only our nonactivating fixture unobscured, and publish readiness after
@@ -57,7 +57,9 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
         'if($script:fixturePainted){ [IO.File]::WriteAllText(' + psQuote(paintedFile) + ', ' +
         '(@{request=$request; sequence=$script:paintSequence; paintedAt=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress)) } } })',
       '$form.Add_Paint({ $script:fixturePainted=$true })',
-      "$form.Add_Shown({ $form.Refresh(); $button.Refresh(); if(-not $script:fixturePainted){ throw 'Owned native fixture did not paint' }; [Console]::WriteLine('READY'); $timer.Start() })",
+      // Shown runs inside the native show transition. Publish readiness on the
+      // next GUI turn after a real DWM fence, never merely from a Paint callback.
+      "$form.Add_Shown({ $null=$form.BeginInvoke([Action]{ $form.Refresh(); $button.Refresh(); if(-not $script:fixturePainted){ throw 'Owned native fixture did not paint' }; $flush=[CosContractForm]::DwmFlush(); if($flush -ne 0){ throw ('Owned fixture DWM fence failed: '+$flush) }; [Console]::WriteLine('READY'); $timer.Start() }) })",
       'try { [System.Windows.Forms.Application]::Run($form) } finally { $timer.Dispose(); $form.Dispose() }'
     ].join('\n');
     const executable = path.join(process.env['SystemRoot'] || 'C:/Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe');

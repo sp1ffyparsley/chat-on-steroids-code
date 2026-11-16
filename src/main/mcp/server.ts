@@ -21,7 +21,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 import { EXTERNAL_TUNNEL_CHALLENGE_HEADER, EXTERNAL_TUNNEL_PROBE_HEADER, EXTERNAL_TUNNEL_PROOF_HEADER, EXTERNAL_TUNNEL_PROOF_PATTERN, EXTERNAL_TUNNEL_REQUEST_ID_DIGEST_HEADER, MCP_SURFACE_TOKEN_PATTERN, type ExternalRouteVerifier } from '../../shared/external-tunnel.js';
 import { INSTANCE_CONNECTOR_SURFACES } from '../../shared/instance-profile.js';
 import { invocationArgumentsDigest } from '../session/correlation.js';
-import { createInboundTiming, formatInboundTiming, inboundClientSessionShape, inboundIdentityFromHeaders, withInboundRequestId, type ClientSessionShape, type IdentityHeaderShapes } from './inbound.js';
+import { createInboundTiming, formatInboundTiming, inboundClientSessionShape, inboundIdentityFromHeaders, terminalBudgetKeyFromBody, withInboundRequestId, type ClientSessionShape, type IdentityHeaderShapes } from './inbound.js';
 import http from 'node:http';
 import type { Socket } from 'node:net';
 import { createMcpHandler } from '@modelcontextprotocol/server';
@@ -646,7 +646,7 @@ export async function startMcpServer(getContext: () => ToolContext, persistent?:
         ? rpc.params as Record<string, unknown> : null;
       const tool = typeof params?.name === 'string' && /^[a-z0-9_.-]{1,64}$/i.test(params.name) ? params.name : null;
       const invocation = tool ? { tool, digest: invocationArgumentsDigest(tool, params?.arguments ?? {}) } : undefined;
-      withInboundRequestId(requestId, () => void route.handler(req, res, body), timing, publication, invocation);
+      withInboundRequestId(requestId, () => void route.handler(req, res, body), timing, publication, invocation, terminalBudgetKeyFromBody(body));
     };
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       void readBoundedJsonBody(req).then((parsed) => {

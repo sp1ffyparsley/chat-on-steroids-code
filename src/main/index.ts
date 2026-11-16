@@ -39,7 +39,7 @@ import {
 import { registerIpc, resumeAutomationAfterExplicitRequest, setHelperReasoningAfterExplicitRequest, retireRecordedChatsAfterExplicitRequest } from './ipc.js';
 import { getChatModels, restoreChatModels, startChatModelDiscovery } from './chat-models.js';
 import { flushLogBeforeExit, initLogFile, logError, logEvent, logInfo, logWarn, setLogProfileContext, snapshotLogOnCrash } from './logger.js';
-import { unifiedExecManager } from './codex/manager.js';
+import { unifiedExecManager, restoreTerminalResults } from './codex/manager.js';
 import { initSkills } from './skills.js';
 import { pluginManager } from './plugins/manager.js';
 import { applyAutomationPause, applyCoreConnectionDispatchState, armBrowserStartupRecovery, bridgeStatus, onBridgeChange, reconcileBrowserAuthEmergencyPolicy, setBrowserOpener, setBrowserWorkArea, setCoreConnectionRecoveryProvider, setCoreConnectionStateProvider, setCoreIncidentDiagnosticProvider, setDiagnosticIncidentProvider, setSessionsAutomationPaused, shutdownBridge, startBridge } from './bridge.js';
@@ -1287,6 +1287,7 @@ void app.whenReady().then(async () => {
   // user choice instead of Electron's default `system` theme. On macOS this controls the window
   // frame, application menus and OS dialogs; on Linux/Windows it covers Electron-native UI.
   nativeTheme.themeSource = getConfig().ui.theme;
+  await restoreTerminalResults();
   const savedGoalObjectives = await readDurable<GoalObjectivesSnapshot>(GOAL_OBJECTIVES_STATE);
   if (windowActivation.isDisabled()) return;
   restoreGoalObjectives(savedGoalObjectives);
@@ -1654,7 +1655,7 @@ app.on('will-quit', (event) => {
       {
         name: 'process cleanup',
         budgetMs: 15_000,
-        run: () => [unifiedExecManager.terminateAllProcesses(), stopComputerHelper(), pluginManager.close()]
+        run: () => [unifiedExecManager.terminateAllProcesses(true), stopComputerHelper(), pluginManager.close()]
       },
       // Phase 3: recorder work can enqueue both session projections and named durable state.
       { name: 'recorder flush', budgetMs: 10_000, run: () => [flushRecorder()] },

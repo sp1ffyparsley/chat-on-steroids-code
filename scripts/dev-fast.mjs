@@ -1334,7 +1334,8 @@ if (checkOnly) {
       appShellSourceSha256 === 'C48D4F7716B573569623EB08D97623DBEBB6263DF22CC0275DE33EA455542206' ||
       // Read-only lifecycle work observation changes startup wiring only. Both
       // complete navigation owners retain window6c0662d9/globald2ba9316; BLOCKED.
-      appShellSourceSha256 === '0B28780DDAED7857D145A7F448028B782F047C44990A09334E9B871EEEC1690B';
+      appShellSourceSha256 === '9FEB692F6DE96120DFEC2F28A407B91BE570975D57FD829BE593732746947336' ||
+    appShellSourceSha256 === '0B28780DDAED7857D145A7F448028B782F047C44990A09334E9B871EEEC1690B';
   const nativeDocumentGate = knownBlockedNavigationSource
     ? 'blocked-by-known-app-shell-navigation-guards'
     : 'source-unknown-requires-native-qualification';
