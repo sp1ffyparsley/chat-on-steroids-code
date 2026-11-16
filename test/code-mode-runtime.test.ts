@@ -9,6 +9,20 @@ const tools = [{ name: 'lookup', description: 'Fixture lookup returning a normal
 const limits = { ...CODE_MODE_LIMITS, wallMs: 2000, cpuMs: 100 };
 const rendered = (value: ToolResult) => JSON.stringify(value.content);
 
+it('preserves schema data keys inside isolated tool discovery without treating them as object prototypes', async () => {
+  const inputSchema = JSON.parse('{"type":"object","properties":{"__proto__":{"type":"string"}}}');
+  const invoke = vi.fn();
+  const response = await runCodeMode(`
+    const properties = ALL_TOOLS[0].inputSchema.properties;
+    text(Object.prototype.hasOwnProperty.call(properties,'__proto__'));
+    properties.__proto__.type = 'number';
+  `, [{ ...tools[0]!, inputSchema }], invoke, limits);
+  expect(response.isError).not.toBe(true);
+  expect(response.content).toEqual([{ type: 'text', text: 'true' }]);
+  expect(inputSchema.properties.__proto__.type).toBe('string');
+  expect(invoke).not.toHaveBeenCalled();
+});
+
 it('runs concurrent tools, keeps intermediates private, and returns only explicit filtered output', async () => {
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });

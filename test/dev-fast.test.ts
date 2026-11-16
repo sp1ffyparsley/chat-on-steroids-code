@@ -2066,6 +2066,21 @@ globalThis.fetch=async (url,...rest)=>{
       expect(ready.targetOwnerPid).toBe(child!.pid);
       const ownerRecord = () => JSON.parse(readFileSync(path.join(root, '.test_tmp',
         '.chat42-private-preview-owner', 'owner.json'), 'utf8'));
+      const previewFamilyAbsent = async (pid: number): Promise<boolean> => {
+        for (let attempt = 0; attempt < 15; attempt++) {
+          const census = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+            `$nodes=@(Get-CimInstance Win32_Process);` +
+            `$family=New-Object 'System.Collections.Generic.HashSet[int]';` +
+            `[void]$family.Add(${pid});$changed=$true;` +
+            `while($changed){$changed=$false;foreach($p in $nodes){` +
+            `if($family.Contains([int]$p.ParentProcessId) -and $family.Add([int]$p.ProcessId)){$changed=$true}}};` +
+            `if(@($nodes|Where-Object{$family.Contains([int]$_.ProcessId)}).Count -eq 0){'absent'}else{'present'}`
+          ], { encoding: 'utf8', timeout: 5000 });
+          if (census.status === 0 && census.stdout.trim() === 'absent') return true;
+          await new Promise(resolve => setTimeout(resolve, 150));
+        }
+        return false;
+      };
       expect(ownerRecord()).toMatchObject({ phase: 'listening', pending: null,
         active: { generation: a.privateOutput.name, compiled: a.compiledOutputSha256 },
         previous: null });
@@ -2229,9 +2244,10 @@ globalThis.fetch=async (url,...rest)=>{
         child!.kill('SIGKILL');
         await crashedSwitch;
         child = null;
+        expect(await previewFamilyAbsent(switching.pid), 'Switching preview and descendants must be independently absent').toBe(true);
         const interrupted = spawnSync(process.execPath,
           [local, '--recover-private-preview'], { cwd: root, encoding: 'utf8', timeout: 12000 });
-        expect(interrupted.status, interrupted.stderr).toBe(0);
+        expect(interrupted.status, interrupted.stderr+' '+interrupted.stdout).toBe(0);
         expect(JSON.parse(interrupted.stdout)).toMatchObject({
           event: 'recovered', interruptedTransition: true,
           lastConfirmed: { generation: a.privateOutput.name, compiled: a.compiledOutputSha256 },
@@ -2260,23 +2276,7 @@ globalThis.fetch=async (url,...rest)=>{
         child!.kill('SIGKILL');
         await died;
         child = null;
-        let absent = false;
-        for (let attempt = 0; attempt < 15; attempt++) {
-          const census = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-            // Parent exit alone is not preview quiescence: its selector subprocess can
-            // outlive it. Await independent native absence of the whole fixture tree
-            // before asking the unchanged recovery owner to reclaim the lease.
-            `$nodes=@(Get-CimInstance Win32_Process);` +
-            `$family=New-Object 'System.Collections.Generic.HashSet[int]';` +
-            `[void]$family.Add(${locked.pid});$changed=$true;` +
-            `while($changed){$changed=$false;foreach($p in $nodes){` +
-            `if($family.Contains([int]$p.ParentProcessId) -and $family.Add([int]$p.ProcessId)){$changed=$true}}};` +
-            `if(@($nodes|Where-Object{$family.Contains([int]$_.ProcessId)}).Count -eq 0){'absent'}else{'present'}`
-          ], { encoding: 'utf8', timeout: 5000 });
-          if (census.status === 0 && census.stdout.trim() === 'absent') { absent = true; break; }
-          await new Promise(resolve => setTimeout(resolve, 150));
-        }
-        expect(absent, 'Preview PID must be independently absent before recovery').toBe(true);
+        expect(await previewFamilyAbsent(locked.pid), 'Preview PID and descendants must be independently absent before recovery').toBe(true);
         const recovered = spawnSync(process.execPath,
           [local, '--recover-private-preview'], { cwd: root, encoding: 'utf8', timeout: 12000 });
         expect(recovered.status, recovered.stderr+' '+recovered.stdout).toBe(0);
@@ -5323,7 +5323,7 @@ require('node:module').syncBuiltinESMExports();
     expect(payload.bridge).toBe('127.0.0.1:8796');
     expect(payload.installedRuntimeChecked).toBe(false);
     expect(payload.developmentUpdateGates).toMatchObject({
-      appShellSourceSha256: '9FEB692F6DE96120DFEC2F28A407B91BE570975D57FD829BE593732746947336',
+      appShellSourceSha256: '61BC6AB2EE7A36362023C8B23FA750374B5B46428EF804D470098AA1D441FC6D',
       htmlDocument: 'blocked-by-known-app-shell-navigation-guards',
       preloadCurrentRenderer: 'blocked-by-known-app-shell-navigation-guards',
       nativeRuntimeVerified: false,
@@ -5334,7 +5334,7 @@ require('node:module').syncBuiltinESMExports();
 
   it('pins the reviewed recovery shell to blocked navigation without qualifying modified shell bytes', () => {
     const reviewedBytes = readFileSync(path.join(project, 'src', 'main', 'index.ts'));
-    const reviewedHash = '9FEB692F6DE96120DFEC2F28A407B91BE570975D57FD829BE593732746947336';
+    const reviewedHash = '61BC6AB2EE7A36362023C8B23FA750374B5B46428EF804D470098AA1D441FC6D';
     const source = reviewedBytes.toString('utf8');
     expect(createHash('sha256').update(reviewedBytes).digest('hex').toUpperCase()).toBe(reviewedHash);
     // The reviewed window body includes view-only recovery and exact-window close

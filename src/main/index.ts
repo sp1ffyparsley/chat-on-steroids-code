@@ -72,6 +72,7 @@ import {
   type SwarmSnapshot
 } from './agents.js';
 import { flushDurable, initDurableStore, readDurable, writeDurableNow, writeDurableSoon } from './durable.js';
+import { settleDeepAIHelperNotices } from './deepai-helper.js';
 import { loadConnectorIdentity } from './connector-identity.js';
 import { restoreRequestCorrelations } from './session/correlation.js';
 import { restoreBlockedChats } from './session/blocked-chats.js';
@@ -1651,6 +1652,9 @@ app.on('will-quit', (event) => {
       // the bridge force-closes wedged localhost sockets at 15s and the MCP endpoint forces
       // its own drain at 30s. This is the outer bound on both, not a competing one.
       { name: 'admission/drain', budgetMs: 40_000, run: () => [shutdownConnection(), shutdownBridge()] },
+      // Passive helper reads use at most one inbox and four exact-job reads (5s each).
+      // Settle their disposable projections before child cleanup and durable flush.
+      { name: 'helper projection settle', budgetMs: 30_000, run: () => [settleDeepAIHelperNotices()] },
       // Phase 2: only after request handlers are done may their owned child processes go.
       {
         name: 'process cleanup',

@@ -54,7 +54,7 @@ function finish(error) { if (closed) return; send({ type: 'done', error }); clos
     'const bridge = globalThis.__bridge; delete globalThis.__bridge; ' +
     'const stringify = JSON.stringify, parse = JSON.parse, String_ = String; ' +
     'const tools = Object.create(null); ' +
-    'const entries = ' + JSON.stringify(workerData.tools) + '; ' +
+    'const entries = parse(' + JSON.stringify(JSON.stringify(workerData.tools)) + '); ' +
     'for (const entry of entries) { Object.freeze(entry); tools[entry.name] = args => bridge("call", stringify({name:entry.name,args})).then(parse); } ' +
     'Object.defineProperties(globalThis, {' +
       'tools: {value:Object.freeze(tools)}, ALL_TOOLS:{value:Object.freeze(entries)}, ' +

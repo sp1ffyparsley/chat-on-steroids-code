@@ -64,7 +64,7 @@ Loop:
 - Raise the quality and completeness of the result, not the granularity of your instructions. Keep the broad outcome visible every round. Do not invent unrelated features or recycle a finished tiny task to keep the loop busy.`;
 
 /** Closing role reminders carry no competing microtask policy. Wire syntax belongs to goal.ts. */
-const PROMPTER_TRAILER = 'Write an instruction TO the executor now, not its answer or a claim of work. Keep the whole brief and user corrections in view; bundle the remaining useful work into a coherent assignment.';
+const PROMPTER_TRAILER = 'Write an instruction TO the executor now, not its answer or a claim of work. Keep the whole brief and user corrections in view; bundle the remaining useful work into a coherent assignment. For a missing helper, direct the executor to inspect its current ALL_TOOLS inputSchema in exec.';
 export const GOAL_SYSTEM_TRAILER = `${PROMPTER_TRAILER} Use NO_REPLY only when the whole user request is clearly complete.`;
 export const GOAL_OBJECTIVE_TRAILER = `${PROMPTER_TRAILER} Read the saved objective together with the original task. Use NO_REPLY only when the whole requested outcome is clearly complete.`;
 export const GOAL_LOOP_TRAILER = `${PROMPTER_TRAILER} Choose the next substantial in-scope result that can be worked on now. Decide routine reversible details from the brief. If a step needs approval, user-only facts, an unavailable app, or evidence you cannot obtain, keep that item pending and switch to independent authorized work. After a repeated failure, change the approach or move to another item. Ask for a relevant test, artifact, or measurement when available, and keep unchecked claims pending without halting other work.`;

@@ -17,6 +17,7 @@ import { goalSwitchFor } from './goal.js';
 import { getSession } from './session/store.js';
 import type { CallContext, CallCaller } from './mcp/call-context.js';
 import type { OutputPublication } from './codex/unified-exec.js';
+import { logWarn } from './logger.js';
 
 const STATE = 'deepai-helper-bindings';
 const MAX_LEDGER_BYTES = 8 * 1024 * 1024;
@@ -80,7 +81,7 @@ const publicJobSchema = z.object({
   contextRotation: z.enum(['native-context-near-limit', 'native-context-exhausted']).nullable().optional(),
   createdAt: z.string().max(100).optional(), completedAt: z.string().max(100).nullable().optional(),
   cancelRequested: z.boolean().optional(), lastError: z.string().max(1000).nullable().optional(),
-  resultDirectory: z.string().max(4096).optional(), resultSaved: z.boolean().optional(),
+  resultDirectory: z.string().max(4096).optional(), resultAvailable: z.boolean().optional(), resultSaved: z.boolean().optional(),
   attention: attentionSchema.nullable().optional(), attentionUnavailableReason: z.string().max(500).nullable().optional(),
   acknowledged: z.boolean().optional(), reused: z.boolean().optional(),
   blocker: z.object({ code: z.string().max(100), action: z.string().max(1000) }).nullable().optional(),
@@ -91,9 +92,12 @@ const publicJobSchema = z.object({
 });
 type PublicJob = z.infer<typeof publicJobSchema>;
 const needsAttention = (job: PublicJob): boolean => (job.attention?.pendingCount ?? 0) > 0;
-const needsRecovery = (job: PublicJob): boolean => (!TERMINAL.has(job.status) || job.status === 'completed' && !job.resultSaved) &&
+const hasUnsavedReport = (job: PublicJob): boolean => !job.resultSaved &&
+  (job.status === 'completed' || job.resultAvailable === true || !!job.resultSaveError);
+const needsRecovery = (job: PublicJob): boolean => (!TERMINAL.has(job.status) || hasUnsavedReport(job)) &&
   (job.workerStatus === 'unavailable' || job.workerStatus === 'stale' ||
-    ['native_unavailable', 'parent_control_unverified', 'parent_command_disabled'].includes(job.waitingFor ?? '') || !!job.resultSaveError);
+    ['native_unavailable', 'parent_control_unverified', 'parent_command_disabled'].includes(job.waitingFor ?? '') || !!job.resultSaveError ||
+    (!TERMINAL.has(job.status) && !!job.lastError));
 /** The bridge retains full reports; parent custody stores only their bounded metadata. */
 const summary = (job: PublicJob): PublicJob => {
   const { assistantText: _text, offset: _offset, totalCharacters: _total, nextOffset: _next, ...metadata } = job;
@@ -188,10 +192,14 @@ export const runDeepAIHelperCLI: BridgeCall = async request => {
 
 export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
   let serial = Promise.resolve<unknown>(undefined);
+  let pendingOperations = 0;
+  const parentRevisions = new Map<string, number>();
+  let passiveRefresh: Promise<void> | undefined;
   const offers = new Map<string, { fingerprint: string; publication: OutputPublication; scopeToken: unknown; offeredAt: number }>();
   const polledAt = new Map<string, number>();
   const locked = <T>(work: () => Promise<T>): Promise<T> => {
-    const run = serial.then(work);
+    pendingOperations++;
+    const run = serial.then(work).finally(() => { pendingOperations--; });
     serial = run.catch(() => undefined);
     return run;
   };
@@ -219,7 +227,8 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
       refuse('DEEPAI_BINDING_STATE_UNVERIFIED', 'Parent-helper custody could not be read safely; no new helper was dispatched.');
     return parsed.data;
   };
-  const save = async (scope: HelperScope, ledger: Ledger, admission = false): Promise<void> => {
+  const save = async (parent: HelperParent, ledger: Ledger, admission = false): Promise<void> => {
+    const scope = parent.scope;
     assertScope(scope);
     // latest is a disposable projection; native IDs/results remain in the native job store,
     // while this exact binding and all delivery/ACK receipts remain authoritative here.
@@ -233,6 +242,8 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
       refuse('DEEPAI_BINDING_CAPACITY', 'New helper admission is full; terminal receipt space remains reserved. Handle existing outcomes before adding work.');
     if (Buffer.byteLength(JSON.stringify(persisted)) > MAX_LEDGER_BYTES)
       refuse('DEEPAI_BINDING_CAPACITY', 'The retained helper registration ledger is full; preserve it before maintenance.');
+    // Fence passive snapshots even when an explicit write has an uncertain outcome.
+    parentRevisions.set(parent.owner, (parentRevisions.get(parent.owner) ?? 0) + 1);
     await deps.write(persisted);
     assertScope(scope);
     // Keep publication witnesses retryable until their custody is durably retained.
@@ -303,20 +314,20 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
         owner: principal.owner, requestKey: request.requestKey, requestHash, workspace, model: request.model,
         jobId: null, ...(prior?.jobId ? { previousJobId: prior.jobId } : {}), createdAt: deps.now() };
       ledger.rows.push(row);
-      await save(principal.scope, ledger, true); // intent must survive a lost CLI response
+      await save(principal, ledger, true); // intent must survive a lost CLI response
     }
     await assertParent(principal, true);
     if (row.jobId) {
       const job = checked(await deps.bridge({ action: 'status', owner: row.owner, job: row.jobId, passive: true }), row);
       await assertParent(principal);
-      row.latest = summary(job); await save(principal.scope, ledger);
+      row.latest = summary(job); await save(principal, ledger);
       return { ...view(job, row), reused: true };
     }
     const job = checked(await deps.bridge({ action: prior ? 'continue' : 'submit', owner: principal.owner,
       ...(prior?.jobId ? { job: prior.jobId } : {}), request }), row);
     await assertParent(principal);
     row.jobId = job.id; row.latest = summary(job);
-    await save(principal.scope, ledger);
+    await save(principal, ledger);
     polledAt.delete(principal.owner);
     return view(job, row);
   });
@@ -353,12 +364,12 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
     }
     if (action === 'ack') {
       if (!TERMINAL.has(job.status)) refuse('DEEPAI_OUTCOME_NOT_TERMINAL', 'Only a terminal helper outcome can be acknowledged.');
-      if (job.status === 'completed' && !job.resultSaved) refuse('DEEPAI_REPORT_NOT_SAVED', 'Save the completed report before acknowledging this outcome.');
+      if (hasUnsavedReport(job)) refuse('DEEPAI_REPORT_NOT_SAVED', 'Save the collected report before acknowledging this outcome, including partial work from failed or cancelled tasks.');
       row.latest = summary(job);
       retainPublishedNotice(row, principal);
       // Native ACK removes the job from its inbox. Persist confirmed local publication
       // custody first, so a failed final write/restart can reconcile the same known job.
-      await save(principal.scope, ledger);
+      await save(principal, ledger);
       await assertParent(principal);
       // Validate exact saved custody before issuing a mutating native operation. The native
       // owner rechecks its own current terminal/report state; its reply is validated again.
@@ -366,22 +377,23 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
       await assertParent(principal);
       if (job.acknowledged !== true) refuse('DEEPAI_ACK_UNCONFIRMED', 'The native owner did not confirm acknowledgment. Keep the same job identity and reconcile its status.');
       if (!TERMINAL.has(job.status)) refuse('DEEPAI_OUTCOME_NOT_TERMINAL', 'The native acknowledgment did not retain a terminal outcome.');
-      if (job.status === 'completed' && !job.resultSaved) refuse('DEEPAI_REPORT_NOT_SAVED', 'The native acknowledgment did not retain a saved report.');
+      if (hasUnsavedReport(job)) refuse('DEEPAI_REPORT_NOT_SAVED', 'The native acknowledgment did not retain a saved report.');
       row.acknowledgedAt ??= deps.now();
     }
     row.latest = summary(job);
     retainPublishedNotice(row, principal);
-    await save(principal.scope, ledger);
+    await save(principal, ledger);
     return { ...view(job, row), ...(action === 'recover' ? { recoveryRequested: true } : {}) };
   });
 
-  async function refresh(principal: HelperParent, ledger: Ledger): Promise<void> {
+  async function refresh(principal: HelperParent, ledger: Ledger, persist = true): Promise<boolean> {
     polledAt.set(principal.owner, deps.now()); // failed passive reads also receive bounded backoff
     const raw = await deps.bridge({ action: 'inbox', owner: principal.owner, passive: true });
     await assertParent(principal);
     const parsed = z.object({ jobs: z.array(z.unknown()).max(50) }).safeParse(raw);
     if (!parsed.success) refuse('DEEPAI_BRIDGE_INVALID_RESPONSE', 'The helper inbox has an invalid bounded shape.');
     let changed = false;
+    const observed = new Set<string>();
     for (const candidate of parsed.data.jobs) {
       const shape = publicJobSchema.safeParse(candidate);
       if (!shape.success) refuse('DEEPAI_BRIDGE_INVALID_RESPONSE', 'The helper inbox contains an invalid job.');
@@ -389,19 +401,53 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
         item.requestKey === shape.data.requestKey);
       if (!row) continue; // manual CLI labels do not register a Core parent
       const job = checked(candidate, row);
-      row.jobId = job.id; row.latest = summary(job); changed = true;
+      row.jobId = job.id; row.latest = summary(job); observed.add(job.id); changed = true;
     }
-    // A known running/ACKed job need not appear in the native attention inbox. Cache
-    // eviction must never relabel that durable identity as an uncertain submission.
+    // Healthy active jobs disappear from the attention inbox. Resolve a cached error
+    // or approval with a bounded exact-job read; absence alone never proves recovery.
+    // Cache eviction must not relabel known work as an uncertain submission either.
     const missing = ledger.rows.filter(row => row.owner === principal.owner && row.sessionId === principal.sessionId &&
-      row.acknowledgedAt === undefined && row.jobId && !row.latest).slice(0, 4);
+      row.acknowledgedAt === undefined && row.jobId && !observed.has(row.jobId) &&
+      (!row.latest || needsRecovery(row.latest) || needsAttention(row.latest))).slice(0, 4);
     for (const row of missing) {
       const job = checked(await deps.bridge({ action: 'status', owner: row.owner, job: row.jobId!, passive: true }), row);
       await assertParent(principal);
       row.latest = summary(job); changed = true;
     }
-    if (changed) await save(principal.scope, ledger);
+    if (changed && persist) await save(principal, ledger);
     polledAt.set(principal.owner, deps.now());
+    return changed;
+  }
+
+  function refreshLater(principal: HelperParent, ledger: Ledger): void {
+    if (passiveRefresh) return;
+    const revision = parentRevisions.get(principal.owner) ?? 0;
+    const snapshot: Ledger = { ...ledger, rows: ledger.rows.filter(row =>
+      row.owner === principal.owner && row.sessionId === principal.sessionId && !row.acknowledgedAt)
+      .map(row => ({ ...row, ...(row.latest ? { latest: { ...row.latest } } : {}) })) };
+    const work = (async () => {
+      // Reuse the bounded inbox/exact-job reads on a detached parent snapshot.
+      // No native I/O holds the ledger lock or an ordinary tool response.
+      if (!await refresh(principal, snapshot, false)) return;
+      await locked(async () => {
+        await assertParent(principal, true);
+        if ((parentRevisions.get(principal.owner) ?? 0) !== revision) return;
+        const ledger = await load(principal.scope);
+        for (const update of snapshot.rows) {
+          const row = ledger.rows.find(row => row.key === update.key && row.owner === principal.owner && row.sessionId === principal.sessionId);
+          if (!row || !update.latest) continue;
+          const job = checked(update.latest, row);
+          row.jobId = job.id; row.latest = summary(job);
+        }
+        await save(principal, ledger);
+      });
+    })();
+    passiveRefresh = work;
+    void work.catch(error => {
+      if (error instanceof DeepAIHelperError &&
+          (error.code === 'DEEPAI_PARENT_CHANGED' || error.code === 'DEEPAI_PARENT_PAUSED')) return;
+      logWarn('DeepAI passive inbox refresh failed; original job/result custody is retained. Inspect the same job with status/inbox.');
+    }).finally(() => { if (passiveRefresh === work) passiveRefresh = undefined; });
   }
 
   const inbox = (principal: HelperParent): Promise<Record<string, unknown>> => locked(async () => {
@@ -409,7 +455,7 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
     const ledger = await load(principal.scope);
     let publicationChanged = false;
     for (const row of ledger.rows) if (row.owner === principal.owner && retainPublishedNotice(row, principal)) publicationChanged = true;
-    if (publicationChanged) await save(principal.scope, ledger);
+    if (publicationChanged) await save(principal, ledger);
     if (ledger.rows.some(row => row.owner === principal.owner && !row.acknowledgedAt)) await refresh(principal, ledger);
     return { source: 'deepai-model-report', jobs: ledger.rows.filter(row => row.owner === principal.owner && !row.acknowledgedAt)
       .map(row => row.latest ? view(row.latest, row) : row.jobId ? { id: row.jobId, requestKeyHash: row.key, status: 'observation-unavailable',
@@ -417,7 +463,11 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
         instruction: 'Retry the original submission with the same requestKey and body; do not create replacement work.' }) };
   });
 
-  const offer = (context: CallContext, budget: number): Promise<string | null> => locked(async () => {
+  // Notices decorate an already finished tool reply. Never queue that reply behind
+  // explicit helper I/O (or another notice): the next eligible call can offer it.
+  // Reserve synchronously through the same lock; skip without reading or ACKing custody.
+  const offer = (context: CallContext, budget: number): Promise<string | null> =>
+    pendingOperations > 0 ? Promise.resolve(null) : locked(async () => {
     if (!context.publication || budget < 1024 || !context.caller.requestId || !context.caller.sessionId || !context.caller.conversationId) return null;
     const principal = await parent(context.caller);
     if (!deps.automationAllowed(principal.conversationId)) return null;
@@ -438,9 +488,9 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
         row.noticeAcknowledged = prior.fingerprint; row.noticePublishedAt = prior.publication.completedAt; changed = true;
       }
     }
-    if (changed) await save(principal.scope, ledger);
+    if (changed) await save(principal, ledger);
     if (rows.some(row => !row.latest || !TERMINAL.has(row.latest.status) || !row.latest.resultSaved) &&
-        deps.now() - (polledAt.get(principal.owner) ?? -Infinity) >= 5000) await refresh(principal, ledger);
+        deps.now() - (polledAt.get(principal.owner) ?? -Infinity) >= 5000) refreshLater(principal, ledger);
     await assertParent(principal, true);
     for (const row of rows) {
       const job = row.latest;
@@ -455,7 +505,7 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
         ? 'User attention required in DeepAI Code: ' + job.attention!.pendingCount + ' pending request(s). This bridge cannot answer or approve them.\n' +
           (!job.attention!.available || job.attentionUnavailableReason ? 'Attention observation is incomplete or possibly stale; inspect the actual native chat.\n' : '') +
           (job.attention!.requests ?? []).slice(0, 4).map(item => '- ' + item.type + ': ' + (item.title ?? item.kind ?? 'Review in DeepAI Code')).join('\n')
-        : needsRecovery(job) ? 'Helper recovery needs attention: ' + (job.workerStatus && job.workerStatus !== 'running' ? job.workerStatus : job.waitingFor ?? 'report_not_saved') + '.\n' +
+        : needsRecovery(job) ? 'Helper recovery needs attention: ' + (job.blocker?.code ?? (job.workerStatus && job.workerStatus !== 'running' ? job.workerStatus : job.waitingFor ?? (job.lastError ? 'native_job_error' : 'report_not_saved'))) + '.\n' +
           (job.lastError ? job.lastError + '\n' : '') +
           (job.resultSaveError ? 'Report save failed: ' + job.resultSaveError + '\n' : '') +
           (job.recovery ?? 'Inspect this job with action=status and repair the reported native/control prerequisite. Keep the original task identity; do not submit replacement work.') + '\n' +
@@ -492,7 +542,11 @@ export function createDeepAIHelperOwner(deps: HelperOwnerDependencies) {
     return { ...parsed.data, parentSessionId: principal.sessionId, parentConversationId: principal.conversationId,
       instruction: 'This is a point-in-time native/control preflight, not loaded-browser or end-to-end acceptance. Admission rechecks controls and free-model eligibility at dispatch.' };
   });
-  return { parent, submit, inspect, inbox, offer, readiness };
+  const settle = async (): Promise<void> => {
+    await passiveRefresh?.catch(() => undefined);
+    await serial;
+  };
+  return { parent, submit, inspect, inbox, offer, readiness, settle };
 }
 
 function currentScope(): HelperScope {
@@ -518,3 +572,4 @@ const owner = createDeepAIHelperOwner({
 });
 export const deepAIHelperOwner = owner;
 export const offerDeepAIHelperNotice = owner.offer;
+export const settleDeepAIHelperNotices = owner.settle;

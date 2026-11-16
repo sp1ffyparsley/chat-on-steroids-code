@@ -1335,6 +1335,8 @@ if (checkOnly) {
       // Read-only lifecycle work observation changes startup wiring only. Both
       // complete navigation owners retain window6c0662d9/globald2ba9316; BLOCKED.
       appShellSourceSha256 === '9FEB692F6DE96120DFEC2F28A407B91BE570975D57FD829BE593732746947336' ||
+      // DeepAI passive-refresh shutdown settlement only; both navigation owners are unchanged.
+      appShellSourceSha256 === '61BC6AB2EE7A36362023C8B23FA750374B5B46428EF804D470098AA1D441FC6D' ||
     appShellSourceSha256 === '0B28780DDAED7857D145A7F448028B782F047C44990A09334E9B871EEEC1690B';
   const nativeDocumentGate = knownBlockedNavigationSource
     ? 'blocked-by-known-app-shell-navigation-guards'

@@ -13,7 +13,7 @@ export const CODE_MODE_LIMITS = Object.freeze({
 });
 export const codeModeSchema = z.object({ code: z.string().min(1).max(CODE_MODE_LIMITS.codeChars)
   .describe('Raw JavaScript source with top-level await. Emit results with text(...) or image(...).') }).strict();
-export type CodeModeTool = { name: string; description: string };
+export type CodeModeTool = { name: string; description: string; inputSchema?: unknown };
 export type CodeModeOptions = { windowsDesktop?: boolean };
 const requireRuntime = createRequire(typeof __filename === 'string' ? __filename : import.meta.url);
 let activeRuns = 0;

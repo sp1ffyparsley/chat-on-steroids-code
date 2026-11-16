@@ -1,5 +1,11 @@
 # Chat On Steroids — code research mirror
 
+## DeepAI notices and finished tool delivery
+
+The helper notice owner formerly queued an already finished Core reply behind another helper operation, and could also hold it during its own native inbox/status reads. Both delays were reproduced before repair. Notice admission now skips busy helper custody; bounded passive reads run on a detached parent snapshot outside the reply and ledger lock. A later eligible call can publish the saved outcome. Explicit writes invalidate older refreshes, and shutdown settles pending reads before durable state flush. Existing pause, ownership, report paging, native approvals and uncertain-send checks remain binding. This source repair does not certify browser Loops or production-parent helper acceptance.
+
+The same owner preserves collected partial reports until saved and rechecks exact native status before clearing cached recovery/approval messages. Failure, stale-snapshot, account-change, concurrent-notice and real Core result-recording regressions are covered. See [helper contract](docs/deepai-helper.md).
+
 ## Terminal session lifecycle repair
 
 Finished commands no longer consume the 64 active-command slots. Each client may hold at most eight active commands. Scheduling hints select a bounded fairness bucket; they never grant chat identity or access to another client's output.

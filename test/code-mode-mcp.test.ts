@@ -45,6 +45,25 @@ async function identity() {
 const call = (requestId: string | undefined, code: string) => rpc('tools/call', { name: 'exec', arguments: { code } }, requestId);
 const text = (response: any) => response.result.content.filter((item: any) => item.type === 'text').map((item: any) => item.text).join('\n');
 
+it('discovers a current helper schema through exec without relying on a cached client tool list', async () => {
+  const caller = await identity();
+  const response = await call(caller.requestId, `
+    const helper = ALL_TOOLS.find(tool => tool.name === 'deepai_helper');
+    text({name:helper.name,inputSchema:helper.inputSchema});
+    const rejected = await tools.deepai_helper({action:'readiness',owner:'forged-owner'});
+    text({isError:rejected.isError,content:rejected.content});
+  `);
+  expect(response.result.isError, text(response)).not.toBe(true);
+  const blocks = response.result.content.filter((item: any) => item.type === 'text').map((item: any) => JSON.parse(item.text));
+  expect(blocks[0]).toMatchObject({ name: 'deepai_helper', inputSchema: {
+    type: 'object', additionalProperties: false, required: ['action'],
+    properties: { action: { enum: expect.arrayContaining(['submit', 'result', 'readiness']) } }
+  } });
+  expect(blocks[0].inputSchema.properties.owner).toBeUndefined();
+  expect(blocks[1]).toMatchObject({ isError: true });
+  expect(JSON.stringify(blocks[1])).toContain('INVALID_ARGUMENTS');
+});
+
 it.each(['current', 'superseded'] as const)('resolves late session_finish identity before enforcing its %s owner', async state => {
   const conversationId = randomUUID(), requestId = `wfr_${randomUUID().replaceAll('-', '')}`;
   const session = await createSession({ conversationId, title: 'Late finish identity' });

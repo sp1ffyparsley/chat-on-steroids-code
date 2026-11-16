@@ -32,7 +32,7 @@ import type { Capabilities, Root } from '../../shared/types.js';
 import { CAPABILITY_LABELS, WRITE_CAPABILITIES } from '../../shared/types.js';
 import { FsOpError, formatBytes, type FileInfo } from '../fsops.js';
 import { logInfo, logWarn } from '../logger.js';
-import { toolSchema } from './tool-declarations.js';
+import { toolSchema, toolSchemaJson } from './tool-declarations.js';
 import {
   SandboxError,
   isAbsoluteVirtualPath,
@@ -1441,7 +1441,7 @@ export interface SurfaceRegistrar {
   registered(): string[];
   /** Same registered handler/schema, with a fresh child recording context and inherited proof. */
   invokeNested(name: string, args: unknown, parent: CallContext): Promise<ToolResult>;
-  descriptions(): Array<{ name: string; description: string }>;
+  descriptions(includeSchemas?: boolean): Array<{ name: string; description: string; inputSchema?: unknown }>;
 }
 
 export function createRegistrar(server: McpServer | null, ctx: ToolContext, surface: SurfaceId, observe?: (name: string, config: { description: string; inputSchema: z.ZodType; annotations?: ToolAnnotations }) => void): SurfaceRegistrar {
@@ -1457,7 +1457,7 @@ export function createRegistrar(server: McpServer | null, ctx: ToolContext, surf
   const agentToolsExposed = ctx.exposedAgentTools ?? agentToolsLive;
   const findExposed = ctx.exposedFind ?? (!exposedCaps.command && exposedCaps.search);
   const names: string[] = [];
-  const handlers = new Map<string, { description: string; run: (args: unknown) => Promise<ToolResult> }>();
+  const handlers = new Map<string, { description: string; inputSchema: z.ZodType; run: (args: unknown) => Promise<ToolResult> }>();
 
   return {
     ctx,
@@ -1469,7 +1469,8 @@ export function createRegistrar(server: McpServer | null, ctx: ToolContext, surf
     agentToolsExposed,
     findExposed,
     registered: () => [...names],
-    descriptions: () => [...handlers].map(([name, entry]) => ({ name, description: entry.description })),
+    descriptions: (includeSchemas = false) => [...handlers].map(([name, entry]) => ({ name, description: entry.description,
+      ...(includeSchemas ? { inputSchema: toolSchemaJson(entry.inputSchema) } : {}) })),
     invokeNested(name, args, parent) {
       return dispatch(name, args, parent.caller.transportKey, parent.caller.requestId, surface, async () => {
         const entry = handlers.get(name);
@@ -1478,7 +1479,7 @@ export function createRegistrar(server: McpServer | null, ctx: ToolContext, surf
     },
     register(name, config, handler) {
       names.push(name);
-      handlers.set(name, { description: config.description, run: async args => {
+      handlers.set(name, { description: config.description, inputSchema: config.inputSchema, run: async args => {
         const parsed = await config.inputSchema.safeParseAsync(args);
         if (parsed.success) return handler(parsed.data);
         // Preserve the schema owner's corrective explanation for code-mode children too.

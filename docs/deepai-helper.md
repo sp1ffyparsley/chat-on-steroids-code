@@ -1,5 +1,9 @@
 # DeepAI helpers from Chat On Steroids
 
+Passive notices do not hold finished Core replies behind helper I/O. One existing-owner refresh reads a detached parent snapshot outside the response and ledger lock; a later eligible call can offer the cached outcome. Per-parent write-attempt revisions and exact account/session/Pause checks fence stale merges without letting unrelated parents starve notice delivery. Shutdown settles pending passive reads before child cleanup and durable flush. Explicit status/result/inbox operations retain their real failures. No idle-parent wake, timer, second queue or automatic approval is added. Collected partial reports must be saved before acknowledgment; clearing old recovery/approval messages requires an exact native status observation.
+
+If a cached client catalog omits the helper, inspect its current `ALL_TOOLS` entry inside `exec`: matching entries include the live `inputSchema`. The schema comes from the existing native schema cache, and nested calls still pass the original validators, caller identity and capability checks. Discovery does not grant permission or create a second dispatch route.
+
 `scripts/deepai-helper.mjs` submits work to real DeepAI Code chats through the installed app's paired local HTTP/WebSocket interface. CoS or Codex can call the CLI, continue independent work, then collect the matching result. Helpers can implement changes, investigate, review or test; their role comes from the request.
 
 The bridge owns native execution and its shared queue. The Core integration binds helpers to their actual parent and adds bounded result notices to later eligible Core tool responses. Existing CoS Goal, Loop, input and broker owners still decide when chats run. This integration does not wake an idle chat by itself, resume a stalled CoS turn, alter production prompts or replace the parent task's acceptance checks.

@@ -48,7 +48,7 @@ beforeEach(async () => {
     if (request.action === 'inbox') return { jobs: [...jobs.values()].filter(job =>
       job.owner === request.owner && !job.acknowledged &&
       (['completed', 'failed', 'cancelled', 'blocked', 'incomplete'].includes(job.status) || job.attention?.pendingCount > 0 ||
-        ['unavailable', 'stale'].includes(job.workerStatus) || job.waitingFor === 'native_unavailable')).map(job => structuredClone(job)) };
+        ['unavailable', 'stale'].includes(job.workerStatus) || job.waitingFor === 'native_unavailable' || !!job.lastError)).map(job => structuredClone(job)) };
     const job = jobs.get(request.job!)!;
     if (!job || job.owner !== request.owner) throw new Error('fixture ownership refusal');
     if (request.action === 'cancel') job.cancelRequested = true;
@@ -64,7 +64,7 @@ beforeEach(async () => {
   };
   owner = createDeepAIHelperOwner(deps);
 });
-afterEach(async () => { await flushDurable(); resetDurableForTests(); await removeTempDir(directory); });
+afterEach(async () => { await owner.settle(); await flushDurable(); resetDurableForTests(); await removeTempDir(directory); });
 
 const principal = (id = 'a') => owner.parent({
   requestId: 'exact-request-' + id, conversationId: 'conversation-' + id,
@@ -77,6 +77,14 @@ function context(parent: HelperParent, publication = { completedAt: null as numb
 }
 function complete(id: unknown, status = 'completed') {
   Object.assign(jobs.get(String(id))!, { status, resultSaved: true, completedAt: new Date(now).toISOString() });
+}
+
+// A passive inbox read never holds the first finished tool response. Model the
+// next eligible Core boundary after the owner's bounded refresh has settled.
+async function offerAfterRefresh(c: CallContext, budget: number): Promise<string | null> {
+  const first = await owner.offer(c, budget);
+  await owner.settle();
+  return first ?? owner.offer(c, budget);
 }
 
 async function nearFullLedger(targetBytes: number) {
@@ -172,6 +180,67 @@ it('returns every oversized Unicode report page without treating the prompt budg
   expect((await readDurableStrict<any>('deepai-helper-bindings')).rows[0].latest.assistantText).toBeUndefined();
 });
 
+it('surfaces an exact job error with a healthy worker only at an eligible parent boundary', async () => {
+  const p = await principal(), job = await owner.submit(p, request());
+  Object.assign(jobs.get(String(job.id))!, { status: 'active', workerStatus: 'running',
+    lastError: 'Native chat moved to another project; inspect its workspace before continuing.',
+    blocker: { code: 'native_job_error', action: 'Inspect this exact native job and keep its original identity.' } });
+  allowed = false;
+  expect(await offerAfterRefresh(context(p), 8000)).toBeNull();
+  expect(calls.filter(call => call.action === 'inbox')).toHaveLength(0);
+  allowed = true;
+  const publication = { completedAt: null as number | null, failed: false };
+  const notice = await offerAfterRefresh(context(p, publication), 8000);
+  expect(notice).toContain('native_job_error'); expect(notice).toContain(String(job.id));
+  expect(notice).toContain('another project'); expect(notice).not.toContain('report_not_saved');
+  publication.completedAt = now; now += 6000;
+  Object.assign(jobs.get(String(job.id))!, { lastError: null, blocker: null });
+  expect(await offerAfterRefresh(context(p), 8000)).toBeNull();
+  expect(calls.some(call => call.action === 'status' && call.job === job.id && call.passive)).toBe(true);
+  expect((await owner.inbox(p)).jobs).toEqual([expect.objectContaining({ id: job.id, status: 'active', lastError: null, blocker: null })]);
+  expect(calls.filter(call => call.action === 'submit')).toHaveLength(1);
+  expect(calls.some(call => call.action === 'ack' || call.action === 'cancel' || call.passive === false && call.action !== 'submit')).toBe(false);
+});
+
+it('clears resolved native attention only after an exact passive status read, not inbox absence', async () => {
+  const p = await principal(), job = await owner.submit(p, request());
+  Object.assign(jobs.get(String(job.id))!, { status: 'waiting', workerStatus: 'running',
+    attention: { available: true, pendingCount: 1, fingerprint: 'approval-pending', requests: [] } });
+  expect(await offerAfterRefresh(context(p), 8000)).toContain('User attention required');
+  Object.assign(jobs.get(String(job.id))!, { status: 'active', attention: { available: true, pendingCount: 0, requests: [] } });
+  const response = await owner.inbox(p);
+  expect(calls.some(call => call.action === 'status' && call.job === job.id && call.passive)).toBe(true);
+  expect(response.jobs).toEqual([expect.objectContaining({ id: job.id, status: 'active',
+    attention: expect.objectContaining({ pendingCount: 0 }) })]);
+  expect(calls.some(call => call.action === 'ack' || call.action === 'cancel')).toBe(false);
+});
+
+it.each(['failed', 'cancelled', 'incomplete'])('retains collected %s report custody until it is saved', async status => {
+  const p = await principal(), job = await owner.submit(p, request());
+  Object.assign(jobs.get(String(job.id))!, { status, resultAvailable: true, resultSaved: false });
+  await expect(owner.inspect(p, 'ack', String(job.id))).rejects.toThrow('DEEPAI_REPORT_NOT_SAVED');
+  expect(calls.some(call => call.action === 'ack')).toBe(false);
+  expect((await readDurableStrict<any>('deepai-helper-bindings')).rows[0].acknowledgedAt).toBeUndefined();
+  Object.assign(jobs.get(String(job.id))!, { resultSaved: true });
+  expect(await owner.inspect(p, 'ack', String(job.id))).toMatchObject({ status, acknowledged: true, resultAvailable: true });
+});
+
+it.each(['blocked', 'cancelled'])('allows a terminal %s outcome with no collected report to be handled', async status => {
+  const p = await principal(), job = await owner.submit(p, request());
+  Object.assign(jobs.get(String(job.id))!, { status, resultAvailable: false, resultSaved: false });
+  expect(await owner.inspect(p, 'ack', String(job.id))).toMatchObject({ status, acknowledged: true });
+});
+
+it('retains failed-report custody when an acknowledgment response loses its saved-report proof', async () => {
+  const p = await principal(), job = await owner.submit(p, request());
+  Object.assign(jobs.get(String(job.id))!, { status: 'failed', resultAvailable: true, resultSaved: true });
+  const native = deps.bridge;
+  deps.bridge = async call => call.action === 'ack'
+    ? { ...await native(call) as object, resultSaved: false } : native(call);
+  await expect(owner.inspect(p, 'ack', String(job.id))).rejects.toThrow('DEEPAI_REPORT_NOT_SAVED');
+  expect((await readDurableStrict<any>('deepai-helper-bindings')).rows[0].acknowledgedAt).toBeUndefined();
+});
+
 it('R90 refuses an unsaved outcome before issuing the mutating native ACK', async () => {
   const p = await principal(), job = await owner.submit(p, request());
   Object.assign(jobs.get(String(job.id))!, { status: 'completed', resultSaved: false });
@@ -190,7 +259,7 @@ it('R90 reserves terminal receipt headroom before admitting a new native job', a
 it('R90 acknowledges a saved outcome near the real ledger limit without deleting custody rows', async () => {
   const p = await principal(), job = await owner.submit(p, request()); complete(job.id);
   const publication = { completedAt: null as number | null, failed: false };
-  await owner.offer(context(p, publication), 8000); publication.completedAt = ++now; now++;
+  await offerAfterRefresh(context(p, publication), 8000); publication.completedAt = ++now; now++;
   const retained = await nearFullLedger(8 * 1024 * 1024 - 1), rows = retained().rows.length;
   const result = await owner.inspect(p, 'ack', String(job.id));
   expect(result.receipt).toMatchObject({ noticePublishedAt: publication.completedAt, acknowledgedAt: now });
@@ -203,7 +272,7 @@ it('R90 acknowledges a saved outcome near the real ledger limit without deleting
 it('R90 refuses native ACK until the publication witness survives a restart', async () => {
   const p = await principal(), job = await owner.submit(p, request()); complete(job.id);
   const publication = { completedAt: null as number | null, failed: false };
-  await owner.offer(context(p, publication), 8000); publication.completedAt = ++now; now++;
+  await offerAfterRefresh(context(p, publication), 8000); publication.completedAt = ++now; now++;
   const write = deps.write;
   deps.write = async () => { throw new Error('pre-ACK disk failure'); };
   await expect(owner.inspect(p, 'ack', String(job.id))).rejects.toThrow('pre-ACK disk failure');
@@ -222,7 +291,7 @@ it('R90 never records a local ACK without native confirmation', async () => {
 it('R90 preserves publication custody across a native ACK and failed final write with restart', async () => {
   const p = await principal(), job = await owner.submit(p, request()); complete(job.id);
   const publication = { completedAt: null as number | null, failed: false };
-  await owner.offer(context(p, publication), 8000); publication.completedAt = ++now; now++;
+  await offerAfterRefresh(context(p, publication), 8000); publication.completedAt = ++now; now++;
   const write = deps.write; let writes = 0;
   deps.write = async ledger => { if (++writes === 2) throw new Error('post-ACK disk failure'); await write(ledger); };
   await expect(owner.inspect(p, 'ack', String(job.id))).rejects.toThrow('post-ACK disk failure');
@@ -236,10 +305,10 @@ it('R90 preserves publication custody across a native ACK and failed final write
 it.each(['result', 'offer'] as const)('R90 captures %s receipts near the limit and refreshes evicted known jobs without replay', async method => {
     const p = await principal(), job = await owner.submit(p, request(method)); complete(job.id);
     const publication = { completedAt: null as number | null, failed: false };
-    await owner.offer(context(p, publication), 8000); publication.completedAt = ++now; now++;
+    await offerAfterRefresh(context(p, publication), 8000); publication.completedAt = ++now; now++;
     const retained = await nearFullLedger(8 * 1024 * 1024 - 1), rows = retained().rows.length;
     if (method === 'result') expect((await owner.inspect(p, 'result', String(job.id))).assistantText).toContain('model claim');
-    else await owner.offer(context(p), 8000);
+    else await offerAfterRefresh(context(p), 8000);
     expect(retained().rows).toHaveLength(rows);
     expect(retained().rows[0]).toMatchObject({ jobId: job.id, noticePublishedAt: publication.completedAt });
     expect(Buffer.byteLength(JSON.stringify(retained()))).toBeLessThanOrEqual(8 * 1024 * 1024);
@@ -312,7 +381,7 @@ it('can attach the terminal receipt for an ambiguous submit without dispatching 
   bridge.mockImplementationOnce(async input => { const job = await ordinary(input); complete((job as any).id); throw new Error('lost'); });
   await expect(owner.submit(await principal(), request())).rejects.toThrow('lost');
   owner = createDeepAIHelperOwner(deps);
-  const notice = await owner.offer(context(await principal()), 8000);
+  const notice = await offerAfterRefresh(context(await principal()), 8000);
   expect(notice).toContain([...jobs.keys()][0]);
   expect(calls.filter(call => call.action === 'submit')).toHaveLength(1);
 });
@@ -326,21 +395,140 @@ it('leaves results pending during account/chat holds without polling or creating
   const parent = await principal();
   const job = await owner.submit(parent, request()); complete(job.id);
   bridge.mockClear(); allowed = false;
-  expect(await owner.offer(context(parent), 8000)).toBeNull();
+  expect(await offerAfterRefresh(context(parent), 8000)).toBeNull();
   expect(bridge).not.toHaveBeenCalled();
   await expect(owner.submit(parent, request('another'))).rejects.toThrow('DEEPAI_PARENT_PAUSED');
   allowed = true; now += 6000;
-  expect(await owner.offer(context(parent), 8000)).toContain(String(job.id));
+  expect(await offerAfterRefresh(context(parent), 8000)).toContain(String(job.id));
+});
+
+it('does not delay an ordinary tool reply behind a busy helper operation or lose its later notice', async () => {
+  const a = await principal(), b = await principal('b');
+  const first = await owner.submit(a, request('busy-helper'));
+  const ready = await owner.submit(b, request('ready-helper')); complete(ready.id);
+  const ordinary = bridge.getMockImplementation()!;
+  let release!: () => void, started!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const entered = new Promise<void>(resolve => { started = resolve; });
+  bridge.mockImplementationOnce(async input => { started(); await held; return ordinary(input); });
+  const inspection = owner.inspect(a, 'status', String(first.id));
+  await entered;
+  let settled = false;
+  const notice = owner.offer(context(b), 8000).then(value => { settled = true; return value; });
+  try {
+    await vi.waitFor(() => expect(settled).toBe(true), { timeout: 1000, interval: 10 });
+    expect(await notice).toBeNull();
+  } finally {
+    release(); await inspection; await notice;
+  }
+  expect(await offerAfterRefresh(context(b), 8000)).toContain(String(ready.id));
+  expect(calls.filter(call => call.action === 'submit')).toHaveLength(2);
+});
+
+it('releases notice admission after failed helper I/O and publishes once across concurrent replies', async () => {
+  const p = await principal(), job = await owner.submit(p, request()); complete(job.id);
+  bridge.mockRejectedValueOnce(new Error('native offline'));
+  await expect(owner.inspect(p, 'status', String(job.id))).rejects.toThrow('native offline');
+  await owner.inbox(p);
+  const notices = await Promise.all([owner.offer(context(p), 8000), owner.offer(context(p), 8000)]);
+  expect(notices.filter(Boolean)).toHaveLength(1);
+  expect(notices.find(Boolean)).toContain(String(job.id));
+  expect(calls.filter(call => call.action === 'submit')).toHaveLength(1);
+});
+
+it('refreshes passive helper state outside the reply lock while explicit status remains usable', async () => {
+  const p = await principal(), job = await owner.submit(p, request()); complete(job.id);
+  const ordinary = bridge.getMockImplementation()!;
+  let release!: () => void, entered!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  bridge.mockImplementation(async input => {
+    if (input.action === 'inbox') { entered(); await held; }
+    return ordinary(input);
+  });
+  let delivered = false;
+  const response = owner.offer(context(p), 8000).then(value => { delivered = true; return value; });
+  await started;
+  try {
+    await vi.waitFor(() => expect(delivered).toBe(true), { timeout: 1000, interval: 10 });
+    expect(await response).toBeNull();
+    let inspected = false;
+    const status = owner.inspect(p, 'status', String(job.id)).then(value => { inspected = true; return value; });
+    await vi.waitFor(() => expect(inspected).toBe(true), { timeout: 1000, interval: 10 });
+    expect(await status).toMatchObject({ id: job.id, status: 'completed' });
+  } finally {
+    release(); await response;
+  }
+});
+
+it('does not replace a newer explicit result with an older passive inbox snapshot', async () => {
+  const p = await principal(), job = await owner.submit(p, request());
+  complete(job.id); jobs.get(String(job.id))!.resultSaved = false;
+  const ordinary = bridge.getMockImplementation()!;
+  let release!: () => void, entered!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  bridge.mockImplementation(async input => {
+    const snapshot = await ordinary(input);
+    if (input.action === 'inbox') { entered(); await held; }
+    return snapshot;
+  });
+  expect(await owner.offer(context(p), 8000)).toBeNull(); await started;
+  try {
+    jobs.get(String(job.id))!.resultSaved = true;
+    expect(await owner.inspect(p, 'status', String(job.id))).toMatchObject({ resultSaved: true });
+  } finally { release(); await owner.settle(); }
+  expect((await readDurableStrict<any>('deepai-helper-bindings')).rows[0].latest.resultSaved).toBe(true);
+  expect(await owner.offer(context(p), 8000)).toContain(String(job.id));
+});
+
+it('merges a quiet parent refresh despite unrelated explicit traffic from another parent', async () => {
+  const a = await principal(), b = await principal('b');
+  const first = await owner.submit(a, request('busy-parent'));
+  const ready = await owner.submit(b, request('quiet-parent')); complete(ready.id);
+  const ordinary = bridge.getMockImplementation()!;
+  let release!: () => void, entered!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  bridge.mockImplementation(async input => {
+    const snapshot = await ordinary(input);
+    if (input.action === 'inbox') { entered(); await held; }
+    return snapshot;
+  });
+  expect(await owner.offer(context(b), 8000)).toBeNull(); await started;
+  try { await owner.inspect(a, 'status', String(first.id)); }
+  finally { release(); await owner.settle(); }
+  const ledger = await readDurableStrict<any>('deepai-helper-bindings');
+  expect(ledger.rows.find((row: any) => row.jobId === ready.id).latest).toMatchObject({ status: 'completed', resultSaved: true });
+  expect(await owner.offer(context(b), 8000)).toContain(String(ready.id));
+  expect(calls.filter(call => call.action === 'submit')).toHaveLength(2);
+});
+
+it('drops a passive snapshot after an account change without changing parent custody or issuing ACK', async () => {
+  const p = await principal(), job = await owner.submit(p, request()); complete(job.id);
+  const ordinary = bridge.getMockImplementation()!;
+  let release!: () => void, entered!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  bridge.mockImplementation(async input => {
+    if (input.action === 'inbox') { entered(); await held; }
+    return ordinary(input);
+  });
+  const before = await readDurableStrict('deepai-helper-bindings');
+  expect(await owner.offer(context(p), 8000)).toBeNull(); await started;
+  scope = { ...scope, token: {} }; release(); await owner.settle();
+  expect(await readDurableStrict('deepai-helper-bindings')).toEqual(before);
+  expect(calls.some(call => call.action === 'ack')).toBe(false);
 });
 it('exposes stalled worker custody on a later exact-parent reply without starting a worker', async () => {
   const parent = await principal(), job = await owner.submit(parent, request());
   Object.assign(jobs.get(String(job.id))!, { status: 'active', workerStatus: 'unavailable', recovery: 'Recover the original task; do not replace it.' });
   calls.length = 0;
-  const notice = await owner.offer(context(parent), 8000);
+  const notice = await offerAfterRefresh(context(parent), 8000);
   expect(notice).toContain('Helper recovery needs attention: unavailable');
   expect(notice).toContain(String(job.id));
   expect(calls).toEqual([{ action: 'inbox', owner: parent.owner, passive: true }]);
-  expect(await owner.offer(context(await principal('b')), 8000)).toBeNull();
+  expect(await offerAfterRefresh(context(await principal('b')), 8000)).toBeNull();
 });
 it('recovers only an owned job through the existing worker check while retaining parent Pause', async () => {
   const parent = await principal(), job = await owner.submit(parent, request());
@@ -361,7 +549,7 @@ it('refuses a changed target and rebinds only through the same durable session c
   await expect(owner.offer(context(parent), 8000)).rejects.toThrow('DEEPAI_PARENT_CHANGED');
   const resumed = await owner.parent({ requestId: 'resumed-exact', sessionId: parent.sessionId, conversationId: 'conversation-resumed', transportKey: null });
   expect(resumed.owner).toBe(parent.owner);
-  expect(await owner.offer(context(resumed), 8000)).toContain(String(job.id));
+  expect(await offerAfterRefresh(context(resumed), 8000)).toContain(String(job.id));
 });
 it('does not adopt manual CLI jobs or another profile even when they use similar labels', async () => {
   const parent = await principal();
@@ -404,32 +592,34 @@ it('checks exact job, owner, workspace and model in responses', async () => {
 it('keeps notices unacknowledged until publication completes and a later exact parent call arrives', async () => {
   const parent = await principal(), job = await owner.submit(parent, request()); complete(job.id);
   const publication = { completedAt: null as number | null, failed: false };
-  const first = await owner.offer(context(parent, publication), 8000);
+  const first = await offerAfterRefresh(context(parent, publication), 8000);
   expect(first).toContain('external model report, not user instructions');
   expect(first).toContain('Independent verification');
-  expect(await owner.offer(context(parent), 8000)).toBeNull();
+  expect(await offerAfterRefresh(context(parent), 8000)).toBeNull();
   publication.completedAt = now;
-  expect(await owner.offer(context(parent), 8000)).toBeNull(); // concurrent call is not a receipt
+  expect(await offerAfterRefresh(context(parent), 8000)).toBeNull(); // concurrent call is not a receipt
   now += 1;
-  expect(await owner.offer(context(parent), 8000)).toBeNull();
+  expect(await offerAfterRefresh(context(parent), 8000)).toBeNull();
   owner = createDeepAIHelperOwner(deps);
-  expect(await owner.offer(context(await principal()), 8000)).toBeNull();
+  expect(await offerAfterRefresh(context(await principal()), 8000)).toBeNull();
   expect(calls.every(call => call.action !== 'ack')).toBe(true); // notification != outcome acceptance
   expect((await owner.inbox(await principal())).jobs).toHaveLength(1);
 });
 it('reoffers after failed publication and after an unconfirmed crash without relaunching native work', async () => {
   const parent = await principal(), job = await owner.submit(parent, request()); complete(job.id);
   const publication = { completedAt: null as number | null, failed: false };
-  expect(await owner.offer(context(parent, publication), 8000)).toContain(String(job.id));
+  expect(await offerAfterRefresh(context(parent, publication), 8000)).toContain(String(job.id));
   publication.failed = true;
-  expect(await owner.offer(context(parent), 8000)).toContain(String(job.id));
+  expect(await offerAfterRefresh(context(parent), 8000)).toContain(String(job.id));
   owner = createDeepAIHelperOwner(deps);
-  expect(await owner.offer(context(await principal()), 8000)).toContain(String(job.id));
+  expect(await offerAfterRefresh(context(await principal()), 8000)).toContain(String(job.id));
   expect(calls.filter(call => call.action === 'submit')).toHaveLength(1);
 });
 it('uses one bounded notice and suppresses simultaneous offers for the same result', async () => {
   const parent = await principal(), job = await owner.submit(parent, request()); complete(job.id);
-  expect(await owner.offer(context(parent), 100)).toBeNull();
+  expect(await offerAfterRefresh(context(parent), 100)).toBeNull();
+  expect(await owner.offer(context(parent), 8000)).toBeNull();
+  await owner.settle();
   const notices = await Promise.all([owner.offer(context(parent), 8000), owner.offer(context(parent), 8000)]);
   expect(notices.filter(Boolean)).toHaveLength(1);
   expect(Buffer.byteLength(notices.find(Boolean)!)).toBeLessThanOrEqual(8000);
@@ -437,11 +627,11 @@ it('uses one bounded notice and suppresses simultaneous offers for the same resu
 });
 it('reoffers only the passive notice after bounded transport ambiguity without accepting the report', async () => {
   const parent = await principal(), job = await owner.submit(parent, request()); complete(job.id);
-  expect(await owner.offer(context(parent), 8000)).toContain(String(job.id));
+  expect(await offerAfterRefresh(context(parent), 8000)).toContain(String(job.id));
   now += 29_999;
-  expect(await owner.offer(context(parent), 8000)).toBeNull();
+  expect(await offerAfterRefresh(context(parent), 8000)).toBeNull();
   now += 2;
-  expect(await owner.offer(context(parent), 8000)).toContain(String(job.id));
+  expect(await offerAfterRefresh(context(parent), 8000)).toContain(String(job.id));
   expect(calls.filter(call => call.action === 'submit')).toHaveLength(1);
   expect(calls.some(call => call.action === 'ack')).toBe(false);
 });
@@ -449,17 +639,17 @@ it('withholds completion notices until the report is saved, then publishes the s
   const parent = await principal(), job = await owner.submit(parent, request());
   Object.assign(jobs.get(String(job.id))!, { status: 'completed', resultSaved: false });
   const publication = { completedAt: null as number | null, failed: false };
-  expect(await owner.offer(context(parent, publication), 8000)).toBeNull();
+  expect(await offerAfterRefresh(context(parent, publication), 8000)).toBeNull();
   publication.completedAt = now;
   now += 6000;
   jobs.get(String(job.id))!.resultSaved = true;
-  expect(await owner.offer(context(parent), 8000)).toContain('Saved report:');
+  expect(await offerAfterRefresh(context(parent), 8000)).toContain('Saved report:');
   expect(calls.filter(call => call.action === 'inbox')).toHaveLength(2);
 });
 it('reports a save failure without publishing successful completion or claiming a saved report', async () => {
   const parent = await principal(), job = await owner.submit(parent, request());
   Object.assign(jobs.get(String(job.id))!, { status: 'completed', resultSaved: false, workerStatus: 'unavailable', resultSaveError: 'Disk full' });
-  const notice = await owner.offer(context(parent), 8000);
+  const notice = await offerAfterRefresh(context(parent), 8000);
   expect(notice).toContain('Helper recovery needs attention'); expect(notice).toContain('Report save failed: Disk full');
   expect(notice).not.toContain('Native task outcome: completed'); expect(notice).not.toContain('Saved report:');
 });
@@ -468,7 +658,7 @@ it('reports pending secret/approval attention with nullable IDs even when the gr
   Object.assign(jobs.get(String(job.id))!, { status: 'waiting', attentionUnavailableReason: 'incomplete_graph',
     attention: { available: false, pendingCount: 1, fingerprint: 'attention-1', reason: 'incomplete_graph',
       requests: [{ id: 'secret-1', requestId: null, itemId: 'secret-1', type: 'secret', title: 'Secret required in DeepAI Code', reason: 'x'.repeat(512), userOnly: true }] } });
-  const notice = await owner.offer(context(parent), 8000);
+  const notice = await offerAfterRefresh(context(parent), 8000);
   expect(notice).toContain('User attention required');
   expect(notice).toContain('incomplete or possibly stale');
   expect(notice).toContain('cannot answer or approve');
@@ -477,7 +667,7 @@ it('reports pending secret/approval attention with nullable IDs even when the gr
 it('does not report an available but empty attention projection as a pending approval', async () => {
   const parent = await principal(), job = await owner.submit(parent, request());
   Object.assign(jobs.get(String(job.id))!, { status: 'active', attention: { available: true, pendingCount: 0, fingerprint: 'empty', requests: [] } });
-  expect(await owner.offer(context(parent), 8000)).toBeNull();
+  expect(await offerAfterRefresh(context(parent), 8000)).toBeNull();
 });
 it('paginates reports without copying their text into the parent custody ledger and requires explicit outcome ack', async () => {
   const parent = await principal(), job = await owner.submit(parent, request()); complete(job.id);
@@ -485,7 +675,7 @@ it('paginates reports without copying their text into the parent custody ledger 
   expect(result.assistantText).toBe('A model claim, not proof.');
   expect(JSON.stringify(await readDurableStrict('deepai-helper-bindings'))).not.toContain('A model claim');
   await owner.inspect(parent, 'ack', String(job.id));
-  expect(await owner.offer(context(parent), 8000)).toBeNull();
+  expect(await offerAfterRefresh(context(parent), 8000)).toBeNull();
   expect((await owner.inbox(parent)).jobs).toHaveLength(0);
 });
 it('continues only an owned registered job with the same workspace/model and a new key', async () => {
@@ -578,10 +768,10 @@ it('links the exact parent, native run, saved report, witnessed publication and 
   complete(job.id); Object.assign(jobs.get(String(job.id))!, { runId: 'native-run-one' });
   const publication = { completedAt: null as number | null, failed: false };
   const c = context(p, publication);
-  expect(await owner.offer(c, 8000)).toContain(String(job.id));
+  expect(await offerAfterRefresh(c, 8000)).toContain(String(job.id));
   publication.completedAt = ++now;
   now += 5;
-  await owner.offer(context(p), 8000);
+  await offerAfterRefresh(context(p), 8000);
   const inspected = await owner.inspect(p, 'status', String(job.id));
   expect(inspected.receipt).toMatchObject({ nativeRunId: 'native-run-one', reportSaved: true,
     reportPath: path.join(directory, '.cos-deepai', 'results', String(job.id), 'report.md'), noticePublishedAt: publication.completedAt });
@@ -601,7 +791,7 @@ it('refuses explicit acknowledgment of a completed but unsaved result without ma
 it('retains witnessed publication when the next parent action directly acknowledges the outcome', async () => {
  const p = await principal(); const job = await owner.submit(p, request()); complete(job.id);
  const publication = { completedAt: null as number | null, failed: false };
- await owner.offer(context(p, publication), 8000); publication.completedAt = ++now; now++;
+ await offerAfterRefresh(context(p, publication), 8000); publication.completedAt = ++now; now++;
  const ack = await owner.inspect(p, 'ack', String(job.id));
  expect(ack.receipt).toMatchObject({ noticePublishedAt: publication.completedAt, acknowledgedAt: now });
 });
@@ -610,7 +800,7 @@ it('does not turn a failed or future publication witness into confirmed notice d
  for (const failed of [true, false]) {
   const p = await principal(); const job = await owner.submit(p, request('notice-' + failed)); complete(job.id);
   const publication = { completedAt: null as number | null, failed: false };
-  await owner.offer(context(p, publication), 8000);
+  await offerAfterRefresh(context(p, publication), 8000);
   publication.completedAt = failed ? now : now + 500; publication.failed = failed;
   const ack = await owner.inspect(p, 'ack', String(job.id));
   expect(ack.receipt).toMatchObject({ noticePublishedAt: null, acknowledgedAt: now });
@@ -620,7 +810,7 @@ it('does not turn a failed or future publication witness into confirmed notice d
 it('retains a confirmed publication witness across a failed durable acknowledgment write', async () => {
  const p = await principal(); const job = await owner.submit(p, request()); complete(job.id);
  const publication = { completedAt: null as number | null, failed: false };
- await owner.offer(context(p, publication), 8000); publication.completedAt = ++now; now++;
+ await offerAfterRefresh(context(p, publication), 8000); publication.completedAt = ++now; now++;
  const write = deps.write; let fail = true;
  deps.write = async ledger => { if (fail) { fail = false; throw new Error('disk write interrupted'); } await write(ledger); };
  await expect(owner.inspect(p, 'ack', String(job.id))).rejects.toThrow('disk write interrupted');
@@ -632,7 +822,7 @@ it('retries durable publication capture through inbox and later eligible notices
  for (const method of ['inbox', 'offer'] as const) {
   const p = await principal(); const job = await owner.submit(p, request('write-' + method)); complete(job.id);
   const publication = { completedAt: null as number | null, failed: false };
-  await owner.offer(context(p, publication), 8000); publication.completedAt = ++now; now++;
+  await offerAfterRefresh(context(p, publication), 8000); publication.completedAt = ++now; now++;
   const write = deps.write; let fail = true;
   deps.write = async ledger => { if (fail) { fail = false; throw new Error('temporary write failure'); } await write(ledger); };
   const read = () => method === 'inbox' ? owner.inbox(p) : owner.offer(context(p), 8000);

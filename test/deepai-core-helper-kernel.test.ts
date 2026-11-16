@@ -27,6 +27,7 @@ import { createRegistrar, dispatch, ok, fail, type ToolResult } from '../src/mai
 import { currentCall } from '../src/main/mcp/call-context.js';
 import { withInboundRequestId } from '../src/main/mcp/inbound.js';
 import { defaultConfig } from '../src/main/config.js';
+import { createDeepAIHelperOwner } from '../src/main/deepai-helper.js';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -75,6 +76,38 @@ it('preserves successful work when the external-result projection fails', async 
   expect(text(result)).not.toContain('Private bridge failure');
   expect(result.isError).not.toBe(true);
   expect(fixture.record).toHaveBeenCalledTimes(1);
+});
+it('delivers and records the real Core result while the helper owner is blocked in native readiness', async () => {
+  const token = {};
+  let release!: () => void, entered!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const helper = createDeepAIHelperOwner({
+    scope: () => ({ key: 'account-fixture', token, deviceId: 'device-fixture', profileId: 'profile-fixture' }),
+    currentSession: async id => ({ conversationId: id.replace(/^session-/, '') }),
+    automationAllowed: () => true, read: async () => null, write: async () => undefined,
+    bridge: async () => {
+      entered(); await held;
+      return { ready: true, observedAt: new Date().toISOString(), maxActive: 2,
+        model: 'deepai/glm-5.3-flash', version: '0.3.37', protocol: 2, blocker: null };
+    }, now: () => Date.now()
+  });
+  const parent = await helper.parent({ requestId: 'req-parent-a', sessionId: 'session-parent-a',
+    conversationId: 'parent-a', transportKey: null });
+  fixture.offer.mockImplementation((context, budget) => helper.offer(context, budget));
+  const readiness = helper.readiness(parent); await started;
+  let delivered = false;
+  const response = registrar()('req-parent-b').then(value => { delivered = true; return value; });
+  try {
+    await vi.waitFor(() => expect(delivered).toBe(true), { timeout: 1000, interval: 10 });
+    expect(text(await response)).toContain('base result');
+    expect(fixture.record).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'session-parent-b', conversationId: 'parent-b',
+      content: expect.arrayContaining([expect.objectContaining({ type: 'text', text: 'base result' })])
+    }));
+  } finally {
+    release(); await readiness; await response;
+  }
 });
 it('appends only once after nested code-mode calls have returned', async () => {
   const reg = createRegistrar(null, { roots: [], caps: defaultConfig().capabilities, readOnly: false }, 'core');
