@@ -42,7 +42,7 @@
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
   const VERSION = 19;
   /** Private implementation epoch, independent of the stable cross-world wire schema. */
-  const PRODUCER_VERSION = 182;
+  const PRODUCER_VERSION = 183;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -2999,11 +2999,17 @@
               canonicalParents.set(id, parent); exchanges.set(id, exchange);
               continue;
             }
+            // The outer Code Mode return can retain the same contracted narration
+            // edge as an invocation. Only its still-open exact execution may use
+            // that two-edge proof. Child receipts, request scope, cache parity and
+            // the final terminal are independently validated below as before.
             const contracted = retainedParent && retainedParent !== parent && own.call(mapping, retainedParent) &&
               (at === 1 && role === 'system'
                 ? contractedHeader(retainedParent, parent, metadata)
-                : at > 1 && role === 'assistant' &&
-                  (recipient === 'functions.exec' || recipient === 'api_tool.call_tool') &&
+                : at > 1 && (role === 'assistant' &&
+                  (recipient === 'functions.exec' || recipient === 'api_tool.call_tool') ||
+                  role === 'tool' && nativeField(author, 'name') === 'functions.exec' && recipient === 'all' &&
+                  execution && str(nativeField(metadata, 'request_id')) === execution.request) &&
                   contractedNarration(retainedParent, parent, metadata));
             if (!retainedParent || retainedParent !== parent && own.call(mapping, retainedParent) && !contracted) {
               // Fixed shape of the first refused edge only. Do not export either

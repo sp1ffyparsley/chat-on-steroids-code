@@ -4516,7 +4516,7 @@ describe('desktop input delivery and helper ownership', () => {
       expect(nativeSend).toHaveBeenCalledOnce();
     });
 
-  it.each(['plain', 'fenced', 'code-controls', 'new-renderer'])('recovers one stable strict Temporary Chat decision when provider terminal metadata is absent (%s)', async (shape) => {
+  it.each(['plain', 'fenced', 'code-controls', 'new-renderer', 'dil-response'])('recovers one stable strict Temporary Chat decision when provider terminal metadata is absent (%s)', async (shape) => {
     const json = '{"action":"continue","reply":"Continue the exact accepted task."}';
     const canonical = shape === 'fenced' ? '```json\n' + json + '\n```' : json;
     live = await harness(`https://chatgpt.com/?temporary-chat=true&cos-input=${inputId}`, {
@@ -4538,16 +4538,17 @@ describe('desktop input delivery and helper ownership', () => {
     expect(await live.runtimeMessage({ type: 'clf-desktop-input', id: inputId, conversationId: null })).toEqual({ ok: true });
     const section = assistantTurn(live.document, 'dom-recovery-final', []);
     prose(live.document, section, 'dom-recovery-message', canonical);
-    if (shape === 'code-controls' || shape === 'new-renderer') {
+    if (shape === 'code-controls' || shape === 'new-renderer' || shape === 'dil-response') {
       const markdown = section.querySelector('.markdown')!;
       markdown.textContent = '';
       const pre = live.document.createElement('pre');
       pre.innerHTML = '<div>JSON<button>Copy</button></div><code></code>';
       pre.querySelector('code')!.textContent = json;
       markdown.append(pre);
-      if (shape === 'new-renderer') {
+      if (shape === 'new-renderer' || shape === 'dil-response') {
         markdown.className = 'MarkdownRoot-current';
-        markdown.setAttribute('data-markdown-text-style', 'assistant-message');
+        if (shape === 'dil-response') markdown.setAttribute('data-dil-response', '');
+        else markdown.setAttribute('data-markdown-text-style', 'assistant-message');
         markdown.setAttribute('data-dil-message-id', 'dom-recovery-message');
         const surface = live.document.createElement('div');
         surface.setAttribute('data-markdown-copy', 'code-block');
@@ -5913,7 +5914,7 @@ describe('desktop input delivery and helper ownership', () => {
     ]);
   });
 
-  it.each(['plain', 'code-controls', 'code-with-prose', 'two-blocks', 'new-renderer', 'new-renderer-prose', 'new-renderer-two-blocks', 'new-renderer-foreign-id', 'new-renderer-nested', 'new-renderer-nested-prose', 'new-renderer-sibling-roots', 'new-renderer-foreign-data-id', 'new-renderer-prior-message', 'new-renderer-prior-message-prose', 'new-renderer-duplicate-final'])('waits through a reference-only helper terminal and publishes its exact visible JSON once rendered (%s)', async shape => {
+  it.each(['plain', 'code-controls', 'code-with-prose', 'two-blocks', 'new-renderer', 'new-renderer-prose', 'new-renderer-two-blocks', 'new-renderer-foreign-id', 'new-renderer-nested', 'new-renderer-nested-prose', 'new-renderer-sibling-roots', 'new-renderer-foreign-data-id', 'new-renderer-prior-message', 'new-renderer-prior-message-prose', 'new-renderer-duplicate-final', 'dil-response', 'dil-response-prose', 'dil-response-foreign-id', 'dil-response-two-blocks'])('waits through a reference-only helper terminal and publishes its exact visible JSON once rendered (%s)', async shape => {
     const canonical = '{"action":"continue","reply":"Continue the exact task."}';
     const reference = '::chatgpt-content-reference{index="0" source_message_id="helper-source"}';
     live = await harness(`https://chatgpt.com/c/${chatA}`, {
@@ -5943,16 +5944,19 @@ describe('desktop input delivery and helper ownership', () => {
       markdown.append(pre);
       if (shape === 'code-with-prose') markdown.append('This is only an example.');
       if (shape === 'two-blocks') markdown.append(pre.cloneNode(true));
-      if (shape.startsWith('new-renderer')) {
-        markdown.className = 'MarkdownRoot-current';
-        markdown.setAttribute('data-markdown-text-style', 'assistant-message');
+      if (shape.startsWith('new-renderer') || shape.startsWith('dil-response')) {
+        markdown.className = shape.startsWith('dil-response') ? 'DilRenderer' : 'MarkdownRoot-current';
+        if (!shape.startsWith('dil-response')) markdown.setAttribute('data-markdown-text-style', 'assistant-message');
         const rendered = live.document.createElement('div');
-        rendered.setAttribute('data-dil-message-id', shape === 'new-renderer-foreign-id' ? 'foreign-message' : 'reference-helper-answer');
+        rendered.setAttribute('data-dil-message-id', shape.endsWith('foreign-id') ? 'foreign-message' : 'reference-helper-answer');
+        if (shape.startsWith('dil-response')) rendered.setAttribute('data-dil-response', '');
         const surface = live.document.createElement('div');
         surface.setAttribute('data-markdown-copy', 'code-block');
         surface.innerHTML = '<div>JSON<button>Enable word wrap</button><button>Copy</button></div><div><pre><code></code></pre></div>';
         surface.querySelector('code')!.textContent = canonical;
         rendered.append(surface);
+        if (shape === 'dil-response-prose') rendered.append('This is only an example.');
+        if (shape === 'dil-response-two-blocks') rendered.append(surface.cloneNode(true));
         markdown.replaceChildren(rendered);
         if (shape.startsWith('new-renderer-nested')) {
           const inner = live.document.createElement('div'); inner.className = 'markdown';
@@ -5979,7 +5983,7 @@ describe('desktop input delivery and helper ownership', () => {
       }
     }
     await bindFiberTurns([{ section, turn: proof }]);
-    if (shape === 'new-renderer-prior-message-prose' || shape === 'new-renderer-duplicate-final' || shape === 'new-renderer-sibling-roots' || shape === 'new-renderer-foreign-data-id' || shape === 'new-renderer-nested-prose' || shape === 'code-with-prose' || shape === 'two-blocks' || shape === 'new-renderer-prose' || shape === 'new-renderer-two-blocks' || shape === 'new-renderer-foreign-id') {
+    if (['dil-response-prose', 'dil-response-foreign-id', 'dil-response-two-blocks'].includes(shape) || shape === 'new-renderer-prior-message-prose' || shape === 'new-renderer-duplicate-final' || shape === 'new-renderer-sibling-roots' || shape === 'new-renderer-foreign-data-id' || shape === 'new-renderer-nested-prose' || shape === 'code-with-prose' || shape === 'two-blocks' || shape === 'new-renderer-prose' || shape === 'new-renderer-two-blocks' || shape === 'new-renderer-foreign-id') {
       expect(live.sent.filter(message => message.response)).toEqual([]);
       return;
     }

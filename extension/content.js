@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 182;
+  const RECORDER_VERSION = 183;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -16005,7 +16005,10 @@
     const owners = owned.filter(element => !owned.some(other => other !== element && other.contains(element)));
     if (owners.length > 1) return fallback;
     if (owners.length === 1) node = owners[0];
-    const rootSelector = '.markdown, [data-markdown-text-style="assistant-message"]';
+    // Current DIL renders a message-owned response root without either Markdown
+    // marker. Its explicit public message id remains subject to the same exact
+    // owner/foreign-id checks below; a generic code widget is never an answer root.
+    const rootSelector = '.markdown, [data-markdown-text-style="assistant-message"], [data-dil-response][data-dil-message-id]';
     const markdowns = [...(node.matches?.(rootSelector) ? [node] : []), ...node.querySelectorAll(rootSelector)];
     // The current renderer can nest a legacy .markdown inside its newer root.
     // These are one answer surface, not competing answers. Keep the outer root

@@ -2805,6 +2805,10 @@ describe('alternate shell turn/message provenance', () => {
     'header annotation accessor', 'pending header annotation', 'header annotation foreign scope',
     'header annotation missing receipt', 'header rebase flag', 'header rebase accessor',
     'unfinished execution', 'unfinished execution result', 'foreign retained parent',
+    'exact retained result commentary', 'retained result commentary foreign request',
+    'retained result commentary foreign working', 'retained result commentary foreign exchange',
+    'retained result commentary wrong parent', 'retained result commentary terminal',
+    'retained result commentary tool', 'retained result commentary missing receipt',
     'exact retained commentary parent', 'exact retained execution commentary parent', 'exact retained commentary image result', 'exact retained commentary value image result',
     'exact retained header parent', 'retained header transport annotation', 'retained header transport annotation foreign scope',
     'retained header missing children', 'retained header duplicate child',
@@ -2996,6 +3000,26 @@ describe('alternate shell turn/message provenance', () => {
                 { content_type: 'image_asset_pointer', asset_pointer: 'PRIVATE_IMAGE_ASSET' }] };
             }
           }
+          if (variant === 'exact retained result commentary' || variant.startsWith('retained result commentary ')) {
+            // Provider contracts finished commentary immediately before the outer
+            // Code Mode return, retaining its metadata parent off the current path.
+            const retained = 'PRIVATE_RETAINED_RESULT_COMMENTARY';
+            const parent = mapping[EXEC_RESULT].parent;
+            mapping[retained] = { id: retained, parent, message: { id: retained,
+              author: { role: 'assistant' }, recipient: 'all', channel: 'commentary',
+              status: 'finished_successfully', end_turn: false,
+              content: { content_type: 'text', parts: ['PRIVATE_RESULT_COMMENTARY'] },
+              metadata: { ...scope, parent_id: parent } } };
+            mapping[EXEC_RESULT].message.metadata.parent_id = retained;
+            if (variant === 'retained result commentary foreign request') mapping[retained].message.metadata.request_id = 'foreign';
+            if (variant === 'retained result commentary foreign working') mapping[retained].message.metadata.working_turn_id = 'foreign';
+            if (variant === 'retained result commentary foreign exchange') mapping[retained].message.metadata.turn_exchange_id = 'foreign';
+            if (variant === 'retained result commentary wrong parent') mapping[retained].parent = USER;
+            if (variant === 'retained result commentary terminal') mapping[retained].message.end_turn = true;
+            if (variant === 'retained result commentary tool') mapping[retained].message.recipient = 'functions.exec';
+            if (variant === 'retained result commentary missing receipt')
+              mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: '{"content":[]}' };
+          }
           if (variant === 'unselected call') entry.turn.messageIds = [USER, ASSISTANT];
           if (variant === 'system accessor') Object.defineProperty(mapping[HEADER].message.metadata,
             'is_visually_hidden_from_conversation', { get() { getterReads++; throw new Error('PRIVATE_SYSTEM_GETTER'); } });
@@ -3071,11 +3095,13 @@ describe('alternate shell turn/message provenance', () => {
       try {
         const accepted = variant === 'direct Core' || variant === 'exact canonical group' || variant === 'exact final reference' ||
           ['widget before final reference', 'widget after final reference', 'widget getter final reference', 'bounded widget final reference'].includes(variant) ||
+          variant === 'exact retained result commentary' ||
           variant === 'exact retained commentary parent' || variant === 'exact retained execution commentary parent' ||
           variant === 'exact retained commentary image result' || variant === 'exact retained commentary value image result' || variant === 'exact retained header parent' ||
           variant === 'retained header transport annotation' ||
           ['header message type', 'header annotation absent', 'header annotation null', 'header annotation accessor'].includes(variant);
         const identityOnly = variant === 'direct Core missing receipt' || variant.startsWith('core receipt missing') ||
+          variant === 'retained result commentary missing receipt' ||
           variant === 'retained commentary missing receipt' || variant === 'retained header missing receipt' ||
           variant === 'missing terminal exact user' || variant === 'header annotation missing receipt' ||
           variant === 'execution child result missing' || variant === 'execution child result missing provider contraction';
