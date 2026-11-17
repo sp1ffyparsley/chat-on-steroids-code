@@ -555,6 +555,32 @@ async function shellHarness(options: ShellOptions = {}) {
   return { dom, win, fiber, api: win.CLF_DOM, exchange, secondExchange };
 }
 
+describe('live mapping cache scan capacity', () => {
+  it.each(['padding', 'object overflow', 'late conflict', '4096 slots', '4097 slots'])(
+    'preserves exact native receipt checks with %s', async variant => {
+      const page = await shellHarness({ assistantCompleted: false, withCall: true, withExec: true,
+        nativeCallReceipt: true, callCompleted: 'missing', nativeCallMutation: completeExecBeforeCall });
+      try {
+        const owner = (page.exchange as any).__reactFiber$shellfixture;
+        const snapshot = owner.memoizedState.memoizedState;
+        const padding = Symbol.for('react.memo_cache_sentinel');
+        const slots = variant === '4096 slots' ? 4096 : variant === '4097 slots' ? 4097 : 2048;
+        const values: any[] = Array.from({ length: slots }, () => variant === 'object overflow' ? {} : padding);
+        if (variant === 'late conflict') values[values.length - 1] = {
+          ...snapshot, renderedConversation: { ...snapshot.renderedConversation, current_node: CALL }
+        };
+        const rows = [];
+        for (let at = 0; at < values.length; at += 1024) rows.push(values.slice(at, at + 1024));
+        owner.updateQueue = { memoCache: { data: rows } };
+        const frame = await shellRescan(page, `mapping-cache-${variant}`);
+        const accepted = variant === 'padding' || variant === '4096 slots';
+        expect(frame.turns[0].calls[0].answered).toBe(accepted);
+        expect(frame.turns[0].endMessageId).toBe(accepted ? ASSISTANT : null);
+        expect(JSON.stringify(frame)).not.toContain('PRIVATE_TOOL_RESULT');
+      } finally { page.dom.window.close(); }
+    });
+});
+
 async function shellRescan(page: Awaited<ReturnType<typeof shellHarness>>, nonce: string) {
   const answer = new Promise<any>((resolve, reject) => {
     const timer = globalThis.setTimeout(() => reject(new Error('shell rescan never answered')), 2000);

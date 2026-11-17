@@ -42,7 +42,7 @@
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
   const VERSION = 19;
   /** Private implementation epoch, independent of the stable cross-world wire schema. */
-  const PRODUCER_VERSION = 185;
+  const PRODUCER_VERSION = 186;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -2087,8 +2087,12 @@
       if (prior && prior.renderedConversation.current_node !== conversation.current_node) conflict = true;
       snapshots.set(mapping, candidate);
     };
-    let remaining = 2048;
-    for (let at = fiber, up = 0; at && up < MAX_CLIMB && remaining > 0; up++, at = at.return) {
+    // React compiler caches are capacity-sized and include primitive/sentinel slots.
+    // Those cannot own a mapping. Do not spend the object-inspection budget on them:
+    // the live completed branch had 2,067 slots but only 1,112 object inspections.
+    // Bound physical iteration separately; exhaustion still withholds every identity.
+    let remaining = 2048, cacheSlots = 4096;
+    for (let at = fiber, up = 0; at && up < MAX_CLIMB && remaining > 0 && cacheSlots >= 0; up++, at = at.return) {
       if (at.memoizedProps?.conversationId !== entry.conversationId) continue;
       for (let hook = at.memoizedState; hook && remaining-- > 0; hook = hook.next) {
         const state = value(hook, 'memoizedState');
@@ -2098,11 +2102,31 @@
       const data = at.updateQueue?.memoCache?.data;
       if (!Array.isArray(data) || data.length > 32) continue;
       for (const row of data) {
+        if (remaining <= 0 || cacheSlots < 0) break;
         if (!Array.isArray(row) || row.length > 1024) continue;
-        for (const item of row) { if (--remaining < 0) break; inspect(item); }
+        for (const item of row) {
+          if (--cacheSlots < 0) break;
+          if (!item || typeof item !== 'object') continue;
+          if (--remaining < 0) break;
+          inspect(item);
+        }
       }
     }
-    return conflict || snapshots.size > 1 || remaining <= 0 ? false : snapshots.values().next().value || null;
+    if (remaining <= 0 || cacheSlots < 0) {
+      // Reuse the existing bounded local diagnostic allowance; never export page values.
+      const now = Date.now(), key = 'live-mapping-scan-budget';
+      if (now - nativeReferenceTraceAt >= 60_000) {
+        nativeReferenceTraceAt = now; nativeReferenceTraceKeys.clear();
+      }
+      if (!nativeReferenceTraceKeys.has(key) && nativeReferenceTraceKeys.size < MAX_TURNS) {
+        nativeReferenceTraceKeys.add(key);
+        console.info('[Chat On Steroids] native mapping scan diagnostic' +
+          ` producer=${PRODUCER_VERSION} reason=scan-budget objectBudgetExhausted=${remaining <= 0}` +
+          ` slotBudgetExhausted=${cacheSlots < 0}`);
+      }
+      return false;
+    }
+    return conflict || snapshots.size > 1 ? false : snapshots.values().next().value || null;
   }
 
   function shellCurrentPath(snapshot, entry) {
