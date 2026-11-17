@@ -2538,6 +2538,94 @@ describe('alternate shell turn/message provenance', () => {
       } finally { page.dom.window.close(); }
     });
 
+  it.each(['exact', 'opaque body accessor', 'missing receipt', 'foreign request', 'foreign working', 'foreign exchange',
+    'visible', 'unfinished', 'wrong role', 'wrong recipient', 'assistant final', 'assistant text',
+    'missing system flag', 'missing developer flag', 'extra rebase flag', 'wrong parent', 'missing user request',
+    'invocation metadata', 'jit metadata', 'shape accessor', 'channel accessor', 'terminal accessor', 'author accessor', 'missing member', 'late prefix',
+    'cached role', 'cached hidden', 'cached flag', 'cached parent', 'cached content type', 'cached request'] as const)(
+    'proves the selected on-path native rebase context without granting result credit (%s)', async variant => {
+      const HEADER = 'on-path-header', PREFIX = ['on-path-system', 'on-path-developer', 'on-path-memory', 'on-path-context'] as const;
+      const scope = { request_id: REQUEST, working_turn_id: 'on-path-working', turn_exchange_id: 'on-path-exchange' };
+      let getterReads = 0;
+      const page = await shellHarness({ withCall: true, withExec: true, nativeCallReceipt: true,
+        callCompleted: false, assistantCompleted: false,
+        nativeCallMutation(mapping, entry) {
+          completeExecBeforeCall(mapping, entry);
+          entry.turn.items = entry.turn.items.filter((item: any) => item.callId !== EXEC);
+          delete entry.turn.items.find((item: any) => item.callId === CALL).widgetStateSource;
+          entry.turn.messageIds = [USER, CALL, ASSISTANT];
+          for (const row of Object.values(mapping) as any[]) Object.assign(row.message.metadata, scope);
+          mapping[HEADER] = { id: HEADER, parent: USER, message: { id: HEADER, author: { role: 'system' },
+            recipient: 'all', channel: null, end_turn: true, status: 'finished_successfully',
+            content: { content_type: 'text', parts: ['PRIVATE_HEADER'] },
+            metadata: { ...scope, request_id: null, parent_id: USER, is_visually_hidden_from_conversation: true,
+              rebase_developer_message: false } } };
+          PREFIX.forEach((id, at) => {
+            const parent = at ? PREFIX[at - 1] : HEADER;
+            mapping[id] = { id, parent, message: { id, author: { role: at === 2 ? 'assistant' : 'system' },
+              recipient: 'all', channel: null, end_turn: at < 2 ? true : null, status: 'finished_successfully',
+              content: at === 2 ? { content_type: 'model_editable_context', model_set_context: 'PRIVATE_CONTEXT' }
+                : { content_type: 'text', parts: ['PRIVATE_CONTEXT'] },
+              metadata: { ...scope, parent_id: parent, is_visually_hidden_from_conversation: true,
+                ...(at === 0 ? { rebase_system_message: true } : at === 1 ? { rebase_developer_message: true } : {}) } } };
+          });
+          mapping[EXEC].parent = PREFIX[3]; mapping[EXEC].message.metadata.parent_id = PREFIX[3];
+          mapping[CALL].parent = EXEC; mapping[CALL].message.metadata.parent_id = EXEC;
+          mapping[EXEC_RESULT].parent = RESULT; mapping[EXEC_RESULT].message.metadata.parent_id = RESULT;
+          mapping[ASSISTANT].parent = EXEC_RESULT; mapping[ASSISTANT].message.metadata.parent_id = EXEC_RESULT;
+          mapping[RESULT].message.content = { content_type: 'code', language: 'json', text: JSON.stringify({
+            cosResultReceipt: { version: 2, id: 'a'.repeat(48),
+              invocationSha256: createHash('sha256').update(JSON.stringify(['read', {}])).digest('hex') } }) };
+          const context = mapping[PREFIX[2]].message;
+          if (variant === 'opaque body accessor') Object.defineProperty(context.content, 'model_set_context', {
+            get() { getterReads++; throw new Error('PRIVATE_CONTEXT_GETTER'); } });
+          if (variant === 'missing receipt') mapping[RESULT].message.content.text = '{}';
+          if (variant === 'foreign request') context.metadata.request_id = 'foreign';
+          if (variant === 'foreign working') context.metadata.working_turn_id = 'foreign';
+          if (variant === 'foreign exchange') context.metadata.turn_exchange_id = 'foreign';
+          if (variant === 'visible') context.metadata.is_visually_hidden_from_conversation = false;
+          if (variant === 'unfinished') context.status = 'in_progress';
+          if (variant === 'wrong role') mapping[PREFIX[0]].message.author.role = 'assistant';
+          if (variant === 'wrong recipient') context.recipient = 'functions.exec';
+          if (variant === 'assistant final') context.end_turn = true;
+          if (variant === 'assistant text') context.content = { content_type: 'text', parts: ['PRIVATE_CONTEXT'] };
+          if (variant === 'missing system flag') delete mapping[PREFIX[0]].message.metadata.rebase_system_message;
+          if (variant === 'missing developer flag') delete mapping[PREFIX[1]].message.metadata.rebase_developer_message;
+          if (variant === 'extra rebase flag') context.metadata.rebase_system_message = true;
+          if (variant === 'wrong parent') context.metadata.parent_id = HEADER;
+          if (variant === 'missing user request') delete mapping[USER].message.metadata.request_id;
+          if (variant === 'invocation metadata') context.metadata.invoked_resource = { app_name: APP };
+          if (variant === 'jit metadata') context.metadata.jit_plugin_data = null;
+          if (variant === 'shape accessor') Object.defineProperty(context.metadata, 'is_visually_hidden_from_conversation', {
+            get() { getterReads++; throw new Error('PRIVATE_SHAPE_GETTER'); } });
+          if (variant === 'channel accessor' || variant === 'terminal accessor' || variant === 'author accessor')
+            Object.defineProperty(variant === 'author accessor' ? context.author : context,
+              variant === 'channel accessor' ? 'channel' : variant === 'terminal accessor' ? 'end_turn' : 'name', {
+                get() { getterReads++; throw new Error('PRIVATE_NULLABLE_GETTER'); } });
+          if (variant === 'missing member') { mapping[PREFIX[2]].parent = PREFIX[0];
+            mapping[PREFIX[2]].message.metadata.parent_id = PREFIX[0]; }
+          if (variant === 'late prefix') { mapping[EXEC].parent = HEADER; mapping[EXEC].message.metadata.parent_id = HEADER;
+            mapping[PREFIX[0]].parent = EXEC; mapping[PREFIX[0]].message.metadata.parent_id = EXEC;
+            mapping[CALL].parent = PREFIX[3]; mapping[CALL].message.metadata.parent_id = PREFIX[3]; }
+        }, nativeCallCacheMutation: variant.startsWith('cached ') ? mapping => {
+          const context = mapping[PREFIX[2]].message;
+          if (variant === 'cached role') context.author.role = 'system';
+          if (variant === 'cached hidden') context.metadata.is_visually_hidden_from_conversation = false;
+          if (variant === 'cached flag') mapping[PREFIX[0]].message.metadata.rebase_system_message = false;
+          if (variant === 'cached parent') mapping[PREFIX[2]].parent = HEADER;
+          if (variant === 'cached content type') context.content.content_type = 'text';
+          if (variant === 'cached request') context.metadata.request_id = 'foreign';
+        } : undefined });
+      try {
+        const accepted = variant === 'exact' || variant === 'opaque body accessor';
+        const identityOnly = variant === 'missing receipt';
+        expect(page.fiber.turns[0].calls[0]).toMatchObject({ requestId: accepted || identityOnly ? REQUEST : null, answered: accepted });
+        expect(page.fiber.turns[0].endMessageId).toBe(accepted ? ASSISTANT : null);
+        expect(getterReads).toBe(0);
+        expect(JSON.stringify(page.fiber)).not.toContain('PRIVATE_CONTEXT');
+      } finally { page.dom.window.close(); }
+    });
+
   it.each(['eight-node prefix', 'private context getter', 'different context request', '400-node prefix',
     '401-node prefix', 'foreign working', 'foreign exchange', 'visible context', 'tool recipient',
     'invocation metadata', 'foreign user', 'missing child', 'duplicate child', 'cycle', 'parent conflict',

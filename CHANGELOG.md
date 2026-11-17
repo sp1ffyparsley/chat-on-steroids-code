@@ -11,6 +11,7 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## [2.1.39] — Custom Fresh turns and companion reliability
 
+- Recognizes the provider's exact selected-path hidden system/developer rebase, model-memory and system-context prefix before execution. Context bodies remain opaque; current-user namespace, ancestry, cache parity, terminal and per-tool receipt checks still decide result acceptance. Recorder 187 keeps wire 19 unchanged. The existing same-page evidence-reader refresh can load the qualified MAIN reader without reloading the companion worker; a refresh alone never certifies completion.
 - Selectively adapts Maximapple's upstream Fresh turns work (#1402 and the v2.1.39 fixes): ordinary long turns can continue after an exactly attributed, completed tool result. The default is 30 minutes; Off and other intervals are available. Pro, Goal, Loop, worker and helper chats retain their existing turn owners.
 - Adds custom safeguards around that adaptation: durable two-attempt custody, no ambiguous-send replay, exact native tool-idle proof before Stop, manual-Stop precedence across asynchronous authorization, preserved drafts/attachments, and executable source-document capability checks before status/opening custody, claim and Send authorization. Bounded idle-recorder repair prevents mixed loaded revisions from reserving work they cannot execute.
 - Opens app-authored chats in regular browser windows rather than incognito, while retaining account, placement and delivery ownership.

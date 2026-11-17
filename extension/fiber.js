@@ -42,7 +42,7 @@
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
   const VERSION = 19;
   /** Private implementation epoch, independent of the stable cross-world wire schema. */
-  const PRODUCER_VERSION = 186;
+  const PRODUCER_VERSION = 187;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -2997,6 +2997,64 @@
             }
             return true;
           };
+          // The current native graph retains a context-only rebase prefix ON
+          // the selected path: header -> system rebase -> developer rebase ->
+          // model memory -> hidden system context -> ordinary execution. It is
+          // distinct from the contracted/off-path prefix above. Recognize only
+          // this four-member layout before any command, with the selected user's
+          // exact request/namespace. Bodies remain opaque. Membership supplies no
+          // result, terminal, approval or execution credit; every ordinary edge,
+          // status, cache and tool/receipt check below still runs.
+          const onPathContext = new Set();
+          if (hasHeader && nativeField(nativeField(messageAt(currentPath[2]), 'metadata'), 'rebase_system_message') === true) {
+            const request = str(nativeField(userMeta, 'request_id'));
+            const cachedUser = nativeField(nativeField(data, 'mapping'), typedUserId);
+            if (!userAnchorsHeader || !request) return refuse('nativeScopeBranchConflict', 'group-role');
+            if (cachedUser && cachedUser !== nativeField(mapping, typedUserId)) {
+              const prior = nativeField(cachedUser, 'message'), meta = nativeField(prior, 'metadata');
+              if (nativeField(cachedUser, 'id') !== typedUserId || nativeField(prior, 'id') !== typedUserId ||
+                  nativeField(cachedUser, 'parent') !== nativeField(nativeField(mapping, typedUserId), 'parent') ||
+                  nativeField(nativeField(prior, 'author'), 'role') !== 'user' ||
+                  ['request_id', 'working_turn_id', 'turn_exchange_id'].some(key => nativeField(meta, key) !== nativeField(userMeta, key)))
+                return refuse('nativeScopeCacheConflict');
+            }
+            const nullField = (object, key) => {
+              const descriptor = object && Object.getOwnPropertyDescriptor(object, key);
+              return !descriptor || own.call(descriptor, 'value') && descriptor.value == null;
+            };
+            const contextShape = (message, offset) => {
+              const meta = nativeField(message, 'metadata'), author = nativeField(message, 'author');
+              const memory = offset === 2, content = nativeField(message, 'content');
+              return nativeField(author, 'role') === (memory ? 'assistant' : 'system') &&
+                nullField(author, 'name') && nativeField(message, 'recipient') === 'all' &&
+                nullField(message, 'channel') && nativeField(message, 'status') === 'finished_successfully' &&
+                (offset < 2 ? nativeField(message, 'end_turn') === true : nullField(message, 'end_turn')) &&
+                nativeField(content, 'content_type') === (memory ? 'model_editable_context' : 'text') &&
+                nativeField(meta, 'is_visually_hidden_from_conversation') === true &&
+                nativeField(meta, 'request_id') === request && nativeField(meta, 'working_turn_id') === working &&
+                nativeField(meta, 'turn_exchange_id') === exchange &&
+                (offset === 0 ? nativeField(meta, 'rebase_system_message') === true : !own.call(meta, 'rebase_system_message')) &&
+                (offset === 1 ? nativeField(meta, 'rebase_developer_message') === true : !own.call(meta, 'rebase_developer_message')) &&
+                !['invoked_resource', 'connector_tool_payload', 'tool_invoking_message', 'tool_invoked_message', 'jit_plugin_data']
+                  .some(key => own.call(meta, key));
+            };
+            for (let offset = 0; offset < 4; offset++) {
+              const id = currentPath[offset + 2], node = nativeField(mapping, id), message = nativeField(node, 'message');
+              const meta = nativeField(message, 'metadata'), parent = currentPath[offset + 1];
+              if (!id || onPathContext.has(id) || !contextShape(message, offset) ||
+                  nativeField(node, 'id') !== id || nativeField(message, 'id') !== id ||
+                  nativeField(node, 'parent') !== parent || nativeField(meta, 'parent_id') !== parent)
+                return refuse('nativeScopeBranchConflict', 'group-role');
+              const cached = nativeField(nativeField(data, 'mapping'), id);
+              if (cached && cached !== node) {
+                const prior = nativeField(cached, 'message'), priorMeta = nativeField(prior, 'metadata');
+                if (!contextShape(prior, offset) || nativeField(cached, 'id') !== id || nativeField(prior, 'id') !== id ||
+                    nativeField(cached, 'parent') !== parent || nativeField(priorMeta, 'parent_id') !== parent)
+                  return refuse('nativeScopeCacheConflict');
+              }
+              onPathContext.add(id);
+            }
+          }
           for (let at = 1; at < currentPath.length; at++) {
             const id = currentPath[at], node = nativeField(mapping, id), message = nativeField(node, 'message');
             const author = nativeField(message, 'author'), metadata = nativeField(message, 'metadata');
@@ -3072,7 +3130,7 @@
               return refuse('nativeScopeBranchConflict', 'group-working-turn');
             if (str(nativeField(metadata, 'turn_exchange_id')) !== exchange)
               return refuse('nativeScopeBranchConflict', 'group-exchange');
-            if (missingTerminal && role === 'assistant' && recipient === 'all' &&
+            if (missingTerminal && !onPathContext.has(id) && role === 'assistant' && recipient === 'all' &&
                 (nativeField(message, 'end_turn') !== false || nativeField(message, 'channel') === 'final')) {
               finalFacet('unselected-final'); return refuse('nativeScopeFinalReceiptUnproved');
             }
@@ -3087,6 +3145,7 @@
             }
             canonicalParents.set(id, parent); exchanges.set(id, exchange);
             if (hasHeader && at === 1) { if (role !== 'system') return refuse('nativeScopeBranchConflict', 'header-role'); continue; }
+            if (onPathContext.has(id)) continue;
             if (role === 'assistant' && recipient === 'functions.exec') {
               const request = str(nativeField(metadata, 'request_id'));
               if (execution || !request) return refuse('nativeScopeBranchConflict', 'execution-start');
