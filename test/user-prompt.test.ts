@@ -77,6 +77,22 @@ it('recovers only a valid provider-serialized transport frame for presentation',
   expect(providerSerializedUserPromptText(serializedResume)).toBe('[[CLF-RESUME:token_0123456789abcdef]]\n\nContinue the original task');
 });
 
+it('recovers provider hard breaks and one native Core chip without exposing framed instructions as authored text', async () => {
+  const { prepareOperatorPrompt } = await import('../src/shared/operator-prompt.mjs');
+  const authored = 'Read the current checkpoint.\nKeep C:\\work\\file and a literal backslash\\\nNext line.';
+  const framed = prepareOperatorPrompt(prependUserPrompt(authored,
+    '# Selected skills\nUse this skill for visual work.\nKeep the entire original task.'));
+  const chip = '[$cove-windows-core](app://asdk_app_' + 'a'.repeat(32) + ')';
+  const serialized = framed.replace(/([\\`*_{}\[\]()#+\-.!<>&:|=~])/g, '\\$1').replace(/\n/g, '\\\n');
+  expect(providerSerializedUserPromptText(chip + serialized)).toBe(authored);
+  expect(providerSerializedUserPromptText(serialized + chip)).toBe(authored);
+  expect(providerSerializedUserPromptText(chip + chip + serialized)).toBeNull();
+  expect(providerSerializedUserPromptText(chip + serialized.slice(0, Math.floor(serialized.length / 2)))).toBeNull();
+  expect(providerSerializedUserPromptText(chip + serialized.replace('entire', 'a different length'))).toBeNull();
+  expect(nativePreparedInputMatches(chip + serialized, framed)).toBe(true);
+  expect(nativePreparedInputMatches(chip + serialized.replace('checkpoint', 'different'), framed)).toBe(false);
+});
+
 it('hides only the framed prefix while preserving native message bytes and controls through repaint', () => {
   const page = new JSDOM('<section data-testid="conversation-turn-0"><div data-message-id="user-1" data-message-author-role="user"><div class="whitespace-pre-wrap"></div><button>Copy</button></div></section>', { runScripts: 'outside-only' });
   try {
@@ -171,7 +187,7 @@ it('hides a provider-prefixed blank paragraph using exact source, retaining stri
 });
 
 it('compares complete prepared native payloads without losing literal paths, entities or transport delimiters', () => {
-  const mention = '[$luna-forge-x7-wise-lark-f968852d90b4-Gamma-windows-core](app://asdk_app_6acdfd6eade881918f99e0fd00dbd3e6)';
+  const mention = '[$luna-forge-x7-wise-lark-f968852d90b4-gamma-windows-core](app://asdk_app_6acdfd6eade881918f99e0fd00dbd3e6)';
   const prepared = prependUserPrompt('Keep C:\\x and C:\\\\x; literal &#x20; and \\# remain. 日本語 🐱\n[[/COS_CONTEXT]]\n\nEnd.', '# Skill\nKeep  two spaces and\tone tab.');
   const newline = prepared.indexOf('\n');
   const serialized = prepared.slice(0, newline) + prepared.slice(newline)

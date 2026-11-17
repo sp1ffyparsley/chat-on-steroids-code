@@ -6,7 +6,7 @@ import { effectiveCapabilities, getConfig } from '../config.js';
 import { openingCoreInstructionParts } from '../mcp/instructions.js';
 import { getSessionProject, projectWorkspace } from '../projects.js';
 import { resolvePath } from '../sandbox.js';
-import { MAX_CHATGPT_MESSAGE_CHARS, prependUserPrompt, userPromptText } from '../../shared/user-prompt.js';
+import { MAX_CHATGPT_MESSAGE_CHARS, prependUserPrompt, providerSerializedUserPromptText, userPromptText } from '../../shared/user-prompt.js';
 import { authorizedAutomaticDesignSkills, canonicalSkillRelevanceWindows, directlyRequestedDesignSkills, excludedAutomaticSkills, explicitlyRequestedSkills, invokedSkills, mentionedActionableSkillIds, refusedLeadingSkills, replacedSkillChoices, scopesCurrentWorkToBackend } from '../../shared/skill-invocation.js';
 import { mayRequireSkillLibrary, selectedSkillInstructions } from './skill-prompt.js';
 import { listSkillLibrary } from '../skill-library.js';
@@ -119,7 +119,12 @@ async function followupSkillCommands(commands: readonly string[], scope: PromptS
     // restore an older saved Skill choice. Conversely, an incomplete original
     // might contain a later veto or renewal: preparation must fail visibly
     // rather than silently decide what the missing words instructed.
-    const authored = event.authoredText ?? userPromptText(event.message.text) ?? event.message.text;
+    // Native Markdown serialization can escape the hidden context and add the
+    // Core chip before it. Recover only a complete length-checked frame before
+    // parsing Skill intent; injected "Use this skill" is not a /this selection.
+    // Authorship, generated-input and native-delivery fences below stay intact.
+    const authored = event.authoredText ?? userPromptText(event.message.text) ??
+      providerSerializedUserPromptText(event.message.text) ?? event.message.text;
     if (!authored || (handoff && resumeBootstrapMatches(authored, handoff.text))) continue;
     // A browser echo carrying inputId proves an outbox delivery, NOT who wrote
     // the entry. The actual input owner cannot be read here: prepareText runs

@@ -21,10 +21,16 @@ export function userPromptText(text: string): string | null {
  */
 export function providerSerializedUserPromptText(text: string): string | null {
   let normalized = text.replace(/\r\n?/g, '\n');
-  normalized = normalized.replace(/\\([\\`*_{}\[\]()#+\-.!<>&:])/g, '$1');
+  // ChatGPT may serialize each line break as a Markdown hard break too. Decode
+  // it in the SAME pass as punctuation: a doubled authored backslash followed
+  // by a serialized newline must retain the authored backslash.
+  normalized = normalized.replace(/\\([\\`*_{}\[\]()#+\-.!<>&:|=~\n])/g, '$1');
   normalized = normalized.replace(/\[(https?:\/\/[^\]\s]{1,4096})\]\((https?:\/\/[^)\s]{1,4096})\)/g,
     (whole, label: string, destination: string) => label === destination ? label : whole);
-  return userPromptText(normalized);
+  // One native Core chip may surround the complete operator/context frame.
+  // Duplicate/competing chips remain literal and cannot hide a malformed frame.
+  // This is presentation/intent parsing only, never a Send or result receipt.
+  return userPromptText(withoutNativeCoreMention(normalized, true));
 }
 
 export function prependUserPrompt(text: string, instructions: string): string {
