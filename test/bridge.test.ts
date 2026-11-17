@@ -1,3 +1,4 @@
+import { profileWorkAdmission } from '../src/main/work-admission.js';
 import { operatorPromptBody } from '../src/shared/operator-prompt.mjs';
 /**
  * The local bridge, over real HTTP.
@@ -147,7 +148,7 @@ const {
   startBridge,
   stopBridge,
   sweepStaleSwarm,
-  unpair
+  unpair, companionBindingStatus, replaceCompanionBinding
 } = await import('../src/main/bridge.js');
 const { flushDurable, initDurableStore, readDurable, resetDurableForTests, writeDurableNow, writeDurableSoon } = await import('../src/main/durable.js');
 const {
@@ -4406,6 +4407,79 @@ describe('provisioning', () => {
     expect(second).not.toBe(first);
     expect((await request('GET', '/status', { auth: first })).status).toBe(401);
     expect((await request('GET', '/status', { auth: second })).status).toBe(200);
+  });
+
+  it('protects legacy companion replacement even with a finalization fence', async () => {
+    const owner = 'test-companion-legacy'; profileWorkAdmission.beginFinalization(owner);
+    try {
+      await expect(replaceCompanionBinding('local-instance', EXTENSION_ORIGIN, OTHER_EXTENSION_ORIGIN, owner)).rejects.toThrow(/paused isolated/);
+    } finally { profileWorkAdmission.release(owner); }
+  });
+
+  it.each(['success', 'wrong-old', 'no-fence', 'unpaused', 'persist-failure', 'old-pair-race'])('migrates isolated companion identity safely: %s', async mode => {
+    const originalConfig = getConfig();
+    const owner = 'test-companion-replacement';
+    await stopBridge();
+    const instanceId = `isolated-companion-${mode}`;
+    const legacy = originalConfig.instances!.profiles.find(profile => profile.id === originalConfig.instances!.activeInstanceId)!;
+    const isolated = { ...legacy, id: instanceId, state: { mode: 'isolated' as const, root: path.join(dir, 'instances', instanceId) },
+      bridge: { host: '127.0.0.1' as const, port: legacy.bridge.port } };
+    try {
+      await saveConfig({ ...originalConfig, ui: { ...originalConfig.ui, automationPaused: mode !== 'unpaused' },
+        instances: { schemaVersion: 1, activeInstanceId: instanceId, profiles: [isolated] } });
+      const port = await startBridge(); expect(port).not.toBeNull(); base = `http://127.0.0.1:${port}`;
+      const first = await request('POST', '/pair', { auth: null, body: { instanceId } });
+      expect(first.status).toBe(200);
+      const before = JSON.stringify(getConfig());
+      if (mode !== 'no-fence') profileWorkAdmission.beginFinalization(owner);
+      const bindingChanges = vi.fn(); const offBindingChanges = onBridgeChange(bindingChanges);
+      onTestFinished(offBindingChanges);
+      if (mode === 'persist-failure') {
+        // First credential write succeeds; origin persistence fails. Never leave a usable old token.
+        const encrypt = vi.mocked(safeStorage.encryptStringAsync);
+        encrypt.mockImplementationOnce(async value => Buffer.from(value, 'utf8')).mockRejectedValueOnce(new Error('simulated origin persistence failure'));
+      }
+      let releaseWrite: (() => void) | undefined, enteredWrite: Promise<void> | undefined, stalePair: Promise<Reply> | undefined;
+      if (mode === 'old-pair-race') {
+        const release = new Promise<void>(resolve => { releaseWrite = resolve; });
+        enteredWrite = new Promise<void>(resolve => {
+          vi.mocked(safeStorage.encryptStringAsync).mockImplementationOnce(async value => { resolve(); await release; return Buffer.from(value, 'utf8'); });
+        });
+      }
+      const action = replaceCompanionBinding(instanceId, mode === 'wrong-old' ? OTHER_EXTENSION_ORIGIN : EXTENSION_ORIGIN, OTHER_EXTENSION_ORIGIN, owner);
+      if (mode === 'old-pair-race') {
+        await enteredWrite;
+        const checked = new Promise<void>(resolve => {
+          vi.mocked(safeStorage.isAsyncEncryptionAvailable).mockImplementationOnce(async () => { resolve(); return true; });
+        });
+        stalePair = request('POST', '/pair', { auth: null, body: { instanceId, reconnect: true } });
+        await checked; releaseWrite!();
+      }
+      if (mode !== 'success' && mode !== 'old-pair-race') {
+        await expect(action).rejects.toThrow();
+        if (mode === 'persist-failure') expect(bindingChanges).toHaveBeenCalled();
+        expect((await companionBindingStatus()).origin).toBe(EXTENSION_ORIGIN);
+        expect((await request('GET', '/status', { auth: first.body.token })).status).toBe(mode === 'persist-failure' ? 401 : 200);
+      } else {
+        await expect(action).resolves.toMatchObject({ instanceId, origin: OTHER_EXTENSION_ORIGIN, reconnectRequired: true });
+        if (stalePair) expect((await stalePair).status).toBe(403);
+        expect(JSON.stringify(getConfig())).toBe(before);
+        const status = await companionBindingStatus();
+        expect(status).toMatchObject({ paired: false, disconnected: true });
+        expect(JSON.stringify(status)).not.toContain(first.body.token);
+        expect((await request('POST', '/pair', { origin: EXTENSION_ORIGIN, auth: null, body: { instanceId, reconnect: true } })).status).toBe(403);
+        expect((await request('POST', '/pair', { origin: OTHER_EXTENSION_ORIGIN, auth: null, body: { instanceId } })).status).toBe(409);
+        const second = await request('POST', '/pair', { origin: OTHER_EXTENSION_ORIGIN, auth: null, body: { instanceId, reconnect: true } });
+        expect(second.status).toBe(200); expect(second.body.token).not.toBe(first.body.token);
+        expect((await request('GET', '/status', { origin: OTHER_EXTENSION_ORIGIN, auth: first.body.token })).status).toBe(401);
+        expect((await request('GET', '/status', { origin: OTHER_EXTENSION_ORIGIN, auth: second.body.token })).status).toBe(200);
+        await expect(replaceCompanionBinding(instanceId, EXTENSION_ORIGIN, OTHER_EXTENSION_ORIGIN, owner)).rejects.toThrow(/identity changed/);
+      }
+    } finally {
+      profileWorkAdmission.release(owner);
+      await stopBridge(); await saveConfig(originalConfig);
+      const port = await startBridge(); expect(port).not.toBeNull(); base = `http://127.0.0.1:${port}`;
+    }
   });
 
   it('binds pairing to one companion origin and refuses another extension without rotating the token', async () => {

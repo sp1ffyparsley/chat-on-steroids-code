@@ -12,7 +12,7 @@ const desktop = process.env.COS_DEEPAI_DESKTOP_EXE || path.join(homedir(), 'AppD
 const serverEntry = path.join(path.dirname(desktop), 'resources', 'server.asar', 'apps', 'server', 'dist', 'bin.mjs');
 // Reviewed native releases only: a shared protocol number is not blanket permission
 // to accept future server versions. Keep transport, custody and model checks unchanged.
-export const DEEPAI_NATIVE_CONTRACT = Object.freeze({ versions: Object.freeze(['0.3.36', '0.3.37']), protocol: 2 });
+export const DEEPAI_NATIVE_CONTRACT = Object.freeze({ versions: Object.freeze(['0.3.36', '0.3.37', '0.3.40']), protocol: 2 });
 const SERVER_VERSIONS = new Set(DEEPAI_NATIVE_CONTRACT.versions);
 const PROTOCOL_VERSION = DEEPAI_NATIVE_CONTRACT.protocol;
 const SCOPES = ['orchestration:read', 'orchestration:operate'];
@@ -22,7 +22,7 @@ const READ_RPC = new Set(['server.probe', 'server.getConfig', 'orchestration.get
 const MESSAGES = {
   NATIVE_RUNTIME_UNAVAILABLE: 'Cannot read the installed DeepAI runtime descriptor.',
   NATIVE_LOOPBACK_REQUIRED: 'DeepAI requests must stay on the discovered HTTP 127.0.0.1 origin.',
-  NATIVE_VERSION_UNSUPPORTED: 'DeepAI requires verified server version 0.3.36 or 0.3.37 and orchestration protocol 2.',
+  NATIVE_VERSION_UNSUPPORTED: 'DeepAI requires reviewed server version 0.3.36, 0.3.37 or 0.3.40 and orchestration protocol 2.',
   NATIVE_AUTH_ISSUE_FAILED: 'Could not issue a scoped local DeepAI client credential.',
   NATIVE_AUTH_INVALID: 'The local credential response has invalid identity, scopes or expiration.',
   NATIVE_CREDENTIAL_EXPIRED: 'The local credential expired. Reconnect, then inspect existing work before resubmission.',

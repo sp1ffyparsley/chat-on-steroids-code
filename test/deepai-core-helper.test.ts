@@ -740,9 +740,9 @@ it('readiness checks an explicit model and bounds discovery without accepting a 
 it('keeps the Core readiness contract identical to the executable native transport', async () => {
   const native = await import(new URL('../scripts/deepai-native.mjs', import.meta.url).href);
   expect(DEEPAI_NATIVE_CONTRACT).toEqual(native.DEEPAI_NATIVE_CONTRACT);
-  expect(DEEPAI_NATIVE_CONTRACT).toEqual({ versions: ['0.3.36', '0.3.37'], protocol: 2 });
+  expect(DEEPAI_NATIVE_CONTRACT).toEqual({ versions: ['0.3.36', '0.3.37', '0.3.40'], protocol: 2 });
 });
-it.each(['0.3.36', '0.3.37'])('readiness accepts reviewed native %s without dispatching work', async version => {
+it.each(['0.3.36', '0.3.37', '0.3.40'])('readiness accepts reviewed native %s without dispatching work', async version => {
   const p = await principal();
   bridge.mockResolvedValueOnce({ ready: true, observedAt: new Date(now).toISOString(), maxActive: 2,
     version, protocol: 2, model: 'deepai/glm-5.3-flash', blocker: null });
@@ -751,6 +751,7 @@ it.each(['0.3.36', '0.3.37'])('readiness accepts reviewed native %s without disp
 });
 it.each([
   { version: '0.3.38' }, { version: '0.3.37-dev' }, { version: undefined },
+  { version: '0.3.41' }, { version: '0.3.40-dev' },
   { protocol: 1 }, { protocol: 3 }, { protocol: undefined },
   { model: 'deepai/other-free' }, { blocker: { code: 'native_hold', action: 'Review in native app.' } }
 ])('readiness refuses unsupported or inconsistent native contracts: %j', async change => {

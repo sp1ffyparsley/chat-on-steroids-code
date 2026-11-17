@@ -7,11 +7,11 @@ import { z } from 'zod';
 const state = vi.hoisted(() => ({
   id: 'profile-4444444a-444a-4444-8444-444444444444',
   config: { tunnel: { kind: 'openai', tunnelId: 'keep-id', binaryPath: 'keep-path' }, ui: { automationPaused: true }, roots: ['keep-root'] },
-  blockers: [] as object[]
+  mode: 'isolated', blockers: [] as object[]
 }));
 vi.mock('../src/main/config.js', () => ({
   assertActiveSecureTunnelIsolation: vi.fn(async () => {}),
-  getActiveInstanceRuntime: () => ({ profile: { id: state.id, bridge: { port: 8770 } } }), getConfig: () => state.config,
+  getActiveInstanceRuntime: () => ({ profile: { id: state.id, bridge: { port: 8770 }, state: { mode: state.mode } } }), getConfig: () => state.config,
   getActiveInstanceOwnerPaths: () => ({ runtimeRoot: '/test/runtime', durableStoreRoot: '/test/state' }),
   updateConfig: vi.fn(async updater => { state.config = updater(state.config); return state.config; })
 }));
@@ -24,8 +24,13 @@ vi.mock('../src/main/connection.js', () => ({
 vi.mock('../src/main/profile-work-state.js', () => ({
   activeProfileWorkCensus: vi.fn(async () => ({ profileId: state.id, blockers: state.blockers }))
 }));
+vi.mock('../src/main/bridge.js', () => ({
+  companionBindingStatus: vi.fn(async () => ({ instanceId: state.id, origin: 'chrome-extension://' + 'a'.repeat(32) })),
+  replaceCompanionBinding: vi.fn(async () => ({ instanceId: state.id, reconnectRequired: true }))
+}));
 vi.mock('../src/main/logger.js', () => ({ logInfo: vi.fn(), logWarn: vi.fn() }));
-import { controlConnection, getConnectionControlStatus } from '../src/main/connection-control.js';
+import { companionBindingStatus, replaceCompanionBinding } from '../src/main/bridge.js';
+import { controlConnection, connectionControlSchema, getConnectionControlStatus } from '../src/main/connection-control.js';
 import { applySettings, connect, disconnect } from '../src/main/connection.js';
 import { assertActiveSecureTunnelIsolation, updateConfig } from '../src/main/config.js';
 import { activeProfileWorkCensus } from '../src/main/profile-work-state.js';
@@ -35,7 +40,7 @@ import { operatorInputDirectory, processOperatorSettingsControl } from '../src/m
 import { initDurableStore } from '../src/main/durable.js';
 
 beforeEach(() => {
-  vi.clearAllMocks(); state.blockers = [];
+  vi.clearAllMocks(); state.blockers = []; state.mode = 'isolated';
   state.config = { tunnel: { kind: 'openai', tunnelId: 'keep-id', binaryPath: 'keep-path' }, ui: { automationPaused: true }, roots: ['keep-root'] };
   const owner = profileWorkAdmission.snapshot().owner;
   if (owner) profileWorkAdmission.release(owner);
@@ -232,4 +237,39 @@ it('does not replay a completed local connection receipt with a different extern
       await expect(processOperatorConnectionControl(changed, controller, root)).rejects.toThrow(/another operation/);
     expect(controller).toHaveBeenCalledOnce();
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+const oldCompanion = 'chrome-extension://' + 'a'.repeat(32), newCompanion = 'chrome-extension://' + 'b'.repeat(32);
+describe('explicit isolated companion replacement', () => {
+  it('reads categorical binding without changing connection or requiring idle work', async () => {
+    state.blockers = [{ category: 'active-turn', count: 1 }];
+    await controlConnection({ instanceId: state.id, action: 'companion-status' });
+    expect(companionBindingStatus).toHaveBeenCalledOnce();
+    expect(replaceCompanionBinding).not.toHaveBeenCalled();
+    expect(disconnect).not.toHaveBeenCalled();
+  });
+  it('replaces only an exact paused idle isolated binding through lifecycle finalization', async () => {
+    const config = JSON.stringify(state.config);
+    await expect(controlConnection({ instanceId: state.id, action: 'rebind-companion',
+      expectedCompanionOrigin: oldCompanion, companionOrigin: newCompanion })).resolves.toMatchObject({ reconnectRequired: true });
+    expect(replaceCompanionBinding).toHaveBeenCalledWith(state.id, oldCompanion, newCompanion, expect.any(String));
+    expect(JSON.stringify(state.config)).toBe(config);
+    expect(disconnect).not.toHaveBeenCalled(); expect(connect).not.toHaveBeenCalled();
+    expect(profileWorkAdmission.snapshot().mode).toBe('open');
+  });
+  it.each(['legacy', 'unpaused', 'busy', 'foreign'])('refuses %s without credential mutation', async mode => {
+    if (mode === 'legacy') state.mode = 'legacy';
+    if (mode === 'unpaused') state.config.ui.automationPaused = false;
+    if (mode === 'busy') state.blockers = [{ category: 'message-opening', count: 1 }];
+    await expect(controlConnection({ instanceId: mode === 'foreign' ? 'another' : state.id, action: 'rebind-companion',
+      expectedCompanionOrigin: oldCompanion, companionOrigin: newCompanion })).rejects.toThrow(/Connection control/);
+    expect(replaceCompanionBinding).not.toHaveBeenCalled();
+  });
+  it('requires exact distinct origins exclusively on the replacement action', () => {
+    for (const patch of [{ companionOrigin: undefined }, { expectedCompanionOrigin: undefined },
+      { companionOrigin: oldCompanion }, { companionOrigin: 'https://example.com' },
+      { companionOrigin: newCompanion + '/' }, { action: 'connect' }, { kind: 'manual' }])
+      expect(connectionControlSchema.safeParse({ instanceId: state.id, action: 'rebind-companion',
+        expectedCompanionOrigin: oldCompanion, companionOrigin: newCompanion, ...patch }).success).toBe(false);
+  });
 });

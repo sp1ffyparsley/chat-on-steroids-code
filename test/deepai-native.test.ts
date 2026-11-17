@@ -139,10 +139,10 @@ describe('DeepAI paired transport', () => {
     expect(f.sockets[0]!.listenerCount('message')).toBe(0);
   });
 
-  it('accepts the reviewed 0.3.37 protocol-2 transport with the same scoped credentials', async () => {
-    const f = fixture({ descriptor: { ...descriptor, serverVersion: '0.3.37' } });
+  it.each(['0.3.37', '0.3.40'])('accepts the reviewed %s protocol-2 transport with the same scoped credentials', async version => {
+    const f = fixture({ descriptor: { ...descriptor, serverVersion: version } });
     const client = await f.connect();
-    expect(client.descriptor.serverVersion).toBe('0.3.37');
+    expect(client.descriptor.serverVersion).toBe(version);
     expect(f.command.mock.calls[0]![0]).toEqual(['auth', 'session', 'issue', '--scope', scopes[0],
       '--scope', scopes[1], '--ttl', '1h', '--label', 'CoS DeepAI native integration', '--json']);
     const probe = client.rpc('server.probe', {});
@@ -152,6 +152,10 @@ describe('DeepAI paired transport', () => {
   });
 
   it.each([{ serverVersion: '0.3.38', orchestrationProtocolVersion: 2 },
+    { serverVersion: '0.3.41', orchestrationProtocolVersion: 2 },
+    { serverVersion: '0.3.40-dev', orchestrationProtocolVersion: 2 },
+    { serverVersion: '0.3.40', orchestrationProtocolVersion: 1 },
+    { serverVersion: '0.3.40', orchestrationProtocolVersion: 3 },
     { serverVersion: '0.3.37', orchestrationProtocolVersion: 1 },
     { serverVersion: '0.3.37', orchestrationProtocolVersion: 3 },
     { serverVersion: '0.3.36', orchestrationProtocolVersion: 1 }])(

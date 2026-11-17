@@ -1,3 +1,4 @@
+import { profileWorkAdmission } from './work-admission.js';
 import { conversationProgress } from './session/progress.js';
 import type { CoreShellScanDiagnostic } from './core-browser-evidence.js';
 import { promises as fs } from 'node:fs';
@@ -1567,6 +1568,60 @@ export async function unpair(): Promise<void> {
     failBrowserConversationOpens('extension_disconnected');
     logInfo('bridge: browser disconnected');
     changed();
+  });
+}
+
+/** Nonsecret local operator inspection; does not change browser custody. */
+export async function companionBindingStatus() {
+  return withBrowserCredentials(async () => {
+    const identity = activeBrowserBridgeIdentity();
+    const origin = await getSecret(identity.originSlot), credential = await getSecret(identity.tokenSlot);
+    if (activeBrowserBridgeIdentity().instanceId !== identity.instanceId)
+      throw new Error('Connection control account changed during companion inspection.');
+    return { instanceId: identity.instanceId, origin, paired: Boolean(credential && credential !== BROWSER_DISCONNECTED),
+      disconnected: credential === BROWSER_DISCONNECTED, automationPaused: getConfig().ui.automationPaused === true };
+  });
+}
+
+/** Explicit local CAS migration. Normal HTTP pairing never relaxes its origin guard. */
+export async function replaceCompanionBinding(instanceId: string, expectedOrigin: string, replacementOrigin: string, owner: string) {
+  const pattern = /^chrome-extension:\/\/[a-p]{32}$/;
+  if (!pattern.test(expectedOrigin) || !pattern.test(replacementOrigin) || expectedOrigin === replacementOrigin)
+    throw new Error('Connection control companion replacement requires exact distinct extension origins.');
+  return withBrowserCredentials(async () => {
+    const identity = activeBrowserBridgeIdentity();
+    const assertCurrent = () => {
+      const current = activeBrowserBridgeIdentity(), admission = profileWorkAdmission.snapshot();
+      if (current.instanceId !== instanceId || current.legacy || getActiveInstanceRuntime().profile.state.mode !== 'isolated' ||
+          getConfig().ui.automationPaused !== true || admission.mode !== 'finalizing' || admission.owner !== owner)
+        throw new Error('Connection control companion replacement lost its paused isolated lifecycle owner.');
+    };
+    assertCurrent();
+    const bound = await getSecret(identity.originSlot);
+    assertCurrent();
+    if (bound !== expectedOrigin)
+      throw new Error('Connection control companion identity changed; inspect current binding before a new explicit action.');
+    const epoch = ++browserCredentialEpoch;
+    let revoked = false;
+    try {
+      // Revoke first: a failed origin write must never authorize the old token at a new origin.
+      await setSecret(identity.tokenSlot, BROWSER_DISCONNECTED);
+      revoked = true;
+      browserWake?.revoke();
+      assertCurrent();
+      if (epoch !== browserCredentialEpoch) throw new Error('Connection control companion replacement was superseded.');
+      await setSecret(identity.originSlot, replacementOrigin);
+      assertCurrent();
+      if (epoch !== browserCredentialEpoch) throw new Error('Connection control companion replacement was superseded.');
+      logInfo(`bridge: explicit companion identity replacement saved for ${instanceId}; old credential revoked; explicit Connect required`);
+      return { instanceId, origin: replacementOrigin, paired: false, disconnected: true, reconnectRequired: true };
+    } catch (error) {
+      if (revoked) logWarn(`bridge: companion replacement incomplete for ${instanceId}; old credential revoked; inspect companion-status before a new explicit action`);
+      throw error;
+    } finally {
+      // Secret persistence may partially commit. Notify on that failure as well as success.
+      if (revoked) changed();
+    }
   });
 }
 
@@ -5448,8 +5503,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     // originOf refuses anything that is not a chrome-extension:// origin, above.
     const reuse = !reconnect && request['reuse'] === true;
     const provisioned = await withBrowserCredentials(async () => {
+      const currentOrigin = await getSecret(identity.originSlot);
+      if (currentOrigin && !safeEqual(origin, currentOrigin)) return { originMismatch: true as const };
       const stored = await getSecret(identity.tokenSlot);
-      if (credentialEpoch !== browserCredentialEpoch || (stored === BROWSER_DISCONNECTED && !reconnect)) return null;
+      if (activeBrowserBridgeIdentity().instanceId !== identity.instanceId || credentialEpoch !== browserCredentialEpoch || (stored === BROWSER_DISCONNECTED && !reconnect)) return null;
       // An extension origin is shared by every Chrome profile using that extension.
       // A silent reconnect must prove the existing bearer, not borrow another account's
       // credential merely because its extension id matches. Check inside the serial owner
@@ -5466,6 +5523,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       return { token, reused };
     });
     if (!provisioned) return json(res, 409, { error: 'browser_disconnected' }, origin);
+    if ('originMismatch' in provisioned) return json(res, 403, { error: 'extension_origin_mismatch',
+      message: 'This app instance is already paired with a different companion extension.' }, null);
     if ('bindingRequired' in provisioned) return json(res, 409, {
       error: 'extension_binding_required',
       message: 'This account already has a paired browser. Connect the intended account explicitly in this Chrome profile.'

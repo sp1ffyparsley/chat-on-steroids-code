@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -595,7 +596,7 @@ describe('account-scoped operator input', () => {
       await expect(processOperatorProfileCreation(argv, creator)).rejects.toThrow();
     }
     expect(creator).not.toHaveBeenCalled();
-    expect(operatorProfileCreationRequest(['app.exe', path.resolve('.'), '--cos-create-profile=Gamma',
+    expect(operatorProfileCreationRequest(['app.exe', path.resolve(fileURLToPath(new URL('..', import.meta.url))), '--cos-create-profile=Gamma',
       '--cos-profile-browser=Profile 8'])).toEqual({ nickname: 'Gamma', browserProfileDirectory: 'Profile 8' });
   });
 
@@ -1038,4 +1039,25 @@ it('keeps external route receipt identity while setup bearers remain only in the
   for (const change of ['--cos-connection-origin=https://Epsilon.example.com', '--cos-connection-port=9771'])
     await expect(processOperatorConnectionControl(args.map(arg => arg.startsWith(change.split('=')[0] + '=') ? change : arg), controller, root)).rejects.toThrow(/another operation/);
   expect(controller).toHaveBeenCalledOnce();
+});
+
+it('retains exact companion replacement identity through transport, receipts and retry refusal', async () => {
+  const { initDurableStore, readDurableStrict } = await import('../src/main/durable.js');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cos-companion-control-')); initDurableStore(root);
+  const id = 'profile-4444444a-444a-4444-8444-444444444444', receipt = randomUUID();
+  const oldOrigin = 'chrome-extension://' + 'a'.repeat(32), newOrigin = 'chrome-extension://' + 'b'.repeat(32);
+  const args = ['--cos-connection-action=rebind-companion', `--cos-connection-profile=${id}`,
+    `--cos-connection-receipt=${receipt}`, `--cos-instance-runtime=${id}`,
+    `--cos-connection-expected-companion=${oldOrigin}`, `--cos-connection-companion=${newOrigin}`, '--background'];
+  const payload = operatorProfileCreationAdditionalData(args);
+  expect(operatorConnectionControlRequest(operatorProfileCreationSecondInstanceArgs(['app.exe'], payload)!))
+    .toEqual(operatorConnectionControlRequest(args));
+  const controller = vi.fn(async () => ({ reconnectRequired: true }));
+  await processOperatorConnectionControl(args, controller, root);
+  expect(await readDurableStrict('connection-control')).toMatchObject([{ expectedCompanionOrigin: oldOrigin, companionOrigin: newOrigin, state: 'completed' }]);
+  await processOperatorConnectionControl(args, controller, root); expect(controller).toHaveBeenCalledOnce();
+  for (const flag of ['--cos-connection-companion', '--cos-connection-expected-companion']) {
+    await expect(processOperatorConnectionControl(args.map(arg => arg.startsWith(flag + '=') ? flag + '=chrome-extension://' + 'c'.repeat(32) : arg), controller, root)).rejects.toThrow(/another operation/);
+    expect(() => operatorConnectionControlRequest([...args, flag + '=' + newOrigin])).toThrow();
+  }
 });

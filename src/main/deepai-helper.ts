@@ -28,7 +28,7 @@ const MAX_ADMISSION_BYTES = MAX_LEDGER_BYTES - MAX_ROWS * 256;
 const MAX_PENDING_PER_PARENT = 50;
 // Deliberate release allowlist, parity-checked against the native transport.
 // Protocol compatibility alone never authorizes an unreviewed server release.
-export const DEEPAI_NATIVE_CONTRACT = Object.freeze({ versions: Object.freeze(['0.3.36', '0.3.37']), protocol: 2 });
+export const DEEPAI_NATIVE_CONTRACT = Object.freeze({ versions: Object.freeze(['0.3.36', '0.3.37', '0.3.40']), protocol: 2 });
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'blocked', 'incomplete']);
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const samePath = (a: string, b: string): boolean => process.platform === 'win32'

@@ -429,25 +429,28 @@ export function operatorConnectionControlRequest(argv: readonly string[]) {
   const kind = values('--cos-connection-kind'), receipt = values('--cos-connection-receipt');
   const origin = values('--cos-connection-origin'), port = values('--cos-connection-port');
   const tunnel = values('--cos-connection-tunnel-id');
+  const expectedCompanion = values('--cos-connection-expected-companion'), companion = values('--cos-connection-companion');
   const selectors = values('--cos-instance-runtime');
   const firstOption = argv.findIndex(argument => argument.startsWith('--'));
   const appRoot = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
   const devEntry = firstOption === 2 ? path.resolve(argv[1]!) : null;
   const allowed = ['--cos-connection-action=', '--cos-connection-profile=', '--cos-connection-kind=',
-    '--cos-connection-receipt=', '--cos-instance-runtime=', '--cos-connection-origin=', '--cos-connection-port=', '--cos-connection-tunnel-id='];
+    '--cos-connection-receipt=', '--cos-instance-runtime=', '--cos-connection-origin=', '--cos-connection-port=', '--cos-connection-tunnel-id=', '--cos-connection-expected-companion=', '--cos-connection-companion='];
   if (firstOption > 2 || devEntry !== null && devEntry !== appRoot && devEntry !== path.join(appRoot, 'out', 'main', 'index.js') ||
       argv.slice(firstOption).some(argument => !argument.startsWith('--')) ||
       argv.some(argument => argument.startsWith('--') && argument !== '--background' && !allowed.some(prefix => argument.startsWith(prefix))) ||
       argv.filter(argument => argument === '--background').length > 1 ||
       action.length !== 1 || instanceId.length !== 1 || receipt.length !== 1 || kind.length > 1 || selectors.length > 1 ||
-      origin.length > 1 || port.length > 1 || tunnel.length > 1 || port.length === 1 && !/^(0|[1-9][0-9]{0,4})$/.test(port[0]!) ||
+      expectedCompanion.length > 1 || companion.length > 1 || origin.length > 1 || port.length > 1 || tunnel.length > 1 || port.length === 1 && !/^(0|[1-9][0-9]{0,4})$/.test(port[0]!) ||
       !REQUEST_ID.test(receipt[0]!) ||
       selectors.length === 1 && (selectors[0] !== instanceId[0] || !CANONICAL_PROFILE_ID.test(selectors[0]!)))
     throw new Error('Connection control requires one exclusive exact-profile action and UUID receipt; mixed or malformed arguments are refused.');
   const request = connectionControlSchema.safeParse({ instanceId: instanceId[0], action: action[0], ...(kind.length ? { kind: kind[0] } : {}),
     ...(tunnel.length ? { tunnelId: tunnel[0] } : {}),
+    ...(expectedCompanion.length ? { expectedCompanionOrigin: expectedCompanion[0] } : {}),
+    ...(companion.length ? { companionOrigin: companion[0] } : {}),
     ...(origin.length ? { manualPublicOrigin: origin[0] } : {}), ...(port.length ? { manualPort: Number(port[0]) } : {}) });
-  if (!request.success) throw new Error('Connection control requires status, setup, configure with a supported kind, connect or disconnect.');
+  if (!request.success) throw new Error('Connection control requires a supported exact action, including companion-status or explicit rebind-companion.');
   return { request: request.data, receipt: receipt[0]!, isolated: selectors.length === 1 };
 }
 
@@ -462,26 +465,31 @@ export async function processOperatorConnectionControl(argv: readonly string[],
   }
   await pruneOperatorControlResponses(userData);
   const { readDurableStrict, writeDurableNow } = await import('./durable.js');
-  type Receipt = { receipt: string; instanceId: string; action: string; kind?: string; tunnelId?: string; manualPublicOrigin?: string; manualPort?: number; state: 'started' | 'completed' | 'failed'; diagnostic?: string; status?: unknown };
+  type Receipt = { receipt: string; instanceId: string; action: string; kind?: string; tunnelId?: string; manualPublicOrigin?: string; manualPort?: number; expectedCompanionOrigin?: string; companionOrigin?: string; state: 'started' | 'completed' | 'failed'; diagnostic?: string; status?: unknown };
   const stored = await readDurableStrict<Receipt[]>(CONNECTION_RECEIPTS_STATE) ?? [];
   if (!Array.isArray(stored) || stored.length > 64 || stored.some(row => !row || !REQUEST_ID.test(row.receipt) ||
     typeof row.instanceId !== 'string' || row.instanceId.length > 64 ||
-    !['status', 'setup', 'configure', 'connect', 'disconnect'].includes(row.action) ||
+    !['status', 'setup', 'configure', 'connect', 'disconnect', 'companion-status', 'rebind-companion'].includes(row.action) ||
     !['started', 'completed', 'failed'].includes(row.state) || row.kind !== undefined && !['openai', 'cloudflared', 'manual'].includes(row.kind) ||
     !connectionControlSchema.safeParse({ instanceId: row.instanceId, action: row.action, ...(row.kind === undefined ? {} : { kind: row.kind }),
       ...(row.tunnelId === undefined ? {} : { tunnelId: row.tunnelId }),
+    ...(row.expectedCompanionOrigin === undefined ? {} : { expectedCompanionOrigin: row.expectedCompanionOrigin }),
+    ...(row.companionOrigin === undefined ? {} : { companionOrigin: row.companionOrigin }),
       ...(row.manualPublicOrigin === undefined ? {} : { manualPublicOrigin: row.manualPublicOrigin }),
       ...(row.manualPort === undefined ? {} : { manualPort: row.manualPort }) }).success))
     throw new Error('Connection control receipt history is invalid; inspect account state before retrying.');
   const history = stored.map(row => ({ receipt: row.receipt, instanceId: row.instanceId, action: row.action,
     ...(row.kind ? { kind: row.kind } : {}),
     ...(row.tunnelId === undefined ? {} : { tunnelId: row.tunnelId }),
+    ...(row.expectedCompanionOrigin === undefined ? {} : { expectedCompanionOrigin: row.expectedCompanionOrigin }),
+      ...(row.companionOrigin === undefined ? {} : { companionOrigin: row.companionOrigin }),
     ...(row.manualPublicOrigin === undefined ? {} : { manualPublicOrigin: row.manualPublicOrigin }),
     ...(row.manualPort === undefined ? {} : { manualPort: row.manualPort }), state: row.state }));
   await writeDurableNow(CONNECTION_RECEIPTS_STATE, history);
   const previous = history.find(row => row.receipt === operation.receipt);
   if (previous) {
     if (previous.instanceId !== operation.request.instanceId || previous.action !== operation.request.action || previous.kind !== operation.request.kind ||
+        previous.expectedCompanionOrigin !== operation.request.expectedCompanionOrigin || previous.companionOrigin !== operation.request.companionOrigin ||
         previous.tunnelId !== operation.request.tunnelId || previous.manualPublicOrigin !== operation.request.manualPublicOrigin || previous.manualPort !== operation.request.manualPort)
       throw new Error('Connection control receipt belongs to another operation.');
     return previous;
@@ -489,6 +497,8 @@ export async function processOperatorConnectionControl(argv: readonly string[],
   const receipt: Receipt = { receipt: operation.receipt, instanceId: operation.request.instanceId,
     action: operation.request.action, ...(operation.request.kind ? { kind: operation.request.kind } : {}),
     ...(operation.request.tunnelId === undefined ? {} : { tunnelId: operation.request.tunnelId }),
+    ...(operation.request.expectedCompanionOrigin === undefined ? {} : { expectedCompanionOrigin: operation.request.expectedCompanionOrigin }),
+    ...(operation.request.companionOrigin === undefined ? {} : { companionOrigin: operation.request.companionOrigin }),
     ...(operation.request.manualPublicOrigin === undefined ? {} : { manualPublicOrigin: operation.request.manualPublicOrigin }),
     ...(operation.request.manualPort === undefined ? {} : { manualPort: operation.request.manualPort }), state: 'started' };
   const rows = [...history.slice(-63), receipt];
@@ -734,6 +744,8 @@ export function operatorProfileCreationSecondInstanceArgs(argv: readonly string[
     const canonical = [`--cos-connection-action=${request.action}`, `--cos-connection-profile=${request.instanceId}`,
       `--cos-connection-receipt=${receipt}`, ...(request.kind ? [`--cos-connection-kind=${request.kind}`] : []),
       ...(request.tunnelId === undefined ? [] : [`--cos-connection-tunnel-id=${request.tunnelId}`]),
+      ...(request.expectedCompanionOrigin === undefined ? [] : [`--cos-connection-expected-companion=${request.expectedCompanionOrigin}`]),
+      ...(request.companionOrigin === undefined ? [] : [`--cos-connection-companion=${request.companionOrigin}`]),
       ...(request.manualPublicOrigin === undefined ? [] : [`--cos-connection-origin=${request.manualPublicOrigin}`]),
       ...(request.manualPort === undefined ? [] : [`--cos-connection-port=${request.manualPort}`]),
       ...(isolated ? [`--cos-instance-runtime=${request.instanceId}`] : []), ...(background ? ['--background'] : [])];

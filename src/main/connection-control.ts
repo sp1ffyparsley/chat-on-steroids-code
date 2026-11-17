@@ -9,17 +9,23 @@ import { logInfo, logWarn } from './logger.js';
 
 export const connectionControlSchema = z.object({
   instanceId: z.string().min(1).max(64),
-  action: z.enum(['status', 'setup', 'configure', 'connect', 'disconnect']),
+  action: z.enum(['status', 'setup', 'configure', 'connect', 'disconnect', 'companion-status', 'rebind-companion']),
   kind: z.enum(['openai', 'cloudflared', 'manual']).optional(),
   tunnelId: z.string().regex(/^tunnel_[0-9a-f]{32}$/).optional(),
   manualPublicOrigin: manualPublicOriginSchema.optional(),
-  manualPort: manualPortSchema.optional()
+  manualPort: manualPortSchema.optional(),
+  expectedCompanionOrigin: z.string().regex(/^chrome-extension:\/\/[a-p]{32}$/).optional(),
+  companionOrigin: z.string().regex(/^chrome-extension:\/\/[a-p]{32}$/).optional()
 }).strict().refine(request => request.action === 'configure' ? request.kind !== undefined : request.kind === undefined,
   'Only configure accepts and requires a connection kind')
   .refine(request => request.manualPublicOrigin === undefined && request.manualPort === undefined ||
     request.action === 'configure' && request.kind === 'manual', 'External route settings require manual configure')
   .refine(request => request.tunnelId === undefined || request.action === 'configure' && request.kind === 'openai',
-    'Core tunnel identity requires Secure MCP configure');
+    'Core tunnel identity requires Secure MCP configure')
+  .refine(request => request.action === 'rebind-companion'
+    ? Boolean(request.expectedCompanionOrigin && request.companionOrigin && request.expectedCompanionOrigin !== request.companionOrigin)
+    : request.expectedCompanionOrigin === undefined && request.companionOrigin === undefined,
+    'Companion replacement requires exact distinct expected and replacement extension origins');
 export type ConnectionControlRequest = z.infer<typeof connectionControlSchema>;
 
 function externalRouteStatus() {
@@ -55,6 +61,16 @@ export function controlConnection(value: ConnectionControlRequest) {
     };
     assertOwner();
     if (request.data.action === 'status') return getConnectionControlStatus();
+    if (request.data.action === 'companion-status') {
+      const bridge = await import('./bridge.js'); assertOwner();
+      const status = await bridge.companionBindingStatus(); assertOwner(); return status;
+    }
+    const assertCompanionReplacement = () => {
+      assertOwner();
+      if (getActiveInstanceRuntime().profile.state.mode !== 'isolated' || getConfig().ui.automationPaused !== true)
+        throw new Error('Connection control companion replacement requires a paused isolated account; legacy accounts are protected.');
+    };
+    if (request.data.action === 'rebind-companion') assertCompanionReplacement();
     if (request.data.action === 'configure' && request.data.kind === 'manual' &&
         (request.data.manualPublicOrigin ?? getConfig().tunnel.manualPublicOrigin)) {
       try { persistentMcpPort(request.data.manualPort ?? getConfig().tunnel.manualPort ?? 0, getActiveInstanceRuntime().profile.bridge.port); }
@@ -88,6 +104,11 @@ export function controlConnection(value: ConnectionControlRequest) {
       if (pausedRemoteOnly)
         logWarn('connection control: explicit paused disconnect with native turns only; draining accepted local requests; remote Stop remains unconfirmed');
       logInfo(`connection control: ${request.data.action} started for ${request.data.instanceId}`);
+      if (request.data.action === 'rebind-companion') {
+        assertCompanionReplacement();
+        return await (await import('./bridge.js')).replaceCompanionBinding(request.data.instanceId,
+          request.data.expectedCompanionOrigin!, request.data.companionOrigin!, owner);
+      }
       if (request.data.action === 'configure') {
         if (request.data.kind === 'openai') {
           await assertActiveSecureTunnelIsolation({ ...getConfig().tunnel, kind: 'openai',
