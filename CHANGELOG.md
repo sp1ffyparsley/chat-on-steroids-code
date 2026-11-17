@@ -11,6 +11,7 @@ the app refuses the extension and asks you to reload the matching copy.
 
 ## [2.1.39] — Custom Fresh turns and companion reliability
 
+- Recognizes the exact two-member hidden model-memory/system-context prefix alongside the existing four-member rebase prefix. Both retain the same selected-user request, namespace, ancestry, cache, receipt and terminal checks; context bodies remain opaque. Recorder 189 keeps wire 19.
 - Matches the exact native text carrier for a returned Core failure, including the provider's contracted execution-return edge, using original argument digests, parent/cache proof and committed v2 receipts. A failed call remains failed; Main's independent per-call durable checks still gate Loop completion. Recorder 188 retains wire 19.
 - Reobserves native project currentness and capacity before helper dispatch. A historical project-creation receipt cannot activate a deleted binding; explicit failed submissions retain custody and reconcile read-only instead of repeatedly launching. Late original acceptance still recovers through the existing observation owner.
 - Recognizes the provider's exact selected-path hidden system/developer rebase, model-memory and system-context prefix before execution. Context bodies remain opaque; current-user namespace, ancestry, cache parity, terminal and per-tool receipt checks still decide result acceptance. Recorder 187 keeps wire 19 unchanged. The existing same-page evidence-reader refresh can load the qualified MAIN reader without reloading the companion worker; a refresh alone never certifies completion.

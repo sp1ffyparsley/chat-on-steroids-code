@@ -42,7 +42,7 @@
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
   const VERSION = 19;
   /** Private implementation epoch, independent of the stable cross-world wire schema. */
-  const PRODUCER_VERSION = 188;
+  const PRODUCER_VERSION = 189;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -3092,7 +3092,8 @@
           // the selected path: header -> system rebase -> developer rebase ->
           // model memory -> hidden system context -> ordinary execution. It is
           // distinct from the contracted/off-path prefix above. Recognize only
-          // this four-member layout before any command, with the selected user's
+          // the four-member rebase layout or its exact two-member memory/system
+          // layout before any command, with the selected user's
           // exact request/namespace. Bodies remain opaque. Membership supplies no
           // result, terminal, approval or execution credit; every ordinary edge,
           // status, cache and tool/receipt check below still runs.
@@ -3117,7 +3118,11 @@
             return admitErrorPair(nativeErrorPair(resultId, callId));
           };
           const onPathContext = new Set();
-          if (hasHeader && nativeField(nativeField(messageAt(currentPath[2]), 'metadata'), 'rebase_system_message') === true) {
+          const firstContext = messageAt(currentPath[2]);
+          const rebasedContext = nativeField(nativeField(firstContext, 'metadata'), 'rebase_system_message') === true;
+          const memoryContext = nativeField(nativeField(firstContext, 'author'), 'role') === 'assistant' &&
+            nativeField(nativeField(firstContext, 'content'), 'content_type') === 'model_editable_context';
+          if (hasHeader && (rebasedContext || memoryContext)) {
             const request = str(nativeField(userMeta, 'request_id'));
             const cachedUser = nativeField(nativeField(data, 'mapping'), typedUserId);
             if (!userAnchorsHeader || !request) return refuse('nativeScopeBranchConflict', 'group-role');
@@ -3135,21 +3140,22 @@
             };
             const contextShape = (message, offset) => {
               const meta = nativeField(message, 'metadata'), author = nativeField(message, 'author');
-              const memory = offset === 2, content = nativeField(message, 'content');
+              const stage = rebasedContext ? offset : offset + 2;
+              const memory = stage === 2, content = nativeField(message, 'content');
               return nativeField(author, 'role') === (memory ? 'assistant' : 'system') &&
                 nullField(author, 'name') && nativeField(message, 'recipient') === 'all' &&
                 nullField(message, 'channel') && nativeField(message, 'status') === 'finished_successfully' &&
-                (offset < 2 ? nativeField(message, 'end_turn') === true : nullField(message, 'end_turn')) &&
+                (stage < 2 ? nativeField(message, 'end_turn') === true : nullField(message, 'end_turn')) &&
                 nativeField(content, 'content_type') === (memory ? 'model_editable_context' : 'text') &&
                 nativeField(meta, 'is_visually_hidden_from_conversation') === true &&
                 nativeField(meta, 'request_id') === request && nativeField(meta, 'working_turn_id') === working &&
                 nativeField(meta, 'turn_exchange_id') === exchange &&
-                (offset === 0 ? nativeField(meta, 'rebase_system_message') === true : !own.call(meta, 'rebase_system_message')) &&
-                (offset === 1 ? nativeField(meta, 'rebase_developer_message') === true : !own.call(meta, 'rebase_developer_message')) &&
+                (stage === 0 ? nativeField(meta, 'rebase_system_message') === true : !own.call(meta, 'rebase_system_message')) &&
+                (stage === 1 ? nativeField(meta, 'rebase_developer_message') === true : !own.call(meta, 'rebase_developer_message')) &&
                 !['invoked_resource', 'connector_tool_payload', 'tool_invoking_message', 'tool_invoked_message', 'jit_plugin_data']
                   .some(key => own.call(meta, key));
             };
-            for (let offset = 0; offset < 4; offset++) {
+            for (let offset = 0; offset < (rebasedContext ? 4 : 2); offset++) {
               const id = currentPath[offset + 2], node = nativeField(mapping, id), message = nativeField(node, 'message');
               const meta = nativeField(message, 'metadata'), parent = currentPath[offset + 1];
               if (!id || onPathContext.has(id) || !contextShape(message, offset) ||
