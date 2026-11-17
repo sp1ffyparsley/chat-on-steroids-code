@@ -297,6 +297,131 @@ test('completed native chat with background work still reserves its assigned wor
   native.extra = [];
   await runCycle(state, native); assert.equal(state.get(next.id).status, 'active'); assert.equal(native.effects.size, 2);
 });
+test('a stale project creation receipt is not active project evidence; polling never recreates it', async t => {
+  const { state, request } = fixture(t), native = new FakeNative(), job = state.enqueue(request()).job;
+  const base = native.rpc.bind(native);
+  native.rpc = async (tag, payload) => {
+    if (tag === 'projects.mutate') { native.calls.push({ tag, payload }); return { id: payload.projectId, workspaceRoot: payload.workspaceRoot }; }
+    return base(tag, payload);
+  };
+  for (let n = 0; n < 5; n++) await runCycle(state, native, { now: Date.now() + n * 11000 });
+  assert.equal(state.get(job.id).status, 'queued');
+  assert.equal(state.get(job.id).waitingFor, 'native_project');
+  assert.equal(native.calls.filter(c => c.tag === 'projects.mutate').length, 1);
+  assert.equal(native.calls.filter(c => c.tag === 'orchestration.launchThread').length, 0);
+  assert.equal(diagnosedJob(state, state.get(job.id)).blocker.code, 'native_project');
+  native.projects.push({ id: job.projectId, workspaceRoot: job.workspace });
+  await runCycle(state, native);
+  assert.equal(state.get(job.id).status, 'active');
+  assert.equal(state.get(job.id).command.commandId, job.command.commandId);
+  assert.equal(native.calls.filter(c => c.tag === 'projects.mutate').length, 1);
+});
+
+test('a failed project observation retains uncertainty and recovers without another create', async t => {
+  const { state, request } = fixture(t), native = new FakeNative(), job = state.enqueue(request()).job;
+  const base = native.http.bind(native); let reads = 0;
+  native.http = async route => {
+    if (route === '/api/orchestration/shell' && ++reads === 3)
+      throw Object.assign(new Error('Transient native read failure'), { code: 'NATIVE_HTTP_FAILED' });
+    return base(route);
+  };
+  await assert.rejects(runCycle(state, native), error => requiresNativeReconnect(error));
+  assert.equal(state.get(job.id).status, 'queued');
+  assert.ok(state.get(job.id).projectCreationAttemptedAt);
+  assert.match(state.get(job.id).lastError, /NATIVE_HTTP_FAILED/);
+  assert.equal(native.calls.filter(c => c.tag === 'orchestration.launchThread').length, 0);
+  await runCycle(state, native);
+  assert.equal(state.get(job.id).status, 'active');
+  assert.equal(native.calls.filter(c => c.tag === 'projects.mutate').length, 1);
+});
+
+test('an explicit failed native submission is reconciled read-only, never repeatedly launched', async t => {
+  const { state, request } = fixture(t), native = new FakeNative(), job = state.enqueue(request()).job;
+  native.onLaunch = () => { throw Object.assign(new Error('Native operation failed'), { code: 'NATIVE_RPC_FAILED' }); };
+  await runCycle(state, native);
+  for (let n = 1; n < 5; n++) await runCycle(state, native, { now: Date.now() + n * 11000 });
+  assert.equal(state.get(job.id).status, 'submitting');
+  assert.equal(state.get(job.id).waitingFor, 'native_submission_failed');
+  assert.equal(native.calls.filter(c => c.tag === 'orchestration.launchThread').length, 1);
+  assert.equal(diagnosedJob(state, state.get(job.id)).blocker.code, 'native_submission_failed');
+  // Late native acceptance is reconciliation evidence, not authority to replay.
+  native.projections.set(job.threadId, { thread: { id: job.threadId, projectId: job.projectId, runtimeMode: 'auto' },
+    runs: [{ id: 'late-original-run', threadId: job.threadId, userMessageId: job.messageId, providerInstanceId: 'deepai',
+      modelSelection: job.command.modelSelection, status: 'running', startedAt: new Date().toISOString(), rootNodeId: 'root', providerThreadId: 'provider-thread' }],
+    nodes: [], attempts: [], providerTurns: [], messages: [], turnItems: [], runtimeRequests: [] });
+  await runCycle(state, native);
+  assert.equal(state.get(job.id).status, 'active');
+  assert.equal(state.get(job.id).runId, 'late-original-run');
+  assert.equal(native.calls.filter(c => c.tag === 'orchestration.launchThread').length, 1);
+});
+
+test('changed project binding cannot redirect an already admitted helper', async t => {
+  const { state, request } = fixture(t), native = new FakeNative(), job = state.enqueue(request()).job;
+  const project = state.project(job.workspace);
+  state.db.prepare('UPDATE projects SET data=? WHERE workspace_key=?').run(JSON.stringify({ ...project, projectId: 'replacement-project' }), job.workspaceKey);
+  await runCycle(state, native);
+  assert.equal(state.get(job.id).waitingFor, 'native_project_binding_changed');
+  assert.equal(native.calls.filter(c => ['projects.mutate', 'orchestration.launchThread'].includes(c.tag)).length, 0);
+  assert.equal(state.get(job.id).projectId, job.projectId);
+  assert.equal(state.get(job.id).command.commandId, job.command.commandId);
+});
+
+test('a project binding change during fresh native evidence is fenced before model submission', async t => {
+  const { state, request } = fixture(t), native = new FakeNative(), job = state.enqueue(request()).job;
+  const base = native.http.bind(native); let reads = 0;
+  native.http = async route => {
+    const value = await base(route);
+    if (route === '/api/orchestration/shell' && ++reads === 3) {
+      const project = state.project(job.workspace);
+      state.db.prepare('UPDATE projects SET data=? WHERE workspace_key=?').run(JSON.stringify({ ...project, projectId: 'replacement-project' }), job.workspaceKey);
+    }
+    return value;
+  };
+  await runCycle(state, native);
+  assert.equal(state.get(job.id).waitingFor, 'native_project_binding_changed');
+  assert.equal(native.calls.filter(c => c.tag === 'orchestration.launchThread').length, 0);
+  assert.equal(state.get(job.id).command.commandId, job.command.commandId);
+});
+
+test('fresh native capacity changes block a queued helper before project mutation', async t => {
+  const { state, request } = fixture(t), native = new FakeNative(), job = state.enqueue(request()).job;
+  const base = native.http.bind(native); let reads = 0;
+  native.http = async route => {
+    if (route === '/api/orchestration/shell' && ++reads === 2)
+      native.extra.push(...['foreign-one', 'foreign-two'].map(id => ({ id, providerInstanceId: 'deepai', activeRunId: id })));
+    return base(route);
+  };
+  await runCycle(state, native);
+  assert.equal(state.get(job.id).waitingFor, 'native_capacity');
+  assert.equal(native.calls.filter(c => ['projects.mutate', 'orchestration.launchThread'].includes(c.tag)).length, 0);
+});
+
+test('malformed original submission clocks hold read-only without inventing a send time', async t => {
+  const { state, request } = fixture(t), native = new FakeNative(), job = state.enqueue(request()).job;
+  state.patch(job.id, { status: 'submitting', lastSendAt: 'not-a-clock' });
+  await runCycle(state, native);
+  await runCycle(state, native, { now: Date.now() + 11000 });
+  assert.equal(state.get(job.id).waitingFor, 'native_submission_unverified');
+  assert.equal(state.get(job.id).lastSendAt, 'not-a-clock');
+  assert.equal(native.effects.size, 0);
+});
+
+test('failed project mutation keeps its original error and command without repeated mutation', async t => {
+  const { state, request } = fixture(t), native = new FakeNative(), job = state.enqueue(request()).job;
+  const base = native.rpc.bind(native);
+  native.rpc = async (tag, payload) => {
+    if (tag === 'projects.mutate') { native.calls.push({ tag, payload }); throw Object.assign(new Error('Creation rejected'), { code: 'NATIVE_RPC_FAILED' }); }
+    return base(tag, payload);
+  };
+  await runCycle(state, native);
+  await runCycle(state, native);
+  assert.equal(state.get(job.id).waitingFor, 'native_project');
+  assert.match(state.get(job.id).projectCreationError, /NATIVE_RPC_FAILED/);
+  assert.match(state.get(job.id).lastError, /Creation rejected/);
+  assert.equal(native.calls.filter(c => c.tag === 'projects.mutate').length, 1);
+  assert.equal(native.effects.size, 0);
+});
+
 test('accepted launch with lost reply is reconciled without another launch', async t => {
   const { state, request } = fixture(t), native = new FakeNative(), job = state.enqueue(request()).job;
   native.failAfterAcceptance = true;

@@ -42,7 +42,7 @@
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
   const VERSION = 19;
   /** Private implementation epoch, independent of the stable cross-world wire schema. */
-  const PRODUCER_VERSION = 187;
+  const PRODUCER_VERSION = 188;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -1424,7 +1424,8 @@
     const data = Object.getOwnPropertyDescriptor(message, 'content');
     const content = data && own.call(data, 'value') ? data.value : null;
     const textField = content && typeof content === 'object' ? Object.getOwnPropertyDescriptor(content, 'text') : null;
-    const raw = textField && own.call(textField, 'value') ? textField.value : null;
+    let raw = textField && own.call(textField, 'value') ? textField.value : null;
+    let nativeErrorText = false;
     const validReceipt = receipt => receipt && typeof receipt === 'object' && !Array.isArray(receipt) &&
       typeof receipt.id === 'string' && /^[a-f0-9]{48}$/.test(receipt.id) &&
       (receipt.version === 1 && Object.keys(receipt).length === 2 ||
@@ -1439,6 +1440,24 @@
     // recursively parse arbitrary tool prose/parts. Accept only the v2 root
     // receipt, with its original invocation digest, on a finished native result.
     const type = content && Object.getOwnPropertyDescriptor(content, 'content_type');
+    // The provider transports a returned Core exception as ONE native text
+    // part, rather than a resource card. Recognize only its reserved v2 error
+    // envelope; never search prose or accept an echoed/nested/legacy receipt.
+    // The caller must still prove exact native parent, invocation digest and
+    // account custody. Main independently checks the FAILED durable outcome.
+    if (type?.value === 'text') {
+      const value = (object, key) => object && typeof object === 'object'
+        ? Object.getOwnPropertyDescriptor(object, key)?.value : undefined;
+      const metadata = value(message, 'metadata'), plugin = value(metadata, 'invoked_plugin');
+      const parts = value(content, 'parts'), text = Array.isArray(parts) ? value(parts, '0') : null;
+      if (!status || status.value !== 'finished_successfully' || value(message, 'channel') !== 'commentary' ||
+          value(metadata, 'is_visually_hidden_from_conversation') !== true || !plugin ||
+          typeof plugin !== 'object' || Array.isArray(plugin) || Object.keys(plugin).length ||
+          own.call(metadata, 'invoked_resource') || own.call(metadata, 'jit_plugin_data') ||
+          textField || Object.keys(content).length !== 2 || !Array.isArray(parts) || parts.length !== 1 ||
+          typeof text !== 'string' || text.length > 512 * 1024) return decline('parts');
+      raw = text; nativeErrorText = true;
+    }
     if (type?.value === 'multimodal_text') {
       const descriptor = Object.getOwnPropertyDescriptor(content, 'parts');
       const parts = descriptor && own.call(descriptor, 'value') ? descriptor.value : null;
@@ -1478,7 +1497,7 @@
         return remember(value.cosResultReceipt);
       } catch { return decline('json'); }
     }
-    if (typeof raw !== 'string' || !content || content.content_type !== 'code' || content.language !== 'json') {
+    if (typeof raw !== 'string' || !content || !nativeErrorText && (content.content_type !== 'code' || content.language !== 'json')) {
       const parts = content && typeof content === 'object' ? Object.getOwnPropertyDescriptor(content, 'parts') : null;
       return decline(parts && own.call(parts, 'value') && Array.isArray(parts.value) ? 'parts' : 'content');
     }
@@ -1486,6 +1505,15 @@
     if (raw.length > 1024 * 1024) return decline('oversized');
     try {
       const value = JSON.parse(raw);
+      if (nativeErrorText) {
+        if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 3 ||
+            typeof value.output !== 'string' || value.is_error !== true ||
+            !own.call(value, 'cosResultReceipt') || value.cosResultReceipt?.version !== 2 ||
+            !validReceipt(value.cosResultReceipt)) return decline('receipt');
+        if (proof) proof.nativeErrorText = true;
+        if (shapes) shapes.valid++;
+        return remember(value.cosResultReceipt);
+      }
       if (largeOutput) {
         // The native structured projection can retain a bounded read/Code Mode
         // output just over the ordinary envelope limit (observed 526975 chars).
@@ -2506,6 +2534,69 @@
       requestPaths.set(message, path);
       return path;
     };
+    // Own data only; shared by native error proof and the ordinary receipt lane.
+    const dataFields = (object, keys) => {
+      if (!object || typeof object !== 'object') return false;
+      try { return keys.every(key => {
+        const descriptor = Object.getOwnPropertyDescriptor(object, key);
+        return descriptor ? own.call(descriptor, 'value') : !(key in object);
+      }); } catch { return false; }
+    };
+    const nativeErrorPairs = new Map();
+    // A native error has no invoked_resource. Do not invent one. Its exact
+    // selected invocation, original argument digest and committed failure receipt
+    // are a distinct conjunction, followed by Main's ordinary durable checks.
+    const nativeErrorPair = (resultId, callId) => {
+      const call = shell.calls.find(call => call.messageId === callId);
+      if (!call || !selected.has(callId)) return null;
+      const node = nativeField(mapping, resultId), message = nativeField(node, 'message');
+      const meta = nativeField(message, 'metadata'), author = nativeField(message, 'author');
+      const askedNode = nativeField(mapping, callId), asked = nativeField(askedNode, 'message');
+      const askedMeta = nativeField(asked, 'metadata'), path = nativeRequestPath(asked);
+      const server = ownServerName(shell.callSources.get(callId)?.server);
+      if (!dataFields(message, ['author', 'recipient', 'status', 'content', 'metadata', 'channel']) ||
+          !dataFields(author, ['role', 'name']) ||
+          !dataFields(meta, ['parent_id', 'request_id', 'working_turn_id', 'turn_exchange_id', 'invoked_plugin', 'is_visually_hidden_from_conversation']) ||
+          nativeField(node, 'id') !== resultId || nativeField(message, 'id') !== resultId ||
+          nativeField(node, 'parent') !== callId || nativeField(meta, 'parent_id') !== callId ||
+          nativeField(askedNode, 'id') !== callId || nativeField(asked, 'id') !== callId ||
+          nativeField(nativeField(asked, 'author'), 'role') !== 'assistant' ||
+          nativeField(asked, 'recipient') !== 'api_tool.call_tool' || nativeField(asked, 'status') !== 'finished_successfully' ||
+          !path || !server || !ourPath(path) || !nativeRequestServerMatches(path, server) || toolName(path) !== call.tool ||
+          !['request_id', 'working_turn_id', 'turn_exchange_id'].every(key =>
+            str(nativeField(askedMeta, key)) && nativeField(askedMeta, key) === nativeField(meta, key))) return null;
+      const proof = {}, receipt = coreResultReceipt(message, null, proof);
+      if (!receipt || proof.nativeErrorText !== true) return null;
+      const cachedMapping = nativeField(data, 'mapping'), cached = nativeField(cachedMapping, resultId);
+      const cachedCall = nativeField(cachedMapping, callId);
+      // Start both bounded immutable hashes in the same scan, so the incumbent
+      // digest-settle owner does not need a second cascading asynchronous pass.
+      const digest = nativeInvocationDigest(asked, call.tool);
+      const cachedDigest = cachedCall && cachedCall !== askedNode
+        ? nativeInvocationDigest(nativeField(cachedCall, 'message'), call.tool) : digest;
+      if (!digest || !cachedDigest || proof.invocationSha256 !== digest) return null;
+      if (cached && cached !== node) {
+        const prior = nativeField(cached, 'message'), priorMeta = nativeField(prior, 'metadata'), priorProof = {};
+        if (!dataFields(prior, ['author', 'recipient', 'status', 'content', 'metadata', 'channel']) ||
+            !dataFields(nativeField(prior, 'author'), ['role', 'name']) ||
+            nativeField(cached, 'id') !== resultId || nativeField(prior, 'id') !== resultId || nativeField(cached, 'parent') !== callId ||
+            !['parent_id', 'request_id', 'working_turn_id', 'turn_exchange_id'].every(key => nativeField(priorMeta, key) === nativeField(meta, key)) ||
+            coreResultReceipt(prior, null, priorProof) !== receipt || priorProof.nativeErrorText !== true ||
+            priorProof.invocationSha256 !== digest ||
+            nativeField(nativeField(nativeField(prior, 'content'), 'parts'), '0') !==
+              nativeField(nativeField(nativeField(message, 'content'), 'parts'), '0')) return null;
+      }
+      if (cachedCall && cachedCall !== askedNode) {
+        const prior = nativeField(cachedCall, 'message'), priorMeta = nativeField(prior, 'metadata');
+        if (nativeField(cachedCall, 'id') !== callId || nativeField(prior, 'id') !== callId ||
+            nativeField(cachedCall, 'parent') !== nativeField(askedNode, 'parent') ||
+            nativeField(nativeField(prior, 'author'), 'role') !== 'assistant' ||
+            ['recipient', 'status'].some(key => nativeField(prior, key) !== nativeField(asked, key)) ||
+            nativeRequestPath(prior) !== path || cachedDigest !== digest ||
+            ['parent_id', 'request_id', 'working_turn_id', 'turn_exchange_id'].some(key => nativeField(priorMeta, key) !== nativeField(askedMeta, key))) return null;
+      }
+      return { resultId, callId, receipt, digest };
+    };
     const missingReferenceCalls = shell.calls.filter(call => {
       const reference = shell.callSources.get(call.messageId);
       return reference && !reference.id && reference.referenceMissing;
@@ -3005,6 +3096,26 @@
           // exact request/namespace. Bodies remain opaque. Membership supplies no
           // result, terminal, approval or execution credit; every ordinary edge,
           // status, cache and tool/receipt check below still runs.
+          const admitErrorPair = pair => {
+            if (!pair || receiptIds.has(pair.receipt) || nativeErrorPairs.has(pair.callId) ||
+                (execution ? !execution.calls.includes(pair.callId) || execution.results.includes(pair.resultId)
+                  : !pendingDirectCalls.has(pair.callId))) return false;
+            receiptIds.add(pair.receipt);
+            nativeErrorPairs.set(pair.callId, pair);
+            canonicalParents.set(pair.resultId, pair.callId); exchanges.set(pair.resultId, exchange);
+            if (execution) execution.results.push(pair.resultId);
+            else pendingDirectCalls.delete(pair.callId);
+            return true;
+          };
+          const contractedErrorReturn = (resultId, callId, returnId) => {
+            // Exact two-edge retained return, not an arbitrary sibling join:
+            // call -> error and call -> outer return are both declared, while
+            // the outer return retains error as its original metadata parent.
+            // The ordinary loop still checks the outer return/owner/namespace.
+            if (pending || !execution || currentIds.has(resultId) ||
+                !declaredEdge(callId, resultId) || !declaredEdge(callId, returnId)) return false;
+            return admitErrorPair(nativeErrorPair(resultId, callId));
+          };
           const onPathContext = new Set();
           if (hasHeader && nativeField(nativeField(messageAt(currentPath[2]), 'metadata'), 'rebase_system_message') === true) {
             const request = str(nativeField(userMeta, 'request_id'));
@@ -3100,7 +3211,9 @@
                   (recipient === 'functions.exec' || recipient === 'api_tool.call_tool') ||
                   role === 'tool' && nativeField(author, 'name') === 'functions.exec' && recipient === 'all' &&
                   execution && str(nativeField(metadata, 'request_id')) === execution.request) &&
-                  contractedNarration(retainedParent, parent, metadata));
+                  (contractedNarration(retainedParent, parent, metadata) ||
+                    role === 'tool' && nativeField(author, 'name') === 'functions.exec' &&
+                    contractedErrorReturn(retainedParent, parent, id)));
             if (!retainedParent || retainedParent !== parent && own.call(mapping, retainedParent) && !contracted) {
               // Fixed shape of the first refused edge only. Do not export either
               // parent, inspect its node or change the original ancestry guard.
@@ -3191,6 +3304,11 @@
                 execution.calls.push(id); executionGroups.set(id, execution);
               } else pendingDirectCalls.add(id);
             } else if (role === 'tool' && nativeField(author, 'name') === 'api_tool.call_tool' && recipient === 'all') {
+              const errorPair = nativeErrorPair(id, parent);
+              if (errorPair) {
+                if (!admitErrorPair(errorPair)) return refuse('nativeScopeBranchConflict', 'core-result');
+                continue;
+              }
               if (!execution && stagedRequestResultMembers.has(id) && pendingDirectCalls.delete(parent)) {
                 // The exact direct parent/resource/scope proves request membership while
                 // its receipt loads. Missing receipt still withholds all completion proof.
@@ -3553,15 +3671,6 @@
       if (message?.author?.role === 'assistant' && message.recipient === 'functions.exec') invocationIds.add(id);
     }
     const serverName = name => ownServerName(name);
-    // Diagnostics may inspect only ordinary data fields. An unknown/accessor-backed native
-    // shape stays uninspected; optional counters never evaluate extra page getters.
-    const dataFields = (object, keys) => {
-      if (!object || typeof object !== 'object') return false;
-      try { return keys.every(key => {
-        const descriptor = Object.getOwnPropertyDescriptor(object, key);
-        return descriptor ? own.call(descriptor, 'value') : !(key in object);
-      }); } catch { return false; }
-    };
     const traceNativeReferenceRecovery = () => {
       try {
         const missing = missingReferenceCalls;
@@ -3645,14 +3754,16 @@
     if (mountedCallResultScope?.executionGroups) for (const call of shell.calls) {
       const group = mountedCallResultScope.executionGroups.get(call.messageId);
       const digest = group && nativeInvocationDigest(messageAt(call.messageId), call.tool);
+      const errorPair = nativeErrorPairs.get(call.messageId);
       if (!group?.closed || !digest || group.calls.filter(id => {
         const member = shell.calls.find(call => call.messageId === id);
         return member && nativeInvocationDigest(messageAt(id), member.tool) === digest;
-      }).length !== 1) continue;
+      }).length !== 1 && !errorPair) continue;
       const reference = shell.callSources.get(call.messageId), invocation = messageAt(call.messageId);
       const path = nativeRequestPath(invocation), server = ownServerName(reference?.server);
       const candidates = group.results.filter(id => {
         const result = messageAt(id), proof = {}, resource = resultOf(result);
+        if (errorPair) return id === errorPair.resultId && digest === errorPair.digest;
         if (!coreResultReceipt(result, null, proof) || proof.invocationSha256 !== digest || !path || !server || !resource)
           return false;
         return ownResult(resource) && ownServerName(resource.app) === server && toolName(resource.resource) === call.tool &&
@@ -3709,19 +3820,22 @@
       // Reuse exact paired opaque-app identity for completion, not a display-name comparison.
       // An opaque request's result must identify that SAME app, as well as its exact link/tool.
       const sameNativeApp = !appIdOf(path) || appIdOf(path) === appIdOf(resource?.resource);
+      const retainedError = nativeErrorPairs.get(call.messageId);
+      const exactError = Boolean(mountedCallResultScope && retainedError?.resultId === reference.id &&
+        retainedError.digest === nativeInvocationDigest(invocation, call.tool));
       const invocationNode = Object.getOwnPropertyDescriptor(mapping, call.messageId)?.value;
       const resultNode = Object.getOwnPropertyDescriptor(mapping, reference.id)?.value;
       const enclosing = codeContexts.get(call.messageId) || [];
       // One unchanged receipt conjunction owns both omitted-flag completion and shape-only
       // veto diagnostics. The latter never adds a call to `completed` or changes `answered`.
-        const finishedReceiptMatches = () => currentIds.has(call.messageId) && currentIds.has(reference.id) &&
+        const finishedReceiptMatches = () => currentIds.has(call.messageId) && (currentIds.has(reference.id) || exactError) &&
         invocation?.status === 'finished_successfully' && result.status === 'finished_successfully' &&
         invocation.recipient === 'api_tool.call_tool' && path &&
         nativeRequestServerMatches(path, server) && toolName(path) === call.tool &&
         result.author.name === 'api_tool.call_tool' && result.recipient === 'all' &&
-        server && resource && ownResult(resource) && sameNativeApp && path && ourPath(path) &&
+        server && path && ourPath(path) && (exactError || resource && ownResult(resource) && sameNativeApp &&
         serverName(resource.app) === server && toolName(resource.resource) === call.tool &&
-        linkIdOf(path) && linkIdOf(path) === linkIdOf(resource.resource) &&
+        linkIdOf(path) && linkIdOf(path) === linkIdOf(resource.resource)) &&
         (fingerprintedPairs.get(call.messageId)?.resultId === reference.id ||
           (mountedCallResultScope?.executionGroups?.get(call.messageId)?.calls.length ?? 0) <= 1 &&
           resultNode.parent === call.messageId && str(result.metadata?.parent_id) === call.messageId) &&

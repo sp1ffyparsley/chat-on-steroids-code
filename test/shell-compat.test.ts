@@ -2542,7 +2542,16 @@ describe('alternate shell turn/message provenance', () => {
     'visible', 'unfinished', 'wrong role', 'wrong recipient', 'assistant final', 'assistant text',
     'missing system flag', 'missing developer flag', 'extra rebase flag', 'wrong parent', 'missing user request',
     'invocation metadata', 'jit metadata', 'shape accessor', 'channel accessor', 'terminal accessor', 'author accessor', 'missing member', 'late prefix',
-    'cached role', 'cached hidden', 'cached flag', 'cached parent', 'cached content type', 'cached request'] as const)(
+    'cached role', 'cached hidden', 'cached flag', 'cached parent', 'cached content type', 'cached request',
+    'contracted error', 'contracted error cached exact', 'contracted error digest', 'contracted error scope',
+    'contracted error parent', 'contracted error false', 'contracted error legacy', 'contracted error missing receipt',
+    'contracted error missing edge', 'contracted error duplicate edge', 'contracted error cached body',
+    'contracted error cached role', 'contracted error accessor', 'contracted error metadata accessor',
+    'contracted error missing arguments', 'contracted error cached arguments', 'contracted error extra text',
+    'contracted error private output', 'contracted error unfinished', 'contracted error visible',
+    'contracted error cached call role', 'contracted error cached call recipient', 'contracted error cached call status',
+    'contracted error return request', 'contracted error return working', 'contracted error return exchange',
+    'contracted error return retained parent', 'direct error'] as const)(
     'proves the selected on-path native rebase context without granting result credit (%s)', async variant => {
       const HEADER = 'on-path-header', PREFIX = ['on-path-system', 'on-path-developer', 'on-path-memory', 'on-path-context'] as const;
       const scope = { request_id: REQUEST, working_turn_id: 'on-path-working', turn_exchange_id: 'on-path-exchange' };
@@ -2607,7 +2616,43 @@ describe('alternate shell turn/message provenance', () => {
           if (variant === 'late prefix') { mapping[EXEC].parent = HEADER; mapping[EXEC].message.metadata.parent_id = HEADER;
             mapping[PREFIX[0]].parent = EXEC; mapping[PREFIX[0]].message.metadata.parent_id = EXEC;
             mapping[CALL].parent = PREFIX[3]; mapping[CALL].message.metadata.parent_id = PREFIX[3]; }
-        }, nativeCallCacheMutation: variant.startsWith('cached ') ? mapping => {
+          if (variant.startsWith('contracted error') || variant === 'direct error') {
+            mapping[CALL].message.metadata.connector_tool_payload = '{}';
+            const result = mapping[RESULT].message;
+            result.channel = 'commentary';
+            delete result.metadata.invoked_resource;
+            result.metadata.invoked_plugin = {};
+            result.metadata.is_visually_hidden_from_conversation = true;
+            const receipt = { version: 2, id: 'a'.repeat(48),
+              invocationSha256: createHash('sha256').update(JSON.stringify(['read', {}])).digest('hex') };
+            const value: any = { output: 'RETURNED_TOOL_FAILURE', cosResultReceipt: receipt, is_error: true };
+            if (variant === 'contracted error private output') value.output = 'PRIVATE_ERROR_BODY';
+            if (variant === 'contracted error digest') receipt.invocationSha256 = 'b'.repeat(64);
+            if (variant === 'contracted error false') value.is_error = false;
+            if (variant === 'contracted error legacy') { value.cosResultReceipt = { version: 1, id: 'a'.repeat(48) }; }
+            if (variant === 'contracted error missing receipt') delete value.cosResultReceipt;
+            result.content = { content_type: 'text', parts: [JSON.stringify(value)] };
+            mapping[RESULT].children = [];
+            mapping[CALL].children = [RESULT, EXEC_RESULT];
+            if (variant !== 'direct error') mapping[EXEC_RESULT].parent = CALL;
+            if (variant === 'contracted error scope') result.metadata.turn_exchange_id = 'foreign';
+            if (variant === 'contracted error parent') result.metadata.parent_id = HEADER;
+            if (variant === 'contracted error missing edge') mapping[CALL].children = [EXEC_RESULT];
+            if (variant === 'contracted error duplicate edge') mapping[CALL].children.push(RESULT);
+            if (variant === 'contracted error missing arguments') delete mapping[CALL].message.metadata.connector_tool_payload;
+            if (variant === 'contracted error extra text') result.content.parts.push('untrusted trailing text');
+            if (variant === 'contracted error unfinished') result.status = 'in_progress';
+            if (variant === 'contracted error visible') result.metadata.is_visually_hidden_from_conversation = false;
+            if (variant === 'contracted error return request') mapping[EXEC_RESULT].message.metadata.request_id = 'foreign';
+            if (variant === 'contracted error return working') mapping[EXEC_RESULT].message.metadata.working_turn_id = 'foreign';
+            if (variant === 'contracted error return exchange') mapping[EXEC_RESULT].message.metadata.turn_exchange_id = 'foreign';
+            if (variant === 'contracted error return retained parent') mapping[EXEC_RESULT].message.metadata.parent_id = HEADER;
+            if (variant === 'contracted error metadata accessor') Object.defineProperty(result.metadata, 'invoked_plugin', {
+              get() { getterReads++; throw new Error('PRIVATE_ERROR_METADATA_GETTER'); } });
+            if (variant === 'contracted error accessor') Object.defineProperty(result.content.parts, '0', {
+              get() { getterReads++; throw new Error('PRIVATE_ERROR_GETTER'); } });
+          }
+        }, nativeCallCacheMutation: variant.startsWith('cached ') || variant.includes('error cached ') ? mapping => {
           const context = mapping[PREFIX[2]].message;
           if (variant === 'cached role') context.author.role = 'system';
           if (variant === 'cached hidden') context.metadata.is_visually_hidden_from_conversation = false;
@@ -2615,14 +2660,22 @@ describe('alternate shell turn/message provenance', () => {
           if (variant === 'cached parent') mapping[PREFIX[2]].parent = HEADER;
           if (variant === 'cached content type') context.content.content_type = 'text';
           if (variant === 'cached request') context.metadata.request_id = 'foreign';
+          if (variant === 'contracted error cached body') mapping[RESULT].message.content.parts[0] = mapping[RESULT].message.content.parts[0].replace('RETURNED_TOOL_FAILURE', 'PRIVATE_CACHE_FAILURE');
+          if (variant === 'contracted error cached role') mapping[RESULT].message.author.role = 'assistant';
+          if (variant === 'contracted error cached arguments') mapping[CALL].message.metadata.connector_tool_payload = '{"other":1}';
+          if (variant === 'contracted error cached call role') mapping[CALL].message.author.role = 'system';
+          if (variant === 'contracted error cached call recipient') mapping[CALL].message.recipient = 'functions.exec';
+          if (variant === 'contracted error cached call status') mapping[CALL].message.status = 'in_progress';
         } : undefined });
       try {
-        const accepted = variant === 'exact' || variant === 'opaque body accessor';
+        const accepted = ['exact', 'opaque body accessor', 'contracted error', 'contracted error cached exact',
+          'contracted error private output', 'direct error'].includes(variant);
         const identityOnly = variant === 'missing receipt';
         expect(page.fiber.turns[0].calls[0]).toMatchObject({ requestId: accepted || identityOnly ? REQUEST : null, answered: accepted });
         expect(page.fiber.turns[0].endMessageId).toBe(accepted ? ASSISTANT : null);
         expect(getterReads).toBe(0);
         expect(JSON.stringify(page.fiber)).not.toContain('PRIVATE_CONTEXT');
+        expect(JSON.stringify(page.fiber)).not.toContain('PRIVATE_ERROR_BODY');
       } finally { page.dom.window.close(); }
     });
 

@@ -37,7 +37,7 @@ const MESSAGES = {
   NATIVE_SOCKET_ERROR: 'The native WebSocket failed. Inspect accepted work before resubmission.',
   NATIVE_RPC_TIMEOUT: 'The native request timed out. A submitted mutation may have completed; inspect it before retrying.',
   NATIVE_RPC_WRITE_FAILED: 'The native transport write failed. A submitted mutation may have completed; inspect it before retrying.',
-  NATIVE_RPC_FAILED: 'The native server returned a failed request. Inspect its task status; no automatic retry was made.',
+  NATIVE_RPC_FAILED: 'The native server returned a failed request. Inspect the original task and command before retrying.',
   NATIVE_PROTOCOL_ERROR: 'The native server returned an invalid protocol frame. Inspect submitted work before retrying.',
   FREE_MODEL_UNAVAILABLE: 'The enabled, installed DeepAI provider must be ready and expose the exact non-custom zero-Theos model with thinking=high. No fallback is allowed.'
 };
