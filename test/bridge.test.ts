@@ -2247,6 +2247,38 @@ describe('opt-in settled-turn Loop forward-readiness', () => {
     } finally { spy.mockRestore(); await saveConfig(config); }
   });
 
+  it.each(['source', 'physical'] as const)('reports the actual %s refusal when an accepted proof is later rechecked', async cause => {
+    const f = await settledFixture();
+    const config = getConfig();
+    const refused: string[] = [];
+    const proof = await settledForwardBridge.settledTurnContinuationProof(f.sessionId, f.conversationId, f.turnId,
+      { onRefusal: reason => refused.push(reason) });
+    expect(await proof?.()).toBe(true);
+    try {
+      if (cause === 'physical') await saveConfig({ ...getConfig(), ui: { ...getConfig().ui, automationPaused: true } });
+      else await appendEvent(f.sessionId, { kind: 'page_tool', source: 'extension', time: Date.now(),
+        turnId: f.turnId, messageId: randomUUID(), label: 'new-native-work-after-proof' });
+      expect(await proof?.()).toBe(false);
+      expect(refused).toEqual([cause === 'source' ? 'source_revision_changed' : 'live_readiness_changed']);
+      expect(nativeFinalEvidenceWait(coreBrowserEvidence(f.conversationId))?.reason).toBe('evidence');
+    } finally { await saveConfig(config); }
+  });
+
+  it('revokes a settled proof when durable handoff ownership supersedes the source after issuance', async () => {
+    const f = await settledFixture();
+    const refused: string[] = [];
+    const superseded = vi.spyOn(sessionStoreModule, 'conversationWasSuperseded').mockResolvedValue(false);
+    try {
+      const proof = await settledForwardBridge.settledTurnContinuationProof(f.sessionId, f.conversationId, f.turnId,
+        { onRefusal: reason => refused.push(reason) });
+      expect(await proof?.()).toBe(true);
+      superseded.mockResolvedValue(true);
+      expect(await proof?.()).toBe(false);
+      expect(refused).toEqual(['session_superseded']);
+      expect(nativeFinalEvidenceWait(coreBrowserEvidence(f.conversationId))?.reason).toBe('evidence');
+    } finally { superseded.mockRestore(); }
+  });
+
   it('keeps settled source proof stable across equivalent object-key reconstruction', async () => {
     const f = await settledFixture();
     const reader = sessionStoreModule.readRecentEvents;
@@ -6002,6 +6034,10 @@ describe('committed Resume native terminal pickup after restart', () => {
 
   it.each(['goal', 'loop', 'loop-source-open', 'loop-source-open-unknown-request', 'loop-source-open-pause',
     'loop-source-open-not-superseded',
+    'loop-source-open-late-core', 'loop-source-open-foreign-core', 'loop-source-open-new-core',
+    'loop-source-open-duplicate-core', 'loop-source-open-withdraw-late-core', 'loop-source-open-withdraw-foreign-frame-core',
+    'loop-source-open-withdraw-deliberate-core', 'loop-source-open-withdraw-resume-refusal-core',
+    'loop-source-open-withdraw-reloaded-core', 'loop-source-open-withdraw-reloaded-request-mismatch-core',
     'loop-serialized-path', 'loop-serialized-tilde', 'loop-interleaved-commentary',
     'goal-late-question-watchdog', 'loop-late-question-watchdog', 'loop-late-question-watchdog-stopped',
     'loop-late-question-watchdog-wrong-detail', 'loop-late-question-watchdog-new-work'] as const)(
@@ -6010,6 +6046,7 @@ describe('committed Resume native terminal pickup after restart', () => {
       const lateObserver = shape.includes('late-question-watchdog');
       const rejectedObserver = ['stopped', 'wrong-detail', 'new-work', 'unknown-request', 'pause', 'not-superseded'].some(ending => shape.endsWith(ending));
       const sourceOpen = shape.startsWith('loop-source-open');
+      const lateCore = shape.endsWith('-core');
       const { from, chat, userId, finalId, sessionId, token, answer, input } = await setup(!sourceOpen, mode, shape === 'loop-serialized-path', shape === 'loop-serialized-tilde', lateObserver);
       if (shape.endsWith('not-superseded')) {
         const original = sessionStoreModule.conversationWasSuperseded;
@@ -6031,6 +6068,22 @@ describe('committed Resume native terminal pickup after restart', () => {
             state: 'streaming', final: false }
         ] } });
       await request('POST', '/events', { body: { conversationId: chat, events: [unassociated] } });
+      const recordedCall = 'resume-recorded-native-call';
+      const recordedRequest = randomUUID();
+      if (lateCore) {
+        const receipt = { kind: 'tool_call', source: 'mcp',
+          time: answer.time + (shape.endsWith('new-core') ? 100 : -100),
+          call: { tool: 'read', callId: randomUUID(), conversationId: chat,
+            attributionMethod: 'result_receipt', attribution: 'result_receipt', requestId: null, resultReceiptId: 'a'.repeat(48),
+            invocationSha256: 'b'.repeat(64), nativeCallMessageId: shape.endsWith('foreign-core') ? 'foreign-call' : recordedCall,
+            args: { text: '{}', chars: 2, truncated: false }, result: { text: 'saved output', chars: 12, truncated: false },
+            outcome: 'ok', durationMs: 1, summary: { title: 'Read fixture', tone: 'good', kind: 'read' } }
+        } as const;
+        await sessionStoreModule.appendEvent(sessionId, receipt);
+        if (shape.endsWith('duplicate-core')) await sessionStoreModule.appendEvent(sessionId, {
+          ...receipt, call: { ...receipt.call, callId: randomUUID() }
+        });
+      }
       if (lateObserver) {
         await request('POST', '/events', { body: { conversationId: chat, events: [
           { kind: 'turn_start', turnId: 'post-final-observer', time: Date.now() },
@@ -6051,12 +6104,12 @@ describe('committed Resume native terminal pickup after restart', () => {
       }
       const diagnostic = { documentId: 'resume-settled-association', navigationEpoch: 2,
         observedAt: Date.now(), shell: 'alternate', shellDiscovery: 'compatible',
-        requestIds: [nativeRequest], turnId: null,
-        ordinaryFinal: { reason: 'open-call', questions: 1, calls: 1, openCalls: 1,
+        requestIds: lateCore ? [nativeRequest, recordedRequest] : [nativeRequest], turnId: null,
+        ordinaryFinal: { reason: 'open-call', questions: 1, calls: lateCore ? 2 : 1, openCalls: 1,
           codeCalls: 0, openCodeCalls: 0, activeTurnMapped: false,
           sourceUserMessageId: userId, settledFinalMessageId: finalId,
-          coreCallMessageIds: [nativeCall],
-          ...(sourceOpen && !shape.endsWith('unknown-request') ? { allCoreRequestIds: [nativeRequest] } : {}) } };
+          coreCallMessageIds: lateCore ? [nativeCall, recordedCall] : [nativeCall],
+          ...(sourceOpen && !shape.endsWith('unknown-request') ? { allCoreRequestIds: lateCore ? [nativeRequest, recordedRequest] : [nativeRequest] } : {}) } };
       if (shape.endsWith('pause')) await saveConfig({ ...getConfig(), ui: { ...getConfig().ui, automationPaused: true } });
       expect((await request('POST', '/activity?conversationId=' + chat,
         { body: { coreDiagnostic: diagnostic } })).status).toBe(200);
@@ -6118,6 +6171,11 @@ describe('committed Resume native terminal pickup after restart', () => {
         recordDelivered: (await import('../src/main/session/input-history.js')).recordDeliveredInput,
         settledTurnForwardReadiness: settledForwardBridge.settledTurnInputForwardProof });
       const refusal: string[] = [];
+      if (shape.endsWith('foreign-core') || shape.endsWith('new-core') || shape.endsWith('duplicate-core')) {
+        expect(await settledForwardBridge.settledTurnContinuationAllowed(sessionId, chat, 'reply:' + finalId)).toBe(false);
+        expect(await input.listInputs()).toEqual([]);
+        return;
+      }
       expect(await settledForwardBridge.settledTurnContinuationAllowed(sessionId, chat, 'reply:' + finalId,
         { onRefusal: reason => refusal.push(reason) }), refusal.join(';')).toBe(true);
       const drafted = await request('POST', '/goal/draft', { body: { conversationId: chat,
@@ -6142,6 +6200,60 @@ describe('committed Resume native terminal pickup after restart', () => {
       await input.completeBrowserDecision(helper.id, 'settled-resume-helper', response);
       expect((await input.listInputs()).filter(row => row.sourceHelperId === helper.id)).toHaveLength(1);
       expect(await input.claimBrowserInput(outgoing.id, 'settled-resume-main', chat, true)).not.toBeNull();
+      if (shape.includes('withdraw')) {
+        const { settledFinalMessageId: _settledFinalMessageId, ...ordinaryFinal } = diagnostic.ordinaryFinal;
+        const refuseResume = shape.includes('resume-refusal');
+        const deliberate = shape.includes('deliberate') || refuseResume;
+        const sameQuestion = !shape.includes('foreign-frame') && !deliberate;
+        const reloaded = shape.includes('reloaded');
+        const wrongRequest = shape.includes('request-mismatch');
+        const sameCensus = sameQuestion && !wrongRequest;
+        const documentId = reloaded ? 'resume-settled-reloaded' : diagnostic.documentId;
+        const busy = { ...diagnostic, documentId, observedAt: Date.now(), ordinaryFinal: { ...ordinaryFinal, reason: 'busy',
+          sourceUserMessageId: sameQuestion ? userId : randomUUID(),
+          ...(wrongRequest ? { allCoreRequestIds: [nativeRequest, randomUUID()] } : {}) } };
+        expect((await request('POST', '/activity?conversationId=' + chat, { body: { coreDiagnostic: busy } })).status).toBe(200);
+        expect(await input.authorizeBrowserInput(outgoing.id, 'settled-resume-main', chat)).toBe(false);
+        expect(await input.failBrowserInput(outgoing.id, 'settled-resume-main', 'After-turn pickup was withdrawn before Send.',
+          { confirmedUnsent: true, conversationId: chat, detail: 'authorization-policy' })).toBe(true);
+        expect((await input.listInputs()).find(row => row.id === outgoing.id)).toMatchObject({
+          state: sameCensus ? 'queued' : 'failed', owner: null
+        });
+        expect((await input.listInputs()).find(row => row.id === outgoing.id)?.sendAuthorizedAt).toBeUndefined();
+        expect((await input.listInputs()).filter(row => row.sourceHelperId === helper.id)).toHaveLength(1);
+        expect(goalPendingReplyFor(chat)?.acceptedAt).toBe(acceptedAt);
+        expect(settledForwardBridge.goalNativeCompletionReady(chat)).toBe(false);
+        if (!sameCensus && !deliberate) return;
+        const saved = (await input.listInputs()).find(row => row.id === outgoing.id)!;
+        if (sameQuestion) {
+          const now = vi.spyOn(Date, 'now').mockReturnValue(Math.max(saved.dueAt, Date.now()) + 100);
+          onTestFinished(() => { now.mockRestore(); });
+        }
+        expect(await input.claimBrowserInput(outgoing.id, 'settled-resume-busy', chat, true)).toBeNull();
+        const current = { sessionId, conversationId: chat, sourceTurnId: 'reply:' + finalId,
+          sourceAcceptedAt: acceptedAt, current: () => true };
+        if (deliberate) expect(await input.retainSourceHelperContinuation({ ...current, authorizeRetry: async () => true }))
+          .toBe('attention');
+        expect((await request('POST', '/activity?conversationId=' + chat,
+          { body: { coreDiagnostic: { ...diagnostic, documentId, observedAt: Date.now() } } })).status).toBe(200);
+        if (refuseResume) {
+          const previous = goal.snapshotGoalSwitches().switches.find(row => row.conversationId === chat);
+          const refusal = vi.spyOn(goal, 'setGoalReplyActiveNow').mockResolvedValue(false);
+          try {
+            const resumed = await request('POST', '/settings', { body: { conversationId: chat, loop: true } });
+            expect(resumed.status, JSON.stringify(resumed.body)).toBe(503);
+            expect(resumed.body?.error).toBe('goal_resume_not_durable');
+          } finally { refusal.mockRestore(); }
+          expect(goal.snapshotGoalSwitches().switches.find(row => row.conversationId === chat)).toEqual(previous);
+          expect(goalPendingReplyFor(chat)?.acceptedAt).toBe(acceptedAt);
+          expect((await input.listInputs()).find(row => row.id === outgoing.id)?.state).toBe('failed');
+        }
+        if (deliberate) {
+          expect(await input.retainSourceHelperContinuation(current)).toBe('attention');
+          expect(await input.retainSourceHelperContinuation({ ...current, authorizeRetry: async () => true })).toBe('held');
+        }
+        expect(await input.claimBrowserInput(outgoing.id, 'settled-resume-main', chat, true)).not.toBeNull();
+      }
       expect(await input.authorizeBrowserInput(outgoing.id, 'settled-resume-main', chat)).toBe(true);
       expect(await input.acknowledgeBrowserInput(outgoing.id, 'settled-resume-main', chat, randomUUID())).toBe(true);
       expect((await input.listInputs()).find(row => row.id === outgoing.id)?.state).toBe('sent');

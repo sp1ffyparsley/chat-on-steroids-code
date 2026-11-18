@@ -71,7 +71,8 @@ export function diagnosedJob(state, job, now = Date.now()) {
     native_project: 'The retained project creation receipt did not prove a current active project. Inspect or restore that exact native binding; no replacement project or task was created. Continue independent parent work.',
     native_project_binding_changed: 'The admitted job and current workspace binding disagree. Inspect the original project and job; the bridge will not silently rebind or replay it.',
     native_submission_failed: 'The original native submission failed without a reconciled run. Its IDs and custody remain retained; only read-only reconciliation continues, with no further model launch. Continue independent parent work.',
-    native_submission_unverified: 'The original submission clock is invalid. Keep the original job and command for read-only native reconciliation; no model launch or fabricated timestamp is permitted.',
+    native_submission_unverified: 'The original submission did not yield a verified native run. Keep the original job and command for read-only reconciliation and continue independent parent work.',
+    native_cancel_reconciliation: 'DeepAI is reachable, but the original launch has no confirmed run or terminal result. Keep the original job for read-only reconciliation and continue independent parent work.',
     workspace: 'Wait for the existing native work to release this workspace; use a separate approved workspace for independent work.'
   };
   if (job.resultSaveError || job.status === 'completed' && !job.resultSavedAt) blocker = { code: 'report_not_saved', action: 'Check workspace access and available disk space, then retry result for this same job. Completion is withheld until the report is saved.' };
@@ -114,9 +115,13 @@ export function verifyRun(job, projection) {
   if (projection?.thread?.id !== job.threadId) throw new Error('Native result belongs to a different chat.');
   if (projection.thread.projectId !== job.projectId) throw new Error('Native chat moved to another project; inspect its workspace before continuing.');
   if (projection.thread.worktreePath && workspaceKey(path.resolve(projection.thread.worktreePath)) !== job.workspaceKey) throw new Error('Native chat worktree changed; inspect before continuing.');
-  const run = projection.runs?.find(value => value.userMessageId === job.messageId);
+  const runs = (projection.runs || []).filter(value => value.userMessageId === job.messageId);
+  const matches = job.runId ? runs.filter(value => value.id === job.runId) : runs;
+  if (matches.length > 1) throw new Error('Multiple native runs match the original message; no result was accepted.');
+  if (runs.length && !matches.length) throw new Error('Native run identity changed; no result was accepted.');
+  const [run] = matches;
   if (!run) return null;
-  if (run.threadId !== job.threadId || (job.runId && job.runId !== run.id)) throw new Error('Native run identity changed; no result was accepted.');
+  if (run.threadId !== job.threadId) throw new Error('Native run identity changed; no result was accepted.');
   if (run.providerInstanceId !== 'deepai' || run.modelSelection?.instanceId !== 'deepai' || run.modelSelection?.model !== job.model) throw new Error('Native model differs from the pinned free model; no result was accepted.');
   return run;
 }
@@ -173,11 +178,28 @@ async function requestStop(state, connection, job, run, reason) {
 
 async function observeJob(state, connection, job, threads, now) {
   const shell = threads.find(thread => thread.id === job.threadId);
-  if (!shell && job.status === 'submitting' && !job.runId) return false;
-  let projection = await connection.rpc('orchestration.getThreadProjection', { threadId: job.threadId });
+  let projection;
   let fullProjectionRead = false;
+  if (!shell && job.status === 'submitting' && !job.runId) {
+    // Shell lists can omit the exact chat of a lost launch. A direct read can
+    // recover its run, but an absent chat cannot prove the launch never happened.
+    const lastProbe = job.nativeSubmissionProbeAt;
+    if (Number.isFinite(lastProbe) && now >= lastProbe && now - lastProbe < 60000 &&
+        job.waitingFor !== 'native_unavailable') return true;
+    state.patch(job.id, { nativeSubmissionProbeAt: now });
+    try {
+      const full = await connection.http(`/api/orchestration/threads/${encodeURIComponent(job.threadId)}`);
+      projection = full.projection;
+      fullProjectionRead = true;
+    } catch (error) {
+      if (error?.code === 'NATIVE_HTTP_STATUS' && error.httpStatus === 404) return false;
+      throw error;
+    }
+  } else {
+    projection = await connection.rpc('orchestration.getThreadProjection', { threadId: job.threadId });
+  }
   let run = verifyRun(job, projection);
-  if (!run) {
+  if (!run && !fullProjectionRead) {
     const full = await connection.http(`/api/orchestration/threads/${encodeURIComponent(job.threadId)}`);
     projection = full.projection;
     fullProjectionRead = true;
@@ -244,29 +266,33 @@ export async function runCycle(state, connection, { now = Date.now() } = {}) {
     let candidate = candidates.shift();
     candidate = state.get(candidate.id);
     if (candidate.cancelRequestedAt && candidate.status === 'queued') { state.patch(candidate.id, { status: 'cancelled', completedAt: new Date(now).toISOString() }); continue; }
-    const replay = candidate.status === 'submitting';
-    if (replay && candidate.cancelRequestedAt) { state.patch(candidate.id, { lastError: 'Cancellation is pending native reconciliation; the ambiguous launch will not be replayed.' }); continue; }
-    if (replay && (candidate.nativeSubmissionFailedAt || /^NATIVE_RPC_FAILED:/.test(candidate.lastError || ''))) {
-      if (candidate.waitingFor !== 'native_submission_failed') state.patch(candidate.id, {
-        waitingFor: 'native_submission_failed', nativeSubmissionFailedAt: candidate.nativeSubmissionFailedAt || new Date(now).toISOString()
-      });
+    if (candidate.status === 'submitting') {
+      // A committed launch may have crossed the native write boundary before
+      // its reply was lost. An empty inventory is evidence for another read only.
+      if (candidate.cancelRequestedAt) {
+        const lastError = 'Cancellation is pending native reconciliation; the ambiguous launch will not be replayed.';
+        if (candidate.waitingFor !== 'native_cancel_reconciliation' || candidate.lastError !== lastError)
+          state.patch(candidate.id, { waitingFor: 'native_cancel_reconciliation', lastError });
+      } else if (candidate.nativeSubmissionFailedAt || /^NATIVE_RPC_FAILED:/.test(candidate.lastError || '')) {
+        if (candidate.waitingFor !== 'native_submission_failed') state.patch(candidate.id, {
+          waitingFor: 'native_submission_failed', nativeSubmissionFailedAt: candidate.nativeSubmissionFailedAt || new Date(now).toISOString()
+        });
+      } else if (candidate.waitingFor !== 'native_submission_unverified') {
+        const clockValid = Number.isFinite(Date.parse(candidate.lastSendAt));
+        state.patch(candidate.id, { waitingFor: 'native_submission_unverified',
+          lastError: clockValid ? candidate.lastError || 'Original native launch has no verified run; reconciling without resubmission.'
+            : 'Original submission clock is missing or invalid; original identity retained for read-only reconciliation.' });
+      }
       continue;
     }
     const admission = helperAdmission(candidate);
     if (!admission.allowed) { state.patch(candidate.id, { waitingFor: admission.reason }); continue; }
-    if ((!replay && occupied.size >= MAX_ACTIVE) || (replay && occupied.size > MAX_ACTIVE)) { if (candidate.waitingFor !== 'native_capacity') state.patch(candidate.id, { waitingFor: 'native_capacity' }); continue; }
-    if (!replay && workspaces.has(candidate.workspaceKey)) { if (candidate.waitingFor !== 'workspace') state.patch(candidate.id, { waitingFor: 'workspace' }); continue; }
-    if (replay && !Number.isFinite(Date.parse(candidate.lastSendAt))) {
-      if (candidate.waitingFor !== 'native_submission_unverified') state.patch(candidate.id, {
-        waitingFor: 'native_submission_unverified', lastError: 'Original submission clock is missing or invalid; original identity retained for read-only reconciliation.'
-      });
-      continue;
-    }
-    if (replay && now - Date.parse(candidate.lastSendAt) < 10000) continue;
+    if (occupied.size >= MAX_ACTIVE) { if (candidate.waitingFor !== 'native_capacity') state.patch(candidate.id, { waitingFor: 'native_capacity' }); continue; }
+    if (workspaces.has(candidate.workspaceKey)) { if (candidate.waitingFor !== 'workspace') state.patch(candidate.id, { waitingFor: 'workspace' }); continue; }
     try {
       config ||= await connection.rpc('server.getConfig', {});
       try { assertFreeModel(config, candidate.model); }
-      catch (error) { if (!replay) { state.patch(candidate.id, { status: 'blocked', lastError: errorText(error), completedAt: new Date(now).toISOString() }); continue; } throw error; }
+      catch (error) { state.patch(candidate.id, { status: 'blocked', lastError: errorText(error), completedAt: new Date(now).toISOString() }); continue; }
       const project = state.project(candidate.workspace);
       if (candidate.projectId !== project.projectId || candidate.operation === 'launch' && candidate.command.projectId !== candidate.projectId) {
         state.patch(candidate.id, { waitingFor: 'native_project_binding_changed', lastError: 'The admitted native project binding changed; original job and command retained without dispatch.' });
@@ -281,7 +307,7 @@ export async function runCycle(state, connection, { now = Date.now() } = {}) {
       }
       const newlyActive = activeNativeIds(currentShell.threads);
       for (const id of newlyActive) occupied.add(id);
-      if ((!replay && occupied.size >= MAX_ACTIVE) || (replay && occupied.size > MAX_ACTIVE)) {
+      if (occupied.size >= MAX_ACTIVE) {
         state.patch(candidate.id, { waitingFor: 'native_capacity' }); continue;
       }
       const otherWorkspaces = new Set(state.workspacesForThreads([...occupied].filter(id => id !== candidate.threadId)));
@@ -308,8 +334,8 @@ export async function runCycle(state, connection, { now = Date.now() } = {}) {
         const currentThread = (await connection.http(`/api/orchestration/threads/${encodeURIComponent(candidate.threadId)}`)).projection.thread;
         if (currentThread.projectId !== candidate.projectId || (currentThread.worktreePath && workspaceKey(path.resolve(currentThread.worktreePath)) !== candidate.workspaceKey) || currentThread.runtimeMode !== 'auto') throw new Error('Native continuation workspace or permission mode changed; no task was sent.');
       }
-      // Stable payload/IDs are committed before transmission. Replays use the
-      // installed version's durable receipt deduplication, never a fresh ID.
+      // Stable payload/IDs are committed before transmission. Once claimed,
+      // this command is observed by exact identity even if the reply is lost.
       // Config/Goal may change during native project/config reads. Recheck the
       // original durable owners immediately before the synchronous send boundary.
       const finalAdmission = helperAdmission(candidate);

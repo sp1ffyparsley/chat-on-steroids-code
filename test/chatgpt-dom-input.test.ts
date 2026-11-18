@@ -7,6 +7,7 @@ const source = readFileSync(new URL('../extension/chatgpt-dom.js', import.meta.u
 // Real transport fixtures exercise the mandatory envelope, including generic click/receipt tests.
 const preparedPrompt = (text: string) => prepareOperatorPrompt(text, upper => upper - 1);
 interface DomApi {
+  skipResponseComparison(current: () => boolean): boolean;
   promptEnvelopeReady(): boolean;
   promptEnvelopeProtocol(): number;
   operatorPromptBody(value: string): string;
@@ -78,6 +79,68 @@ beforeEach(() => {
   button = document.querySelector('[data-testid="send-button"]')!;
 });
 afterEach(() => { dom.window.close(); vi.useRealTimers(); });
+
+describe('neutral response comparison feedback', () => {
+  function comparison(question = 'Which response do you prefer?', remove = true) {
+    const card = document.createElement('section');
+    card.innerHTML = `<h2>${question}</h2><div><button type="button">I prefer this option</button></div>` +
+      '<div><button type="button">I prefer this option</button></div><button type="button">Skip</button>';
+    const votes = vi.fn(), skipped = vi.fn();
+    const buttons = card.querySelectorAll('button');
+    buttons[0]!.addEventListener('click', votes); buttons[1]!.addEventListener('click', votes);
+    buttons[2]!.addEventListener('click', () => { skipped(); if (remove) card.remove(); });
+    document.body.append(card);
+    return { card, skip: buttons[2]!, votes, skipped };
+  }
+  it.each(['Which response do you prefer?', 'What option do you prefer?',
+    'Improve your experience by letting us know what option is better.'])(
+    'skips only a complete native comparison: %s', question => {
+      const f = comparison(question);
+      expect(api.skipResponseComparison(() => true)).toBe(true);
+      expect(f.skipped).toHaveBeenCalledOnce(); expect(f.votes).not.toHaveBeenCalled();
+      expect(box.textContent).toBe('Exact app prompt');
+      expect(api.skipResponseComparison(() => true)).toBe(false);
+    });
+  it('does not repeat the same Skip when the provider leaves the card mounted', () => {
+    const f = comparison(undefined, false);
+    expect(api.skipResponseComparison(() => true)).toBe(true);
+    expect(api.skipResponseComparison(() => true)).toBe(false);
+    expect(f.skipped).toHaveBeenCalledOnce(); expect(f.votes).not.toHaveBeenCalled();
+  });
+  it.each(['markdown', 'user', 'editor', 'own', 'hidden', 'inert', 'disabled', 'aria-disabled',
+    'ambiguous', 'no-question', 'one-vote', 'thinking', 'approval', 'no-skip'] as const)(
+    'never votes, sends or dismisses an unrelated/unsafe %s surface', state => {
+      const f = comparison();
+      if (state === 'markdown') f.card.className = 'markdown';
+      if (state === 'user') f.card.setAttribute('data-message-author-role', 'user');
+      if (state === 'editor') f.card.setAttribute('contenteditable', 'true');
+      if (state === 'own') f.card.className = 'clf-stage';
+      if (state === 'hidden') f.card.hidden = true;
+      if (state === 'inert') f.card.setAttribute('inert', '');
+      if (state === 'disabled') f.skip.disabled = true;
+      if (state === 'aria-disabled') f.skip.setAttribute('aria-disabled', 'true');
+      if (state === 'ambiguous') comparison();
+      if (state === 'no-question') f.card.querySelector('h2')!.textContent = 'Skip this task';
+      if (state === 'one-vote') f.card.querySelector('button')!.remove();
+      if (state === 'thinking') box.closest('form')!.insertAdjacentHTML('beforeend', '<button data-testid="stop-button">Stop</button>');
+      if (state === 'approval') document.body.insertAdjacentHTML('beforeend',
+        '<div data-codex-approval-surface="true"><button>Allow once</button><button>Deny</button></div>');
+      if (state === 'no-skip') f.skip.remove();
+      expect(api.skipResponseComparison(() => true)).toBe(false);
+      expect(f.skipped).not.toHaveBeenCalled(); expect(f.votes).not.toHaveBeenCalled();
+      expect(box.textContent).toBe('Exact app prompt');
+    });
+  it('never clicks generic reasoning Skip or a revoked owner', () => {
+    const standalone = document.createElement('button'); standalone.textContent = 'Skip';
+    const skipped = vi.fn(); standalone.addEventListener('click', skipped); document.body.append(standalone);
+    expect(api.skipResponseComparison(() => true)).toBe(false);
+    expect(skipped).not.toHaveBeenCalled(); standalone.remove();
+    const f = comparison(); let checks = 0;
+    expect(api.skipResponseComparison(() => ++checks === 1)).toBe(false);
+    expect(f.skipped).not.toHaveBeenCalled(); expect(f.votes).not.toHaveBeenCalled();
+  });
+});
+
 function user(text: string) {
   const section = document.createElement('section');
   section.setAttribute('data-testid', 'conversation-turn-1');

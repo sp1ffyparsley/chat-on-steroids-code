@@ -1,6 +1,6 @@
 import { operatorPromptBody, prepareOperatorPrompt, assertOperatorPromptEnvelope, operatorPromptOverhead } from '../../shared/operator-prompt.mjs';
 import { workflowStepSchema, workflowReceiptSchema, workflowBlocker, type WorkflowReceipt } from '../../shared/workflow.mjs';
-import { REASONING_EFFORTS, workSequence } from '../../shared/session.js';
+import { isReturnedToolOutcome, REASONING_EFFORTS, workSequence } from '../../shared/session.js';
 /** User-authored input has one durable owner across browser and MCP delivery.
  * A claimed browser send is never automatically retried: losing the ACK is ambiguous.
  * A live tool offer may be acknowledged by a later exact call; after Main reconstruction the
@@ -40,12 +40,13 @@ import { assertNewWorkAllowed, profileWorkAdmission } from '../work-admission.js
 import { backgroundExecObligations } from '../codex/ownership.js';
 import { rotationMessage } from '../../shared/recovery.js';
 import { automationRotationAdmits } from '../automation-rotation.js';
+import { nativeCoreRequestsForUnsentWithdrawal } from '../core-browser-evidence.js';
 import { MAX_AUTOMATION_OBJECTIVE_CHARS } from '../../shared/goal.js';
 
 const browserDecisionProtocolError = z.enum(['invalid_goal_decision_json', 'invalid_goal_decision_schema',
   'empty_reply', 'control_tokens_only', 'unsafe_control_tokens', 'reply_too_long', 'goal_content_reference_unresolved',
   'goal_canonical_scope_changed', 'goal_human_history_changed', 'goal_plan_changed',
-  'goal_original_acceptance_unverified', 'native_completion_unverified', 'loop_stop_refused',
+  'goal_original_acceptance_unverified', 'native_completion_unverified', 'goal_readiness_changed', 'loop_stop_refused',
   'goal_external_hold', 'goal_generated_authority_claim']);
 
 export const inputArgs = z.object({
@@ -503,12 +504,16 @@ export interface ToolInputBatch {
   reminder: string;
 }
 export interface InputActivity { possible: boolean; exact: boolean; model?: 'pro' | 'other' | 'unknown'; turnId?: string }
+export type InputForwardProof = (() => boolean | Promise<boolean>) & {
+  /** Only the incumbent settled-turn Loop owner can mark this separate forward permission. */
+  readonly retryableReadinessChange?: true;
+};
 type InputDeliveryHooks = {
   /** Optional opt-in Loop forward proof, evaluated INSIDE this owner's transaction.
    * null preserves strict/unrelated delivery; false defers; the closure rechecks physical/source
    * custody after later awaits, without recursively entering this Input owner. Never a
    * tool-completion or replay receipt. */
-  settledTurnForwardReadiness?: (entry: Readonly<InputEntry>, rows: readonly InputEntry[], phase?: 'collect') => Promise<(() => boolean | Promise<boolean>) | false | null>;
+  settledTurnForwardReadiness?: (entry: Readonly<InputEntry>, rows: readonly InputEntry[], phase?: 'collect') => Promise<InputForwardProof | false | null>;
   /** Shared bridge decision for whether running calls still hold automatic recovery. */
   callsHoldRecovery?: (conversationId: string) => boolean;
   activity?: (session: SessionSummary) => InputActivity;
@@ -793,6 +798,7 @@ let inputSerialOwner: { live: boolean } | null = null;
 const offered = new Map<string, { at: number; requestId: string; startedAt: number; returnedText: string;
   nativeFinal?: { turnId: string; messageId: string; observedAt: number } }>();
 const terminal = (row: InputEntry): boolean => ['sent', 'cancelled', 'failed'].includes(row.state);
+const RECOVERY_SOURCE_CHANGED_UNSENT = 'Needs attention: the after-turn recovery source changed before native Send. The exact message is saved and was not sent.';
 const confirmedPreSendOperatorRetry = (row: InputEntry): boolean => row.state === 'failed' &&
   row.requiresAuthorization === true && row.sendAuthorizedAt === undefined &&
   row.deliveredAt === undefined && row.messageId === undefined;
@@ -808,6 +814,13 @@ function retainedSourceHelperPreSendRetry(row: InputEntry): boolean {
   if (row.state !== 'failed' || row.owner !== null || row.offeredAt !== undefined ||
       row.sendAuthorizedAt !== undefined || row.deliveredAt !== undefined || row.messageId !== undefined) return false;
   if (confirmedPreSendOperatorRetry(row) && (row.preSendReoffers ?? 0) > MAX_PRE_SEND_REOFFERS) return true;
+  // This exact terminal disposition was written only after an owned pre-click
+  // withdrawal. A deliberate Resume can recheck its source and reuse the UUID.
+  // It remains ineligible for automatic retry and for uncertain Send recovery.
+  if (row.sourceHelperId && row.error === RECOVERY_SOURCE_CHANGED_UNSENT &&
+      row.requiresAuthorization === undefined && row.deliveredSessionId === undefined &&
+      row.response === undefined && row.companionInputId === undefined &&
+      row.recoveryFailure === undefined && row.toolReceiptUncertain !== true) return true;
   // Preparation failed before this child was ever offered to a document. Keep
   // its sole helper/UUID for the existing explicit Resume transaction; absence
   // of offer/authorization/ACK above is mandatory and never an automatic retry.
@@ -2414,12 +2427,15 @@ export function rememberOrdinaryInputFinalNow(sessionId: string, conversationId:
   });
 }
 
+type SettledInputNativeSource = Readonly<{ sourceUserMessageId: string; finalMessageId: string;
+  coreRequests?: ReadonlyMap<string, string> }>;
+
 /** A native final may lack its document-local generation alias. Only the exact Sent/native
  * question/final proof may retain its reply cursor or matching watchdog owner. Neither an
  * arbitrary cursor nor this forward permission certifies missing tool completion. */
 async function ordinaryInputTerminalTurn(sessionId: string, conversationId: string, turnId: string,
   rows: readonly InputEntry[], ignoredIds: readonly string[],
-  settledNativeSource?: Readonly<{ sourceUserMessageId: string; finalMessageId: string }>,
+  settledNativeSource?: SettledInputNativeSource,
   retainedHelperCreatedAt?: number): Promise<string | null> {
   const match = /^reply:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(turnId);
   if ((!match && !settledNativeSource && retainedHelperCreatedAt === undefined) || continuationForSession(sessionId) ||
@@ -2459,7 +2475,7 @@ async function ordinaryInputTerminalTurn(sessionId: string, conversationId: stri
   const resumeReceipt = user?.kind === 'user_message' && user.messageId && !user.message.truncated
     ? await committedResumeNativeReceipt(sessionId, conversationId, user.messageId, user.message.text) : null;
   const postFinalResume = Boolean(resumeReceipt && boundary?.afterFinal);
-  if ((!match && !settledWatchdog) || final?.kind !== 'assistant_message' || user?.kind !== 'user_message' ||
+  if ((!match && !settledWatchdog) || !expectedFinalId || final?.kind !== 'assistant_message' || user?.kind !== 'user_message' ||
       final.messageId !== expectedFinalId || final.providerMessageId !== expectedFinalId || final.turnId || !final.final || final.state !== 'final' ||
       final.goalEligible !== true || (!settledWatchdog && (!final.inputReplyTo || final.inputReplyTo !== user.messageId)) ||
       !final.message.text.trim() || final.message.truncated ||
@@ -2516,9 +2532,33 @@ async function ordinaryInputTerminalTurn(sessionId: string, conversationId: stri
           (row.purpose !== 'decision' && row.id !== receipt?.id &&
             (row.deliveredAt ?? row.sendAuthorizedAt ?? 0) > deliveredAt)))) return null;
   const finalPosition = final.finalContentSeq ?? final.origin ?? final.seq;
+  // The page can deliver the final before Main appends already-returned receipts.
+  // Only a committed Resume's exact native parent census can place those rows
+  // before this final. This admits forward work without clearing any result fence.
+  const retentionRequests = retaining && resumeReceipt?.acceptedDestinationFinal === final.messageId && user.messageId
+    ? nativeCoreRequestsForUnsentWithdrawal(conversationId, user.messageId, expectedFinalId) : undefined;
+  const priorCoreRequests = retentionRequests ?? (resumeReceipt?.acceptedDestinationFinal === final.messageId &&
+    settledNativeSource?.sourceUserMessageId === user.messageId &&
+    settledNativeSource?.finalMessageId === final.messageId ? settledNativeSource?.coreRequests : undefined);
+  const seenLateResults = new Set<string>();
   if (events.some(event => {
     const position = event.kind === 'assistant_message' ? event.finalContentSeq ?? event.origin ?? event.seq
       : event.kind === 'user_message' ? event.origin ?? event.seq : workSequence(event);
+    if (position > finalPosition && priorCoreRequests && event.kind === 'tool_call' && event.source === 'mcp') {
+      const call = event.call, parent = call.nativeCallMessageId, receipt = call.resultReceiptId;
+      const request = parent && priorCoreRequests.get(parent);
+      if (parent && request && receipt && !seenLateResults.has(`parent:${parent}`) &&
+          !seenLateResults.has(`receipt:${receipt}`) && call.conversationId === conversationId &&
+          event.time <= (final.semanticProgressAt ?? final.time) && isReturnedToolOutcome(call.outcome) &&
+          (!call.process || call.process.completedAt) && /^[a-f0-9]{48}$/.test(receipt) &&
+          /^[a-f0-9]{64}$/.test(call.invocationSha256 ?? '') &&
+          (call.attributionMethod === 'request_id' && call.requestId === request ||
+            call.attributionMethod === 'result_receipt' && (call.requestId === null || call.requestId === request))) {
+        seenLateResults.add(`parent:${parent}`);
+        seenLateResults.add(`receipt:${receipt}`);
+        return false;
+      }
+    }
     return (position > (user.origin ?? user.seq) && ['turn_start', 'turn_end', 'handoff'].includes(event.kind) &&
         !(settledWatchdog && (event === start || event === end))) ||
       (position > finalPosition && event !== final && !(settledWatchdog &&
@@ -2537,6 +2577,11 @@ async function ordinaryInputTerminalTurn(sessionId: string, conversationId: stri
   }
   const currentPolicy = snapshotGoalSwitches().switches.find(row => row.conversationId === conversationId);
   const currentActivation = renewedPolicy ? goalPendingReplyFor(conversationId) : null;
+  if (retentionRequests) {
+    const currentRequests = nativeCoreRequestsForUnsentWithdrawal(conversationId, user.messageId!, expectedFinalId);
+    if (!currentRequests || currentRequests.size !== retentionRequests.size ||
+        [...retentionRequests].some(([parent, request]) => currentRequests.get(parent) !== request)) return null;
+  }
   return (!renewedPolicy || (currentActivation?.sessionId === sessionId && currentActivation.turnId === turnId &&
     currentActivation.replyId === activation!.replyId && currentActivation.eventSeq === activation!.eventSeq &&
     currentActivation.acceptedAt === activation!.acceptedAt)) && latest?.conversationId === conversationId && latest.events === session.events && !latest.activeTurnId &&
@@ -2547,7 +2592,7 @@ async function ordinaryInputTerminalTurn(sessionId: string, conversationId: stri
 /** Goal's existing atomic handoff reservation uses the same read-only source proof as Send. */
 export async function ordinaryInputTerminalReply(sessionId: string, conversationId: string, turnId: string,
   options: { inputRows?: readonly InputEntry[]; ignoreInputIds?: readonly string[];
-    settledNativeSource?: Readonly<{ sourceUserMessageId: string; finalMessageId: string }> } = {}): Promise<boolean> {
+    settledNativeSource?: SettledInputNativeSource } = {}): Promise<boolean> {
   return await ordinaryInputTerminalTurn(sessionId, conversationId, turnId,
     options.inputRows ?? await load(), options.ignoreInputIds ?? [], options.settledNativeSource) === turnId;
 }
@@ -4073,7 +4118,7 @@ export async function failBrowserInput(id: string, owner: string, error: string,
           sendAuthorizedAt: undefined,
           requiresAuthorization: undefined,
           deliveryText: undefined,
-          error: 'Needs attention: the after-turn recovery source changed before native Send. The exact message is saved and was not sent.'
+          error: RECOVERY_SOURCE_CHANGED_UNSENT
         } : row));
         return true;
       }
@@ -4953,8 +4998,13 @@ export function completeBrowserDecision(id: string, owner: string, response: str
     }
     if (forward && !await forward()) {
       noteBrowserDecisionRefusal(browserDecisionHoldError() === 'goal_browser_automation_paused' ? 'automation_paused' : 'forward_refused');
+      // This proof existed before validation. Losing it is a fresh readiness/source
+      // race, not evidence that native completion was missing at collection entry.
+      // Archive the spent helper without a child/STOP; the existing Goal retry owner
+      // must pass its complete readiness/source checks before another attempt.
       return collecting
-        ? rejectCollectedDecision(new BrowserDecisionProtocolRejection('native_completion_unverified'), undefined, true)
+        ? rejectCollectedDecision(new BrowserDecisionProtocolRejection(forward.retryableReadinessChange
+          ? 'goal_readiness_changed' : 'native_completion_unverified'), undefined, true)
         : false;
     }
     let decisionOutput: InputEntry['decisionOutput'];
@@ -4979,7 +5029,8 @@ export function completeBrowserDecision(id: string, owner: string, response: str
     if (forward && !await forward()) {
       noteBrowserDecisionRefusal(browserDecisionHoldError() === 'goal_browser_automation_paused' ? 'automation_paused' : 'forward_refused');
       return collecting
-        ? rejectCollectedDecision(new BrowserDecisionProtocolRejection('native_completion_unverified'), decisionOutput, true)
+        ? rejectCollectedDecision(new BrowserDecisionProtocolRejection(forward.retryableReadinessChange
+          ? 'goal_readiness_changed' : 'native_completion_unverified'), decisionOutput, true)
         : false;
     }
     await commit(next);

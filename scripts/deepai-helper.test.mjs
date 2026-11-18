@@ -22,7 +22,11 @@ class FakeNative {
   shells() { return [...this.projections.values()].map(p => ({ id: p.thread.id, providerInstanceId: 'deepai', status: p.runs.at(-1).status, activeRunId: ['completed','failed','cancelled','interrupted'].includes(p.runs.at(-1).status) ? null : p.runs.at(-1).id })); }
   async http(route) {
     if (route === '/api/orchestration/shell') return { projects: [...this.projects], threads: [...this.shells(), ...this.extra] };
-    if (route.startsWith('/api/orchestration/threads/')) return { snapshotSequence: 44, projection: structuredClone(this.projections.get(decodeURIComponent(route.split('/').at(-1)))) };
+    if (route.startsWith('/api/orchestration/threads/')) {
+      const projection = this.projections.get(decodeURIComponent(route.split('/').at(-1)));
+      if (!projection) throw Object.assign(new Error('Native thread not found'), { code: 'NATIVE_HTTP_STATUS', httpStatus: 404 });
+      return { snapshotSequence: 44, projection: structuredClone(projection) };
+    }
     throw new Error('Unexpected HTTP fixture call');
   }
   async rpc(tag, payload) {
@@ -103,14 +107,16 @@ test('explicit cancellation while held settles unsent work even without a native
   await runCycle(f.state, null);
   assert.equal(f.state.get(f.job.id).status, 'cancelled'); assert.equal(f.state.get(f.job.id).sendAttempts, undefined);
 });
-test('ambiguous submission is observed under Pause but never retransmitted until Resume', async t => {
+test('Pause and Resume leave an ambiguous submission in read-only reconciliation', async t => {
   const f = coreFixture(t), native = new FakeNative();
   f.state.patch(f.job.id, { status: 'submitting', submittedAt: new Date(0).toISOString(), lastSendAt: new Date(0).toISOString(), sendAttempts: 1 });
   f.config.ui.automationPaused = true; f.save(); await runCycle(f.state, native);
   assert.equal(native.effects.size, 0); assert.equal(f.state.get(f.job.id).status, 'submitting');
   assert.equal(f.state.get(f.job.id).sendAttempts, 1);
   f.config.ui.automationPaused = false; f.save(); await runCycle(f.state, native);
-  assert.equal(native.effects.size, 1); assert.ok(native.effects.has(f.job.command.commandId));
+  assert.equal(native.effects.size, 0);
+  assert.equal(f.state.get(f.job.id).waitingFor, 'native_submission_unverified');
+  assert.equal(f.state.get(f.job.id).sendAttempts, 1);
 });
 test('unreadable or changed parent custody refuses admission without holding unrelated owners', async t => {
   const f = coreFixture(t), native = new FakeNative();
@@ -430,6 +436,44 @@ test('accepted launch with lost reply is reconciled without another launch', asy
   assert.equal(state.get(job.id).status, 'active');
   assert.equal(native.calls.filter(call => call.tag === 'orchestration.launchThread').length, 1);
 });
+test('an unobserved launch timeout stays read-only across later worker cycles', async t => {
+  const { state, request } = fixture(t), native = new FakeNative(), job = state.enqueue(request()).job;
+  native.onLaunch = () => { throw Object.assign(new Error('Lost response'), { code: 'NATIVE_RPC_TIMEOUT', acceptance: 'unknown' }); };
+  const start = Date.now();
+  for (let n = 0; n < 6; n++) await runCycle(state, native, { now: start + n * 61000 });
+  const held = state.get(job.id);
+  assert.equal(held.status, 'submitting');
+  assert.equal(held.waitingFor, 'native_submission_unverified');
+  assert.equal(held.sendAttempts, 1);
+  assert.equal(native.calls.filter(call => call.tag === 'orchestration.launchThread').length, 1);
+});
+test('an unlisted accepted launch is collected without a fresh command even before cancellation', async t => {
+  const { state, request } = fixture(t), native = new FakeNative(), job = state.enqueue(request()).job;
+  native.failAfterAcceptance = true;
+  await runCycle(state, native);
+  assert.equal(state.get(job.id).status, 'submitting');
+  native.finish(job.threadId, 'accepted before the reply was lost');
+  native.shells = () => [];
+  await runCycle(state, native, { now: Date.now() + 11000 });
+  const completed = state.get(job.id);
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.result.assistantText, 'accepted before the reply was lost');
+  assert.ok(completed.resultSavedAt);
+  assert.equal(native.calls.filter(call => call.tag === 'orchestration.launchThread').length, 1);
+});
+test('duplicate runs for an unacknowledged submission do not establish ownership', async t => {
+  const { state, request } = fixture(t), native = new FakeNative(), job = state.enqueue(request()).job;
+  native.failAfterAcceptance = true;
+  await runCycle(state, native);
+  const runs = native.projections.get(job.threadId).runs;
+  runs.push({ ...runs[0], id: 'different-run' });
+  await runCycle(state, native);
+  const held = state.get(job.id);
+  assert.equal(held.status, 'submitting');
+  assert.equal(held.runId ?? null, null);
+  assert.match(held.lastError, /Multiple native runs/);
+  assert.equal(native.calls.filter(call => call.tag === 'orchestration.launchThread').length, 1);
+});
 test('ambiguous unaccepted launch does not bypass newly occupied capacity', async t => {
   const { state, request } = fixture(t), native = new FakeNative(), job = state.enqueue(request()).job;
   state.patch(job.id, { status: 'submitting', submittedAt: new Date(0).toISOString(), lastSendAt: new Date(0).toISOString() });
@@ -449,8 +493,61 @@ test('cancellation during preflight is rechecked at atomic submission claim', as
 });
 test('unseen ambiguous cancellation does not replay a model launch', async t => {
   const { state, request } = fixture(t), native = new FakeNative(), job = state.enqueue(request()).job;
-  state.patch(job.id, { status: 'submitting', lastSendAt: new Date(0).toISOString() }); state.cancel(job.id, job.owner);
-  await runCycle(state, native); assert.equal(native.effects.size, 0); assert.match(state.get(job.id).lastError, /not be replayed/);
+  const now = Date.now();
+  state.patch(job.id, { status: 'submitting', lastSendAt: new Date(0).toISOString(), waitingFor: 'native_unavailable' });
+  state.cancel(job.id, job.owner);
+  const http = native.http.bind(native);
+  let exactReads = 0;
+  native.http = async route => {
+    if (route === '/api/orchestration/threads/' + job.threadId) {
+      exactReads++;
+      throw Object.assign(new Error('Native thread not found'), { code: 'NATIVE_HTTP_STATUS', httpStatus: 404 });
+    }
+    return http(route);
+  };
+  await runCycle(state, native, { now });
+  const held = state.get(job.id);
+  assert.equal(held.status, 'submitting');
+  assert.equal(held.waitingFor, 'native_cancel_reconciliation');
+  assert.equal(diagnosedJob(state, held, now).blocker.code, 'native_cancel_reconciliation');
+  assert.match(held.lastError, /not be replayed/);
+  await runCycle(state, native, { now: now + 2000 });
+  assert.equal(exactReads, 1);
+  await runCycle(state, native, { now: now + 60000 });
+  assert.equal(exactReads, 2);
+  assert.equal(state.get(job.id).status, 'submitting');
+  assert.equal(native.effects.size, 0);
+});
+test('a cancelled lost launch can reconcile the exact completed run missing from both shell inventories', async t => {
+  const { state, request } = fixture(t), native = new FakeNative(), job = state.enqueue(request()).job;
+  native.failAfterAcceptance = true;
+  await runCycle(state, native);
+  assert.equal(state.get(job.id).status, 'submitting');
+  state.cancel(job.id, job.owner);
+  native.finish(job.threadId, 'full exact report');
+  native.shells = () => [];
+  await runCycle(state, native);
+  const completed = state.get(job.id);
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.result.assistantText, 'full exact report');
+  assert.ok(completed.resultSavedAt);
+  assert.equal(native.calls.filter(call => call.tag === 'orchestration.launchThread').length, 1);
+  assert.equal(native.calls.filter(call => call.tag === 'orchestration.dispatchCommand').length, 0);
+});
+test('cancel reconciliation rejects mismatched exact-thread evidence without relaunching', async t => {
+  const { state, request } = fixture(t), native = new FakeNative(), job = state.enqueue(request()).job;
+  native.failAfterAcceptance = true;
+  await runCycle(state, native);
+  state.cancel(job.id, job.owner);
+  native.finish(job.threadId);
+  native.projections.get(job.threadId).thread.projectId = 'different-project';
+  native.shells = () => [];
+  await runCycle(state, native);
+  const held = state.get(job.id);
+  assert.equal(held.status, 'submitting');
+  assert.match(held.lastError, /another project/);
+  assert.equal(native.calls.filter(call => call.tag === 'orchestration.launchThread').length, 1);
+  assert.equal(native.calls.filter(call => call.tag === 'orchestration.dispatchCommand').length, 0);
 });
 test('active cancellation waits for native terminal state before reporting cancelled', async t => {
   const { state, request } = fixture(t), native = new FakeNative(), job = state.enqueue(request()).job;

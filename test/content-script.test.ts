@@ -1259,6 +1259,48 @@ describe('status presentation cannot strand recorder startup', () => {
   });
 });
 
+describe('neutral comparison feedback ownership', () => {
+  function addComparison(active: Harness, disabled = false) {
+    const card = active.document.createElement('section');
+    card.innerHTML = '<h2>Which response do you prefer?</h2><button type="button">I prefer this option</button>' +
+      '<button type="button">I prefer this option</button><button type="button">Skip</button>';
+    for (const node of [card, ...card.querySelectorAll('*')]) node.setAttribute('data-clf-test-rendered', '1');
+    const votes = vi.fn(), skipped = vi.fn();
+    const buttons = card.querySelectorAll('button');
+    buttons[0]!.addEventListener('click', votes); buttons[1]!.addEventListener('click', votes);
+    buttons[2]!.disabled = disabled;
+    buttons[2]!.addEventListener('click', () => { skipped(); card.remove(); });
+    active.document.body.append(card);
+    return { card, skip: buttons[2]!, votes, skipped };
+  }
+  it.each(['active', 'hidden', 'paused', 'off', 'unpaired', 'route-changed'] as const)(
+    'dismisses feedback only for the exact healthy active owner: %s', async mode => {
+      live = await harness(undefined, {
+        activity: () => ({ ok: true, data: { automationPaused: mode === 'paused',
+          goal: { enabled: mode !== 'off', own: true, mode: 'loop' } } }),
+        status: () => ({ connected: mode !== 'unpaired', paired: mode !== 'unpaired', port: 8765, pending: 0 })
+      });
+      live.hook.observe(); await live.hook.pullActivity();
+      if (mode === 'hidden') Object.defineProperty(live.document, 'visibilityState', { configurable: true, value: 'hidden' });
+      if (mode === 'route-changed') live.window.history.pushState(null, '', '/c/bbbbbbbb-cccc-dddd-eeee-ffffffffffff');
+      const before = live.sent.length;
+      const f = addComparison(live);
+      await settle(100);
+      expect(f.skipped).toHaveBeenCalledTimes(mode === 'active' || mode === 'hidden' ? 1 : 0);
+      expect(f.votes).not.toHaveBeenCalled();
+      expect(live.sent.slice(before).some(message => ['input_ack', 'goal_ack', 'desktop_input', 'goal_draft', 'compact'].includes(message.type))).toBe(false);
+    });
+  it('reuses the existing observer when Skip becomes enabled without a transcript mutation', async () => {
+    live = await harness(undefined, { activity: () => ({ ok: true, data: { automationPaused: false,
+      goal: { enabled: true, own: true, mode: 'loop' } } }) });
+    live.hook.observe(); await live.hook.pullActivity();
+    const f = addComparison(live, true); await settle(100);
+    expect(f.skipped).not.toHaveBeenCalled();
+    f.skip.disabled = false; await settle(100);
+    expect(f.skipped).toHaveBeenCalledOnce(); expect(f.votes).not.toHaveBeenCalled();
+  });
+});
+
 describe('native approval automation ownership', () => {
   const unpaused = { activity: () => ({ ok: true, data: { automationPaused: false } }) };
   async function ready(url?: string): Promise<Harness> {
@@ -26615,6 +26657,32 @@ describe('ordinary input native terminal association', () => {
     expect(proof?.sourceUserMessageId).toBeUndefined();
     expect(live!.sent.some(message => ['goal_draft', 'goal_ack', 'goal_prepare', 'desktop_input'].includes(message.type))).toBe(false);
   });
+
+  it.each(['grouped', 'split', 'ambiguous', 'foreign'] as const)(
+    'scopes an incomplete no-final native inventory to its proven question (%s)', async layout => {
+      const turns = pair();
+      const partial = { ...turns[1]!, endMessageId: '', callEvidenceComplete: false };
+      const grouped = { ...turns[0]!, endMessageId: '', callEvidenceComplete: false };
+      if (layout === 'ambiguous') {
+        const competingId = 'aa120007-1111-4111-8111-000000000007';
+        grouped.messages.push({ ...grouped.messages[0]!, messageId: competingId, rawMessageId: competingId });
+      }
+      if (layout === 'foreign') grouped.conversationId = 'bbbbbbbb-cccc-dddd-eeee-ffffffffffff';
+      await setup();
+      await replyFiber([], layout === 'split' ? [turns[0]!, partial] : [grouped]);
+      live!.sent.length = 0;
+      await live!.hook.pullActivity();
+      const proof = live!.sent.filter(message => message.type === 'activity').at(-1)?.coreDiagnostic?.ordinaryFinal;
+      if (layout === 'ambiguous' || layout === 'foreign') {
+        expect(proof?.sourceUserMessageId).toBeUndefined();
+      } else {
+        expect(proof).toMatchObject({ reason: 'turn-invalid', sourceUserMessageId: userId,
+          calls: 0, codeCalls: 0, callInventoryComplete: false });
+      }
+      expect(proof?.settledFinalMessageId).toBeUndefined();
+      expect(proof?.checkpointSourceUserMessageId).toBeUndefined();
+      expect(live!.sent.some(message => ['goal_draft', 'goal_ack', 'goal_prepare', 'desktop_input'].includes(message.type))).toBe(false);
+    });
 
   it.each(['question-only', 'unknown-call-set', 'duplicate-call', 'protected-draft', 'approval', 'native-generating'] as const)(
     'withholds a tool-only grouped checkpoint for %s', async reason => {

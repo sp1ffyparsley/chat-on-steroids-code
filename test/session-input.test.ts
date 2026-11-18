@@ -605,14 +605,17 @@ describe('settled-turn Input boundary revalidation', () => {
     expect(retained.deliveredAt).toBeUndefined();
   });
 
-  it('archives an already delivered helper as rejected when its exact forward proof is revoked', async () => {
+  it.each(['entry', 'validation', 'archive'] as const)('preserves the exact delivered-helper refusal at %s without committing a continuation', async phase => {
     let ready = true;
-    const accepted = vi.fn(() => { ready = false; return null; });
-    configureInputDelivery({ applyAutomation: automate, changed, settledTurnForwardReadiness: async () => () => ready });
+    const code = phase === 'entry' ? 'native_completion_unverified' : 'goal_readiness_changed';
+    const accepted = vi.fn(() => { if (phase === 'validation') ready = false; return null; });
+    configureInputDelivery({ applyAutomation: automate, changed,
+      settledTurnForwardReadiness: async () => phase === 'entry' && !ready ? false
+        : Object.assign(() => ready, { retryableReadinessChange: true as const }) });
     const controller = new AbortController();
     const decision = requestBrowserDecision('Keep the existing helper custody', controller.signal,
       { lifetime: 'temporary-planner', onAccepted: accepted });
-    const rejection = expect(decision).rejects.toThrow('native_completion_unverified');
+    const rejection = expect(decision).rejects.toThrow(code);
     const [row] = await listInputs();
     const file = path.join(os.tmpdir(), 'CoS-helper-outputs', `${row!.id}.json`);
     try {
@@ -620,17 +623,28 @@ describe('settled-turn Input boundary revalidation', () => {
       expect(await authorizeBrowserInput(row!.id, 'settled-helper', null)).toBe(true);
       expect(await acknowledgeBrowserInput(row!.id, 'settled-helper', null, 'native-delivered-helper')).toBe(true);
       const nativeSent = (await listInputs()).find(entry => entry.id === row!.id)!;
+      const rename = fs.rename.bind(fs);
+      if (phase === 'archive') vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+        await rename(from, to);
+        if (String(to) === file) ready = false;
+      });
+      if (phase === 'entry') ready = false;
       expect(await completeBrowserDecision(row!.id, 'settled-helper', 'Exact native answer', null)).toBe(true);
       await rejection;
       const retained = (await listInputs()).find(entry => entry.id === row!.id)!;
       expect(retained).toMatchObject({ state: 'failed', owner: 'settled-helper',
         messageId: 'native-delivered-helper', sendAuthorizedAt: nativeSent.sendAuthorizedAt,
-        deliveredAt: nativeSent.deliveredAt, goalDecisionRejection: 'native_completion_unverified',
+        deliveredAt: nativeSent.deliveredAt, goalDecisionRejection: code,
         decisionOutput: { sha256: createHash('sha256').update('Exact native answer').digest('hex') } });
       expect(retained.goalStopDisposition).toBeUndefined();
       expect(await browserDecisionOutputSaved(row!.id, 'settled-helper', null)).toBe(true);
       expect((await listInputs()).some(entry => entry.sourceHelperId === row!.id)).toBe(false);
       expect(accepted).toHaveBeenCalledOnce();
+      resetInputForTests();
+      expect((await listInputs()).find(entry => entry.id === row!.id)).toMatchObject({
+        state: 'failed', messageId: 'native-delivered-helper', goalDecisionRejection: code,
+        decisionOutput: retained.decisionOutput });
+      expect(await browserDecisionOutputSaved(row!.id, 'settled-helper', null)).toBe(true);
     } finally { controller.abort(); await fs.rm(file, { force: true }); }
   });
 

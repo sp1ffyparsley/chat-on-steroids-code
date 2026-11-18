@@ -98,7 +98,7 @@
   // Revision 100 pairs opaque native app-ID recovery with bounded helper collection-stage diagnostics.
   // Revision 101 separates positive model denial from a missing native choice; neither is retried.
   // Revision 102 joins distinct native scope IDs only through exact selected mounted ancestry.
-  const RECORDER_VERSION = 190;
+  const RECORDER_VERSION = 194;
   const FIRST_DOCUMENT_RECORDER = !globalThis.__CLF_CONTENT_RECORDER__ && !globalThis.__CLF_CONTENT_RECORDER_ACTIVE__;
   const NATIVE_FAILURE_REASONS = new Set(['thinking_failed', 'model_cooldown', 'conversation_limit']);
   const recorderHandle = {
@@ -3517,6 +3517,9 @@
       if (current()) CLF_DOM.autoApproveIfNeeded?.(current);
       const displayCurrent = () => current() && goalConfig?.enabled === true;
       if (displayCurrent()) CLF_DOM.recoverNativeDisplayFailure?.(displayCurrent);
+      const feedbackCurrent = () => current() && status.connected === true && status.paired === true && (goalConfig?.enabled === true ||
+        Boolean(desktopDecision && desktopDecision.onTarget()));
+      if (feedbackCurrent()) CLF_DOM.skipResponseComparison?.(feedbackCurrent);
     }
     catch { console.warn('[Chat On Steroids] Native approval owner failed; the native card remains pending.'); }
   }
@@ -4198,7 +4201,7 @@
     const tabStatusNodeRelevant = (node) => {
       const element = node && node.nodeType === 1 ? node : node?.parentElement;
       if (!element || element.closest?.('.clf-stream,.clf-stage,.clf-composer,.clf-boot')) return false;
-      if (CLF_DOM.approvalMutationRelevant?.(element)) return true;
+      if (CLF_DOM.approvalMutationRelevant?.(element) || CLF_DOM.responseComparisonMutationRelevant?.(element)) return true;
       const semantic = '[role="alert"],[role="alertdialog"],[role="dialog"],[role="status"],[data-testid*="error"],button[aria-expanded]';
       if (element.matches?.(semantic) || element.closest?.(semantic)) return true;
       for (const button of element.querySelectorAll?.('button') || []) {
@@ -4218,8 +4221,9 @@
       // full transcript's debounce or a background-tab timer. Reuse this observer,
       // coalesce the burst and retain every live policy/card/owner check.
       if (!approvalQueued && tabStatusMutation && records.some(record =>
-        CLF_DOM.approvalMutationRelevant?.(record.target) ||
-        [...(record.addedNodes || [])].some(node => CLF_DOM.approvalMutationRelevant?.(node)))) {
+        CLF_DOM.approvalMutationRelevant?.(record.target) || CLF_DOM.responseComparisonMutationRelevant?.(record.target) ||
+        [...(record.addedNodes || [])].some(node => CLF_DOM.approvalMutationRelevant?.(node) ||
+          CLF_DOM.responseComparisonMutationRelevant?.(node)))) {
         approvalQueued = true;
         const approvalEpoch = epoch, approvalConversation = conversationId, approvalPath = location.pathname;
         void Promise.resolve().then(() => {
@@ -5253,13 +5257,20 @@
     // still cannot borrow this source. This marker asserts no final or tool completion.
     const groupedPartial = source === turns.at(-1) && !source.endMessageId &&
       source.messages.filter(message => message.role === 'user').length === 1 &&
-      (source.messages.some(message => message.role === 'assistant') ||
+      (source.callEvidenceComplete === false || source.messages.some(message => message.role === 'assistant') ||
         (source.calls?.length || source.codeModeCalls?.length)) &&
       source.messages.every((message, index) => message.role !== 'assistant' || index > source.messages.indexOf(latest.message));
     const answer = groupedPartial ? source : answerTurnFor(turns, latest.index);
     if (!answer || answer !== turns.at(-1) || source.conversationId !== target || answer.conversationId !== target ||
         source.conversationConflict || answer.conversationConflict) return refused('turn-invalid');
-    if (!answer.endMessageId && answer.callEvidenceComplete !== false && settledFinalProjectionReady()) {
+    if (answer.callEvidenceComplete === false) {
+      // The selected question is independently scoped even if the native parent
+      // inventory is incomplete and no stable final exists. Keep the negative
+      // observation attributed without supplying a checkpoint or completion proof.
+      scan.sourceUserMessageId = latest.message.rawMessageId;
+      return refused('turn-invalid');
+    }
+    if (!answer.endMessageId && settledFinalProjectionReady()) {
       const assistants = (answer.messages || []).filter(message => message.role === 'assistant');
       const calls = answer.calls || [], code = answer.codeModeCalls || [];
       const identities = rows => rows.length <= FIBER_MAX_CALLS && rows.every(row =>
@@ -5285,11 +5296,6 @@
     // or whichever text happened to be latest. A different question in this same tab must
     // never settle an older unknown Core result. Keep it off logs and incident sidecars.
     scan.sourceUserMessageId = latest.message.rawMessageId;
-    // A selected user and exact document can be independently identified even
-    // when the tool list is incomplete. Preserve only that diagnostic identity;
-    // no final or completion candidate may borrow it while any native parent
-    // is ambiguous. Main retains its own explicit inventory-incomplete veto.
-    if (answer.callEvidenceComplete === false) return refused('turn-invalid');
     const coreCalls = answer.calls || [];
     const coreMessages = coreCalls.map(call => call?.messageId);
     if (coreMessages.length <= FIBER_MAX_CALLS &&

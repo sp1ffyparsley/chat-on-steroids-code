@@ -42,7 +42,7 @@
   /** Refusal-bearing descriptors must not race a legacy reply for the same scan nonce. */
   const VERSION = 19;
   /** Private implementation epoch, independent of the stable cross-world wire schema. */
-  const PRODUCER_VERSION = 190;
+  const PRODUCER_VERSION = 194;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep one current owned listener across V2 protocol versions and retire the
@@ -107,6 +107,8 @@
   // Native ancestry includes invocation AND result nodes for both MCP and Code Mode,
   // in addition to public items. The layout/item bound is not a native branch-depth bound.
   const MAX_NATIVE_PATH_NODES = MAX_ROWS + 4 * MAX_CALLS;
+  const MAX_NATIVE_HISTORY_TURNS = 32;
+  const MAX_NATIVE_HISTORY_NODES = 8 * MAX_NATIVE_PATH_NODES;
   /** Alternate app-shell exchanges carry both roles in one native turn container. */
   const SHELL_TURN = '[data-app-shell-main-surface] [data-thread-find-target="conversation"] [data-turn-key]';
   /** ChatGPT's current classic and alternate turn owners. */
@@ -2191,7 +2193,8 @@
     let turns = snapshot.renderedTurns;
     const matches = turns.filter(row => row?.id === entry.id && row.turn === entry.turn);
     const entryIndex = matches.length === 1 ? turns.indexOf(matches[0]) : -1;
-    if (entryIndex < 0 || entryIndex >= turns.length - 1) return [];
+    if (entryIndex < 0 || entryIndex >= turns.length - 1 ||
+        turns.length - 1 - entryIndex > MAX_NATIVE_HISTORY_TURNS) return [];
     // A late result can outlive more than one automatic turn. Peel only complete,
     // unique, contiguous native successors from this same selected branch. Each
     // peeled user must directly descend from its predecessor's independently
@@ -2203,7 +2206,9 @@
       if (!rowId || !rowTurn || rowIds.has(rowId) || rowTurns.has(rowTurn)) return [];
       rowIds.add(rowId); rowTurns.add(rowTurn);
     }
-    let remaining = MAX_NATIVE_PATH_NODES, length = turns.length;
+    // A bounded single-turn path and an entire history are different workloads.
+    // Keep each successor under the single-turn limit and cap the aggregate walk.
+    let remainingHistory = MAX_NATIVE_HISTORY_NODES, length = turns.length;
     const nativeMapping = snapshot.renderedConversation.mapping;
     let cursor = value(snapshot.renderedConversation, 'current_node');
     while (entryIndex < length - 2) {
@@ -2244,18 +2249,21 @@
       if (!terminal || !shellScopeFinalReceiptMatches(finals[0], terminal)) return [];
       let id = cursor, reached = false;
       const seen = new Set();
-      while (remaining-- > 0 && typeof id === 'string' && id.length <= MAX_TEXT && !seen.has(id)) {
+      for (let at = 0; at < MAX_NATIVE_PATH_NODES && remainingHistory > 0 &&
+        typeof id === 'string' && id.length <= MAX_TEXT && !seen.has(id); at++, remainingHistory--) {
         const node = value(nativeMapping, id), message = value(node, 'message');
         if (value(node, 'id') !== id || value(message, 'id') !== id) return [];
         seen.add(id);
         if (value(value(message, 'author'), 'role') === 'user') {
           if (id !== user || value(node, 'parent') !== final ||
               !members.every(member => seen.has(member))) return [];
-          reached = true; break;
+          remainingHistory--;
+          reached = true;
+          break;
         }
         id = value(node, 'parent');
       }
-      if (!reached || remaining <= 0) return [];
+      if (!reached || remainingHistory <= 0) return [];
       length--; cursor = final;
     }
     if (length !== turns.length) {

@@ -9,7 +9,8 @@
  */
 
 import type { ReaderHealth } from '../shared/types.js';
-export const EXPECTED_READER_PRODUCER = 173;
+declare const __COS_PACKAGED_READER_PRODUCER__: number;
+export const EXPECTED_READER_PRODUCER = __COS_PACKAGED_READER_PRODUCER__;
 export type CoreBrowserShell = 'classic' | 'alternate' | 'unknown';
 export type CoreShellDiscovery = 'compatible' | 'failed' | 'unknown';
 
@@ -578,8 +579,12 @@ function ordinaryFinalDiagnostic(raw: unknown): OrdinaryFinalDiagnostic | null {
 /** Shared provenance check for late enrichment and passive reader diagnostics. */
 function sameNativeParentSet(row: CoreBrowserEvidenceSnapshot, pending: PendingNativeCompletion,
   final: OrdinaryFinalDiagnostic | null | undefined): boolean {
-  return !!(row.shellDiscovery === 'compatible' && final && pending.sourceUserMessageId &&
-    row.documentId === pending.documentId && row.navigationEpoch === pending.navigationEpoch &&
+  return row.shellDiscovery === 'compatible' && row.documentId === pending.documentId &&
+    row.navigationEpoch === pending.navigationEpoch && sameNativeCallCensus(pending, final);
+}
+
+function sameNativeCallCensus(pending: PendingNativeCompletion, final: OrdinaryFinalDiagnostic | null | undefined): boolean {
+  return !!(final && pending.sourceUserMessageId &&
     final.sourceUserMessageId === pending.sourceUserMessageId && final.calls === pending.calls &&
     final.codeCalls === pending.codeCalls && pending.coreCallMessageIds && final.coreCallMessageIds &&
     pending.coreCallMessageIds.length === final.coreCallMessageIds.length &&
@@ -760,6 +765,28 @@ export function settledNativeTurnCandidate(conversation: string, now = Date.now(
   return { observedAt: row.observedAt, documentId: row.documentId, navigationEpoch: row.navigationEpoch,
     sourceUserMessageId: final.sourceUserMessageId, finalMessageId: final.settledFinalMessageId,
     coreCallMessageIds: [...final.coreCallMessageIds], codeCallMessageIds: [...final.codeCallMessageIds ?? []] };
+}
+
+/** An exact original call census can preserve a positively unsent Input during
+ * withdrawal. Unlike a settled candidate this grants no claim/Send authority. */
+export function nativeCoreRequestsForUnsentWithdrawal(conversation: string,
+  sourceUserMessageId: string, finalMessageId: string): ReadonlyMap<string, string> | undefined {
+  const row = snapshots.get(conversation), pending = row?.pendingCompletion, scan = row?.ordinaryFinal;
+  const now = Date.now();
+  if (!row || !pending || !scan || row.shellDiscovery !== 'compatible' || pending.reason !== 'open-call' || pending.calls < 1 ||
+      row.observedAt > now || now - row.observedAt > CORE_BROWSER_EVIDENCE_MAX_AGE_MS ||
+      scan.activeTurnMapped || scan.callInventoryComplete === false || scan.openCodeCalls !== 0 ||
+      !['busy', 'open-call', 'associated'].includes(scan.reason) ||
+      scan.sourceUserMessageId !== sourceUserMessageId ||
+      (scan.settledFinalMessageId && scan.settledFinalMessageId !== finalMessageId) ||
+      // A reload can keep the exact request census without a visible final during
+      // preparation. Use that only to keep the positively unsent UUID in custody.
+      // The result fence stays on its original document and Send still needs the fresh final.
+      row.observedAt < pending.observedAt || !sameNativeCallCensus(pending, scan) || !pending.coreCallMessageIds ||
+      pending.coreCallMessageIds.length !== pending.calls || pending.allCoreRequestIds?.length !== pending.calls ||
+      scan.allCoreRequestIds?.length !== pending.calls ||
+      scan.allCoreRequestIds.some((requestId, index) => requestId !== pending.allCoreRequestIds![index])) return;
+  return new Map(pending.coreCallMessageIds.map((parent, index) => [parent, pending.allCoreRequestIds![index]!]));
 }
 
 /** Main-only late identity recovery after the canonical execution/receipt owner has

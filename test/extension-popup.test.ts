@@ -762,6 +762,43 @@ it('supports an explicit local recovery URL without reloading ordinary popup ope
   expect(reload).toHaveBeenCalledTimes(1);
 });
 
+it('retries one installer recovery request after a legacy worker explicitly reports only its tab operation', async () => {
+  const reload = vi.fn();
+  let attempts = 0;
+  openPopup(reload, 'https://extension-popup.test/popup.html?clf-reload=1&nonce=legacy-tab-operation', vi.fn(), async message => {
+    if (message.type !== 'reloadCompanion') return {};
+    attempts++;
+    return attempts === 1
+      ? { ok: false, error: 'reload_deferred', pendingWork: { tabOperations: 1 } }
+      : { ok: true, reloading: true };
+  });
+  await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1), { timeout: 2500 });
+  expect(attempts).toBe(2);
+});
+
+it('preserves a legacy worker refusal when the startup tab operation overlaps retained work', async () => {
+  const reload = vi.fn();
+  const send = vi.fn(async message => message.type === 'reloadCompanion'
+    ? { ok: false, error: 'reload_deferred', pendingWork: { tabOperations: 1, inputOpenings: 1 } }
+    : {});
+  const document = openPopup(reload, 'https://extension-popup.test/popup.html?clf-reload=1&nonce=retained-navigation', vi.fn(), send);
+  await vi.waitFor(() => expect(document.getElementById('alert')?.textContent).toContain('saved work remains retained'));
+  expect(send.mock.calls.filter(([message]) => message.type === 'reloadCompanion')).toHaveLength(1);
+  expect(reload).not.toHaveBeenCalled();
+});
+
+it('stops after the retry when a legacy worker still has an outstanding tab operation', async () => {
+  const reload = vi.fn();
+  const send = vi.fn(async message => message.type === 'reloadCompanion'
+    ? { ok: false, error: 'reload_deferred', pendingWork: { tabOperations: 1 } }
+    : {});
+  const document = openPopup(reload, 'https://extension-popup.test/popup.html?clf-reload=1&nonce=persistent-navigation', vi.fn(), send);
+  await vi.waitFor(() => expect(document.getElementById('alert')?.textContent).toContain('Reload deferred'), { timeout: 2500 });
+  popup!.window.eval(script);
+  expect(send.mock.calls.filter(([message]) => message.type === 'reloadCompanion')).toHaveLength(2);
+  expect(reload).not.toHaveBeenCalled();
+});
+
 it('retains a marked recovery tab because a reload response is not post-reload loaded-build proof', async () => {
   const reload = vi.fn();
   const remove = vi.fn();

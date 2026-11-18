@@ -10284,6 +10284,70 @@ it('allows only one automatic retry for an unknown provider error on the same tu
 });
 
 
+it('rechecks a late helper-readiness race without replaying its delivered prompt or bypassing current readiness', async () => {
+  const conversationId = 'late-helper-readiness-race', turnId = 'late-helper-source';
+  await writeDurableNow('session-input', []);
+  browserInput.resetInputForTests();
+  await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true,
+    backend: 'chatgpt', loopBackend: 'chatgpt', continuationPolicy: 'settled-turn' } });
+  const session = await createSession({ conversationId });
+  await goal.setGoalSwitchNow(conversationId, 'loop', true);
+  await appendEvent(session.id, { source: 'extension', time: Date.now() - 1000, kind: 'user_message',
+    message: { text: 'Repair the editor with regression tests.', chars: 39, truncated: false } });
+  await appendEvent(session.id, { source: 'extension', time: Date.now() - 500,
+    kind: 'turn_end', turnId, outcome: 'completed' });
+  await goal.acceptGoalReplyNow({ conversationId, sessionId: session.id, replyId: 'late-helper-final',
+    turnId, eventSeq: 1, blocked: false });
+  let ready = true;
+  goal.configureLoopForwardReadiness(async () => ready, () => false);
+  browserInput.configureInputDelivery({ changed: () => {}, applyAutomation: async () => {},
+    settledTurnForwardReadiness: async () => Object.assign(() => ready, { retryableReadinessChange: true as const }) });
+  const originalRequest = browserInput.requestBrowserDecision;
+  const request = vi.spyOn(browserInput, 'requestBrowserDecision').mockImplementation((text, signal, options = {}) =>
+    originalRequest(text, signal, { ...options, onAccepted: async (...args) => {
+      const handoff = await options.onAccepted?.(...args) ?? null;
+      ready = false;
+      return handoff;
+    } }));
+  let originalId: string | undefined;
+  try {
+    goal.startGoalDraft({ conversationId, sessionId: session.id, turnId });
+    await vi.waitFor(async () => expect((await browserInput.listInputs()).some(row => row.purpose === 'decision')).toBe(true));
+    const helper = (await browserInput.listInputs()).find(row => row.purpose === 'decision')!;
+    originalId = helper.id;
+    expect(await browserInput.claimBrowserInput(helper.id, 'late-readiness-owner', null, true)).not.toBeNull();
+    expect(await browserInput.authorizeBrowserInput(helper.id, 'late-readiness-owner', null)).toBe(true);
+    expect(await browserInput.acknowledgeBrowserInput(helper.id, 'late-readiness-owner', null, 'late-readiness-native')).toBe(true);
+    expect(await browserInput.completeBrowserDecision(helper.id, 'late-readiness-owner', JSON.stringify({
+      action: 'continue', reply: 'Reproduce and repair the project save race, then verify editable save and cold reopen.'
+    }), null)).toBe(true);
+    const failed = await settled(conversationId);
+    expect(failed).toMatchObject({ stage: 'failed', error: 'goal_readiness_changed', retryable: true });
+    const retained = (await browserInput.listInputs()).find(row => row.id === helper.id)!;
+    expect(retained).toMatchObject({ state: 'failed', messageId: 'late-readiness-native',
+      goalDecisionRejection: 'goal_readiness_changed', decisionOutput: { sha256: expect.any(String) } });
+    expect((await browserInput.listInputs()).some(row => row.sourceHelperId === helper.id)).toBe(false);
+    expect(await goal.ackGoalDraftNow(conversationId, failed.token)).toBe(true);
+    goal.startGoalDraft({ conversationId, sessionId: session.id, turnId });
+    const held = await settled(conversationId);
+    expect(held).toMatchObject({ stage: 'failed', error: 'goal_readiness_changed' });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(await goal.ackGoalDraftNow(conversationId, held.token)).toBe(true);
+    ready = true;
+    goal.startGoalDraft({ conversationId, sessionId: session.id, turnId });
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+    await vi.waitFor(async () => expect((await browserInput.listInputs()).filter(row => row.purpose === 'decision')).toHaveLength(2));
+    expect((await browserInput.listInputs()).find(row => row.id === helper.id)).toEqual(retained);
+    const next = (await browserInput.listInputs()).find(row => row.id !== helper.id && row.purpose === 'decision')!;
+    expect(next).toMatchObject({ state: 'queued', owner: null });
+    expect(next.sendAuthorizedAt).toBeUndefined();
+  } finally {
+    await goal.setGoalSwitchNow(conversationId, 'loop', false);
+    request.mockRestore();
+    if (originalId) await fs.rm(path.join((await import('node:os')).tmpdir(), 'CoS-helper-outputs', originalId + '.json'), { force: true });
+  }
+});
+
 it('carries the one-hour escape hint into the helper and retries one generic stalled reply', async () => {
   const conversationId = 'stall-escape-substance';
   const { id: sessionId } = await createSession({ conversationId });

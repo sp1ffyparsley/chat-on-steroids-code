@@ -2136,6 +2136,60 @@ var CLF_DOM = (() => {
     } catch { approvalDiagnostic('mutation inspection failed'); return false; }
   }
 
+  // Neutral feedback only: a generic Skip may instead stop provider reasoning.
+  // Require the question, both preference votes and one Skip in the same small
+  // provider-owned region. Never infer completion or send/approve anything here.
+  const comparisonSkips = new WeakSet();
+  const comparisonVote = /^(?:I\s+)?prefer this(?:\s+(?:response|answer|option))?[.!]?$/i;
+  const comparisonQuestion = /\b(?:which|what)\s+(?:response|answer|option)\b.{0,100}\b(?:prefer|better)\b/i;
+  const comparisonLabel = node => (node.getAttribute('aria-label') || node.textContent || '').replace(/\s+/g, ' ').trim();
+  function comparisonVisible(node) {
+    return approvalVisible(node) && !node.closest('textarea') && !node.closest(APPROVAL_CARD);
+  }
+  function responseComparisonMutationRelevant(node) {
+    try {
+      const element = node?.nodeType === 1 ? node : node?.parentElement;
+      if (!element || element.closest(APPROVAL_EXCLUDED)) return false;
+      const relevant = candidate => candidate.matches('button,[role="button"],h1,h2,h3,p,span') &&
+        (/^skip$/i.test(comparisonLabel(candidate)) || comparisonVote.test(comparisonLabel(candidate)) ||
+         comparisonQuestion.test(comparisonLabel(candidate).slice(0, 300)));
+      return relevant(element) || [...element.querySelectorAll('button,[role="button"],h1,h2,h3,p,span')]
+        .some(candidate => !candidate.closest(APPROVAL_EXCLUDED) && relevant(candidate));
+    } catch { return false; }
+  }
+  function skipResponseComparison(stillCurrent) {
+    try {
+      if (typeof stillCurrent !== 'function' || !stillCurrent() || generating() || approvalWaiting()) return false;
+      const candidates = [];
+      for (const skip of document.querySelectorAll('button,[role="button"]')) {
+        if (!/^skip$/i.test(comparisonLabel(skip)) || !comparisonVisible(skip) || skip.disabled ||
+            skip.getAttribute('aria-disabled') === 'true' || skip.matches('button[type="submit"]') || comparisonSkips.has(skip)) continue;
+        let card = skip.parentElement;
+        for (let depth = 0; card && depth < 8 && !card.matches('main,body,html'); depth++, card = card.parentElement) {
+          if (!comparisonVisible(card)) break;
+          const controls = [...card.querySelectorAll('button,[role="button"]')].filter(comparisonVisible);
+          const votes = controls.filter(control => comparisonVote.test(comparisonLabel(control)));
+          const skips = controls.filter(control => /^skip$/i.test(comparisonLabel(control)));
+          if (votes.length !== 2 || skips.length !== 1 || skips[0] !== skip) continue;
+          const question = [...card.querySelectorAll('h1,h2,h3,p,span,div')].some(node =>
+            !node.querySelector('button,[role="button"]') && comparisonVisible(node) &&
+            comparisonLabel(node).length <= 300 && comparisonQuestion.test(comparisonLabel(node)));
+          if (question) { candidates.push(skip); break; }
+        }
+      }
+      if (candidates.length !== 1 || !stillCurrent() || generating() || approvalWaiting()) return false;
+      const skip = candidates[0];
+      if (!comparisonVisible(skip) || skip.disabled || skip.getAttribute('aria-disabled') === 'true') return false;
+      comparisonSkips.add(skip);
+      skip.click();
+      console.info('[Chat On Steroids] Response comparison Skip clicked; no preference selected.');
+      return true;
+    } catch {
+      console.warn('[Chat On Steroids] Response comparison inspection failed; feedback remains pending.');
+      return false;
+    }
+  }
+
   /** Keyboard hints decorate the native split button; they are not its accessible action. */
   function approvalLabelText(node) {
     const label = node.cloneNode(true);
@@ -5514,6 +5568,8 @@ var CLF_DOM = (() => {
     generating,
     approvalWaiting,
     approvalMutationRelevant,
+    responseComparisonMutationRelevant,
+    skipResponseComparison,
     autoApproveIfNeeded,
     noteStopClick,
     restoreStoppedTurn,

@@ -23,6 +23,13 @@ function publicationGeneration(root) {
   } catch { return null; }
 }
 
+/** The desktop can only promise the recorder generation present in all three shipped components. */
+export function requireCompanionRecorderGeneration(root) {
+  const recorder = publicationGeneration(root)?.recorder;
+  if (recorder == null) throw new Error('The packaged browser companion recorder generations are missing or inconsistent.');
+  return recorder;
+}
+
 function newerPublication(stable, bundled) {
   const current = publicationGeneration(stable), source = publicationGeneration(bundled);
   if (!current || !source) return false;

@@ -145,7 +145,7 @@ function reloadDeferredReason(reply, snapshot = latest) {
   return `${reasons.join(' ')} ${reloadPageContext(snapshot)}`.trim();
 }
 
-async function requestCompanionReload() {
+async function requestCompanionReload(fromRecoveryUrl = false) {
   const button = $('reloadBtn');
   if (button.disabled) return;
   const label = button.textContent;
@@ -163,7 +163,20 @@ async function requestCompanionReload() {
     // A missing response can be teardown, not a refusal or proof that the new build loaded.
     sessionStorage.setItem(RECOVERY_RELOAD_KEY, 'attempted');
     requested = true;
-    const reply = await chrome.runtime.sendMessage({ type: 'reloadCompanion' });
+    const dispatchUrl = location.href;
+    let reply = await chrome.runtime.sendMessage({ type: 'reloadCompanion' });
+    const work = reply?.pendingWork;
+    if (fromRecoveryUrl && reply?.ok === false && reply.error === 'reload_deferred' &&
+        work?.tabOperations === 1 && Object.keys(work).length === 1) {
+      // A legacy worker can count this recovery tab's own navigation. Retry only after an
+      // explicit refusal for that sole transient operation. The next attempt still runs every
+      // worker-owned check. An unknown outcome, changed account, or other custody veto stops here.
+      await new Promise(resolve => setTimeout(resolve, 1200));
+      if (location.href === dispatchUrl && pending === accountChoiceWrite &&
+          sessionStorage.getItem(RECOVERY_RELOAD_KEY) === 'attempted') {
+        reply = await chrome.runtime.sendMessage({ type: 'reloadCompanion' });
+      }
+    }
     reloadError = reply?.ok === false && reply?.error === 'reload_deferred'
       ? `Reload deferred; saved work remains retained. ${reloadDeferredReason(reply)}`
       : reply?.ok === true && reply?.reloading === true
@@ -194,7 +207,7 @@ if (recoveryUrl.searchParams.get('clf-reload') === '1' && !sessionStorage.getIte
   sessionStorage.setItem(RECOVERY_RELOAD_KEY, 'attempted');
   recoveryUrl.searchParams.delete('clf-reload');
   try { history.replaceState(history.state, '', recoveryUrl.href); } catch { /* sessionStorage is the fallback fence. */ }
-  void requestCompanionReload();
+  void requestCompanionReload(true);
 } else if (recoveryUrl.searchParams.get('clf-reload') !== '1') {
   // The marker has been consumed and the extension survived its one reload. Clear old build
   // nonces so this tab can be reused for a later desktop update without accumulating state.

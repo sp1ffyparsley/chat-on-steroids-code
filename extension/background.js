@@ -5503,10 +5503,12 @@ function inspectRequestedPluginRefresh(publications, background, browserOnly = f
   })().catch(() => undefined).finally(() => { pluginRefreshFlight = null; });
   return pluginRefreshFlight;
 }
-async function catalogProbe(tabId, nonce) {
+async function catalogProbe(tabId, nonce, documentId) {
   let timer;
   try {
-    return await Promise.race([chrome.tabs.sendMessage(tabId, { type: 'clf-model-catalog-state', nonce }), new Promise(resolve => { timer = setTimeout(() => resolve(null), 3000); })]);
+    const message = { type: 'clf-model-catalog-state', nonce };
+    const reply = documentId ? chrome.tabs.sendMessage(tabId, message, { documentId }) : chrome.tabs.sendMessage(tabId, message);
+    return await Promise.race([reply, new Promise(resolve => { timer = setTimeout(() => resolve(null), 3000); })]);
   } catch { return null; } finally { clearTimeout(timer); }
 }
 function catalogTabNonce(tab) {
@@ -5520,6 +5522,29 @@ function catalogTabNonce(tab) {
 /** A command-owned opening is authored work, never an idle model-catalog surface. */
 function catalogCandidateTab(tab) {
   return !commandOwnedOpeningTab(tab);
+}
+
+/** Retire terminal inspection metadata without changing any tab, input or reload custody. */
+async function reconcileTerminalModelCatalogOwner(activeNonce, observedTabs, inventoryComplete, accountCurrent) {
+  if (!inventoryComplete || !accountCurrent() || modelCatalogFlight ||
+      (activeNonce !== null && (typeof activeNonce !== 'string' || !/^[a-f0-9-]{36}$/i.test(activeNonce)))) return;
+  const { modelCatalogOwner: owner } = await chrome.storage.session.get('modelCatalogOwner');
+  if (!owner || typeof owner.nonce !== 'string' || !/^[a-f0-9-]{36}$/i.test(owner.nonce) ||
+      owner.nonce === activeNonce || !Number.isInteger(owner.tab) || owner.tab < 0 ||
+      Object.keys(owner).some(key => key !== 'nonce' && key !== 'tab')) return;
+  await serializeTab(owner.tab, async () => {
+    if (!accountCurrent() || modelCatalogFlight) return;
+    const tab = observedTabs.find(candidate => candidate.id === owner.tab);
+    const source = tab ? { tab: owner.tab, documentId: tabDocuments[String(owner.tab)],
+      navigationEpoch: tabEpochs[String(owner.tab)] } : null;
+    if (tab && (tab.pendingUrl || !ownsDocument(source) ||
+      (await catalogProbe(owner.tab, catalogTabNonce(tab), source.documentId))?.ready !== true)) return;
+    const { modelCatalogOwner: current } = await chrome.storage.session.get('modelCatalogOwner');
+    if (!accountCurrent() || modelCatalogFlight || (source && !ownsDocument(source)) ||
+        !current || current.nonce !== owner.nonce || current.tab !== owner.tab ||
+        Object.keys(current).some(key => key !== 'nonce' && key !== 'tab')) return;
+    await chrome.storage.session.remove('modelCatalogOwner');
+  });
 }
 
 function inspectRequestedModels(request) {
@@ -7008,6 +7033,9 @@ async function maintainOnce() {
   // Only a successful all-tab inventory may retire stale app-side page liveness. Treating a
   // failed Chrome query as an authoritative empty browser is how a transient API failure can
   // otherwise detach every active chat at once.
+  const catalogAccount = { epoch: connectionEpoch, id: instanceId, token, port };
+  const catalogAccountCurrent = () => !disconnected && connectionEpoch === catalogAccount.epoch &&
+    instanceId === catalogAccount.id && token === catalogAccount.token && port === catalogAccount.port;
   const reply = await call('/status', {
     method: 'POST',
     body: JSON.stringify({ openConversations, inventoryComplete, authState, freshTurnProtocol,
@@ -7128,6 +7156,12 @@ async function maintainOnce() {
     connectorIdentityOwner = instanceId;
     connectorApps = reply.data.connectorApps;
     connectorNames = reply.data.connectorNames || {};
+  }
+  // Paused dispatch and terminal inspection ownership are different. Do this after urgent work
+  // has been offered and only with the new app's explicit nonce observation for this account.
+  if (Object.hasOwn(reply.data, 'activeModelCatalogNonce')) {
+    await reconcileTerminalModelCatalogOwner(reply.data.activeModelCatalogNonce, observedTabs,
+      inventoryComplete, catalogAccountCurrent).catch(() => undefined);
   }
   inspectRequestedModels(reply.data.modelCatalogRequest);
   inspectRequestedPluginRefresh(reply.data.pluginRefreshRequests, reply.data.background === true, reply.data.browserOnly === true);
@@ -10214,6 +10248,7 @@ async function accountPairingBusy(firstEnrollment = false, stagedSelection = nul
     // Account changes never pass this reload-only snapshot. A local-persistent identity lease
     // is not an in-flight payload, but omitting it must still reach the retained-owner read below.
     if (key === 'commandTabLeases' && reloadLeases && reloadLeasesCurrent(reloadLeases)) return false;
+    if (key === 'inputOpenings' && reloadRetiredOpeningsCurrent(reloadLeases)) return false;
     const prospectiveCloses = observationsProven && onlyProspectiveFirstEnrollmentCloses();
     const observations = observationsProven && onlyNeverBoundObservations(prospectiveCloses);
     const adopted = operatorAdoptionProven && onlyOperatorAdoptionCustody();
@@ -10257,12 +10292,26 @@ function reloadLeasesCurrent(snapshot) {
     Object.entries(snapshot.leases).every(([key, value]) => commandTabLeases[key] === value);
 }
 
+function reloadRetiredOpeningsCurrent(snapshot) {
+  return typeof snapshot?.retiredOpenings === 'string' && reloadLeasesCurrent(snapshot) &&
+    JSON.stringify(inputOpenings) === snapshot.retiredOpenings;
+}
+
 async function durableReloadLeases() {
   let timer;
   try {
+    const openings = Object.values(inputOpenings), now = Date.now();
+    // Expired, retired temporary elections with no tab are inert during reload. They
+    // still belong to the opening ledger and must survive with every field intact.
+    const retiredOpenings = openings.length && openings.every(row =>
+      row.stage === 'retired' && row.tab === null && row.temporary === true &&
+      Number.isFinite(row.retiredAt) && row.retiredAt > 0 &&
+      now - row.retiredAt >= RETIRED_INPUT_TAB_GRACE_MS) ? JSON.stringify(inputOpenings) : null;
     const snapshot = { generation: commandLeaseGeneration, leases: { ...commandTabLeases } };
+    const keys = ['commandTabLeases', 'commandLeaseGeneration'];
+    if (retiredOpenings !== null) keys.push('inputOpenings', 'desktopInputTabs');
     const stored = await Promise.race([
-      chrome.storage.local.get(['commandTabLeases', 'commandLeaseGeneration']),
+      chrome.storage.local.get(keys),
       new Promise(resolve => { timer = setTimeout(() => resolve(null), HELLO_TIMEOUT_MS); })
     ]);
     const saved = stored?.commandTabLeases;
@@ -10271,6 +10320,11 @@ async function durableReloadLeases() {
         (Object.keys(snapshot.leases).length > 0 && !saved) ||
         saved && (Object.keys(saved).length !== Object.keys(snapshot.leases).length ||
           !Object.entries(snapshot.leases).every(([key, value]) => saved[key] === value))) return null;
+    const legacyOpenings = stored.desktopInputTabs;
+    if (retiredOpenings !== null && JSON.stringify(stored.inputOpenings) === retiredOpenings &&
+        JSON.stringify(inputOpenings) === retiredOpenings &&
+        (legacyOpenings === undefined || JSON.stringify(legacyOpenings) === '{}'))
+      return { ...snapshot, retiredOpenings };
     return snapshot;
   } catch { return null; }
   finally { clearTimeout(timer); }
@@ -10287,7 +10341,9 @@ function reloadPendingWork(durableLeases = null) {
     browserControlFlight: browserControlFlights.size, urgentOpen: urgentOpenConversationFlights.size,
     tabCloseReceipts: Object.keys(automaticTabRetirements).length,
     receiverRepair: desktopInputReceiverRepairs.size, stopOffers: stopOffers.size
-  }).filter(([key, count]) => count > 0 && !(key === 'commandTabLeases' && reloadLeasesCurrent(durableLeases)))
+  }).filter(([key, count]) => count > 0 &&
+    !(key === 'commandTabLeases' && reloadLeasesCurrent(durableLeases)) &&
+    !(key === 'inputOpenings' && reloadRetiredOpeningsCurrent(durableLeases)))
     .map(([key, count]) => [key, Math.min(4000, count)]));
 }
 
@@ -10341,6 +10397,22 @@ async function reloadCompanionSafely() {
     const current = () => epoch === connectionEpoch && pairedInstance === instanceId &&
       pairedPort === port && pairedToken === token;
     // Joining a different command/close owner is not a positive zero-in-flight receipt.
+    if (ackingCommands || closing || pairing)
+      return defer(reloadPendingWork());
+    // Chrome can deliver this popup's navigation and its first runtime message in
+    // one turn. Join only the existing serialized operations, under the existing
+    // hello deadline; never erase a queue or treat timeout as quiescence. Recheck
+    // identity and every owner afterward, including operations added while waiting.
+    if (tabOperationQueues.size) {
+      let timer;
+      console.info('[Chat On Steroids] companion reload waiting for existing tab operations',
+        { count: tabOperationQueues.size, timeoutMs: HELLO_TIMEOUT_MS });
+      try {
+        await Promise.race([Promise.allSettled([...tabOperationQueues.values()]),
+          new Promise(resolve => { timer = setTimeout(resolve, HELLO_TIMEOUT_MS); })]);
+      } finally { clearTimeout(timer); }
+    }
+    if (!current()) return defer({ connectionChanged: 1 });
     if (ackingCommands || closing || pairing || tabOperationQueues.size)
       return defer(reloadPendingWork());
     const tabs = await conversationInventory();
@@ -10370,9 +10442,9 @@ async function reloadCompanionSafely() {
     const durableLeases = await durableReloadLeases();
     if (!durableLeases) return defer({ leaseDurabilityUnverified: 1 });
     const pending = await accountPairingBusy(false, null, null, null, null, durableLeases);
-    // Pairing changes accounts; reload does not. Only this already-local-persistent identity
-    // map may survive reload, after exact storage parity and a fresh zero-document inventory.
-    // All payload, opening, native Send and retained helper owners remain blocking custody.
+    // Pairing changes accounts; reload does not. Only unchanged local-persistent identity
+    // leases and inert retired tabless records can survive. Every active opening,
+    // pending payload, native Send, and attached helper remains blocking custody.
     if (!current()) return defer({ connectionChanged: 1 });
     if (pending) return defer(pending);
     // Re-read retained owners and exact local durability before the final browser observation.
@@ -10385,7 +10457,9 @@ async function reloadCompanionSafely() {
     if (!Array.isArray(now)) return defer({ inventoryUnverified: 1 });
     if (now.length) return defer({ openChatgptTabs: Math.min(4000, now.length) });
     const finalPending = { ...(finalOwners || {}), ...reloadPendingWork(finalLeases) };
-    if (!current() || !finalLeases || !reloadLeasesCurrent(durableLeases) || Object.keys(finalPending).length || durabilityGap)
+    if (!current() || !finalLeases || !reloadLeasesCurrent(durableLeases) ||
+        (durableLeases.retiredOpenings !== undefined && !reloadRetiredOpeningsCurrent(durableLeases)) ||
+        Object.keys(finalPending).length || durabilityGap)
       return defer(Object.keys(finalPending).length ? finalPending : { custodyChanged: 1 });
     console.info('[Chat On Steroids] companion reload requested; journals delivered, no ChatGPT tabs or in-flight custody');
     chrome.runtime.reload();
@@ -10789,7 +10863,7 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * receive both its static manifest injection and this recovery injection.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 190;
+const PAGE_RECORDER_VERSION = 194;
 
 let deferredRecoveryWork = null;
 

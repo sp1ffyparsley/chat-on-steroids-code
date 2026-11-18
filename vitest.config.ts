@@ -2,6 +2,8 @@ import { defineConfig } from 'vitest/config';
 import type { Reporter } from 'vitest/node';
 import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+// @ts-expect-error Tests use the same companion generation owner as the desktop build.
+import { requireCompanionRecorderGeneration } from './extension/materialize.mjs';
 
 /** Progress only, never a test receipt. Strict packaging deletes this existing cache after success. */
 export function strictBuildProgressReporter(root = process.cwd()): Reporter {
@@ -50,6 +52,7 @@ export function strictBuildProgressReporter(root = process.cwd()): Reporter {
 }
 
 export default defineConfig({
+  define: { __COS_PACKAGED_READER_PRODUCER__: JSON.stringify(requireCompanionRecorderGeneration(path.resolve(__dirname, 'extension'))) },
   test: {
     ...(process.env.COS_STRICT_BUILD === '1' ? { reporters: ['default', strictBuildProgressReporter()] } : {}),
     include: ['test/**/*.test.ts'],

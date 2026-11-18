@@ -5977,6 +5977,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     const pauseSafeInputIds = automationPaused
       ? new Set(inputRows.filter(userRequestedInput).map(row => row.id))
       : null;
+    const modelCatalogRequest = pendingChatModelRequest();
     return json(
       res,
       200,
@@ -5987,7 +5988,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         // it here lets the extension create a missing chat tab solely to carry the Stop, which
         // defeats the user's reason for disconnecting. Reconnect exposes the same exact-turn row.
         stopTurns: browserDispatchPaused ? [] : await pendingStopCommands(),
-        modelCatalogRequest: dispatchPaused ? null : pendingChatModelRequest(),
+        modelCatalogRequest: dispatchPaused ? null : modelCatalogRequest,
+        activeModelCatalogNonce: modelCatalogRequest?.nonce ?? null,
         connectorNames: Object.fromEntries(SURFACE_LIST.map(surface => [surface.id, configuredConnectorName(surface.id)])),
         connectorApps: Object.fromEntries(Object.entries(connectorApps()).map(([surface, apps]) =>
           [surface, apps.map(({ appId, linkId, name }) => ({ appId, linkId, name }))])),
@@ -8884,10 +8886,16 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       acceptedAt: number;
       inputId: string;
       inputAcceptedAt: number;
+      controlRevision: string;
     } | null = null;
+    const controlRevision = (chatId: string) => JSON.stringify({
+      effective: goalSwitchFor(chatId),
+      saved: snapshotGoalSwitches().switches.find(row => row.conversationId === chatId) ?? null
+    });
     let explicitResumeSessionId: string | null = null;
     if (scoped && before === which && (goal ?? loop) === true) {
       const chatId = settingsConversation as string;
+      const revision = controlRevision(chatId);
       const session = await findSessionByConversation(chatId, { requireUnique: true });
       const pending = goalPendingReplyFor(chatId);
       const retained = session && pending?.sessionId === session.id
@@ -8907,7 +8915,8 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         explicitResumeSessionId = session.id;
         if (retained && pending) atomicResume = {
           sessionId: session.id, replyId: pending.replyId, turnId: pending.turnId,
-          acceptedAt: pending.acceptedAt, inputId: retained.inputId, inputAcceptedAt: retained.sourceAcceptedAt
+          acceptedAt: pending.acceptedAt, inputId: retained.inputId, inputAcceptedAt: retained.sourceAcceptedAt,
+          controlRevision: revision
         };
       }
     }
@@ -8919,7 +8928,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         goal: scoped ? config.goal : applyGoalSwitch(config.goal, which, goal ?? loop)
       };
     });
-    const chatSwitch = scoped
+    // Same-mode Resume spends a reply pickup, not an On transition. Rewriting
+    // the existing switch would put its timestamp after the old native reply
+    // even if the ticket write is refused, fencing that still-current source.
+    const chatSwitch = atomicResume ? goalSwitchFor(settingsConversation as string) : scoped
       ? await setGoalSwitchNow(settingsConversation as string, which as 'goal' | 'loop', (goal ?? loop) as boolean)
       : null;
     let atomicResumeApplied = false;
@@ -8944,7 +8956,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         const chatId = settingsConversation as string;
         if (atomicResume) {
           const current = goalPendingReplyFor(chatId);
-          if (getConfig().ui.automationPaused === true || !current ||
+          if (getConfig().ui.automationPaused === true || !current || controlRevision(chatId) !== atomicResume.controlRevision ||
               current.sessionId !== atomicResume.sessionId || current.replyId !== atomicResume.replyId ||
               current.turnId !== atomicResume.turnId || current.acceptedAt !== atomicResume.acceptedAt ||
               !chatSwitch.enabled || chatSwitch.mode !== which) {
@@ -13492,6 +13504,9 @@ export async function settledTurnContinuationProof(sessionId: string, conversati
   const strictlyObserved = unresolved ? null : strictFrame();
   const strictNativeSource = strictlyObserved ? settledNativeTurnCandidate(conversationId) : null;
   const nativeSource = native ?? strictNativeSource;
+  const coreRequestIds = native ? coreBrowserEvidence(conversationId)?.ordinaryFinal?.allCoreRequestIds : undefined;
+  const coreRequests = native && coreRequestIds?.length && coreRequestIds.length === native.coreCallMessageIds.length
+    ? new Map(native.coreCallMessageIds.map((parent, index) => [parent, coreRequestIds[index]!])) : undefined;
   const stoppedRequest = deliberateStoppedLoopResumeFor(sessionId, conversationId, turnId);
   const checkpointFrame = () => {
     const row = coreBrowserEvidence(conversationId), final = row?.ordinaryFinal, now = Date.now();
@@ -13519,7 +13534,9 @@ export async function settledTurnContinuationProof(sessionId: string, conversati
       next.navigationEpoch === nativeSource.navigationEpoch && next.sourceUserMessageId === nativeSource.sourceUserMessageId &&
       next.finalMessageId === nativeSource.finalMessageId &&
       JSON.stringify(next.coreCallMessageIds) === JSON.stringify(nativeSource.coreCallMessageIds) &&
-      JSON.stringify(next.codeCallMessageIds) === JSON.stringify(nativeSource.codeCallMessageIds));
+      JSON.stringify(next.codeCallMessageIds) === JSON.stringify(nativeSource.codeCallMessageIds) &&
+      (!coreRequests || JSON.stringify(coreBrowserEvidence(conversationId)?.ordinaryFinal?.allCoreRequestIds) ===
+        JSON.stringify(coreRequestIds)));
     const currentCheckpoint = checkpoint && checkpointFrame();
     const request = checkpoint && deliberateStoppedLoopResumeFor(sessionId, conversationId, turnId);
     const nativeCurrent = checkpoint ? Boolean(currentCheckpoint && request && request.acceptedAt === stoppedRequest!.acceptedAt &&
@@ -13555,7 +13572,7 @@ export async function settledTurnContinuationProof(sessionId: string, conversati
   const ordinarySourceCurrent = () => ordinaryInputTerminalReply(sessionId, conversationId, turnId, {
     inputRows: options.inputRows, ignoreInputIds: options.ignoreInputIds,
     ...(nativeSource ? { settledNativeSource: { sourceUserMessageId: nativeSource.sourceUserMessageId,
-      finalMessageId: nativeSource.finalMessageId } } : {})
+      finalMessageId: nativeSource.finalMessageId, coreRequests } } : {})
   });
   // A restored activation may retain its exact watchdog generation cursor even
   // when the later provider final has no local turn alias. Input must prove that
@@ -13636,17 +13653,30 @@ export async function settledTurnContinuationProof(sessionId: string, conversati
   if (checkpoint && !bindDeliberateStoppedLoopResumeSource(sessionId, conversationId, turnId,
     stoppedRequest!.acceptedAt, checkpointIdentity!, checkpointRevision!)) return refuse('resume_source_changed');
   return async () => {
-    if (!current()) return false;
+    // Rechecks run after helper validation/archive I/O as well as before Send.
+    // Preserve their exact refusal through the same bounded diagnostic owner;
+    // otherwise a real source/work race becomes only `forward_refused hold=none`.
+    const rejected = (reason: string): false => { refuse(reason); return false; };
+    if (!current()) return rejected('live_readiness_changed');
     // Input callers retain their already-loaded serial transaction; ordinary Goal callers
     // re-read the same outbox owner so newly admitted/changed custody cannot borrow this proof.
     const rows = options.inputRows ?? await listInputs();
     const latestCustody = await settledTurnInputCustodyScope(sessionId, conversationId, rows, ignored, source, events, nativeSource);
     if (!latestCustody || latestCustody.length !== custody.length ||
-        latestCustody.some((owner, at) => owner !== custody[at]) || !current()) return false;
-    if (checkpoint && (await findSessionByConversation(conversationId, { requireUnique: true }))?.id !== sessionId) return false;
+        latestCustody.some((owner, at) => owner !== custody[at])) return rejected('input_custody_changed');
+    if (!current()) return rejected('live_readiness_changed');
+    if (checkpoint && (await findSessionByConversation(conversationId, { requireUnique: true }))?.id !== sessionId)
+      return rejected('session_changed');
+    // Handoff ownership can become durable after proof issuance without changing
+    // the source's cached native frame. Recheck its incumbent owner as well.
+    if (await conversationWasSuperseded(conversationId)) return rejected('session_superseded');
     const latest = await getSession(sessionId);
-    return (!ordinarySource || await ordinarySourceCurrent()) && await sourceUnchanged() && current() && latest?.conversationId === conversationId && !latest.activeTurnId &&
-      !latest.finishTurn?.released && !continuationForSession(sessionId);
+    if (ordinarySource && !await ordinarySourceCurrent()) return rejected('ordinary_source_changed');
+    if (!await sourceUnchanged()) return rejected('source_revision_changed');
+    if (!current()) return rejected('live_readiness_changed');
+    if (latest?.conversationId !== conversationId || latest.activeTurnId || latest.finishTurn?.released || continuationForSession(sessionId))
+      return rejected('recorder_changed');
+    return true;
   };
 }
 
@@ -13662,7 +13692,7 @@ export function goalNativeCompletionReady(conversationId: string): boolean {
 }
 
 /** Existing Input transaction hook: null means the strict incumbent path is unchanged. */
-export async function settledTurnInputForwardProof(entry: Readonly<InputEntry>, rows: readonly InputEntry[], phase?: 'collect'): Promise<(() => Promise<boolean>) | false | null> {
+export async function settledTurnInputForwardProof(entry: Readonly<InputEntry>, rows: readonly InputEntry[], phase?: 'collect'): Promise<import('./session/input.js').InputForwardProof | false | null> {
   const helper = entry.sourceHelperId ? rows.find(row => row.id === entry.sourceHelperId) : entry.purpose === 'decision' ? entry : null;
   if (!helper?.decisionSourceSessionId || !helper.decisionSourceTurnId) return null;
   const session = await getSession(helper.decisionSourceSessionId);
@@ -13689,12 +13719,16 @@ export async function settledTurnInputForwardProof(entry: Readonly<InputEntry>, 
   }
   const pending = goalPendingReplyFor(id), draft = goalViewFor(id);
   if (entry.sourceHelperId && entry.sourceHelperAcceptedAt !== pending?.acceptedAt) return false;
-  return await settledTurnContinuationProof(session!.id, id, helper.decisionSourceTurnId, {
+  const proof = await settledTurnContinuationProof(session!.id, id, helper.decisionSourceTurnId, {
     inputRows: rows, ignoreInputIds: [entry.id, helper.id],
     onRefusal: reason => noteInputContinuationHold(entry, reason),
     ...(phase === 'collect' && entry === helper && liveDeliveredBrowserDecision(entry) ? { collectingHelper: entry } : {}),
     ...(draft?.turnId === helper.decisionSourceTurnId ? { draftToken: draft.token } : {})
-  }) ?? false;
+  });
+  // Finite Goals and strict policy retain their native-completion hold. Only this
+  // separately opted-in Loop may retry after a once-valid forward proof is revoked.
+  return proof && goalSwitchFor(id)?.mode === 'loop'
+    ? Object.assign(proof, { retryableReadinessChange: true as const }) : proof ?? false;
 }
 
 type BrowserRecoveryHold = 'tools' | 'settling' | 'native_completion' | 'source_permission';

@@ -1051,6 +1051,41 @@ describe('custody-preserving companion reload', () => {
     expect(worker.tabsCreate).not.toHaveBeenCalled();
   });
 
+  it.each(['durable', 'active', 'attached', 'recent', 'changed-storage', 'legacy-alias'] as const)(
+    'reloads with retired tabless helper records only when their durable custody is unchanged: %s', async state => {
+      const id = 'a1111111-2222-4333-8444-555555555555';
+      const time = Date.now() - 3600_000;
+      const opening = { tab: state === 'attached' ? 41 : null,
+        stage: state === 'active' ? 'opening' : 'retired',
+        retiredAt: state === 'recent' ? Date.now() : time, electedAt: time,
+        temporary: true, owner: '41:original-document:0' };
+      const initial = { [id]: opening };
+      const local = new FakeStorageArea({ port: 8765, token: 'paired-token', instanceId: 'profile-reload',
+        inputOpenings: initial });
+      let inventories = 0;
+      const worker = loadWorker({ local, session: new FakeStorageArea(), tabsQuery: async () => {
+        inventories++;
+        if (inventories === 2 && state === 'changed-storage') {
+          local.data.inputOpenings = { [id]: { ...opening, owner: '41:different-document:0' } };
+        }
+        if (inventories === 2 && state === 'legacy-alias') {
+          local.data.desktopInputTabs = { [id]: opening };
+        }
+        return state === 'attached' ? [{ id: 41, url: 'https://example.com/' }] : [];
+      } });
+      const result = await request(worker);
+      if (state === 'durable') {
+        expect(result).toEqual({ ok: true, reloading: true });
+        expect(worker.runtimeReload).toHaveBeenCalledOnce();
+        expect(local.data.inputOpenings).toEqual(initial);
+      } else {
+        expect(result).toMatchObject({ ok: false, error: 'reload_deferred', pendingWork: { inputOpenings: 1 } });
+        expect(worker.runtimeReload).not.toHaveBeenCalled();
+      }
+      expect(worker.tabsCreate).not.toHaveBeenCalled();
+      expect(worker.tabsRemove).not.toHaveBeenCalled();
+    });
+
   it.each(['exact-terminal', 'foreign-owner', 'malformed-owner', 'owner-tab-present'])(
     'settles a retired tabless helper only from the exact Main terminal owner and absent native tab: %s', async state => {
       const id = 'a1111111-2222-4333-8444-555555555555', owner = '41:original-document:0';
@@ -1164,6 +1199,54 @@ describe('custody-preserving companion reload', () => {
     expect(worker.tabsQuery.mock.calls.length - before).toBeGreaterThanOrEqual(2);
     expect(worker.runtimeReload).toHaveBeenCalledTimes(1);
     expect(worker.tabsRemove).not.toHaveBeenCalled();
+  });
+
+  it('lets the popup navigation finish before sampling lossless reload quiescence', async () => {
+    const worker = loadWorker({ local: new FakeStorageArea({ disconnected: true }), session: new FakeStorageArea() });
+    await worker.send({ type: 'drain' });
+    // Chrome can deliver popup navigation and its first runtime message in one turn.
+    // The navigation owns a short serialized read, without any ChatGPT work or Send.
+    const navigation = worker.startTabNavigation(99, popupUrl);
+    const result = await request(worker);
+    await navigation;
+    expect(result).toEqual({ ok: true, reloading: true });
+    expect(worker.runtimeReload).toHaveBeenCalledOnce();
+    expect(worker.tabsCreate).not.toHaveBeenCalled();
+    expect(worker.tabsRemove).not.toHaveBeenCalled();
+  });
+
+  it('keeps a newly pending ChatGPT navigation blocking after the popup queue settles', async () => {
+    let armed = false;
+    const worker = loadWorker({ local: new FakeStorageArea({ disconnected: true }), session: new FakeStorageArea(),
+      tabsQuery: async () => armed ? [{ id: 72, url: 'about:blank', pendingUrl: 'https://chatgpt.com/c/' + conversationId }] : [] });
+    await worker.send({ type: 'drain' });
+    armed = true;
+    const navigation = worker.startTabNavigation(99, popupUrl);
+    const result = await request(worker);
+    await navigation;
+    expect(result).toMatchObject({ ok: false, error: 'reload_deferred', pendingWork: { openChatgptTabs: 1 } });
+    expect(worker.runtimeReload).not.toHaveBeenCalled();
+    expect(worker.tabsRemove).not.toHaveBeenCalled();
+  });
+
+  it('bounds the tab-operation join without expiring or clearing the unfinished owner', async () => {
+    const session = new FakeStorageArea();
+    const worker = loadWorker({ local: new FakeStorageArea({ disconnected: true }), session, tabsQuery: async () => [] });
+    await worker.send({ type: 'drain' });
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const original = session.set.bind(session);
+    const write = vi.spyOn(session, 'set').mockImplementationOnce(async values => { await held; return original(values); });
+    const registration = worker.registerTab(31);
+    try {
+      await vi.waitFor(() => expect(write).toHaveBeenCalled());
+      const result = await request(worker);
+      expect(result).toMatchObject({ ok: false, error: 'reload_deferred', pendingWork: { tabOperations: 1 } });
+      expect(worker.runtimeReload).not.toHaveBeenCalled();
+      expect(worker.tabsRemove).not.toHaveBeenCalled();
+    } finally {
+      release(); await registration; write.mockRestore();
+    }
   });
 
 
@@ -1915,6 +1998,67 @@ describe('confirmed pre-Send recovery receipts', () => {
 });
 
 describe('model discovery command custody', () => {
+  it('clears ended catalog custody through paired maintenance even when dispatch is paused', async () => {
+    const nonce = '11111111-2222-4333-8444-555555555555';
+    const session = new FakeStorageArea({ modelCatalogOwner: { nonce, tab: 77 } });
+    let activeNonce: string | null = nonce;
+    const worker = loadWorker({
+      session,
+      local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      fetch: async (input) => {
+        const route = new URL(input).pathname;
+        if (route === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (route === '/status') return response(200, {
+          ok: true, repairs: [], modelCatalogRequest: null, activeModelCatalogNonce: activeNonce
+        });
+        return response(200, { ok: true });
+      }
+    });
+    await worker.fireAlarm();
+    expect(session.data.modelCatalogOwner).toEqual({ nonce, tab: 77 });
+    activeNonce = null;
+    await worker.fireAlarm();
+    expect(session.data.modelCatalogOwner).toBeUndefined();
+    expect(worker.tabsCreate).not.toHaveBeenCalled();
+    expect(worker.runtimeReload).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'idle-tab', 'absent-tab', 'still-requested', 'old-desktop', 'incomplete-census',
+    'opening', 'handed-to-input', 'busy-document', 'changed-document', 'changed-account', 'replaced-owner', 'active-flight'
+  ])('retires only an exact terminal model inspection record (%s)', async scenario => {
+    const nonce = '11111111-2222-4333-8444-555555555555';
+    const owner = {
+      nonce, ...(scenario === 'opening' ? { opening: true } : { tab: 7 }),
+      ...(scenario === 'handed-to-input' ? { handedToInput: 'actual-input' } : {})
+    };
+    const storage = new FakeStorageArea({ modelCatalogOwner: owner });
+    let document = 'catalog-doc';
+    const accepted = vi.fn(() => true);
+    const send = vi.fn(async () => {
+      if (scenario === 'changed-document') document = 'replacement-doc';
+      if (scenario === 'changed-account') accepted.mockReturnValue(false);
+      if (scenario === 'replaced-owner') await storage.set({ modelCatalogOwner: { nonce, tab: 8 } });
+      return { ready: scenario !== 'busy-document' };
+    });
+    const close = vi.fn();
+    const start = backgroundSource.indexOf('async function reconcileTerminalModelCatalogOwner(');
+    const end = backgroundSource.indexOf('\nfunction inspectRequestedModels(', start);
+    expect(start).toBeGreaterThan(0);
+    const run = vm.runInNewContext(`${backgroundSource.slice(start, end)}; reconcileTerminalModelCatalogOwner`, {
+      modelCatalogFlight: scenario === 'active-flight' ? Promise.resolve() : null,
+      chrome: { storage: { session: storage }, tabs: { remove: close } },
+      tabDocuments: { '7': 'catalog-doc' }, tabEpochs: { '7': 2 }, catalogTabNonce: () => nonce,
+      catalogProbe: send, serializeTab: (_tab: number, work: () => Promise<void>) => work(),
+      ownsDocument: (source: { documentId: string }) => source.documentId === document
+    });
+    await run(scenario === 'old-desktop' ? undefined : scenario === 'still-requested' ? nonce : null,
+      scenario === 'absent-tab' ? [] : [{ id: 7 }], scenario !== 'incomplete-census', accepted);
+    if (scenario === 'idle-tab' || scenario === 'absent-tab') expect(storage.data.modelCatalogOwner).toBeUndefined();
+    else expect(storage.data.modelCatalogOwner).toEqual(scenario === 'replaced-owner' ? { nonce, tab: 8 } : owner);
+    expect(close).not.toHaveBeenCalled();
+  });
+
   it.each(['available', 'unavailable'])('forwards exact native %s availability through the elected catalog owner', async status => {
     const nonce = '11111111-2222-4333-8444-555555555555';
     const start = backgroundSource.indexOf('  async model_catalog(');
@@ -2329,7 +2473,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     const atHygiene = new Promise<void>(resolve => { entered = resolve; });
     const held = new Promise<void>(resolve => { release = resolve; });
     const context: Record<string, unknown> = {
-      token: 'paired', latestBrowserAttentionCommandIds: [], discardProtectedTabs: {},
+      token: 'paired', instanceId: 'test-profile', port: 8765, latestBrowserAttentionCommandIds: [], discardProtectedTabs: {},
       lastCompanionReloadDiagnosticEpoch: null, lastCompanionReloadDiagnostic: null, connectionEpoch: 0,
       MAX_AUTOMATION_CHATGPT_TABS: 48, recoveryMonitoring: false,
       call: async () => ({ ok: true, data: { inputs: [helper] } }),
@@ -2379,7 +2523,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     const atRepair = new Promise<void>(resolve => { entered = resolve; });
     const held = new Promise<void>(resolve => { release = resolve; });
     const context: Record<string, unknown> = {
-      token: 'paired', latestBrowserAttentionCommandIds: [], discardProtectedTabs: {},
+      token: 'paired', instanceId: 'test-profile', port: 8765, latestBrowserAttentionCommandIds: [], discardProtectedTabs: {},
       lastCompanionReloadDiagnosticEpoch: null, lastCompanionReloadDiagnostic: null, connectionEpoch: 0,
       MAX_AUTOMATION_CHATGPT_TABS: 48, recoveryMonitoring: false,
       call: async () => ({ ok: true, data: { inputs: [input], userRequestedInputIds: [input.id],
@@ -2450,7 +2594,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     const end = backgroundSource.indexOf('\n/**', start);
     const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
     const context = {
-      token: 'paired', hydrateBrowserControlLeases: async () => true,
+      token: 'paired', instanceId: 'test-profile', port: 8765, hydrateBrowserControlLeases: async () => true,
       lastCompanionReloadDiagnosticEpoch: null, lastCompanionReloadDiagnostic: null, connectionEpoch: 0,
       conversationForTab: () => null,
       freshTurnInventoryProtocol: async () => 1,
@@ -2480,7 +2624,7 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     const maintainStart = backgroundSource.indexOf('async function maintainOnce(');
     const maintainEnd = backgroundSource.indexOf('\n/**', maintainStart);
     const context = {
-      token: 'paired', PAGE_RECORDER_VERSION: 71, setTimeout, clearTimeout,
+      token: 'paired', instanceId: 'test-profile', port: 8765, PAGE_RECORDER_VERSION: 71, setTimeout, clearTimeout,
       lastCompanionReloadDiagnosticEpoch: null, lastCompanionReloadDiagnostic: null, connectionEpoch: 0,
       chrome: { tabs: { get: async () => tab } },
       tabDocuments: { '73': 'doc-73' }, tabEpochs: { '73': 0 },

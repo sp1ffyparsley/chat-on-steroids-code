@@ -86,7 +86,7 @@ const explanations: Readonly<Record<string, string>> = {
   timeout_or_cancelled: 'The continuation request timed out or was cancelled. Check the helper chat or provider status before trying again.',
   request_failed: 'The continuation request failed. Check the selected helper or API endpoint and the app diagnostics before trying again.',
   goal_browser_busy: 'A helper request is already pending. Let it finish or cancel that request before starting another.',
-  goal_readiness_changed: 'Loop readiness changed while preparing the continuation. The saved reply is retained; no new helper was sent. It will retry after current work and delivery holds clear.',
+  goal_readiness_changed: 'Loop readiness changed while preparing or collecting the continuation. The saved reply and any delivered helper answer are retained; no continuation was sent. It will retry only after current work, source and delivery checks pass.',
   goal_browser_rate_limited: 'ChatGPT temporarily limited helper requests. The app is waiting before it creates another helper.',
   goal_browser_cancelled: 'The helper request was cancelled. Start it again when you want to continue.',
   goal_browser_signed_out: 'ChatGPT is signed out. Unsent helper preparation is paused without spending retry attempts. Exact replies and existing native Send receipts are retained. Sign back into this account, then resume its saved work.',

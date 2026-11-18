@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import {
   CORE_TOOL_SURFACE_INCIDENT_FRESH_MS,
   DIAGNOSTIC_INCIDENT_BACKLOG_MAX,
@@ -149,6 +150,22 @@ describe('Core tool-surface incident diagnostics', () => {
       coreCallMessageIds: ['private-parent-a', 'private-parent-b'], codeCallMessageIds: [], openCodeCallMessageIds: [],
       identityRefusals: [{ messageId: 'private-parent-a', reasons: ['workingTurnMismatch'] },
         { messageId: 'private-parent-b', reasons: ['workingTurnMismatch', 'turnExchangeMissing'] }] } });
+
+  it('reports the bundled recorder version as current and a lagging worker as old', () => {
+    resetCoreBrowserEvidenceForTests();
+    const bytes = readFileSync(new URL('../extension/background.js', import.meta.url), 'utf8');
+    const shipped = Number(/^const PAGE_RECORDER_VERSION = (\d+);\r?$/m.exec(bytes)?.[1]);
+    expect(Number.isSafeInteger(shipped)).toBe(true);
+    const shellScan = (workerRecorder: number) => ({ selectorMatches: 1, mapped: 1,
+      reader: { fiberProducer: shipped, contentRecorder: shipped, workerRecorder },
+      rejects: { fiberMissing: 0, ownerMissing: 0, stableKeyMismatch: 0, itemsOverLimit: 0 } });
+    expect(noteCoreBrowserEvidence({ ...refusalFrame(), shellScan: shellScan(shipped) })).toBe(true);
+    expect(nativeEvidence.coreReaderHealth(NOW)).toMatchObject({ expectedProducer: shipped, state: 'aligned', action: 'none' });
+    expect(noteCoreBrowserEvidence({ ...refusalFrame(), observedAt: NOW + 1,
+      shellScan: shellScan(shipped - 1) })).toBe(true);
+    expect(nativeEvidence.coreReaderHealth(NOW + 1)).toMatchObject({ expectedProducer: shipped, state: 'reload-required',
+      olderDocuments: 1, newerDocuments: 0, action: 'reload-companion' });
+  });
 
   it('reports fresh reader skew and alignment without exposing identities or changing custody', () => {
     resetCoreBrowserEvidenceForTests();

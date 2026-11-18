@@ -2298,6 +2298,7 @@ describe('alternate shell turn/message provenance', () => {
     });
 
   it.each(['accepted successor', 'accepted streaming successor', 'accepted completed chain', 'accepted streaming chain', 'accepted streaming long chain',
+    'accepted deep history', 'deep history conflicting edge', 'deep history oversized single turn', 'deep history turn limit', 'deep history aggregate limit',
     'foreign intermediate conversation', 'unclosed intermediate turn', 'intermediate final mismatch',
     'duplicate intermediate user', 'intermediate parent accessor', 'conflicting intermediate final', 'intermediate selected ids accessor',
     'intermediate selected ids duplicate', 'skipped intermediate final',
@@ -2418,6 +2419,40 @@ describe('alternate shell turn/message provenance', () => {
           if (variant === 'intermediate parent accessor') Object.defineProperty(mapping[newestUser], 'parent', {
             get() { accessorReads++; throw new Error('PRIVATE_INTERMEDIATE_PARENT'); }
           });
+        }
+        if (variant === 'accepted deep history' || variant.startsWith('deep history')) {
+          // Retained one visible earlier turn after many ordinary, independently receipted
+          // successors. Reach the native user/final edge for every successor.
+          const finalTemplate = structuredClone(mapping[ASSISTANT].message);
+          const count = variant === 'deep history turn limit' ? 33 : 22;
+          for (let turn = 1; turn <= count; turn++) {
+            const current = snapshot.renderedTurns.at(-1).turn;
+            const user = current.messageIds[0];
+            let parent = user;
+            let nodes = 96;
+            if (variant === 'deep history oversized single turn' && turn === 3) nodes = 2000;
+            if (variant === 'deep history aggregate limit') nodes = 800;
+            for (let node = 0; node < nodes; node++) {
+              const id = `native-history-${turn}-${node}`;
+              mapping[id] = { id, parent, message: { id, author: { role: 'assistant' } } };
+              parent = id;
+            }
+            const final = `native-history-final-${turn}`;
+            const message = { ...structuredClone(finalTemplate), id: final };
+            message.metadata.parent_id = parent;
+            mapping[final] = { id: final, parent, message };
+            current.status = 'complete';
+            current.messageIds.push(final);
+            current.items.push({ type: 'assistant-message', messageId: final,
+              phase: 'final_answer', content: message.content.parts[0], completed: true });
+            const successor = `native-history-user-${turn}`;
+            mapping[successor] = { id: successor, parent: variant === 'deep history conflicting edge' && turn === 3
+              ? user : final, message: { id: successor, author: { role: 'user' } } };
+            snapshot.renderedTurns.push({ id: `native-history-turn-${turn}`, conversationId: THREAD,
+              turn: { status: 'in_progress', messageIds: [successor],
+                items: [{ type: 'user-message', messageId: successor, serverMessageId: successor, message: 'next request' }] } });
+            snapshot.renderedConversation.current_node = successor;
+          }
         }
         const frame = await shellRescan(page, `historical-result-${variant}`);
         if (variant === 'duplicate historical final') {

@@ -180,6 +180,8 @@ CLI operations normally call the existing worker-start check. When pending work 
 
 The durable queue preserves native command/thread/message IDs across reconnects. Recovery inspects accepted work and retains the existing receipt identities. Do not erase state or submit a replacement with new IDs to clear an ambiguous send. A stale heartbeat with a still-live PID is reported for inspection; `recover` does not kill a live process or steal its lease.
 
+An uncertain launch is reconciled by read-only observation. If both native lists omit its chat, the worker checks the original thread directly at most once per minute while unlisted. An exact terminal run can be collected from that thread. An absent or ambiguous run keeps the original job and capacity reservation. `native_submission_unverified` describes an unresolved launch and `native_cancel_reconciliation` describes an unresolved cancellation. A resumed connection permits an immediate fresh check. Neither state resubmits the original command.
+
 Keep DeepAI running during execution and collection. A rejected local credential (HTTP 401) triggers a connection rebuild using the same limited scopes, followed by inspection of the original job. A permission denial does not widen scopes. This is local-client recovery; it does not bypass an account login requirement. After a worker/process restart, a later explicit CLI operation can recover its queue; no Windows startup service or always-running CoS supervisor is installed. A completed helper remains available while the parent is idle; normal Core activity can deliver its notice after activation, but the helper does not resume CoS itself.
 
 ## Local validation boundary
