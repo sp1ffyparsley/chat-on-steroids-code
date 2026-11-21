@@ -3246,7 +3246,7 @@
      */
     const authoredNow = (message) => {
       if (message.id !== newestUserId) return false;
-      if (message.id === openedUserMessageId) return false;
+      const alreadyOpened = message.id === openedUserMessageId;
       const receipt = userSendReceipt;
       if (receipt) {
         if (!desktopInputBusy && Date.now() - receipt.at > receiptLifetime(receipt)) {
@@ -3265,11 +3265,14 @@
           if (sameConversation && newIdentity && attachmentsMatch &&
               (acceptedIdentity || matchesSubmittedUser(message, receipt.text))) {
             if (receipt.desktopInput?.released) retryReleasedDesktopReceipt(receipt, message, conversationId);
-            else userSendReceipt = null;
-            return { messageId: message.id, baseline: receipt.baseline };
+            else if (!receipt.desktopInput || acceptedIdentity) userSendReceipt = null;
+            // Opening a turn and confirming the desktop Send are independent.
+            // A transient ACK refusal must not reopen or resend the native turn.
+            return alreadyOpened ? false : { messageId: message.id, baseline: receipt.baseline };
           }
         }
       }
+      if (alreadyOpened) return false;
       // Transcript custody and send custody are different facts. Fiber may publish this exact
       // stable user object before the DOM exposes its id, and `/activity` may return that
       // canonical row before the rendered bubble catches up. Once that happens the message is

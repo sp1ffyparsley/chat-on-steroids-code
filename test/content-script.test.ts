@@ -6691,10 +6691,13 @@ describe('desktop input delivery and helper ownership', () => {
     ]);
   });
 
-  it('bounds the post-Send receipt wait, releases the page, and confirms the same late native row without resending', async () => {
+  it.each([false, true])('confirms the same late native row without resending (first ACK refused: %s)', async firstAckRefused => {
     let clicks = 0;
+    let acknowledgementsSent = 0;
     live = await harness(`https://chatgpt.com/?cos-input=${inputId}`, {
-      desktop_input: message => ({ ok: true, data: message.authorize || message.ack ? { ok: true } : { input: claimed() } })
+      desktop_input: message => ({ ok: true, data: message.ack
+        ? { ok: ++acknowledgementsSent > Number(firstAckRefused) }
+        : message.authorize ? { ok: true } : { input: claimed() } })
     });
     live.document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
       clicks++;
@@ -6720,6 +6723,10 @@ describe('desktop input delivery and helper ownership', () => {
     ]);
     live.hook.observe(); await settle();
     expect(live.sent.filter(message => message.type === 'desktop_input' && message.ack)).toHaveLength(1);
+    live.advance(5_001);
+    live.hook.observe(); await settle();
+    const finalAcknowledgements = live.sent.filter(message => message.type === 'desktop_input' && message.ack);
+    expect(finalAcknowledgements).toEqual(firstAckRefused ? [acknowledgements[0], acknowledgements[0]] : acknowledgements);
     expect(clicks).toBe(1);
   });
 
