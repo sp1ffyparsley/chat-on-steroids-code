@@ -2860,6 +2860,8 @@
           }
           const userAnchorsHeader = hasUserScope && working === headerWorking && exchange === headerExchange &&
             nativeField(nativeField(mapping, typedUserId), 'id') === typedUserId && nativeField(nativeUser, 'id') === typedUserId;
+          const canTrackApprovalExchange = headerlessGroups ||
+            (userAnchorsHeader && shell.executionIds.length === 0);
           if (headerlessGroups) {
             const cachedUser = nativeField(nativeField(data, 'mapping'), typedUserId);
             const userNode = nativeField(mapping, typedUserId);
@@ -2890,8 +2892,10 @@
                 return refuse('nativeScopeFinalReceiptUnproved');
               const finalMeta = nativeField(messageAt(finalId), 'metadata');
               terminalExchange = str(nativeField(finalMeta, 'turn_exchange_id'));
+              // The path scan independently proves any change of exchange
+              // through the exact approval annotation and closed tool groups.
               if (str(nativeField(finalMeta, 'working_turn_id')) !== working || !terminalExchange ||
-                  (hasHeader && terminalExchange !== exchange))
+                  (hasHeader && terminalExchange !== exchange && !canTrackApprovalExchange))
                 return refuse('nativeScopeBranchConflict', 'final-namespace');
             }
           }
@@ -3193,7 +3197,7 @@
             if (hasApprovalData) {
               const next = messageAt(currentPath[at + 1]), nextMeta = nativeField(next, 'metadata');
               const nextExchange = str(nativeField(metadata, 'turn_exchange_id'));
-              if (!headerlessGroups || pending || missingTerminal || !approval || approvalTargets.has(approval.target) ||
+              if (!canTrackApprovalExchange || pending || missingTerminal || !approval || approvalTargets.has(approval.target) ||
                   execution || pendingDirectCalls.size || closedExecution?.resultId !== currentPath[at - 1] ||
                   !nextExchange || seenExchanges.has(nextExchange) ||
                   nativeField(metadata, 'working_turn_id') !== working ||

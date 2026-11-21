@@ -2846,8 +2846,11 @@ describe('alternate shell turn/message provenance', () => {
     'annotation extra field', 'annotation body', 'annotation resource', 'annotation pending',
     'annotation parent conflict', 'annotation accessor', 'cached annotation conflict',
     'missing user scope', 'missing final', 'foreign final', 'cached user conflict',
-    'annotation extra root', 'annotation remember string', 'annotation channel', 'reused exchange', 'foreign target'] as const)(
-    'anchors headerless groups and observes only an exact native approval exchange boundary (%s)', async variant => {
+    'annotation extra root', 'annotation remember string', 'annotation channel', 'reused exchange', 'foreign target',
+    'header approval transition', 'header unannounced exchange', 'header foreign final',
+    'header foreign working final', 'header approval without user scope', 'header denied annotation',
+    'header wrong next request', 'header cached annotation conflict'] as const)(
+    'anchors grouped calls and observes only an exact native approval exchange boundary (%s)', async variant => {
       const X2 = 'scope-exec-two', C2 = 'scope-call-two', R2 = 'scope-result-two', E2 = 'scope-end-two';
       const ALLOW = 'scope-native-allow';
       const oldScope = { request_id: REQUEST, working_turn_id: 'scope-working', turn_exchange_id: 'scope-old' };
@@ -2883,6 +2886,18 @@ describe('alternate shell turn/message provenance', () => {
           Object.assign(mapping[ASSISTANT].message.metadata, transitioning ? newScope : oldScope, { parent_id: E2 });
           // Real completed native groups retain metadata parents no longer in the live graph.
           mapping[EXEC].message.metadata.parent_id = 'retired-source-parent';
+          if (variant.startsWith('header ')) {
+            const header = 'scope-native-header';
+            mapping[header] = { id: header, parent: USER, message: { id: header, author: { role: 'system' },
+              recipient: 'all', status: 'finished_successfully', content: { content_type: 'text', parts: ['PRIVATE_HEADER'] },
+              metadata: { ...oldScope, parent_id: 'retired-header-parent', is_visually_hidden_from_conversation: true,
+                message_type: 'next', rebase_developer_message: false } } };
+            mapping[EXEC].parent = header;
+            if (variant === 'header approval without user scope') {
+              delete mapping[USER].message.metadata.working_turn_id;
+              delete mapping[USER].message.metadata.turn_exchange_id;
+            }
+          }
           entry.turn.messageIds = [USER, CALL, C2, ASSISTANT];
           if (transitioning) {
             mapping[ALLOW] = { id: ALLOW, parent: EXEC_RESULT, message: { id: ALLOW,
@@ -2897,11 +2912,11 @@ describe('alternate shell turn/message provenance', () => {
             if (variant === 'annotation channel') marker.channel = 'analysis';
             if (variant === 'foreign target') mapping[client.target_message_id] = { id: client.target_message_id,
               message: { id: client.target_message_id, author: { role: 'user' }, metadata: {} } };
-            if (variant === 'denied annotation') client.type = 'deny';
+            if (variant.endsWith('denied annotation')) client.type = 'deny';
             if (variant === 'malformed target') client.target_message_id = 'not-a-native-occurrence';
             if (variant === 'foreign working') marker.metadata.working_turn_id = 'foreign';
-            if (variant === 'unannounced exchange') { delete mapping[ALLOW]; mapping[X2].parent = EXEC_RESULT; mapping[X2].message.metadata.parent_id = EXEC_RESULT; }
-            if (variant === 'wrong next request') mapping[X2].message.metadata.request_id = 'foreign-request';
+            if (variant.endsWith('unannounced exchange')) { delete mapping[ALLOW]; mapping[X2].parent = EXEC_RESULT; mapping[X2].message.metadata.parent_id = EXEC_RESULT; }
+            if (variant.endsWith('wrong next request')) mapping[X2].message.metadata.request_id = 'foreign-request';
             if (variant === 'wrong next exchange') mapping[X2].message.metadata.turn_exchange_id = 'foreign-exchange';
             if (variant === 'annotation extra field') client.extra = true;
             if (variant === 'annotation body') marker.content.parts = ['PRIVATE_NONEMPTY_ANNOTATION'];
@@ -2917,13 +2932,14 @@ describe('alternate shell turn/message provenance', () => {
           }
           if (variant === 'missing user scope') delete mapping[USER].message.metadata.turn_exchange_id;
           if (variant === 'missing final') { delete mapping[ASSISTANT]; entry.turn.items = entry.turn.items.filter((item: any) => item.messageId !== ASSISTANT); entry.turn.messageIds = [USER, CALL, C2]; }
-          if (variant === 'foreign final') mapping[ASSISTANT].message.metadata.turn_exchange_id = 'foreign-final';
-        }, nativeCallCacheMutation: ['cached annotation conflict', 'cached user conflict'].includes(variant) ? mapping => {
-          if (variant === 'cached annotation conflict') mapping[ALLOW].message.metadata.jit_plugin_data.from_client.remember_answer = true;
+          if (variant.endsWith('foreign final')) mapping[ASSISTANT].message.metadata.turn_exchange_id = 'foreign-final';
+          if (variant === 'header foreign working final') mapping[ASSISTANT].message.metadata.working_turn_id = 'foreign-working';
+        }, nativeCallCacheMutation: variant.endsWith('cached annotation conflict') || variant === 'cached user conflict' ? mapping => {
+          if (variant.endsWith('cached annotation conflict')) mapping[ALLOW].message.metadata.jit_plugin_data.from_client.remember_answer = true;
           else mapping[USER].message.metadata.turn_exchange_id = 'foreign-cached-user';
         } : undefined });
       try {
-        const accepted = ['headerless', 'headerless empty execution', 'approval transition'].includes(variant);
+        const accepted = ['headerless', 'headerless empty execution', 'approval transition', 'header approval transition'].includes(variant);
         const calls = page.fiber.turns[0].calls;
         expect(calls.map((call: any) => call.answered)).toEqual(accepted ? [true, true] : [false, false]);
         expect(calls.map((call: any) => call.requestId)).toEqual(accepted || variant === 'missing final'
