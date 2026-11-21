@@ -1385,8 +1385,8 @@ async function captureBrowserDebug(offer) {
     pairingInstance !== null && token !== null && !disconnected &&
     !unassignedHistoryUncertain && !unassignedHistoryConversation(offer.conversationId);
   try {
-    const preference = await chrome.storage.local.get('browserDebugScreenshots');
-    if (preference.browserDebugScreenshots !== true ||
+    const { browserDebugScreenshots: preference = true } = await chrome.storage.local.get('browserDebugScreenshots');
+    if (preference !== true ||
         !await chrome.permissions.contains({ origins: ['<all_urls>'] })) {
       await call('/browser-debug', { method: 'POST', body: JSON.stringify({ id: offer.id,
         conversationId: offer.conversationId, status: 'screenshots_disabled' }) }, false, paired);
@@ -1415,7 +1415,8 @@ async function captureBrowserDebug(offer) {
         ]);
         const after = await chrome.tabs.get(tab.id);
         const afterWindow = await chrome.windows.get(tab.windowId);
-        const stillEnabled = (await chrome.storage.local.get('browserDebugScreenshots')).browserDebugScreenshots === true &&
+        const { browserDebugScreenshots: afterPreference = true } = await chrome.storage.local.get('browserDebugScreenshots');
+        const stillEnabled = afterPreference === true &&
           await chrome.permissions.contains({ origins: ['<all_urls>'] });
         if (!stillEnabled || !current() || !after.active || after.pendingUrl || after.windowId !== tab.windowId ||
             !afterWindow.focused || afterWindow.state === 'minimized' ||

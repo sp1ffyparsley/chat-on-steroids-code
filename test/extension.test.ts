@@ -53,17 +53,20 @@ describe('extension release metadata', () => {
     expect(producer).toBe(currentRecorderVersion);
     expect(wire).toBe(expectedWire);
   });
-  it.each(['visible', 'hidden', 'navigation', 'focus-roundtrip', 'pairing-change', 'disabled', 'permission-denied'])('captures debug pixels only for a stable visible exact document: %s', async mode => {
+  it.each(['visible', 'default-visible', 'hidden', 'navigation', 'focus-roundtrip', 'pairing-change', 'disabled',
+    'disabled-during-capture', 'permission-denied'])('captures debug pixels only for a stable visible exact document: %s', async mode => {
     const start = backgroundSource.indexOf('async function captureBrowserDebug(offer) {');
     const end = backgroundSource.indexOf('\nasync function deliverJournalBatch', start);
     expect(start).toBeGreaterThan(0);
     const conversation = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
     let epoch = 3, focusListener: (() => void) | undefined;
+    let preference = mode === 'default-visible' ? undefined : mode !== 'disabled';
     const call = vi.fn(async (_path, _body, _retry, accepted) => ({ ok: accepted() }));
     const capture = vi.fn(async () => {
       if (mode === 'navigation') epoch++;
       if (mode === 'focus-roundtrip') focusListener?.();
       if (mode === 'pairing-change') context.connectionEpoch++;
+      if (mode === 'disabled-during-capture') preference = false;
       return 'data:image/jpeg;base64,QUJD';
     });
     const context = { connectionEpoch: 1, instanceId: 'profile-test', unassignedHistoryUncertain: false,
@@ -73,7 +76,7 @@ describe('extension release metadata', () => {
       conversationFromUrl: () => conversation, tabConversations: { '4': conversation },
       tabDocuments: { '4': 'document' }, tabEpochs: { '4': 3 }, Date,
       ownsDocument: (source: { navigationEpoch: number }) => source.navigationEpoch === epoch,
-      chrome: { storage: { local: { get: async () => ({ browserDebugScreenshots: mode !== 'disabled' }) } },
+      chrome: { storage: { local: { get: async () => ({ browserDebugScreenshots: preference }) } },
         permissions: { contains: async () => mode !== 'permission-denied' },
         tabs: { query: async () => mode === 'hidden' ? [] : [{ id: 4, windowId: 2, url: 'https://chatgpt.com/c/test' }],
         get: async () => ({ active: true, windowId: 2, url: 'https://chatgpt.com/c/test' }), captureVisibleTab: capture,
@@ -83,7 +86,7 @@ describe('extension release metadata', () => {
     const run = vm.runInNewContext(`${backgroundSource.slice(start, end)}; captureBrowserDebug`, context);
     await run({ id: 'capture', conversationId: conversation, expiresAt: Date.now() + 30_000 });
     const packet = JSON.parse(call.mock.calls[0]![1].body);
-    expect(Boolean(packet.image)).toBe(mode === 'visible');
+    expect(Boolean(packet.image)).toBe(mode === 'visible' || mode === 'default-visible');
     expect(capture).toHaveBeenCalledTimes(['hidden', 'disabled', 'permission-denied'].includes(mode) ? 0 : 1);
     if (mode === 'pairing-change') expect(call.mock.calls[0]![3]()).toBe(false);
   });

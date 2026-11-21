@@ -58,6 +58,8 @@ interface FileMirror {
   cutWrites: number;
   /** Rotation failed and the file grows past its limit; said once in the file until it rotates. */
   rotationNoted: boolean;
+  screenshotSweep: Promise<void> | null;
+  screenshotTimer: NodeJS.Timeout | null;
 }
 let mirror: FileMirror | null = null;
 
@@ -781,7 +783,8 @@ async function verifiedIncidentScreenshot(value: LocalIncident): Promise<LocalIn
     const directory = await fs.lstat(base);
     if (!directory.isDirectory() || directory.isSymbolicLink()) throw new Error('stale');
     const metaStat = await fs.lstat(metaFile);
-    if (!metaStat.isFile() || metaStat.isSymbolicLink() || metaStat.size > 4096) throw new Error('stale');
+    if (!metaStat.isFile() || metaStat.isSymbolicLink() || metaStat.size > 4096 || screenshotExpired(metaStat.mtimeMs))
+      throw new Error('stale');
     const metadata = JSON.parse(await fs.readFile(metaFile, 'utf8')) as Record<string, unknown>;
     if (metadata['sha256'] !== copy.screenshot.sha256 || metadata['bytes'] !== copy.screenshot.bytes ||
         (metadata['profileId'] ?? null) !== copy.profileId ||
@@ -791,7 +794,8 @@ async function verifiedIncidentScreenshot(value: LocalIncident): Promise<LocalIn
       throw new Error('stale');
     const image = path.join(base, metadata['imageFile']);
     const imageStat = await fs.lstat(image);
-    if (!imageStat.isFile() || imageStat.isSymbolicLink() || imageStat.size !== copy.screenshot.bytes ||
+    if (!imageStat.isFile() || imageStat.isSymbolicLink() || screenshotExpired(imageStat.mtimeMs) ||
+        imageStat.size !== copy.screenshot.bytes ||
         imageStat.size > BROWSER_DEBUG_IMAGE_BYTES ||
         createHash('sha256').update(await fs.readFile(image)).digest('hex') !== copy.screenshot.sha256)
       throw new Error('stale');
@@ -877,7 +881,7 @@ export async function readLocalIncidentImage(id: string): Promise<{
     if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) return { status: 'expired', data: null };
     const sidecar = path.join(directory, incident.screenshot.metadataFile);
     const sidecarInfo = await fs.lstat(sidecar);
-    if (!sidecarInfo.isFile() || sidecarInfo.isSymbolicLink() || sidecarInfo.size > 4096)
+    if (!sidecarInfo.isFile() || sidecarInfo.isSymbolicLink() || sidecarInfo.size > 4096 || screenshotExpired(sidecarInfo.mtimeMs))
       return { status: 'expired', data: null };
     const metadata = JSON.parse(await fs.readFile(sidecar, 'utf8')) as Record<string, unknown>;
     if (metadata['sha256'] !== incident.screenshot.sha256 || metadata['bytes'] !== incident.screenshot.bytes ||
@@ -888,7 +892,7 @@ export async function readLocalIncidentImage(id: string): Promise<{
       return { status: 'expired', data: null };
     const file = path.join(directory, metadata['imageFile']);
     const stat = await fs.lstat(file);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== incident.screenshot.bytes ||
+    if (!stat.isFile() || stat.isSymbolicLink() || screenshotExpired(stat.mtimeMs) || stat.size !== incident.screenshot.bytes ||
         stat.size > BROWSER_DEBUG_IMAGE_BYTES) return { status: 'expired', data: null };
     const image = await fs.readFile(file);
     if (!stillOwned()) return { status: 'not_found', data: null };
@@ -956,6 +960,53 @@ let debugSlot = 0;
 let debugWrites = 0;
 export const BROWSER_DEBUG_IMAGE_SLOTS = 32;
 export const BROWSER_DEBUG_IMAGE_BYTES = 128 * 1024;
+const BROWSER_DEBUG_RETENTION_MS = 24 * 60 * 60_000;
+const BROWSER_DEBUG_SWEEP_MS = 60 * 60_000;
+
+function screenshotExpired(mtimeMs: number, now = Date.now()): boolean {
+  return now - mtimeMs >= BROWSER_DEBUG_RETENTION_MS;
+}
+
+function sweepBrowserDebug(state: FileMirror): void {
+  if (mirror !== state) return;
+  const owner = incidentFolder, epoch = incidentProfileEpoch;
+  const current = () => mirror === state && incidentFolder === owner && owner !== null &&
+    incidentProfileVerified && owner.profileId === incidentProfileId && incidentProfileEpoch === epoch;
+  const sweep = async () => {
+    if (!current() || debugWrites > 0) return;
+    const directory = path.join(path.dirname(state.file), 'browser-debug');
+    try {
+      const base = await fs.lstat(directory);
+      if (!base.isDirectory() || base.isSymbolicLink()) return;
+      const now = Date.now();
+      let removed = 0;
+      for (let slot = 0; slot < BROWSER_DEBUG_IMAGE_SLOTS; slot++) {
+        for (const suffix of ['jpg', 'json', 'jpg.tmp', 'json.tmp']) {
+          if (!current()) return;
+          const file = path.join(directory, `viewport-${slot}.${suffix}`);
+          const info = await fs.lstat(file).catch((error: NodeJS.ErrnoException) => {
+            if (error.code === 'ENOENT') return null;
+            throw error;
+          });
+          if (!info?.isFile() || info.isSymbolicLink() || !screenshotExpired(info.mtimeMs, now)) continue;
+          const verified = await fs.lstat(directory);
+          if (!current() || !verified.isDirectory() || verified.isSymbolicLink() ||
+              verified.ino !== base.ino || verified.dev !== base.dev) return;
+          await fs.unlink(file);
+          removed++;
+        }
+      }
+      if (removed && current()) logEvent('browser-debug.retention', `removed=${removed}`);
+    } catch (error) {
+      if (current() && (error as NodeJS.ErrnoException).code !== 'ENOENT')
+        logEvent('browser-debug.retention', 'cleanup deferred after local filesystem error');
+    }
+  };
+  state.screenshotSweep = sweep().finally(() => {
+    state.screenshotSweep = null;
+    if (mirror === state) state.screenshotTimer = setTimeout(() => sweepBrowserDebug(state), BROWSER_DEBUG_SWEEP_MS).unref();
+  });
+}
 
 export function offerBrowserDebugCapture(input: {
   sessionId: string; conversationId: string; turnId?: string; reason: string; errors: number;
@@ -1037,6 +1088,8 @@ export async function completeBrowserDebugCapture(id: string, image: unknown, st
     if (thumbnail.length > BROWSER_DEBUG_IMAGE_BYTES) throw new Error('image_byte_limit');
     if (!debugOfferStillOwned(row) || !await allowed() || !debugOfferStillOwned(row) ||
         row.expiresAt <= Date.now()) return false;
+    await state.screenshotSweep;
+    if (!debugOfferStillOwned(row) || row.expiresAt <= Date.now()) return false;
     const directory = path.join(path.dirname(state.file), 'browser-debug');
     await fs.mkdir(directory, { recursive: true });
     const directoryStat = await fs.lstat(directory);
@@ -1115,9 +1168,12 @@ export function initLogFile(file: string, folder = path.join(path.dirname(file),
     bytes = statSync(file).size;
   } catch { /* A first run has no log yet. */ }
   if (mirror?.retry) clearTimeout(mirror.retry);
-  mirror = { file, bytes, pending: [], pendingBytes: 0, dropped: 0, work: null, error: null, failures: 0, retry: null, cutWrites: 0, rotationNoted: false };
+  if (mirror?.screenshotTimer) clearTimeout(mirror.screenshotTimer);
+  mirror = { file, bytes, pending: [], pendingBytes: 0, dropped: 0, work: null, error: null, failures: 0,
+    retry: null, cutWrites: 0, rotationNoted: false, screenshotSweep: null, screenshotTimer: null };
   incidentFolder = { folder, profileId: incidentProfileId, rows: null, queue: Promise.resolve(), pending: 0, dropped: 0, storageError: null,
     tempsReconciled: false, unverifiedSlots: new Set(), archive: null };
+  sweepBrowserDebug(mirror);
   // The existing synchronous fatal snapshot survives a power loss. Import only
   // its hash on next startup; private stack/body text stays in its original
   // bounded .crash file and cannot become a new prompt or diagnostic instruction.
@@ -1267,6 +1323,7 @@ function mirrorToFile(entry: LogEntry): void {
 export async function flushLogFile(): Promise<void> {
   const state = mirror;
   if (!state) return;
+  await state.screenshotSweep;
   // A waiting retry is tried now: a flush wants the lines on disk, not after the backoff.
   if (state.retry) { clearTimeout(state.retry); state.retry = null; }
   startWriter(state);
@@ -1315,6 +1372,7 @@ export async function flushLogBeforeExit(timeoutMs = 2_000): Promise<void> {
 /** Test seam; callers must finish outstanding file writes first. */
 export function resetLoggerForTests(): void {
   if (mirror?.retry) clearTimeout(mirror.retry);
+  if (mirror?.screenshotTimer) clearTimeout(mirror.screenshotTimer);
   debugOffers.clear(); debugCooldowns.clear(); debugSlot = 0; debugWrites = 0;
   mirror = null;
   incidentFolder = null;

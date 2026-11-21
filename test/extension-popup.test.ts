@@ -215,6 +215,18 @@ it('shows one bounded-custody check and suppresses duplicate reload requests whi
   expect(reload).not.toHaveBeenCalled();
 });
 
+it.each([[undefined, true, true], [false, true, false], [true, false, false]])(
+  'defaults screenshot capture only with Chrome access (saved=%s, access=%s)', async (saved, permission, enabled) => {
+    const request = vi.fn();
+    const document = openPopup(vi.fn(), undefined, vi.fn(), accountPopupSender(),
+      { get: async () => ({ browserDebugScreenshots: saved }), set: vi.fn() },
+      { contains: async () => permission, request });
+    await vi.waitFor(() => expect(document.querySelectorAll('#accountSelect option')).toHaveLength(2));
+    expect(document.getElementById('debugCaptureBtn')?.textContent)
+      .toBe(enabled ? 'Disable failure screenshots' : 'Enable failure screenshots');
+    expect(request).not.toHaveBeenCalled();
+  });
+
 it.each([true, false])('requests optional screenshot permission only from a deliberate button click (granted=%s)', async granted => {
   const request = vi.fn(async () => granted);
   const stored: Record<string, unknown> = {};

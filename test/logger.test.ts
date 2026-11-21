@@ -1494,6 +1494,50 @@ describe('bounded asynchronous diagnostic mirror', () => {
     expect(after.map(row => row.sendEvidence)).toEqual(['not_observed', 'not_observed']);
   });
 
+  it('expires failure pixels at startup and retains the incident and unrelated files', async () => {
+    const file = await logFile();
+    const sharp = (await import('sharp')).default;
+    const jpeg = await sharp({ create: { width: 8, height: 8, channels: 3, background: '#123456' } }).jpeg().toBuffer();
+    const offer = offerBrowserDebugCapture({ ...debugInput, turnId: 'expiring-capture' })!;
+    expect(await completeBrowserDebugCapture(offer.id, `data:image/jpeg;base64,${jpeg.toString('base64')}`, 'captured')).toBe(true);
+    await flushLocalIncidents();
+    const incident = (await listLocalIncidents()).incidents[0]!;
+    const directory = path.join(path.dirname(file), 'browser-debug');
+    const sidecar = path.join(directory, incident.screenshot!.metadataFile);
+    const image = sidecar.replace(/\.json$/, '.jpg');
+    const old = new Date(Date.now() - 25 * 60 * 60_000);
+    for (const name of [sidecar, image]) await fs.utimes(name, old, old);
+    expect((await readLocalIncidentImage(incident.id)).status).toBe('expired');
+    await fs.writeFile(path.join(directory, 'viewport-0.jpg.tmp'), jpeg);
+    await fs.utimes(path.join(directory, 'viewport-0.jpg.tmp'), old, old);
+    await fs.writeFile(path.join(directory, 'keep.txt'), 'unrelated');
+    await fs.writeFile(path.join(directory, 'viewport-1.jpg'), jpeg);
+    initLogFile(file);
+    await flushLogFile();
+    expect((await readLocalIncidentImage(incident.id)).status).toBe('expired');
+    expect((await listLocalIncidents(incident.id)).incidents[0]).toMatchObject({ id: incident.id, capture: 'expired' });
+    expect((await fs.readdir(directory)).sort()).toEqual(['keep.txt', 'viewport-1.jpg']);
+  });
+
+  it('sweeps expired screenshot slots while the logger stays open', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const file = await logFile();
+      await flushLogFile();
+      const directory = path.join(path.dirname(file), 'browser-debug');
+      await fs.mkdir(directory);
+      const image = path.join(directory, 'viewport-31.jpg');
+      await fs.writeFile(image, 'expired pixel fixture');
+      const old = new Date(Date.now() - 24 * 60 * 60_000);
+      await fs.utimes(image, old, old);
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      await flushLogFile();
+      await expect(fs.lstat(image)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('refuses to read captured pixels whose sidecar is reassigned to a different failed turn', async () => {
     const file = await logFile();
     const sharp = (await import('sharp')).default;

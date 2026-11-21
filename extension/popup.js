@@ -710,11 +710,14 @@ async function loadPreferences() {
     let debugPermission = false;
     try { debugPermission = await chrome.permissions.contains({ origins: ['<all_urls>'] }); } catch { /* Older Chrome/test surface: off. */ }
     if (debugRevision === debugCaptureRevision) {
-      debugCaptureEnabled = stored[DEBUG_CAPTURE_KEY] === true && debugPermission;
+      const { [DEBUG_CAPTURE_KEY]: preference = true } = stored;
+      debugCaptureEnabled = preference === true && debugPermission;
       $('debugCaptureBtn').textContent = debugCaptureEnabled ? 'Disable failure screenshots' : 'Enable failure screenshots';
       $('debugCaptureStatus').textContent = debugCaptureEnabled
         ? 'On: visible ChatGPT failures only. Images stay local; metadata is in the account log.'
-        : 'Screenshots off. Failure metadata is still recorded.';
+        : preference === true
+          ? 'Chrome capture permission is required. Failure metadata is still recorded.'
+          : 'Screenshots off. Failure metadata is still recorded.';
     }
     overwriteEnabled = stored[RENDER_STREAM_KEY] !== false;
     if (revision === accountChoiceRevision) {
@@ -783,7 +786,7 @@ $('debugCaptureBtn').addEventListener('click', async () => {
     button.textContent = enabling ? 'Disable failure screenshots' : 'Enable failure screenshots';
     $('debugCaptureStatus').textContent = enabling
       ? 'On: visible ChatGPT failures only. Images stay local; metadata is in the account log.'
-      : 'Screenshots off. Existing images remain in the bounded local ring.';
+      : 'Screenshots off. Existing images still expire automatically.';
   } catch {
     $('debugCaptureStatus').textContent = 'Chrome could not save this setting. Nothing was started; try this button again.';
   } finally { button.disabled = false; }
