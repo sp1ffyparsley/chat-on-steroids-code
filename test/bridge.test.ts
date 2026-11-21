@@ -31434,7 +31434,10 @@ describe('the goal loop over the bridge', () => {
     expect(recoveryBrowserWake).not.toHaveBeenCalled();
   });
 
-  it.each(['running', 'settling'] as const)('projects local %s work before idle when no Goal reply exists', async phase => {
+  it.each([
+    ['running', 'current'], ['settling', 'current'], ['running', 'unknown'], ['settling', 'unknown'],
+    ['running', 'sibling'], ['settling', 'sibling']
+  ] as const)('projects %s work before idle for %s ownership without borrowing activity', async (phase, ownership) => {
     await pair();
     const conversationId = randomUUID();
     const observed = await request('POST', '/events', { body: { conversationId, events: [
@@ -31444,8 +31447,9 @@ describe('the goal loop over the bridge', () => {
     await setSessionAutomation(sessionId, 'loop', true);
     expect(goalPendingReplyFor(conversationId)).toBeNull();
     const calls = await import('../src/main/mcp/call-context.js');
+    const owner = ownership === 'current' ? conversationId : ownership === 'sibling' ? randomUUID() : null;
     const context = { startedAt: Date.now(), transportKey: null, agent: null, outcome: null,
-      evidence: calls.emptyEvidence(), caller: { conversationId, requestId: 'exact-status-work', transportKey: null } };
+      evidence: calls.emptyEvidence(), caller: { conversationId: owner, requestId: 'exact-status-work', transportKey: null } };
     let release = () => {};
     const work = new Promise<void>(resolve => { release = resolve; });
     const tracked = phase === 'running' ? calls.trackInFlight(context, () => work) : work;
@@ -31455,9 +31459,12 @@ describe('the goal loop over the bridge', () => {
     const beforeOpens = [...opened];
     try {
       const controls = await sessionControlsFor(sessionId);
-      expect(controls.goalWait?.reason).toBe(phase === 'running' ? 'tools' : 'settling');
+      const reason = phase === 'running' ? 'tools' : 'settling';
+      if (ownership === 'sibling') expect(controls.goalWait?.reason).not.toBe(reason);
+      else expect(controls.goalWait).toMatchObject({ reason,
+        detail: expect.stringContaining(ownership === 'current' ? 'exact Core' : 'unattributed') });
       const activity = await request('GET', '/activity?conversationId=' + conversationId);
-      expect(activity.body.goal.wait?.reason).toBe(phase === 'running' ? 'tools' : 'settling');
+      expect(activity.body.goal.wait).toEqual(controls.goalWait);
       expect(snapshotGoalReplies().replies).toEqual(beforeReplies);
       expect(pendingCommands()).toEqual(beforeCommands);
       expect(opened).toEqual(beforeOpens);

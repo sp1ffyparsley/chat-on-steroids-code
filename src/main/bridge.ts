@@ -13819,13 +13819,17 @@ async function goalWaitFor(conversationId: string, sessionId: string, now = Date
   const running = runningToolCalls(conversationId);
   if (running > 0) return {
     reason: 'tools',
-    detail: `${running} exact Core tool call${running === 1 ? ' is' : 's are'} still running.`,
+    detail: runningToolProgress(conversationId)?.count === running
+      ? `${running} exact Core tool call${running === 1 ? ' is' : 's are'} still running for this chat.`
+      : 'This profile has unattributed tool activity. CoS cannot yet tell which chat owns it.',
     nextAction: 'Wait for those calls to finish. This status does not authorize a Goal/Loop continuation.'
   };
   const settling = settlingToolCalls(conversationId);
   if (settling > 0) return {
     reason: 'settling',
-    detail: `${settling} completed Core call${settling === 1 ? ' is' : 's are'} still publishing exact result/attribution evidence.`,
+    detail: inFlightToolProgress(conversationId)?.count === settling
+      ? `${settling} exact Core call${settling === 1 ? ' is' : 's are'} still publishing results for this chat.`
+      : 'This profile has unattributed tool results still being saved. This does not mean tools are running in this chat.',
     nextAction: 'Wait for publication to settle. No Goal/Loop message is being sent from this timer.'
   };
   const pending = goalPendingReplyFor(conversationId);

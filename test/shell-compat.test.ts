@@ -2728,6 +2728,10 @@ describe('alternate shell turn/message provenance', () => {
   it.each(['eight-node prefix', 'private context getter', 'different context request', '400-node prefix',
     '401-node prefix', 'foreign working', 'foreign exchange', 'visible context', 'tool recipient',
     'invocation metadata', 'foreign user', 'missing child', 'duplicate child', 'cycle', 'parent conflict',
+    'missing parent annotation', 'missing annotation and child', 'parent accessor', 'cached parent conflict',
+    'missing graph parent', 'missing both parent fields', 'missing graph parent and child',
+    'graph parent accessor', 'cached graph parent conflict', 'null retained parent', 'null graph parent',
+    'both parents null', 'null graph undeclared parent', 'cached null graph conflict',
     'cached context conflict', 'cached user conflict', 'cached edge conflict', 'active context',
     'assistant final', 'assistant text', 'context accessor', 'missing terminal',
     'declared folded header', 'single folded header', 'folded missing header edge', 'folded missing user edge',
@@ -2809,6 +2813,24 @@ describe('alternate shell turn/message provenance', () => {
           if (variant === 'duplicate child') mapping['prefix-context-3'].children.push('prefix-context-2');
           if (variant === 'cycle') { mapping['prefix-context-7'].parent = TOP; mapping['prefix-context-7'].message.metadata.parent_id = TOP; }
           if (variant === 'parent conflict') context.metadata.parent_id = USER;
+          if (variant === 'missing parent annotation' || variant === 'missing annotation and child' ||
+              variant === 'cached parent conflict') delete context.metadata.parent_id;
+          if (variant === 'missing annotation and child') mapping['prefix-context-3'].children = [];
+          if (variant === 'parent accessor') Object.defineProperty(context.metadata, 'parent_id', {
+            get() { getterReads++; throw new Error('PRIVATE_PARENT_GETTER'); }
+          });
+          const contextNode = mapping[count > 2 ? 'prefix-context-2' : TOP];
+          if (variant === 'null retained parent' || variant === 'both parents null') context.metadata.parent_id = null;
+          if (variant === 'null graph parent' || variant === 'both parents null' ||
+              variant === 'null graph undeclared parent' || variant === 'cached null graph conflict') contextNode.parent = null;
+          if (variant === 'null graph undeclared parent') mapping['prefix-context-3'].children = [];
+          if (['missing graph parent', 'missing both parent fields', 'missing graph parent and child',
+            'cached graph parent conflict'].includes(variant)) delete contextNode.parent;
+          if (variant === 'missing both parent fields') delete context.metadata.parent_id;
+          if (variant === 'missing graph parent and child') mapping['prefix-context-3'].children = [];
+          if (variant === 'graph parent accessor') Object.defineProperty(contextNode, 'parent', {
+            get() { getterReads++; throw new Error('PRIVATE_GRAPH_PARENT_GETTER'); }
+          });
           if (variant === 'active context') context.status = 'in_progress';
           if (variant === 'assistant final') context.end_turn = true;
           if (variant === 'assistant text') context.content = { content_type: 'text', parts: ['PRIVATE_FINAL'] };
@@ -2819,6 +2841,9 @@ describe('alternate shell turn/message provenance', () => {
           ['folded cached header edge', 'folded distinct cache', 'folded cached user children', 'folded direct user cache conflict',
             'single direct assistant cache conflict', 'single direct system cached user children'].includes(variant) ? mapping => {
           if (variant === 'cached context conflict') mapping['prefix-context-2'].message.metadata.turn_exchange_id = 'foreign';
+          if (variant === 'cached parent conflict') mapping['prefix-context-2'].message.metadata.parent_id = USER;
+          if (variant === 'cached graph parent conflict') mapping['prefix-context-2'].parent = USER;
+          if (variant === 'cached null graph conflict') mapping['prefix-context-2'].parent = 'prefix-context-3';
           if (variant === 'cached user conflict') mapping[USER].message.metadata.working_turn_id = 'foreign';
           if (variant === 'cached edge conflict') mapping['prefix-context-3'].children = [];
           if (variant === 'folded cached header edge') mapping[TOP].children = [];
@@ -2827,17 +2852,20 @@ describe('alternate shell turn/message provenance', () => {
           if (variant === 'single direct assistant cache conflict') mapping[TOP].message.metadata.turn_exchange_id = 'foreign';
         } : undefined });
       try {
-        const accepted = ['eight-node prefix', 'private context getter', 'different context request', '400-node prefix',
+        const accepted = ['eight-node prefix', 'private context getter', 'different context request', '400-node prefix', 'missing parent annotation',
+          'missing graph parent', 'null retained parent', 'null graph parent',
           'declared folded header', 'single folded header', 'folded distinct cache', 'single direct assistant', 'single direct system'].includes(variant);
         expect(page.fiber.turns[0].calls[0]).toMatchObject({
           requestId: accepted || variant === 'folded missing receipt' ? REQUEST : null, answered: accepted });
         expect(page.fiber.turns[0].calls[0].resultReceiptId).toBe(accepted ? 'a'.repeat(48) : undefined);
-        const prefixFacet = ({ 'foreign working': 'Shape', 'parent conflict': 'Parent',
-          'cached context conflict': 'Cache', 'cached user conflict': 'UserCache',
-          'missing child': 'Edge', '401-node prefix': 'Bounds' } as Record<string, string>)[variant];
+        const prefixFacet = ({ 'foreign working': 'Shape', 'parent conflict': 'Parent', 'parent accessor': 'Parent',
+          'cached context conflict': 'Cache', 'cached user conflict': 'UserCache', 'cached parent conflict': 'Cache',
+          'cached graph parent conflict': 'Cache', 'missing both parent fields': 'Parent', 'graph parent accessor': 'Parent',
+          'missing child': 'Edge', 'missing annotation and child': 'Edge', 'missing graph parent and child': 'Edge',
+          '401-node prefix': 'Bounds' } as Record<string, string>)[variant];
         if (prefixFacet) expect(page.fiber.shellScan.rejects['nativeContractedHeaderPrefix' + prefixFacet]).toBeGreaterThan(0);
         expect(getterReads).toBe(0);
-        expect(JSON.stringify(page.fiber)).not.toMatch(/PRIVATE_PREFIX|PRIVATE_MODEL_CONTEXT|PRIVATE_MODEL_GETTER|PRIVATE_SCOPE_GETTER|prefix-working|prefix-exchange/);
+        expect(JSON.stringify(page.fiber)).not.toMatch(/PRIVATE_PREFIX|PRIVATE_MODEL_CONTEXT|PRIVATE_MODEL_GETTER|PRIVATE_SCOPE_GETTER|PRIVATE_PARENT_GETTER|PRIVATE_GRAPH_PARENT_GETTER|prefix-working|prefix-exchange/);
       } finally { page.dom.window.close(); }
     });
 
@@ -4901,7 +4929,7 @@ describe('alternate shell turn/message provenance', () => {
   });
 
   it.each(['pending Core', 'completed Core', 'pending Code', 'duplicate Core'] as const)(
-    'retains public output but marks an omitted %s beyond the row budget incomplete', async kind => {
+    'keeps the native call inventory independent of the commentary budget for %s', async kind => {
       const page = await shellHarness({ shellItemsMutation(items) {
         const existing = { type: 'mcp-tool-call', callId: 'overflow-first', completed: true,
           invocation: { server: APP, tool: 'read' } };
@@ -4917,13 +4945,44 @@ describe('alternate shell turn/message provenance', () => {
         if (kind === 'duplicate Core') expect(page.fiber.turns).toEqual([]);
         else {
           expect(page.fiber.turns).toHaveLength(1);
-          expect(page.fiber.turns[0].callEvidenceComplete).toBe(false);
+          const turn = page.fiber.turns[0];
+          if (kind === 'pending Code') {
+            expect(turn.callEvidenceComplete).toBe(false);
+          } else {
+            expect(turn.callEvidenceComplete).not.toBe(false);
+            expect(turn.calls).toContainEqual(expect.objectContaining({
+              messageId: 'overflow-next', answered: kind === 'completed Core'
+            }));
+          }
           expect(page.fiber.turns[0].messages).toEqual(expect.arrayContaining([
             expect.objectContaining({ role: 'assistant', rawMessageId: ASSISTANT })
           ]));
         }
       } finally { page.dom.window.close(); }
     });
+
+  it.each([true, false])('checks late native Code against its exact return (settled=%s)', async settled => {
+    const page = await shellHarness({ withExec: true, withCall: true, nativeCallReceipt: true,
+      assistantCompleted: false, callCompleted: 'missing',
+      nativeCallMutation(mapping, entry) {
+        completeExecBeforeCall(mapping, entry);
+        if (!settled) mapping[EXEC_RESULT].message.status = 'in_progress';
+      },
+      shellItemsMutation(items) {
+      const at = items.findIndex(item => item.callId === EXEC);
+      const [exec] = items.splice(at, 1);
+      items.splice(at, 0, { type: 'chatgpt-reasoning-group', items: [
+        ...Array.from({ length: 1200 }, () => ({ type: 'unknown-fixture-item' })), exec
+      ] });
+    } });
+    try {
+      const turn = page.fiber.turns[0];
+      expect(turn.callEvidenceComplete === false).toBe(!settled);
+      expect(turn.endMessageId).toBe(settled ? ASSISTANT : null);
+      if (settled)
+        expect(turn.requests).toContainEqual(expect.objectContaining({ messageId: EXEC, requestId: EXEC_REQUEST }));
+    } finally { page.dom.window.close(); }
+  });
 
   it.each([244, 400, 401])('enumerates every Core descriptor across %s interleaved native step pairs', async count => {
     const page = await shellHarness({ shellItemsMutation(items) {

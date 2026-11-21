@@ -3024,19 +3024,30 @@
                 Array.isArray(parts) && parts.length === 1 && typeof nativeField(parts, '0') === 'string';
             };
             const visited = new Set();
+            const contextParent = (node, meta) => {
+              const graph = Object.getOwnPropertyDescriptor(node, 'parent');
+              const annotation = Object.getOwnPropertyDescriptor(meta, 'parent_id');
+              const valid = field => !field || own.call(field, 'value') && (field.value === null ||
+                typeof field.value === 'string' && field.value.length > 0 && field.value.length <= MAX_TEXT);
+              if (!valid(graph) || !valid(annotation)) return null;
+              const graphParent = graph?.value, annotatedParent = annotation?.value;
+              if (graphParent && annotatedParent && graphParent !== annotatedParent) return null;
+              return graphParent ?? annotatedParent ?? null;
+            };
             let id = start;
             while (id !== typedUserId) {
               if (visited.size >= MAX_ROWS || visited.has(id) || currentIds.has(id) || selected.has(id)) return failPrefix('PrefixBounds');
               visited.add(id);
               const node = nativeField(mapping, id), message = nativeField(node, 'message'), meta = nativeField(message, 'metadata');
-              const parent = str(nativeField(node, 'parent'));
               if (!contextShape(node, id)) return failPrefix('PrefixShape');
-              if (!parent || nativeField(meta, 'parent_id') !== parent) return failPrefix('PrefixParent');
+              const parent = contextParent(node, meta);
+              if (!parent) return failPrefix('PrefixParent');
               if (!declaredEdge(parent, id)) return failPrefix('PrefixEdge');
               const cached = nativeField(cachedMapping, id);
               if (cached && cached !== node) {
                 const prior = nativeField(cached, 'message'), priorMeta = nativeField(prior, 'metadata');
-                if (!contextShape(cached, id) || nativeField(cached, 'parent') !== parent ||
+                if (!contextShape(cached, id) || contextParent(cached, priorMeta) !== parent ||
+                    nativeField(cached, 'parent') !== nativeField(node, 'parent') ||
                     nativeField(nativeField(prior, 'author'), 'role') !== nativeField(nativeField(message, 'author'), 'role') ||
                     ['recipient', 'status', 'channel', 'end_turn'].some(key => nativeField(prior, key) !== nativeField(message, key)) ||
                     nativeField(nativeField(prior, 'content'), 'content_type') !== nativeField(nativeField(message, 'content'), 'content_type') ||
@@ -4224,6 +4235,7 @@
     // They must not replace the exact stable turn identity proved against this Fiber entry.
     const layoutKey = str(section.querySelector('[data-content-search-turn-key]')?.getAttribute('data-content-search-turn-key')) || turnId;
     const messages = [], calls = [], slots = [], seen = new Set(), callSources = new Map(), executionIds = [];
+    let hasLateExecution = false;
     let terminalCandidate = null;
     // Local fixed counts only; the original typed-user checks still own identity and prose.
     const userDiagnostics = { userTextEmpty: 0, userTextUnsupported: 0 };
@@ -4268,20 +4280,12 @@
       }
       const steps = item?.type === 'chatgpt-reasoning-group' && Array.isArray(item.items) ? item.items : [item];
       for (const step of steps) {
-        // Keep public output readable on long turns without presenting an omitted
-        // tool prefix as a complete census. The existing incomplete-inventory flag
-        // retains result debt; the independent Loop fallback remains available.
-        if (++work > MAX_ROWS + 2 * MAX_CALLS) {
-          if (work > MAX_TURN_ITEMS) return null;
-          const counted = step?.type === 'dynamic-tool-call' ? step.tool === 'exec'
-            : step?.type === 'mcp-tool-call' && ourApp(step.invocation?.server);
-          const spare = counted ? str(step.callId) : null;
-          if (counted) {
-            callEvidenceComplete = false;
-            if (spare && !remember(spare)) return null;
-          }
-          continue;
-        }
+        if (++work > MAX_TURN_ITEMS) return null;
+        // Commentary and tool inventory have separate limits. Late execs
+        // still require a native return on the independently verified path.
+        const late = work > MAX_ROWS + 2 * MAX_CALLS;
+        const executionStep = step?.type === 'dynamic-tool-call' && step.tool === 'exec';
+        if (late && step?.type !== 'mcp-tool-call' && !executionStep) continue;
         if (step?.type === 'assistant-message' && step !== item) {
           // Only these typed phases are known public output, never private analysis.
           // Nested text is progress evidence, not the final answer of this turn.
@@ -4298,12 +4302,13 @@
           });
           continue;
         }
-        if (step?.type === 'dynamic-tool-call' && step.tool === 'exec') {
+        if (executionStep) {
           const id = str(step.callId);
           if (!id) { callEvidenceComplete = false; continue; }
           if (!remember(id)) return null;
           if (executionIds.length >= MAX_CALLS) { callEvidenceComplete = false; continue; }
           executionIds.push(id);
+          if (late) hasLateExecution = true;
           continue;
         }
         if (step?.type !== 'mcp-tool-call' || !ourApp(step.invocation?.server)) continue;
@@ -4356,7 +4361,7 @@
         callSources.set(id, reference);
       }
     }
-    return { entry, turnId: stableTurnId, messages, calls, slots, callSources, executionIds,
+    return { entry, turnId: stableTurnId, messages, calls, slots, callSources, executionIds, hasLateExecution,
       terminalCandidate, userDiagnostics, callEvidenceComplete };
   }
 
@@ -4477,7 +4482,6 @@
           }));
         const classic = shell ? null : callsOf(messages, codeReceipts);
         const calls = shell ? shell.calls : classic.calls;
-        const callEvidenceComplete = (shell ? shell.callEvidenceComplete : classic.complete) && codeParentsUnique;
         const shellSightings = [];
         const metadata = shell ? shellRequestMetadata(fiber, queries, shell, conversation, shellSightings, shellScan.rejects) : messages;
         const sightings = shell ? shellSightings : sightingsOf(metadata);
@@ -4510,9 +4514,13 @@
         responseBudget.remaining -= before - turnBudget.remaining;
         const activities = nativeActivitiesOf(turnSections, messages);
         const directEndMessageId = turnEndMessageId(messages);
-        const endMessageId = directEndMessageId || (shell
+        const checkedShellFinal = shell && (!directEndMessageId || shell.hasLateExecution)
           ? shellProviderTerminalMessageId(fiber, queries, shell, conversation, calls, codeModeCalls, shellScan.rejects)
-          : null);
+          : null;
+        const endMessageId = directEndMessageId || checkedShellFinal;
+        const callEvidenceComplete = (shell
+          ? shell.callEvidenceComplete && (!shell.hasLateExecution || Boolean(checkedShellFinal))
+          : classic.complete) && codeParentsUnique;
         if (
           codeModeCalls.length === 0 && calls.length === 0 &&
           requests.length === 0 && sightings.length === 0 &&
