@@ -14865,6 +14865,11 @@ async function assistantRepairCurrent(conversationId: string, repair: Repair): P
   const [start] = question ? [] : await readRecentEvents(repair.sessionId, 1, { kinds: ['turn_start'] });
   const key = question ? `user:${question.messageId}` : `turn:${start?.turnId ?? 'page'}`;
   if (key !== source.key) return false;
+  if (repair.action === 'continue') {
+    const [latest] = await readRecentEvents(repair.sessionId, 1, { kinds: ['turn_start'] });
+    // Native regeneration can change the turn while keeping the same user message.
+    if (!source.turnId || latest?.turnId !== source.turnId || !goalArmedFor(conversationId)) return false;
+  }
   // A canonical final first revealed after admission retires this repair. A completed/stopped
   // boundary without a canonical final may still produce the exact stale-Stop/composer fault and
   // owns one bounded reload: that action repairs the page shell, not the ended answer. The
@@ -14972,23 +14977,22 @@ function queueBrowserRecovery(
   // `no-tab` supersedes them for the same reason: the tab those repairs would reload is gone,
   // and the reopen does everything their reload would have done. Neither supersedes `no-tab`
   // itself, which ordinary activity clears and which therefore cannot be the stuck kind.
-  // The recorder reports a newly hydrated Retry only once. Replace a weaker reload
-  // or interrupted-stream fallback while it is positively still unclaimed, or that one stronger observation is lost
-  // and the page reloads despite exposing its native Retry. A claimed/uncertain action
-  // keeps receipt custody; neither a new turn nor another session can borrow this upgrade.
-  const upgradesUnclaimedFallback = reason === 'assistant-error' && requestedAction === 'retry' &&
-    held?.reason === 'assistant-error' && held.action !== 'retry' &&
-    (held.state === 'queued' || held.state === 'handed') && !held.claimed && !held.receiptUnverified &&
-    !repairAttentionBlocked(held) &&
+  // A later exact observation can reorder an unclaimed action. A claimed or uncertain
+  // action keeps custody, even if a preferred recovery control subsequently appears.
+  const replaceable = assistantSource && held?.reason === reason &&
+    (held.state === 'queued' || held.state === 'handed') &&
+    !held.claimed && !held.receiptUnverified && !repairAttentionBlocked(held) && held.sessionId === sessionId;
+  const replacesAssistantAction = replaceable && reason === 'assistant-error' &&
     !pendingContinuations().some(entry => entry.from === conversationId) &&
-    held.sessionId === sessionId && Boolean(assistantSource) &&
-    held.assistantSource?.key === assistantSource?.key &&
-    held.assistantSource?.turnId === assistantSource?.turnId &&
-    held.assistantSource?.completed === assistantSource?.completed;
+    held.assistantSource?.key === assistantSource.key &&
+    held.assistantSource?.turnId === assistantSource.turnId &&
+    held.assistantSource?.completed === assistantSource.completed &&
+    (requestedAction === 'continue' && held.action !== 'continue' ||
+      requestedAction === 'retry' && (held.action === 'reload' || held.action === 'compact'));
+  const upgradesUnclaimedFallback = replacesAssistantAction || (replaceable &&
+    reason === 'compaction' && requestedAction === 'retry' && held.action === 'reload' && held.episode === episode);
   const supersedes = upgradesUnclaimedFallback ||
-    ((reason === 'silence' || reason === 'no-tab') && TURN_SCOPED_REPAIRS.has(held?.reason as Repair['reason'])) ||
-    (reason === 'assistant-error' && requestedAction === 'continue' && held?.reason === 'assistant-error' &&
-      held.action === 'reload' && !held.claimed && held.assistantSource?.key === assistantSource?.key);
+    ((reason === 'silence' || reason === 'no-tab') && TURN_SCOPED_REPAIRS.has(held?.reason as Repair['reason']));
   if (held && held.state !== 'done' && !supersedes) return false;
   // Silence already paid its complete shared inactivity boundary. Once genuine new activity
   // starts another episode, layering the unrelated browser-action floor on top delays the next
@@ -15848,23 +15852,18 @@ async function noteRecoveryObservations(
       candidate.kind === 'chat_error' && candidate.recoverable === true &&
       candidate.retryAvailable === true && candidate.reason !== 'conversation_limit' &&
       (candidate.turnId ?? null) === (item.turnId ?? null));
-    // Prefer the provider-owned Retry control immediately. Reloading first can unmount that
-    // exact card and turn a recoverable failure into an empty/stale page. If the one Retry was
-    // already spent (or no control exists), the same authored turn retains one reload fallback.
     const interrupted = /^connection interrupted\.? (?:waiting|please wait) for the complete answer\.?(?: retry)?$/i.test(
       (item.text ?? '').replace(/\s+/g, ' ').trim()
     );
-    // A no-Retry interrupted Loop needs Stop -> Continue, not context compaction. Stop's
-    // receipt reconciles the existing handoff/reply/outbox before creating one durable input.
-    // Workers retain their broker recovery; ordinary unarmed chats are never auto-prompted.
-    // The exact resume 404 can arrive before the native card. Give an armed
-    // Goal/Loop the same recovery path while the page still owns the turn.
-    // The content reader must independently prove the current card before Stop.
+    // Prefer one new Continue for an exact interrupted Goal/Loop, even when Retry exists.
+    // The page proves the current interruption and Main reconciles the end and outbox first.
+    // Existing handoffs above and ordinary provider delivery errors keep their own recovery.
     const interruptedStream = interrupted || item.reason === 'stream_gone';
-    const action: Repair['action'] = nativeRetryAvailable && (!sameSpentTurn || !spent.retry)
-      ? 'retry'
-      : interruptedStream && !goalWorkerChat(conversationId) && goalActiveFor(conversationId) &&
-          (!sameSpentTurn || (!spent.stopRefused && !(spent.retry && spent.reload))) ? 'continue'
+    const canContinue = interruptedStream && source?.key.startsWith('user:') && source.turnId && !source.completed &&
+      !goalWorkerChat(conversationId) && goalActiveFor(conversationId) &&
+      (!sameSpentTurn || (!spent.stopRefused && !(spent.retry && spent.reload)));
+    const action: Repair['action'] = canContinue ? 'continue'
+      : nativeRetryAvailable && (!sameSpentTurn || !spent.retry) ? 'retry'
       : interrupted && !goalWorkerChat(conversationId) && (!sameSpentTurn || !(spent.reload || spent.compact))
         ? 'compact'
         : 'reload';
@@ -18052,11 +18051,13 @@ async function advanceStoppedContinue(conversationId: string, repair: Repair): P
     if (getConfig().ui.automationPaused === true || browserSignedOut() || coreBrowserDispatchStopped() ||
         isChatBlocked(conversationId) || stopRequestedFor(conversationId)) return;
     const source = repair.assistantSource;
-    if (!source?.key.startsWith('user:') || !await assistantRepairCurrent(conversationId, repair)) return;
+    if (!source?.key.startsWith('user:') || !source.turnId ||
+        !await assistantRepairCurrent(conversationId, repair)) return;
     if (repairsInFlight.get(conversationId) !== repair || repair.state !== 'queued') return;
     if (nativeCompletionCandidate(conversationId))
       await settleObservedNativeCompletion(conversationId, repair.sessionId);
-    const input = await enqueueInterruptedContinue(repair.sessionId, conversationId, source.key.slice(5));
+    const input = await enqueueInterruptedContinue(repair.sessionId, conversationId, source.key.slice(5),
+      { interruptedTurnId: source.turnId });
     if (repairsInFlight.get(conversationId) !== repair || repair.state !== 'queued') return;
     if (!input || input.state === 'cancelled' || input.state === 'failed') {
       const session = await getSession(repair.sessionId);

@@ -27122,8 +27122,10 @@ describe('unattributed activity recovery', () => {
   it.each([
     { mode: 'goal', outcome: 'stopped' }, { mode: 'loop', outcome: 'stopped' },
     { mode: 'goal', outcome: 'failed' }, { mode: 'loop', outcome: 'failed' },
-    { mode: 'loop', outcome: 'stopped', machineFirst: true }
-  ] as const)('delivers one exact Stop -> Continue through the existing $mode/$outcome outbox without replacing its objective', async ({ mode, outcome, machineFirst }) => {
+    { mode: 'loop', outcome: 'stopped', machineFirst: true },
+    { mode: 'loop', outcome: 'failed', machineFirst: true },
+    { mode: 'loop', outcome: 'failed', retryAvailable: true }
+  ] as const)('delivers one exact Stop -> Continue through the existing $mode/$outcome outbox without replacing its objective', async ({ mode, outcome, machineFirst, retryAvailable }) => {
     await pair();
     const objective = 'Finish the original production task and verify its real output; retain prior work.';
     await setGoalObjectiveNow(PRIME, objective);
@@ -27135,7 +27137,7 @@ describe('unattributed activity recovery', () => {
       openTurn(turnId),
       { kind: 'chat_error', time: Date.now(), turnId,
         ...(machineFirst ? { reason: 'stream_gone', text: 'resume HTTP 404' } :
-          { text: 'Connection interrupted. Waiting for the complete answer' }), recoverable: true }
+          { text: 'Connection interrupted. Waiting for the complete answer' }), recoverable: true, retryAvailable }
     ]);
     const repair = await maintenance();
     expect(repair).toMatchObject({ conversationId: PRIME, action: 'continue' });
@@ -27144,6 +27146,7 @@ describe('unattributed activity recovery', () => {
     await request('GET', `/status?repaired=${repair!.token}&repairAction=stopped`);
     const input = await import('../src/main/session/input.js');
     const row = (await input.listInputs()).find(candidate => candidate.recovery?.questionId === questionId)!;
+    expect(row?.recovery?.interruptedTurnId).toBe(turnId);
     const claimed = await input.claimBrowserInput(row.id, 'same-stop-document', PRIME, true);
     expect(operatorPromptBody(claimed!.text)).toBe('continue');
     expect(await input.authorizeBrowserInput(row.id, 'same-stop-document', PRIME)).toBe(true);
@@ -27158,6 +27161,31 @@ describe('unattributed activity recovery', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ id: row.id, state: 'sent', messageId: nativeMessageId });
     expect(goalObjectiveFor(PRIME)).toBe(objective);
+  });
+
+  it('keeps a saved Continue tied to its interrupted turn across a native regeneration of the same question', async () => {
+    await pair();
+    await setGoalSwitchNow(PRIME, 'loop', true, true);
+    const turnId = 'first-interrupted-answer';
+    const questionId = 'regenerated-question';
+    await events(PRIME, [
+      { kind: 'user_message', time: Date.now(), messageId: questionId, text: 'Keep working.' },
+      openTurn(turnId),
+      { kind: 'chat_error', time: Date.now(), turnId, recoverable: true,
+        text: 'Connection interrupted. Waiting for the complete answer' }
+    ]);
+    const repair = await maintenance();
+    expect(repair).toMatchObject({ action: 'continue' });
+    expect((await request('POST', '/repairs/claim', { body: { token: repair!.token } })).body.allowed).toBe(true);
+    await events(PRIME, [endTurn(turnId, 'stopped')]);
+    await request('GET', `/status?repaired=${repair!.token}&repairAction=stopped`);
+    const input = await import('../src/main/session/input.js');
+    const row = (await input.listInputs()).find(candidate => candidate.recovery?.questionId === questionId);
+    expect(row).toMatchObject({ state: 'queued', recovery: { interruptedTurnId: turnId } });
+    await events(PRIME, [openTurn('replacement-answer'), endTurn('replacement-answer', 'stopped')]);
+    expect(await input.claimBrowserInput(row!.id, 'same-page-new-native-turn', PRIME, true)).toBeNull();
+    expect((await input.listInputs()).filter(candidate => candidate.recovery?.questionId === questionId))
+      .toHaveLength(1);
   });
 
   it.each(['goal', 'loop'] as const)('keeps the exact $mode interruption owed when the browser Stop report precedes its canonical end', async mode => {
@@ -27188,6 +27216,26 @@ describe('unattributed activity recovery', () => {
     await request('GET', `/status?repaired=${repair!.token}&repairAction=stopped`);
     await maintenance();
     expect((await input.listInputs()).filter(row => row.recovery?.questionId === questionId)).toHaveLength(1);
+  });
+
+  it.each(['new-turn', 'disabled'] as const)('refuses a Continue repair before Stop when the source is %s', async change => {
+    await pair();
+    await setGoalSwitchNow(PRIME, 'loop', true, true);
+    const turnId = 'exact-source-before-interruption-stop';
+    await events(PRIME, [
+      { kind: 'user_message', time: Date.now(), messageId: 'same-user-before-interruption-stop', text: 'Keep working.' },
+      openTurn(turnId),
+      { kind: 'chat_error', time: Date.now(), turnId, recoverable: true, retryAvailable: true,
+        text: 'Connection interrupted. Waiting for the complete answer' }
+    ]);
+    const repair = await maintenance();
+    expect(repair).toMatchObject({ action: 'continue' });
+    if (change === 'disabled') await setGoalSwitchNow(PRIME, 'loop', false, true);
+    else await events(PRIME, [endTurn(turnId, 'failed'), openTurn('native-regeneration-with-same-question')]);
+    expect((await request('POST', '/repairs/claim', { body: { token: repair!.token } })).body.allowed).toBe(false);
+    const input = await import('../src/main/session/input.js');
+    expect((await input.listInputs()).filter(row => row.recovery?.questionId === 'same-user-before-interruption-stop'))
+      .toEqual([]);
   });
 
   it.each(['new-question', 'global-pause', 'Loop-Off', 'queued-message', 'blocked'] as const)(
@@ -27631,7 +27679,7 @@ describe('unattributed activity recovery', () => {
 
   it.each([['queued', 'reload'], ['offered', 'reload'], ['claimed', 'reload'],
     ['offered', 'continue'], ['claimed', 'continue']] as const)(
-    'upgrades a late native Retry at stage %s over fallback %s without stealing a claimed action', async (stage, action) => {
+    'adopts late native Retry at stage %s only when fallback %s has lower priority', async (stage, action) => {
       await pair();
       if (action === 'continue') {
         await setGoalObjectiveNow(PRIME, 'Finish the retained work');
@@ -27661,10 +27709,12 @@ describe('unattributed activity recovery', () => {
       await events(PRIME, [...earlierAlert, { kind: 'chat_error', time: Date.now(), turnId,
         text: 'Message delivery timed out. Please try again. Retry', recoverable: true, retryAvailable: true }]);
       const upgraded = await maintenance();
-      if (stage === 'claimed') {
-        // A claimed reload may already have run. Keep its original receipt custody intact.
-        expect(upgraded).toBeNull();
-        expect((await request('POST', '/repairs/claim', { body: { token: original!.token } })).body.allowed).toBe(false);
+      if (stage === 'claimed' || action === 'continue') {
+        // A claimed action keeps custody, and an unclaimed Continue keeps priority.
+        if (stage === 'claimed') expect(upgraded).toBeNull();
+        else expect(upgraded).toMatchObject({ action: 'continue', token: original!.token });
+        expect((await request('POST', '/repairs/claim', { body: { token: original!.token } })).body.allowed)
+          .toBe(stage !== 'claimed');
         return;
       }
       expect(upgraded).toMatchObject({ conversationId: PRIME, reason: 'assistant-error', action: 'retry' });
@@ -27679,6 +27729,33 @@ describe('unattributed activity recovery', () => {
       expect(await maintenance()).toBeNull();
     }
   );
+
+  it.each([false, true])('prefers a later exact interruption over an earlier native Retry only before claim (%s)',
+    async claimed => {
+      await pair();
+      await setGoalSwitchNow(PRIME, 'loop', true, true);
+      const turnId = 'late-exact-interruption';
+      const issue = { kind: 'chat_error', time: Date.now(), turnId, recoverable: true, retryAvailable: true };
+      await events(PRIME, [
+        { kind: 'user_message', time: Date.now(), messageId: 'late-exact-interruption-question', text: 'Keep working' },
+        openTurn(turnId),
+        { ...issue, text: 'Message delivery timed out. Please try again.' }
+      ]);
+      const retry = await maintenance();
+      expect(retry).toMatchObject({ action: 'retry' });
+      const claim = (token: string) => request('POST', '/repairs/claim', { body: { token } });
+      if (claimed) expect((await claim(retry!.token)).body.allowed).toBe(true);
+      await events(PRIME, [{ ...issue, time: Date.now() + 1,
+        text: 'Connection interrupted. Waiting for the complete answer' }]);
+      const action = await maintenance();
+      if (claimed) expect(action).toBeNull();
+      else {
+        expect(action).toMatchObject({ action: 'continue' });
+        expect(action!.token).not.toBe(retry!.token);
+        expect((await claim(action!.token)).body.allowed).toBe(true);
+      }
+      expect((await claim(retry!.token)).body.allowed).toBe(false);
+    });
 
   it.each(['interruption_not_visible', 'interrupted_stop_unconfirmed'] as const)(
     'only preserves a late native Retry after a proved pre-Stop refusal (%s)', async failure => {

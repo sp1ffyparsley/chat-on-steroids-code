@@ -6315,15 +6315,14 @@ async function pruneManagedTabs(tabs, policy, protectedChats, closable) {
   const selectedByUser = (tab, conversationId = conversationForTab(tab)) => tab.active === true &&
     !deleted.has(conversationId) &&
     (tab.windowId !== backgroundWindow?.id || backgroundWindow.focused === true);
-  const activeStillSafeToClose = async (tab, conversationId) => {
+  const activeStillSafeToClose = async (tab, conversationId, allowBackgroundClose) => {
     if (tab.active !== true) return true;
     // The user already confirmed deletion in the app. Closing this exact page is completion of
     // that action, not background eviction of a readable main chat.
     if (deleted.has(conversationId)) return true;
-    // A background window still has one active tab. Only a worker that main has identified may
-    // use that exception; an ordinary/Prime chat remains a user's readable tab even when the
-    // app originally opened its window and later classified the conversation as terminal.
-    if (!workers.has(conversationId)) return false;
+    // Chrome always selects one tab in the app's background window. Main-authorized terminal
+    // pages may retire there while the window is unfocused.
+    if (!allowBackgroundClose) return false;
     if (tab.windowId !== backgroundWindow?.id || backgroundWindow.focused === true) return false;
     try { return (await chrome.windows.get(backgroundWindow.id)).focused !== true; }
     catch { return false; }
@@ -6333,14 +6332,13 @@ async function pruneManagedTabs(tabs, policy, protectedChats, closable) {
     Number(keeper.get(conversationForTab(b)) !== b.id) - Number(keeper.get(conversationForTab(a)) !== a.id) ||
     (activity[conversationForTab(a)] || 0) - (activity[conversationForTab(b)] || 0) || a.id - b.id);
   let remaining = [...tabs];
-  const selectedSupersededSuccessor = tab => {
-    const id = conversationForTab(tab);
-    if (!superseded.has(id)) return null;
-    const destination = cleanConversationId(policy.supersededSuccessors?.[id]);
+  const supersededSuccessor = (tab, id, inventory, sameWindowOnly) => {
+    const destination = superseded.has(id) && cleanConversationId(policy.supersededSuccessors?.[id]);
     if (!destination || destination === id) return null;
-    return remaining.find(other => other.id !== tab.id && other.windowId === tab.windowId &&
+    return inventory.find(other => other.id !== tab.id && (!sameWindowOnly || other.windowId === tab.windowId) &&
       !other.pendingUrl && conversationFromUrl(other.url) === destination) || null;
   };
+  const selectedSupersededSuccessor = tab => supersededSuccessor(tab, conversationForTab(tab), remaining, true);
   for (const tab of candidates) {
     const conversationId = conversationForTab(tab);
     // Main may still advertise its pre-ACK policy while the app is down or the acknowledgement
@@ -6372,6 +6370,13 @@ async function pruneManagedTabs(tabs, policy, protectedChats, closable) {
       : null;
     if (requiresManagedClaim &&
         (typeof managedCloseClaim !== 'string' || !/^[a-f0-9]{32}$/.test(managedCloseClaim))) continue;
+    const finiteClose = !duplicate && finiteOneOffs.has(conversationId) && Boolean(managedCloseClaim);
+    // A committed predecessor can stay selected in the unfocused CoS window when its successor
+    // lives elsewhere. Retire without shifting user focus, and leave that window a surviving tab.
+    const backgroundHandoffClose = !duplicate && tab.windowId === backgroundWindow?.id &&
+      backgroundWindow?.focused === false && Boolean(supersededSuccessor(tab, conversationId, remaining, false));
+    const allowBackgroundClose = workers.has(conversationId) || finiteClose || backgroundHandoffClose;
+    const checkAfterPersistence = deletionClose || finiteClose || backgroundHandoffClose;
     const idlePage = !duplicate && !retired.has(conversationId);
     if (idlePage && selectedByUser(tab) && !selectedSupersededSuccessor(tab)) continue;
     const source = { tab: tab.id, documentId: tabDocuments[String(tab.id)], navigationEpoch: tabEpochs[String(tab.id)] };
@@ -6383,7 +6388,7 @@ async function pruneManagedTabs(tabs, policy, protectedChats, closable) {
     if (cancelledClaims.length && !cancelledDecisions.length) continue;
     try {
       const current = await chrome.tabs.get(tab.id);
-      if (current.pinned || (!await activeStillSafeToClose(current, conversationId) &&
+      if (current.pinned || (!await activeStillSafeToClose(current, conversationId, allowBackgroundClose) &&
           !selectedSupersededSuccessor(current)) || conversationFromUrl(current.url) !== conversationId || current.pendingUrl) continue;
 
       const proof = await tabReply(tab.id, { type: 'clf-tab-close-check', conversationId,
@@ -6391,13 +6396,13 @@ async function pruneManagedTabs(tabs, policy, protectedChats, closable) {
         ...(cancelledDecisions.length ? { cancelledDecisions } : {}) }, { documentId: source.documentId });
       if (proof?.safe !== true || proof.conversationId !== conversationId || proof.navigationEpoch !== source.navigationEpoch || !ownsDocument(source)) continue;
       const latest = await chrome.tabs.get(tab.id);
-      if (latest.pinned || (!await activeStillSafeToClose(latest, conversationId) &&
+      if (latest.pinned || (!await activeStillSafeToClose(latest, conversationId, allowBackgroundClose) &&
           !selectedSupersededSuccessor(latest)) || latest.pendingUrl || conversationFromUrl(latest.url) !== conversationId || !ownsDocument(source) || journalCountForConversation(conversationId) > 0) continue;
 
       // Chrome must never remove the user's selected source out from under them. Only a durable
       // A -> B handoff with B present in this same window may move selection, after the source
       // page has proved no draft/generation and before the final fresh removal inventory.
-      if (latest.active === true && !await activeStillSafeToClose(latest, conversationId)) {
+      if (latest.active === true && !await activeStillSafeToClose(latest, conversationId, allowBackgroundClose)) {
         const successor = selectedSupersededSuccessor(latest);
         if (!successor) continue;
         try {
@@ -6420,7 +6425,7 @@ async function pruneManagedTabs(tabs, policy, protectedChats, closable) {
             finalProof.navigationEpoch !== source.navigationEpoch || !ownsDocument(source)) return false;
         const newest = await chrome.tabs.get(tab.id);
         if (newest.pinned || newest.pendingUrl || conversationFromUrl(newest.url) !== conversationId ||
-            !await activeStillSafeToClose(newest, conversationId)) return false;
+            !await activeStillSafeToClose(newest, conversationId, allowBackgroundClose)) return false;
         const fresh = await chrome.tabs.query({ url: CHATGPT_TAB_URLS });
         const queried = fresh.find(other => other?.id === tab.id);
         let finalTabs = fresh;
@@ -6432,14 +6437,18 @@ async function pruneManagedTabs(tabs, policy, protectedChats, closable) {
           finalWindow = windows.find(window => window?.id === tab.windowId) || null;
         }
         const current = finalTabs.find(other => other?.id === tab.id);
-        const activeBackgroundWorker = current?.active === true && workers.has(conversationId) &&
+        const backgroundHandoffSurvives = !backgroundHandoffClose || Boolean(current &&
+          supersededSuccessor(current, conversationId, finalTabs, false) &&
+          finalTabs.some(other => Number.isInteger(other?.id) && other.id !== tab.id &&
+            other.windowId === current.windowId));
+        const activeBackgroundClose = current?.active === true && allowBackgroundClose &&
           Number.isInteger(backgroundWindow?.id) && current.windowId === backgroundWindow.id &&
           finalWindow?.id === backgroundWindow.id && finalWindow.focused === false;
         const activeDeleted = current?.active === true && deleted.has(conversationId);
         // No await after the coherent window/tab inventory: candidate identity, selection,
         // document/epoch, journal and another exact named survivor are one removal decision.
-        const safe = Boolean(queried) && Boolean(current) &&
-          (current.active !== true || activeBackgroundWorker || activeDeleted) && !current.pinned && !current.pendingUrl &&
+        const safe = Boolean(queried) && Boolean(current) && backgroundHandoffSurvives &&
+          (current.active !== true || activeBackgroundClose || activeDeleted) && !current.pinned && !current.pendingUrl &&
           conversationFromUrl(current.url) === conversationId && ownsDocument(source) &&
           journalCountForConversation(conversationId) === 0 && !browserControlsTab(tab.id) &&
           (!duplicate || finalTabs.some(other => Number.isInteger(other?.id) && other.id !== tab.id &&
@@ -6455,18 +6464,18 @@ async function pruneManagedTabs(tabs, policy, protectedChats, closable) {
       if (!await retireAutomaticTab(tab.id, async () => {
         if (managedCloseClaim &&
             !await transitionManagedTabCloseClaim('claim', conversationId, managedCloseClaim)) return false;
-        // Worker/finite closes retain their existing ordering. A deleted close re-proves the
-        // page and consumes Main's current tombstone authority after the storage await instead.
-        return deletionClose ? ownsDocument(source) && journalCountForConversation(conversationId) === 0 &&
+        // These pages re-prove the document after storage, so fresh work, focus, or a missing
+        // successor during persistence can still veto removal.
+        return checkAfterPersistence ? ownsDocument(source) && journalCountForConversation(conversationId) === 0 &&
           !browserControlsTab(tab.id) : finalCloseGuard();
       }, superseded.has(conversationId) ? 'superseded-source' : null,
-      deletionClose ? finalCloseGuard : null)) continue;
+      checkAfterPersistence ? finalCloseGuard : null)) continue;
       console.info(
         workers.has(conversationId)
           ? '[Chat On Steroids] closed one proven-safe stopped worker tab'
           : '[Chat On Steroids] closed one proven-safe managed chat tab',
         tab.id,
-        duplicate ? 'duplicate' : deletionClose ? 'deleted' : 'released'
+        duplicate ? 'duplicate' : deletionClose ? 'deleted' : finiteClose ? 'completed-one-off' : 'released'
       );
       remaining = remaining.filter(other => other.id !== tab.id);
     } catch { /* Missing document, navigation or unreadable draft state is not close permission. */ }

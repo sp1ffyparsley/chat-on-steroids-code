@@ -16066,11 +16066,12 @@ it.each([{ phase: 'prepared', accepted: false }, { phase: 'issued', accepted: tr
   }
 );
 
-it('retires a finite one-off main tab only through its managed one-shot close claim', async () => {
+it.each(['inactive', 'background-selected', 'foreground-selected', 'focus-changed', 'missing-claim'] as const)(
+  'retires a finite one-off only through its managed one-shot close claim: %s', async scenario => {
   const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
   const claimId = 'abcdefabcdefabcdefabcdefabcdefab';
   const tab = { id: 71, windowId: 7, url: `https://chatgpt.com/c/${conversationId}`,
-    active: false, pinned: false };
+    active: scenario !== 'inactive', pinned: false };
   const remove = vi.fn();
   const transition = vi.fn(async (_action: string, _conversationId: string, _claimId: string) => true);
   const code = backgroundSource.slice(backgroundSource.indexOf('async function pruneManagedTabs('),
@@ -16083,27 +16084,86 @@ it('retires a finite one-off main tab only through its managed one-shot close cl
     journalCountForConversation: () => 0,
     tabReply: async () => ({ safe: true, conversationId, navigationEpoch: 0 }),
     transitionManagedTabCloseClaim: transition,
-    retireAutomaticTab: async (id: number, finalGuard: () => Promise<boolean>) => {
-      if (!await finalGuard()) return false;
+    retireAutomaticTab: async (id: number, beforePersistence: () => Promise<boolean>, _kind: unknown,
+      afterPersistence: (() => Promise<boolean>) | null) => {
+      if (!await beforePersistence() || (afterPersistence && !await afterPersistence())) return false;
       await remove(id);
       return true;
     },
-    storedBackgroundWindow: async () => null,
+    storedBackgroundWindow: async () => scenario === 'foreground-selected' ? null : { id: 7, focused: false },
     chrome: {
       tabs: { get: async () => tab, query: async () => [tab], remove },
       windows: { get: async () => ({ id: 7, focused: false }),
-        getAll: async () => [{ id: 7, focused: false, tabs: [tab] }] }
+        getAll: async () => [{ id: 7, focused: scenario === 'focus-changed', tabs: [tab] }] }
     }
   });
 
   await prune([tab], {
     managedConversations: [conversationId], finiteOneOffConversations: [conversationId],
-    retiredConversations: [conversationId], managedTabCloseClaims: { [conversationId]: claimId }
+    retiredConversations: [conversationId], managedTabCloseClaims: scenario === 'missing-claim'
+      ? {} : { [conversationId]: claimId }
   }, new Set(), new Set([conversationId]));
 
-  expect(transition.mock.calls.map(call => call[0])).toEqual(['claim', 'consume']);
-  expect(remove).toHaveBeenCalledWith(71);
+  const shouldClose = scenario === 'inactive' || scenario === 'background-selected';
+  expect(transition.mock.calls.map(call => call[0])).toEqual(
+    shouldClose ? ['claim', 'consume'] : scenario === 'focus-changed' ? ['claim'] : []
+  );
+  expect(remove).toHaveBeenCalledTimes(shouldClose ? 1 : 0);
+  if (shouldClose) expect(remove).toHaveBeenCalledWith(71);
 });
+
+it.each(['live-successor', 'successor-gone', 'focused-window', 'last-tab-in-window', 'late-draft'] as const)(
+  'retires a superseded source in the unfocused CoS window only with a live successor: %s', async scenario => {
+    const sourceId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const destinationId = 'bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const source = { id: 71, windowId: 7, active: true, url: `https://chatgpt.com/c/${sourceId}` };
+    const destination = { id: 72, windowId: 8, active: true, url: `https://chatgpt.com/c/${destinationId}` };
+    const spare = { id: 73, windowId: 7, active: false, url: 'https://example.test/' };
+    const tabs = [source, destination, spare];
+    const remove = vi.fn();
+    const update = vi.fn();
+    let persisted = false;
+    const start = backgroundSource.indexOf('async function pruneManagedTabs(');
+    const code = backgroundSource.slice(start, backgroundSource.indexOf('\nfunction maintain(', start));
+    const conversationForTab = (tab: { url: string }) => tab.url.split('/c/')[1];
+    const prune = vm.runInNewContext(`${code}\npruneManagedTabs`, {
+      cleanConversationId: (id: string) => id, conversationForTab,
+      CHATGPT_TAB_URLS: ['https://chatgpt.com/*'], browserControlsTab: () => false,
+      conversationFromUrl: (url: string) => url.split('/c/')[1],
+      tabDocuments: { '71': 'doc' }, tabEpochs: { '71': 0 }, ownsDocument: () => true,
+      journalCountForConversation: () => 0, supersededSourceRetirementPending: () => false,
+      tabReply: async () => ({
+        safe: !(persisted && scenario === 'late-draft'), conversationId: sourceId, navigationEpoch: 0
+      }),
+      retireAutomaticTab: async (id: number, beforePersistence: () => Promise<boolean>, kind: string,
+        afterPersistence: (() => Promise<boolean>) | null) => {
+        expect(kind).toBe('superseded-source');
+        if (!await beforePersistence()) return false;
+        persisted = true;
+        if (afterPersistence && !await afterPersistence()) return false;
+        await remove(id);
+        return true;
+      },
+      storedBackgroundWindow: async () => ({ id: 7, focused: false }),
+      chrome: {
+        tabs: { get: async (id: number) => tabs.find(tab => tab.id === id), query: async () => tabs, update },
+        windows: {
+          get: async () => ({ id: 7, focused: false }),
+          getAll: async () => [
+            { id: 7, focused: scenario === 'focused-window', tabs: scenario === 'last-tab-in-window' ? [source] : [source, spare] },
+            { id: 8, focused: true, tabs: scenario === 'successor-gone' ? [] : [destination] }
+          ]
+        }
+      }
+    });
+    await prune(tabs, {
+      managedConversations: [sourceId, destinationId], retiredConversations: [sourceId],
+      supersededConversations: [sourceId], supersededSuccessors: { [sourceId]: destinationId }
+    }, new Set(), new Set([sourceId]));
+    expect(remove.mock.calls).toEqual(scenario === 'live-successor' ? [[71]] : []);
+    expect(update).not.toHaveBeenCalled();
+  }
+);
 
 it('vetoes duplicate retirement when the candidate becomes active in pruneManagedTabs final inventory', async () => {
   const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';

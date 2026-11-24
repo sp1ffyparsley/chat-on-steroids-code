@@ -140,7 +140,7 @@ const entrySchema = inputArgs.extend({
   /** One after-turn pickup earned by confirmed silence or settled Thinking failed. */
   silenceBoundary: z.object({ turnId: z.string().min(1).max(256), conversationId: z.string().min(1).max(256), workSeq: z.number().int().nonnegative(), acceptedAt: z.number().nonnegative().optional(), listenUntil: z.number().nonnegative().optional(), nativeBusy: z.boolean().optional() }).optional(),
   /** Shared unfinished-response fallback belongs to this exact native question. */
-  recovery: z.object({ questionId: z.string(), episode: z.string().max(200).optional(), pro: z.boolean(), busyUntil: z.number(), phase: z.enum(['ready', 'stopping', 'reloading', 'resumed']), reloadOwner: z.string().optional(),
+  recovery: z.object({ interruptedTurnId: z.string().min(1).max(256).optional(), questionId: z.string(), episode: z.string().max(200).optional(), pro: z.boolean(), busyUntil: z.number(), phase: z.enum(['ready', 'stopping', 'reloading', 'resumed']), reloadOwner: z.string().optional(),
     revival: z.object({ progressAt: z.number().positive(), attempt: z.number().int().min(1).max(4) }).optional() }).optional(),
   /** Exact tool-free turn this explicit browser correction may interrupt. */
   directTurn: z.object({ id: z.string().min(1).max(256), startedAt: z.number() }).optional(),
@@ -1645,8 +1645,9 @@ async function interruptedInputCurrent(entry: InputEntry): Promise<boolean> {
     ? await readRecentEvents(entry.sessionId, 1, { kinds: ['chat_error'] }) : [];
   const failedInterruption = failure?.kind === 'chat_error' && failure.recoverable === true && !failure.message.truncated &&
     failure.turnId === session?.finishTurn?.turnId &&
-    /^(?:connection interrupted\.? (?:waiting|please wait) for the complete answer\.?(?: retry)?|message delivery timed out\.? please try again\.?)$/i.test(
-      failure.message.text.replace(/\s+/g, ' ').trim());
+    (failure.reason === 'stream_gone' ||
+      /^(?:connection interrupted\.? (?:waiting|please wait) for the complete answer\.?|message delivery timed out\.? please try again(?: later)?\.?)(?: retry)?$/i.test(
+        failure.message.text.replace(/\s+/g, ' ').trim()));
   const current = await getSession(entry.sessionId);
   const revival = entry.recovery.revival;
   // Revival owns a distinct idle completed-source boundary. It does not relax Stop/Retry
@@ -1665,6 +1666,7 @@ async function interruptedInputCurrent(entry: InputEntry): Promise<boolean> {
   // this sender can reserve or deliver Continue. An unrelated failure is not proof.
   // A newer native turn revokes this recovery instead of receiving a duplicate.
   return current?.conversationId === id && !current.activeTurnId &&
+    (!entry.recovery.interruptedTurnId || current.finishTurn?.turnId === entry.recovery.interruptedTurnId) &&
     (revival ? idleRevival : current.lastTurnOutcome === 'stopped' || current.lastTurnOutcome === 'failed' && failedInterruption) &&
     current.events === session?.events && current.updatedAt === session?.updatedAt &&
     question?.messageId === entry.recovery.questionId &&
@@ -1677,7 +1679,9 @@ export const PROACTIVE_REVIVAL_MS = 20 * 60_000;
 export const REVIVAL_ESCALATION = 'The previous continue did not produce new work. Skip whatever is blocking the current step and continue with the next independent task in the goal.';
 
 export function enqueueInterruptedContinue(sessionId: string, conversationId: string, questionId: string,
-  revival?: { progressAt: number }): Promise<InputEntry | null> {
+  source?: { progressAt: number } | { interruptedTurnId: string }): Promise<InputEntry | null> {
+  const revival = source && 'progressAt' in source ? source : undefined;
+  const interruption = source && 'interruptedTurnId' in source ? source : undefined;
   return serial(async () => {
     const current = await load();
     const attempts = revival ? current.filter(row => row.sessionId === sessionId &&
@@ -1701,6 +1705,7 @@ export function enqueueInterruptedContinue(sessionId: string, conversationId: st
       model: selection?.model ?? null, reasoningEffort: selection?.reasoningEffort ?? null,
       dueAt: Date.now(), createdAt: Date.now(), state: 'queued', owner: null, transportIntent: 'browser',
       recovery: { questionId, episode, pro: false, busyUntil: 0, phase: 'ready',
+        ...interruption,
         ...(revival ? { revival: { progressAt: revival.progressAt, attempt } } : {}) }
     };
     if (!await interruptedInputCurrent(row)) return null;
